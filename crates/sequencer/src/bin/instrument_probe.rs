@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use sequencer::lisp_effect::{self, InstrumentParamEvent, InstrumentRenderOptions};
+use sequencer::lisp_host::{self, InstrumentParamEvent, InstrumentRenderOptions};
 
 fn usage() {
     eprintln!(
@@ -34,14 +34,23 @@ fn parse_value<T: std::str::FromStr>(flag: &str, value: Option<String>) -> Resul
 fn resolve_source(target: &str) -> Result<(String, Option<PathBuf>, String), String> {
     let path = Path::new(target);
     if path.exists() {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read '{}': {e}", path.display()))?;
-        let asset_base = path.parent().map(|parent| parent.to_path_buf());
+        let source_path = if path.is_dir() {
+            path.join("dsp.lisp")
+        } else {
+            path.to_path_buf()
+        };
+        let source = std::fs::read_to_string(&source_path)
+            .map_err(|e| format!("failed to read '{}': {e}", source_path.display()))?;
+        let asset_base = if path.is_dir() {
+            Some(path.to_path_buf())
+        } else {
+            path.parent().map(|parent| parent.to_path_buf())
+        };
         return Ok((source, asset_base, target.to_string()));
     }
 
-    let source = lisp_effect::load_instrument_source(target).map_err(|e| e.to_string())?;
-    let asset_base = lisp_effect::instrument_source_path(target)
+    let source = lisp_host::load_instrument_source(target).map_err(|e| e.to_string())?;
+    let asset_base = lisp_host::instrument_source_path(target)
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
     Ok((source, asset_base, target.to_string()))
@@ -174,7 +183,7 @@ fn main() {
         }
     };
 
-    let result = match lisp_effect::compile_and_load_instrument_with_asset_base(
+    let result = match lisp_host::compile_and_load_instrument_with_asset_base(
         &source,
         sample_rate,
         asset_base.as_deref(),
@@ -189,7 +198,7 @@ fn main() {
     let mut effective_midi_note = midi_note;
     let mut merged_param_overrides = Vec::new();
     if let Some(name) = preset_name.as_deref() {
-        let presets = match lisp_effect::load_instrument_presets(&label) {
+        let presets = match lisp_host::load_instrument_presets(&label) {
             Ok(presets) => presets,
             Err(error) => {
                 eprintln!("Error: failed to load presets for '{label}': {error}");
@@ -226,17 +235,15 @@ fn main() {
         input_overrides,
     };
 
-    let report = match lisp_effect::render_loaded_instrument_for_test(
-        &result.manifest,
-        &result.lib,
-        &options,
-    ) {
-        Ok(report) => report,
-        Err(error) => {
-            eprintln!("Error: {error}");
-            std::process::exit(1);
-        }
-    };
+    let report =
+        match lisp_host::render_loaded_instrument_for_test(&result.manifest, &result.lib, &options)
+        {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        };
 
     let mut failed = false;
     if let Some(min_peak) = min_peak {

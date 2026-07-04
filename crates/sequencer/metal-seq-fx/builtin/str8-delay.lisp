@@ -107,22 +107,40 @@
         (builtin-fx-filter-mini-number fx "ms" time-p)))))
 
 (def builtin-fx-str8-delay-knob (fx label-text p decimals)
-  (knob-number :label label-text
-    :value (fx-param-value p)
-    :min (get p :min) :max (get p :max) :decimals decimals
-    :font-size 9.5 :label-font-size 9.0
-    :text-color :fg :label-color :dim
-    :width 4.35 :height 2.45 :knob-size 1.55
-    :on-change (lambda (v) (fx-set-effect-value fx p v))))
+  (param-mod-wrapper fx p (str "str8-delay-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (str "str8-delay-param-" (get p :idx) (param-control-key-mode fx p))
+      (knob-number :label label-text
+        :value (fx-param-value-for fx p)
+        :min (param-control-min fx p) :max (param-control-max fx p) :decimals decimals
+        :base-value (param-base-value-prop fx p)
+        :base-min (param-base-min-prop fx p) :base-max (param-base-max-prop fx p)
+        :mod-range-0-slot (param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (param-knob-mod-depth-prop fx p 0)
+        :mod-range-1-slot (param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (param-knob-mod-depth-prop fx p 1)
+        :mod-range-2-slot (param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (param-knob-mod-depth-prop fx p 2)
+        :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
+        :selected-mod-slot (param-selected-mod-slot-prop fx p)
+        :font-size 9.5 :label-font-size 9.0
+        :text-color :fg :label-color :dim
+        :width 4.35 :height 2.45 :knob-size 1.55
+        :on-change (lambda (v) (param-set-control-value fx p v))))))
 
 (def builtin-fx-str8-delay-percent-knob (fx label-text p)
-  (knob-number :label label-text
-    :value (fx-param-value p)
-    :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
-    :font-size 9.5 :label-font-size 9.0
-    :text-color :fg :label-color :dim
-    :width 4.35 :height 2.45 :knob-size 1.55
-    :on-change (lambda (v) (fx-set-effect-value fx p v))))
+  (param-mod-wrapper fx p (str "str8-delay-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (str "str8-delay-param-" (get p :idx) (param-control-key-mode fx p))
+      (knob-number :label label-text
+        :value (fx-param-value-for fx p)
+        :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
+        :base-value (param-base-value-prop fx p)
+        :base-min (param-base-min-prop fx p) :base-max (param-base-max-prop fx p)
+        :mod-range-0-slot (param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (param-knob-mod-depth-prop fx p 0)
+        :mod-range-1-slot (param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (param-knob-mod-depth-prop fx p 1)
+        :mod-range-2-slot (param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (param-knob-mod-depth-prop fx p 2)
+        :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
+        :selected-mod-slot (param-selected-mod-slot-prop fx p)
+        :font-size 9.5 :label-font-size 9.0
+        :text-color :fg :label-color :dim
+        :width 4.35 :height 2.45 :knob-size 1.55
+        :on-change (lambda (v) (param-set-control-value fx p v))))))
 
 (def builtin-fx-str8-delay-ui (fx)
   (let ((params (get fx :params)))

@@ -24,6 +24,29 @@ pub struct NodeVTable {
     >,
     pub reset: Option<unsafe extern "C" fn(state: *mut c_void)>,
     pub migrate: Option<unsafe extern "C" fn(new_state: *mut c_void, old_state: *const c_void)>,
+    pub begin_event_slice: Option<
+        unsafe extern "C" fn(
+            state: *mut c_void,
+            block_serial: u64,
+            slice_start: c_int,
+            slice_nframes: c_int,
+        ),
+    >,
+    pub schedule_event:
+        Option<unsafe extern "C" fn(state: *mut c_void, event: *const GraphBlockEvent) -> bool>,
+}
+
+impl Default for NodeVTable {
+    fn default() -> Self {
+        Self {
+            process: None,
+            init: None,
+            reset: None,
+            migrate: None,
+            begin_event_slice: None,
+            schedule_event: None,
+        }
+    }
 }
 
 /// Mirrors C `ParamMsg`.
@@ -33,6 +56,23 @@ pub struct ParamMsg {
     pub idx: u64,
     pub logical_id: u64,
     pub fvalue: f32,
+}
+
+pub const GBE_AUX_CAP: usize = 32;
+pub const GBE_NOTE_ON: u32 = 1;
+pub const GBE_GATE_OFF: u32 = 2;
+pub const GBE_PULSE: u32 = 3;
+
+/// Mirrors C `GraphBlockEvent`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GraphBlockEvent {
+    pub logical_id: u64,
+    pub frame_offset: u32,
+    pub sequence: u32,
+    pub kind: u32,
+    pub aux_count: u32,
+    pub aux: [f32; GBE_AUX_CAP],
 }
 
 /// Mirrors C `BufferDesc`.
@@ -73,6 +113,7 @@ extern "C" {
     pub fn engine_enable_rt_logging(enable: c_int);
     pub fn engine_enable_graph_logging(enable: c_int);
     pub fn engine_enable_rt_time_constraint(enable: c_int);
+    pub fn debug_dump_graph(lg: *mut LiveGraph);
 
     // Graph lifecycle
     pub fn create_live_graph(
@@ -149,6 +190,7 @@ extern "C" {
     // Wrapper for the static-inline params_push
     #[link_name = "params_push_wrapper"]
     fn params_push_wrapper_raw(lg: *mut LiveGraph, m: ParamMsg) -> bool;
+    pub fn push_block_event(lg: *mut LiveGraph, event: GraphBlockEvent) -> bool;
 
     // Disconnect
     pub fn graph_disconnect(
@@ -167,12 +209,15 @@ extern "C" {
 static PARAM_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 fn param_trace_enabled() -> bool {
-    std::env::var("ESEQ_AUDIOGRAPH_PARAM_TRACE")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0"
-        })
-        .unwrap_or(false)
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ESEQ_AUDIOGRAPH_PARAM_TRACE")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0"
+            })
+            .unwrap_or(false)
+    })
 }
 
 pub unsafe fn params_push_wrapper(lg: *mut LiveGraph, m: ParamMsg) -> bool {

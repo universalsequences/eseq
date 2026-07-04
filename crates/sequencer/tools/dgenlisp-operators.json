@@ -38,6 +38,7 @@
       "summary": "Axis argument for reductions and softmax.",
       "type": "int",
       "used_by": [
+        "cumsum",
         "max-axis",
         "mean",
         "mean-axis",
@@ -2138,6 +2139,54 @@
       "summary": "Cosine."
     },
     {
+      "aliases": [
+        "cumulative-sum"
+      ],
+      "arity": {
+        "maximum": null,
+        "minimum": null
+      },
+      "attribute_docs": [
+        {
+          "name": "@axis",
+          "summary": "Axis argument for reductions and softmax.",
+          "type": "int"
+        }
+      ],
+      "attributes": [
+        "@axis"
+      ],
+      "category": "uncategorized",
+      "documentation": {
+        "port_docs": "not-yet-curated",
+        "source": "source-discovered"
+      },
+      "implementation": {
+        "function": "evalCumsum",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": null,
+        "minimum": null
+      },
+      "inputs": [],
+      "name": "cumsum",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [],
+      "summary": "Operator implemented in DGenLisp evaluator."
+    },
+    {
       "aliases": [],
       "arity": {
         "maximum": 2,
@@ -2534,6 +2583,59 @@
         "(full d1 d2 ... value)"
       ],
       "summary": "Constant-filled tensor."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 2,
+        "minimum": 2
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "tensor_op",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated"
+      },
+      "implementation": {
+        "function": "evalGather",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": 2,
+        "minimum": 2
+      },
+      "inputs": [
+        {
+          "kind": "tensor|signalTensor",
+          "name": "source",
+          "required": true,
+          "summary": "Tensor or signalTensor to read from."
+        },
+        {
+          "kind": "tensor|signalTensor",
+          "name": "indices",
+          "required": true,
+          "summary": "Index tensor. SignalTensor indices produce a frame-aware gather."
+        }
+      ],
+      "name": "gather",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(gather source indices)"
+      ],
+      "summary": "Gather values from a tensor or signalTensor using tensor or signalTensor indices. Fractional indices are truncated by the DGen gather implementation."
     },
     {
       "aliases": [],

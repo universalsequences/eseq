@@ -129,5 +129,6 @@ pub fn limiter_vtable() -> NodeVTable {
         init: Some(limiter_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }

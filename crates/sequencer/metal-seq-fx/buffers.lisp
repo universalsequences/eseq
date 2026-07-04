@@ -48,7 +48,7 @@
       :bg :transparent)))
 
 (def fx-bus-selection-panel ()
-  (v-stack :padding 0.5 :gap 1
+  (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
       (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
         (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
@@ -58,11 +58,10 @@
 (effect-buffer "*track*"
   (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
-    (box :padding 0.6
-      (v-stack :gap 0.6
+    (box :padding 1.0
+      (v-stack :gap 0.2
         (fx-track-parameters-panel)
-        (fx-track-accumulator-panel)
-        (fx-track-plocks-panel)))))
+        (fx-track-accumulator-panel)))))
 
 (effect-buffer "*fx*"
   (if (fx-has-selected-bus?)

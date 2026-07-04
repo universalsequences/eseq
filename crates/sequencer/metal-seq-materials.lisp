@@ -8,8 +8,9 @@
   :state (active selected)
   :bindable (active selected)
   :shader (sdf/layer
-    (sdf/fill (sdf/rounded-rect width height 0.3)
-      (material :color (rgba 0.18 0.25 0.35 (* 0.9 active selected))))))
+    (sdf/stroke (sdf/rounded-rect (* width 0.94) (* height 0.99) 0.30)
+      0.055
+      (rgba 0.72 0.76 0.84 (* 0.95 active selected)))))
 
 ;; ── Aqua material for sliders ──
 

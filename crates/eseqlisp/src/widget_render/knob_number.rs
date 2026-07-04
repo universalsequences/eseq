@@ -51,7 +51,13 @@ fn display_decimals(props: &HashMap<String, Value>) -> u32 {
     let min = get_f32_prop(props, "min", 0.0);
     let max = get_f32_prop(props, "max", 1.0);
     let display_range = ((max - min) * value_scale(props)).abs();
-    if display_range < 10.0 { decimals } else { 0 }
+    if display_range < 10.0 {
+        decimals
+    } else if display_range < 100.0 {
+        decimals.min(1)
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +84,14 @@ mod tests {
     fn display_decimals_removes_precision_for_large_ranges() {
         let props = numeric_props(20.0, 20_000.0, 2.0);
         assert_eq!(display_decimals(&props), 0);
+    }
+
+    #[test]
+    fn display_decimals_keeps_one_decimal_for_mid_ranges() {
+        let props = numeric_props(-24.0, 24.0, 1.0);
+        assert_eq!(display_decimals(&props), 1);
+        let props = numeric_props(-24.0, 24.0, 2.0);
+        assert_eq!(display_decimals(&props), 1);
     }
 
     #[test]

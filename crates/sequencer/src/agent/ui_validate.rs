@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use eseqlisp::parser::{ASTParser, Expression, Parser};
 use eseqlisp::Runtime;
 
-use crate::lisp_effect::DGenManifest;
+use crate::lisp_host::DGenManifest;
 
 pub fn validate_instrument_ui_source(
     ui_source: &str,
@@ -192,6 +192,9 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def custom-ui-select-section-in-scope (scope section) section)
             (def custom-ui-set-param-in-scope (scope p value) value)
             (def custom-ui-set-param-by-name-in-scope (scope name value) value)
+            (def audio-fx-ui-param (fx name) '())
+            (def param-set-option (fx p value) value)
+            (def string-starts-with? (s prefix) false)
             "#,
         )
         .map_err(|error| format!("ui validation runtime setup failed: {error:?}"))?;
@@ -560,7 +563,7 @@ fn ui_param_ref_name(expr: &Expression) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{validate_effect_ui_source, validate_instrument_ui_source};
-    use crate::lisp_effect::{DGenManifest, DGenParam};
+    use crate::lisp_host::{DGenManifest, DGenParam};
 
     fn manifest_with_params(names: &[&str]) -> DGenManifest {
         DGenManifest {

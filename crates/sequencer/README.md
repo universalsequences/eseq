@@ -145,7 +145,7 @@ src/
   delay.rs         -- delay line DSP
   reverb.rs        -- Dattorro plate reverb
   effects.rs       -- unified effect slot system with p-locks
-  lisp_effect.rs   -- DGenLisp custom effect compilation and loading
+  lisp_host.rs   -- DGenLisp custom effect compilation and loading
   audiograph.rs    -- FFI bindings to the C audiograph engine
   ui/
     mod.rs         -- App struct, layout, regions

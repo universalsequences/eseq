@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::neural::ParamNodeId;
 use crate::sequencer::MAX_STEPS;
@@ -7,10 +8,14 @@ use crate::sequencer::MAX_STEPS;
 /// Custom instruments include generated host-modulation controls in addition to
 /// their declared DGen params, so dense synths can exceed 128 parameters.
 pub const MAX_SLOT_PARAMS: usize = 512;
+pub const MAX_SLOT_TENSOR_PARAMS: usize = 16;
+pub const MAX_SLOT_TENSOR_PARAM_CELLS: usize = 64;
+pub const MAX_SLOT_TENSOR_CELLS: usize = MAX_SLOT_TENSOR_PARAMS * MAX_SLOT_TENSOR_PARAM_CELLS;
 
 /// Number of fixed built-in effect slots. Built-ins are now ordinary inserts,
 /// so track effect chains start at slot 0.
 pub const BUILTIN_SLOT_COUNT: usize = 0;
+pub const NO_TRANSPORT_PHASE_PARAM: u32 = u32::MAX;
 
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
@@ -253,10 +258,23 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
-        ParamScaling,
+        tensor_param_descriptors_from_manifest, EffectDescriptor, EffectSlotSnapshot,
+        EffectSlotState, ParamDescriptor, ParamKind, ParamScaling, TensorParamDescriptor,
     };
+    use crate::lisp_host::{TensorInit, TensorMeta};
     use crate::neural::ParamNodeId;
+
+    fn tensor_meta(name: &str, cell_offset: usize, shape: Vec<usize>, mutable: bool) -> TensorMeta {
+        TensorMeta {
+            name: name.to_string(),
+            cell_offset,
+            shape,
+            kind: "f32".to_string(),
+            mutable,
+            source_file: None,
+            source_sample_rate: None,
+        }
+    }
 
     #[test]
     fn denormalize_boolean_snaps_to_zero_or_one() {
@@ -320,6 +338,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params,
         };
 
@@ -333,6 +352,96 @@ mod tests {
     }
 
     #[test]
+    fn tensor_param_descriptors_expose_small_named_mutable_tensors() {
+        let tensors = vec![
+            tensor_meta("strike_mask", 64, vec![2, 2], true),
+            tensor_meta("", 80, vec![2, 2], true),
+            tensor_meta("immutable", 96, vec![2, 2], false),
+            tensor_meta("rank3", 112, vec![2, 2, 2], true),
+        ];
+        let init = vec![TensorInit {
+            offset: 64,
+            data: vec![-0.25, 0.25, 1.5, f32::NAN, 0.75],
+        }];
+
+        let descriptors = tensor_param_descriptors_from_manifest(&tensors, &init);
+
+        assert_eq!(descriptors.len(), 1);
+        let tensor = &descriptors[0];
+        assert_eq!(tensor.name, "strike_mask");
+        assert_eq!(tensor.shape, vec![2, 2]);
+        assert_eq!(tensor.cell_offset, 64);
+        assert_eq!(tensor.rows(), 2);
+        assert_eq!(tensor.cols(), 2);
+        assert_eq!(tensor.default, vec![0.0, 0.25, 1.0, 0.0]);
+        assert_eq!((tensor.min, tensor.max), (0.0, 1.0));
+    }
+
+    #[test]
+    fn tensor_param_descriptors_hide_large_mutable_tensors() {
+        let tensors = vec![tensor_meta("ir_buffer", 128, vec![128, 1024], true)];
+
+        let descriptors = tensor_param_descriptors_from_manifest(&tensors, &[]);
+
+        assert!(
+            descriptors.is_empty(),
+            "large mutable IR-style tensors must not become user parameters"
+        );
+    }
+
+    #[test]
+    fn slot_tensor_params_capture_restore_defaults_and_whole_matrix_plocks() {
+        let desc = EffectDescriptor {
+            name: "tensor instrument".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: vec![TensorParamDescriptor {
+                name: "strike_mask".to_string(),
+                shape: vec![2, 2],
+                cell_offset: 64,
+                default: vec![0.1, 0.2, 0.3, 0.4],
+                min: 0.0,
+                max: 1.0,
+            }],
+            params: Vec::new(),
+        };
+        let slot = EffectSlotState::new(&desc, 10);
+
+        let edited = slot
+            .tensor_params
+            .set_plock_cell(7, 0, 2, 0.95)
+            .expect("tensor p-lock edit");
+
+        assert_eq!(edited, vec![0.1, 0.2, 0.95, 0.4]);
+        assert_eq!(
+            slot.tensor_params.default_values(0).unwrap(),
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(slot.tensor_params.plock_values(7, 0).unwrap(), edited);
+
+        let snapshot = EffectSlotSnapshot::capture(&slot);
+        assert_eq!(snapshot.tensor_params.len(), 1);
+        assert_eq!(snapshot.tensor_params[0].default, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(
+            snapshot.tensor_params[0].plocks[7],
+            Some(vec![0.1, 0.2, 0.95, 0.4])
+        );
+
+        let restored = EffectSlotState::empty();
+        snapshot.restore(&restored);
+        assert_eq!(
+            restored.tensor_params.default_values(0).unwrap(),
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(
+            restored.tensor_params.plock_values(7, 0).unwrap(),
+            vec![0.1, 0.2, 0.95, 0.4]
+        );
+    }
+
+    #[test]
     fn sync_to_descriptor_rebinds_loaded_plock_ids_to_live_node_id() {
         let desc = EffectDescriptor {
             name: "test".to_string(),
@@ -340,6 +449,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
                 name: "cutoff".to_string(),
                 min: 0.0,
@@ -366,6 +476,8 @@ mod tests {
                 .collect(),
             param_node_indices: vec![15],
             param_node_spans: vec![1],
+            transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
+            tensor_params: Vec::new(),
             ir: None,
         };
         snapshot.plocks[3][0] = Some(0.9);
@@ -408,6 +520,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params,
         };
 
@@ -429,6 +542,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "a".to_string(),
@@ -462,6 +576,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "a".to_string(),
@@ -515,6 +630,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -550,6 +666,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "gain".to_string(),
@@ -605,6 +722,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -640,6 +758,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -692,6 +811,7 @@ mod tests {
             output_channels: 1,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -712,7 +832,7 @@ mod tests {
                     default: 0.0,
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
-                    node_param_idx: crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                    node_param_idx: crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
@@ -732,7 +852,7 @@ mod tests {
     fn lisp_manifest_params_address_dgen_wrapper_state() {
         let desc = EffectDescriptor::from_lisp_manifest(
             "custom",
-            &[crate::lisp_effect::DGenParam {
+            &[crate::lisp_host::DGenParam {
                 name: "cutoff".to_string(),
                 cell_id: 12,
                 cell_span: 4,
@@ -751,7 +871,7 @@ mod tests {
 
         assert_eq!(
             desc.params[0].node_param_idx,
-            (crate::lisp_effect::HEADER_SLOTS + 12) as u32
+            (crate::lisp_host::HEADER_SLOTS + 12) as u32
         );
     }
 
@@ -760,7 +880,7 @@ mod tests {
         let desc = EffectDescriptor::from_lisp_manifest(
             "custom",
             &[
-                crate::lisp_effect::DGenParam {
+                crate::lisp_host::DGenParam {
                     name: "amp_attack".to_string(),
                     cell_id: 2,
                     cell_span: 1,
@@ -773,7 +893,7 @@ mod tests {
                     env: Some("amp_env".to_string()),
                     role: Some("attack".to_string()),
                 },
-                crate::lisp_effect::DGenParam {
+                crate::lisp_host::DGenParam {
                     name: "hidden_release".to_string(),
                     cell_id: 3,
                     cell_span: 1,
@@ -855,13 +975,17 @@ mod tests {
             EffectDescriptor::builtin_insert_names(),
             &[
                 "Filter",
+                "EQ8",
                 "Delay",
                 "Str8 Delay",
+                "Space Echo",
+                "Dimension",
                 "DJ Mixer",
                 "Reverb",
                 "444 Compressor",
                 "Glue Compressor",
                 "Compressor",
+                "OTT",
                 "Limiter",
                 "Tape"
             ]
@@ -901,12 +1025,76 @@ mod tests {
             EffectDescriptor::builtin_insert("dj mixer").unwrap().name,
             "DJ Mixer"
         );
+        assert_eq!(EffectDescriptor::builtin_insert("eq8").unwrap().name, "EQ8");
+    }
+
+    #[test]
+    fn builtin_eq8_exposes_expected_band_params_and_defaults() {
+        let desc = EffectDescriptor::builtin_insert("EQ8").unwrap();
+        assert_eq!(desc.input_channels, 2);
+        assert_eq!(desc.output_channels, 2);
+        assert_eq!(desc.params.len(), 1 + crate::eq8::EQ8_NUM_BANDS * 5);
+        assert_eq!(desc.params[0].name, "enabled");
+        assert_eq!(desc.params[0].default, 1.0);
+        assert_eq!(
+            desc.params[0].node_param_idx,
+            crate::eq8::EQ8_PARAM_ENABLED as u32
+        );
+
+        let names: Vec<&str> = desc
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect();
+        assert_eq!(
+            &names[1..6],
+            vec!["b1 enabled", "b1 type", "b1 freq", "b1 gain", "b1 q"]
+        );
+        assert_eq!(
+            desc.params[1].node_param_idx,
+            crate::eq8::eq8_band_enabled_param_idx(0) as u32
+        );
+        assert_eq!(
+            desc.params[2].node_param_idx,
+            crate::eq8::eq8_band_type_param_idx(0) as u32
+        );
+        assert_eq!(desc.params[3].default, 80.0);
+        assert_eq!(desc.params[4].default, 0.0);
+        assert_eq!(desc.params[5].default, 0.707);
+        assert_eq!(desc.params[21].default, 0.0);
+        assert_eq!(desc.params[21].name, "b5 enabled");
+        assert_eq!(desc.params[23].default, 1500.0);
+
+        match &desc.params[2].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["lowshelf", "bell", "highshelf"]
+                );
+            }
+            other => panic!("EQ8 band type should be enum, got {other:?}"),
+        }
+        assert_eq!(
+            EffectDescriptor::builtin_insert_project_name("EQ8").as_deref(),
+            Some("builtin:EQ8")
+        );
+        assert_eq!(
+            EffectDescriptor::strip_builtin_insert_project_name("builtin:EQ8"),
+            Some("EQ8")
+        );
+    }
+
+    #[test]
+    fn builtin_reverb_insert_is_stereo_in_and_stereo_out() {
+        let desc = EffectDescriptor::builtin_insert("Reverb").unwrap();
+        assert_eq!(desc.input_channels, 2);
+        assert_eq!(desc.output_channels, 2);
     }
 
     #[test]
     fn default_full_chain_contains_only_empty_insert_slots() {
         let chain = EffectDescriptor::default_full_chain();
-        assert_eq!(chain.len(), crate::lisp_effect::MAX_CUSTOM_FX);
+        assert_eq!(chain.len(), crate::lisp_host::MAX_CUSTOM_FX);
         assert!(chain.iter().all(|desc| desc.name.is_empty()));
         assert!(chain.iter().all(|desc| desc.params.is_empty()));
     }
@@ -985,11 +1173,82 @@ mod tests {
     }
 
     #[test]
+    fn builtin_space_echo_exposes_re201_params() {
+        let desc = EffectDescriptor::builtin_space_echo();
+        let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            &names[..16],
+            vec![
+                "enabled",
+                "mode",
+                "repeat rate",
+                "sync",
+                "sync div",
+                "sync offset",
+                "intensity",
+                "bass",
+                "treble",
+                "echo volume",
+                "reverb volume",
+                "dry",
+                "input drive",
+                "wow/flutter",
+                "tape age",
+                "mod1_source",
+            ]
+        );
+        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(desc.instrument_modulators.len(), 4);
+        // Spring tension, spring type, and stereo width ride at the end (after
+        // the modulator params) so stored plock param indices stay stable.
+        let n = desc.params.len();
+        let tension = &desc.params[n - 3];
+        assert_eq!(tension.name, "tension");
+        assert_eq!(tension.default, 0.5);
+        let spring_type = &desc.params[n - 2];
+        assert_eq!(spring_type.name, "spring type");
+        match &spring_type.kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), 2);
+                assert_eq!(labels[1], "King Tubby");
+            }
+            other => panic!("spring type should be enum, got {other:?}"),
+        }
+        let width = &desc.params[n - 1];
+        assert_eq!(width.name, "stereo width");
+        assert_eq!(width.default, 0.7);
+        match &desc.params[1].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), 12);
+                assert_eq!(labels[11], "12: reverb only");
+            }
+            other => panic!("mode should be enum, got {other:?}"),
+        }
+        match &desc.params[4].kind {
+            ParamKind::Enum { labels } => assert_eq!(labels[6], "1/4"),
+            other => panic!("sync div should be enum, got {other:?}"),
+        }
+        let target_names: Vec<&str> = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| desc.params[target.base_param_idx].name.as_str())
+            .collect();
+        assert_eq!(target_names.len(), 16);
+        for name in ["repeat rate", "intensity", "echo volume", "reverb volume"] {
+            assert_eq!(
+                target_names.iter().filter(|n| **n == name).count(),
+                4,
+                "{name} should have 4 modulation slots"
+            );
+        }
+    }
+
+    #[test]
     fn builtin_str8_delay_exposes_ableton_style_params() {
         let desc = EffectDescriptor::builtin_str8_delay();
         let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
-            names,
+            &names[..16],
             vec![
                 "enabled",
                 "wet",
@@ -1009,6 +1268,14 @@ mod tests {
                 "mod phase",
             ]
         );
+        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(
+            desc.instrument_modulators
+                .iter()
+                .map(|modulator| (modulator.slot, modulator.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Mod 1"), (2, "Mod 2"), (3, "Mod 3"), (4, "Mod 4")]
+        );
         assert_eq!(desc.params[1].default, 0.5);
         assert_eq!(desc.params[3].default, 1.0);
         assert_eq!(desc.params[4].default, 6.0);
@@ -1024,14 +1291,112 @@ mod tests {
             ParamKind::Enum { labels } => assert_eq!(labels[6], "1/4"),
             other => panic!("right div should be enum, got {other:?}"),
         }
+
+        let target_names = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| {
+                (
+                    desc.params[target.base_param_idx].name.as_str(),
+                    target.modulator_slot,
+                    desc.params[target.depth_param_idx].name.as_str(),
+                    target.depth_min,
+                    target.depth_max,
+                    target.depth_unit.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target_names,
+            vec![
+                (
+                    "left time",
+                    1,
+                    "mod time slot 1 amt",
+                    -1000.0,
+                    1000.0,
+                    Some("ms")
+                ),
+                (
+                    "left time",
+                    2,
+                    "mod time slot 2 amt",
+                    -1000.0,
+                    1000.0,
+                    Some("ms")
+                ),
+                (
+                    "left time",
+                    3,
+                    "mod time slot 3 amt",
+                    -1000.0,
+                    1000.0,
+                    Some("ms")
+                ),
+                (
+                    "left time",
+                    4,
+                    "mod time slot 4 amt",
+                    -1000.0,
+                    1000.0,
+                    Some("ms")
+                ),
+                ("wet", 1, "mod wet slot 1 amt", -1.0, 1.0, Some("%")),
+                ("wet", 2, "mod wet slot 2 amt", -1.0, 1.0, Some("%")),
+                ("wet", 3, "mod wet slot 3 amt", -1.0, 1.0, Some("%")),
+                ("wet", 4, "mod wet slot 4 amt", -1.0, 1.0, Some("%")),
+                ("feedback", 1, "mod feedback slot 1 amt", -0.95, 0.95, None),
+                ("feedback", 2, "mod feedback slot 2 amt", -0.95, 0.95, None),
+                ("feedback", 3, "mod feedback slot 3 amt", -0.95, 0.95, None),
+                ("feedback", 4, "mod feedback slot 4 amt", -0.95, 0.95, None),
+                (
+                    "filter freq",
+                    1,
+                    "mod cutoff slot 1 amt",
+                    -4.0,
+                    4.0,
+                    Some("oct")
+                ),
+                (
+                    "filter freq",
+                    2,
+                    "mod cutoff slot 2 amt",
+                    -4.0,
+                    4.0,
+                    Some("oct")
+                ),
+                (
+                    "filter freq",
+                    3,
+                    "mod cutoff slot 3 amt",
+                    -4.0,
+                    4.0,
+                    Some("oct")
+                ),
+                (
+                    "filter freq",
+                    4,
+                    "mod cutoff slot 4 amt",
+                    -4.0,
+                    4.0,
+                    Some("oct")
+                ),
+            ]
+        );
     }
 
     #[test]
     fn builtin_dj_mixer_exposes_sp_style_params() {
         let desc = EffectDescriptor::builtin_dj_mixer();
         let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["enabled", "speed", "length", "loop"]);
-        assert_eq!(desc.input_channels, 2);
+        assert_eq!(
+            &names[..7],
+            &["enabled", "speed", "length", "loop", "sync", "div", "warp"]
+        );
+        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(desc.instrument_modulators.len(), 4);
+        // 5 modulatable targets × 4 slots
+        assert_eq!(desc.instrument_modulation_targets.len(), 20);
         assert_eq!(desc.output_channels, 2);
         assert_eq!(desc.params[0].default, 1.0);
         assert_eq!(desc.params[1].min, -1.0);
@@ -1174,6 +1539,125 @@ mod tests {
 
 // ── EffectDescriptor ──
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorParamDescriptor {
+    pub name: String,
+    pub shape: Vec<usize>,
+    pub cell_offset: usize,
+    pub default: Vec<f32>,
+    pub min: f32,
+    pub max: f32,
+}
+
+impl TensorParamDescriptor {
+    pub fn cell_count(&self) -> usize {
+        self.shape.iter().copied().product()
+    }
+
+    pub fn rows(&self) -> usize {
+        match self.shape.as_slice() {
+            [cols] if *cols > 0 => 1,
+            [rows, _cols] if *rows > 0 => *rows,
+            _ => 0,
+        }
+    }
+
+    pub fn cols(&self) -> usize {
+        match self.shape.as_slice() {
+            [cols] if *cols > 0 => *cols,
+            [_rows, cols] if *cols > 0 => *cols,
+            _ => 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorParamSnapshot {
+    pub name: String,
+    pub shape: Vec<usize>,
+    pub cell_offset: usize,
+    pub default: Vec<f32>,
+    pub plocks: Vec<Option<Vec<f32>>>,
+}
+
+impl TensorParamSnapshot {
+    pub fn cell_count(&self) -> usize {
+        self.shape.iter().copied().product()
+    }
+
+    fn same_identity_as_descriptor(&self, desc: &TensorParamDescriptor) -> bool {
+        self.name == desc.name
+            && self.shape == desc.shape
+            && self.default.len() == desc.default.len()
+    }
+}
+
+fn exposed_tensor_cell_count(shape: &[usize]) -> Option<usize> {
+    if !(1..=2).contains(&shape.len()) {
+        return None;
+    }
+    let mut count = 1usize;
+    for dim in shape {
+        if *dim == 0 {
+            return None;
+        }
+        count = count.checked_mul(*dim)?;
+    }
+    (count <= MAX_SLOT_TENSOR_PARAM_CELLS).then_some(count)
+}
+
+fn clamped_tensor_cell(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+pub fn tensor_param_descriptors_from_manifest(
+    tensors: &[crate::lisp_host::TensorMeta],
+    tensor_init_data: &[crate::lisp_host::TensorInit],
+) -> Vec<TensorParamDescriptor> {
+    let mut descriptors = Vec::new();
+    for tensor in tensors {
+        if descriptors.len() >= MAX_SLOT_TENSOR_PARAMS {
+            break;
+        }
+        let name = tensor.name.trim();
+        if name.is_empty() || !tensor.mutable {
+            continue;
+        }
+        let Some(cell_count) = exposed_tensor_cell_count(&tensor.shape) else {
+            continue;
+        };
+        let init = tensor_init_data
+            .iter()
+            .find(|init| init.offset == tensor.cell_offset);
+        let mut default = init
+            .map(|init| {
+                init.data
+                    .iter()
+                    .copied()
+                    .take(cell_count)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        default.resize(cell_count, 0.0);
+        for value in &mut default {
+            *value = clamped_tensor_cell(*value);
+        }
+        descriptors.push(TensorParamDescriptor {
+            name: name.to_string(),
+            shape: tensor.shape.clone(),
+            cell_offset: tensor.cell_offset,
+            default,
+            min: 0.0,
+            max: 1.0,
+        });
+    }
+    descriptors
+}
+
 fn sampler_mod_depth_range(destination: &str) -> (f32, f32, Option<String>) {
     match destination {
         "speed" => (-8.0, 8.0, None),
@@ -1189,6 +1673,7 @@ fn sampler_mod_depth_range(destination: &str) -> (f32, f32, Option<String>) {
 pub struct EffectDescriptor {
     pub name: String,
     pub params: Vec<ParamDescriptor>,
+    pub tensor_params: Vec<TensorParamDescriptor>,
     pub input_channels: usize,
     pub output_channels: usize,
     pub instrument_modulators: Vec<InstrumentModulatorDescriptor>,
@@ -1197,6 +1682,14 @@ pub struct EffectDescriptor {
 
 impl EffectDescriptor {
     pub const BUILTIN_INSERT_PREFIX: &'static str = "builtin:";
+
+    pub fn transport_phase_param_idx(&self) -> Option<u32> {
+        if self.name == "DJ Mixer" {
+            Some(crate::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32)
+        } else {
+            None
+        }
+    }
 
     pub fn enabled_param(node_param_idx: u32, default: f32) -> ParamDescriptor {
         ParamDescriptor {
@@ -1216,13 +1709,17 @@ impl EffectDescriptor {
     pub fn builtin_insert_names() -> &'static [&'static str] {
         &[
             "Filter",
+            "EQ8",
             "Delay",
             "Str8 Delay",
+            "Space Echo",
+            "Dimension",
             "DJ Mixer",
             "Reverb",
             "444 Compressor",
             "Glue Compressor",
             "Compressor",
+            "OTT",
             "Limiter",
             "Tape",
         ]
@@ -1261,16 +1758,116 @@ impl EffectDescriptor {
     pub fn builtin_insert(name: &str) -> Option<Self> {
         match Self::canonical_builtin_insert_name(name)? {
             "Filter" => Some(Self::builtin_filter()),
+            "EQ8" => Some(Self::builtin_eq8()),
             "Delay" => Some(Self::builtin_delay()),
             "Str8 Delay" => Some(Self::builtin_str8_delay()),
+            "Space Echo" => Some(Self::builtin_space_echo()),
+            "Dimension" => Some(Self::builtin_dimension()),
             "DJ Mixer" => Some(Self::builtin_dj_mixer()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
             "444 Compressor" => Some(Self::builtin_444_compressor()),
             "Glue Compressor" => Some(Self::builtin_glue_compressor()),
             "Compressor" => Some(Self::builtin_compressor()),
+            "OTT" => Some(Self::builtin_ott()),
             "Limiter" => Some(Self::builtin_limiter()),
             "Tape" => Some(Self::builtin_tape()),
             _ => None,
+        }
+    }
+
+    /// Built-in 8-band parametric equalizer descriptor.
+    pub fn builtin_eq8() -> Self {
+        fn continuous_param(
+            name: String,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            scaling: ParamScaling,
+            node_param_idx: u32,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name,
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling,
+                node_param_idx,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        let mut params = vec![Self::enabled_param(
+            crate::eq8::EQ8_PARAM_ENABLED as u32,
+            1.0,
+        )];
+        for (band, default) in crate::eq8::EQ8_DEFAULT_BANDS.iter().enumerate() {
+            let label = band + 1;
+            params.push(Self::enabled_param(
+                crate::eq8::eq8_band_enabled_param_idx(band) as u32,
+                if default.enabled { 1.0 } else { 0.0 },
+            ));
+            params.last_mut().unwrap().name = format!("b{label} enabled");
+            params.push(ParamDescriptor {
+                name: format!("b{label} type"),
+                min: 0.0,
+                max: 2.0,
+                default: default.filter_type,
+                kind: ParamKind::Enum {
+                    labels: vec![
+                        "lowshelf".to_string(),
+                        "bell".to_string(),
+                        "highshelf".to_string(),
+                    ],
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: crate::eq8::eq8_band_type_param_idx(band) as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            });
+            params.push(continuous_param(
+                format!("b{label} freq"),
+                20.0,
+                20_000.0,
+                default.freq,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                crate::eq8::eq8_band_freq_param_idx(band) as u32,
+            ));
+            params.push(continuous_param(
+                format!("b{label} gain"),
+                -24.0,
+                24.0,
+                default.gain,
+                Some("dB"),
+                ParamScaling::Linear,
+                crate::eq8::eq8_band_gain_param_idx(band) as u32,
+            ));
+            params.push(continuous_param(
+                format!("b{label} q"),
+                0.1,
+                18.0,
+                default.q,
+                None,
+                ParamScaling::Exponential,
+                crate::eq8::eq8_band_q_param_idx(band) as u32,
+            ));
+        }
+
+        Self {
+            name: "EQ8".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params,
         }
     }
 
@@ -1287,6 +1884,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::filter::FILTER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1573,6 +2171,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "wet".to_string(),
@@ -1671,12 +2270,18 @@ impl EffectDescriptor {
                 "1".to_string(),
             ]
         };
-        Self {
+        let mut desc = Self {
             name: "Str8 Delay".to_string(),
-            input_channels: 2,
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: Vec::new(),
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::str8_delay::STR8_DELAY_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1882,16 +2487,785 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        }
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let time_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "left time")
+            .expect("built-in Str8 Delay left time param should exist");
+        let wet_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "wet")
+            .expect("built-in Str8 Delay wet param should exist");
+        let feedback_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "feedback")
+            .expect("built-in Str8 Delay feedback param should exist");
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "filter freq")
+            .expect("built-in Str8 Delay filter freq param should exist");
+
+        let mut append_depth_targets =
+            |base_param_idx: usize,
+             destination_name: &str,
+             depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+             depth_min: f32,
+             depth_max: f32,
+             depth_unit: Option<&str>| {
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: depth_min,
+                        max: depth_max,
+                        default: 0.0,
+                        kind: ParamKind::Continuous {
+                            unit: depth_unit.map(str::to_string),
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min,
+                            depth_max,
+                            depth_unit: depth_unit.map(str::to_string),
+                        });
+                }
+            };
+
+        append_depth_targets(
+            time_idx,
+            "time",
+            [
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_TIME_DEPTH_1,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_TIME_DEPTH_2,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_TIME_DEPTH_3,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_TIME_DEPTH_4,
+            ],
+            -1000.0,
+            1000.0,
+            Some("ms"),
+        );
+        append_depth_targets(
+            wet_idx,
+            "wet",
+            [
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_WET_DEPTH_1,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_WET_DEPTH_2,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_WET_DEPTH_3,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_WET_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            Some("%"),
+        );
+        append_depth_targets(
+            feedback_idx,
+            "feedback",
+            [
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_1,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_2,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_3,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_4,
+            ],
+            -0.95,
+            0.95,
+            None,
+        );
+        append_depth_targets(
+            cutoff_idx,
+            "cutoff",
+            [
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_1,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_2,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_3,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_4,
+            ],
+            -4.0,
+            4.0,
+            Some("oct"),
+        );
+
+        desc
+    }
+
+    /// Roland RE-201 Space Echo style multi-head tape delay + spring reverb.
+    pub fn builtin_space_echo() -> Self {
+        let sync_labels = || {
+            vec![
+                "1/32".to_string(),
+                "1/16".to_string(),
+                "1/16t".to_string(),
+                "1/8".to_string(),
+                "1/8t".to_string(),
+                "1/8.".to_string(),
+                "1/4".to_string(),
+                "1/4t".to_string(),
+                "1/4.".to_string(),
+                "1/2".to_string(),
+                "1".to_string(),
+            ]
+        };
+        let mode_labels = vec![
+            "1: head 1".to_string(),
+            "2: head 2".to_string(),
+            "3: head 3".to_string(),
+            "4: heads 1+2".to_string(),
+            "5: heads 2+3".to_string(),
+            "6: heads 1+2+3".to_string(),
+            "7: head 1 + rev".to_string(),
+            "8: head 2 + rev".to_string(),
+            "9: head 3 + rev".to_string(),
+            "10: heads 1+2 + rev".to_string(),
+            "11: heads 2+3 + rev".to_string(),
+            "12: reverb only".to_string(),
+        ];
+        let mut desc = Self {
+            name: "Space Echo".to_string(),
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                Self::enabled_param(crate::space_echo::SPACE_ECHO_PARAM_ENABLED as u32, 1.0),
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 11.0,
+                    default: 7.0,
+                    kind: ParamKind::Enum {
+                        labels: mode_labels,
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_MODE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "repeat rate".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_RATE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "sync".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_SYNC as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "sync div".to_string(),
+                    min: 0.0,
+                    max: 10.0,
+                    default: 6.0,
+                    kind: ParamKind::Enum {
+                        labels: sync_labels(),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_SYNC_DIV as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "sync offset".to_string(),
+                    min: -0.5,
+                    max: 0.5,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_SYNC_OFFSET as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "intensity".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.45,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_INTENSITY as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "bass".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_BASS as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "treble".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_TREBLE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "echo volume".to_string(),
+                    min: 0.0,
+                    max: 1.5,
+                    default: 0.8,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_ECHO_VOL as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "reverb volume".to_string(),
+                    min: 0.0,
+                    max: 1.5,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_REVERB_VOL as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "dry".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_DRY as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "input drive".to_string(),
+                    min: -12.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_INPUT_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "wow/flutter".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.35,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_WOW_FLUTTER as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "tape age".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.3,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_AGE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+            ],
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let rate_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "repeat rate")
+            .expect("built-in Space Echo repeat rate param should exist");
+        let intensity_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "intensity")
+            .expect("built-in Space Echo intensity param should exist");
+        let echo_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "echo volume")
+            .expect("built-in Space Echo echo volume param should exist");
+        let reverb_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "reverb volume")
+            .expect("built-in Space Echo reverb volume param should exist");
+
+        let mut append_depth_targets =
+            |base_param_idx: usize,
+             destination_name: &str,
+             depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+             depth_min: f32,
+             depth_max: f32,
+             depth_unit: Option<&str>| {
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: depth_min,
+                        max: depth_max,
+                        default: 0.0,
+                        kind: ParamKind::Continuous {
+                            unit: depth_unit.map(str::to_string),
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min,
+                            depth_max,
+                            depth_unit: depth_unit.map(str::to_string),
+                        });
+                }
+            };
+
+        append_depth_targets(
+            rate_idx,
+            "rate",
+            [
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_RATE_DEPTH_1,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_RATE_DEPTH_2,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_RATE_DEPTH_3,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_RATE_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            intensity_idx,
+            "intensity",
+            [
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_INTENSITY_DEPTH_1,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_INTENSITY_DEPTH_2,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_INTENSITY_DEPTH_3,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_INTENSITY_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            echo_idx,
+            "echo",
+            [
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_ECHO_DEPTH_1,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_ECHO_DEPTH_2,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_ECHO_DEPTH_3,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_ECHO_DEPTH_4,
+            ],
+            -1.5,
+            1.5,
+            None,
+        );
+        append_depth_targets(
+            reverb_idx,
+            "reverb",
+            [
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_REVERB_DEPTH_1,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_REVERB_DEPTH_2,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_REVERB_DEPTH_3,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_REVERB_DEPTH_4,
+            ],
+            -1.5,
+            1.5,
+            None,
+        );
+
+        // Spring tension macro — appended last so existing projects' plock /
+        // mod param indices stay stable.
+        desc.params.push(ParamDescriptor {
+            name: "tension".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            kind: ParamKind::Continuous {
+                unit: Some("%".to_string()),
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_TENSION as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+
+        // Spring type + stereo width — also appended last (in this order) so
+        // existing projects' plock / mod param indices stay stable.
+        desc.params.push(ParamDescriptor {
+            name: "spring type".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            kind: ParamKind::Enum {
+                labels: vec!["RE-201".to_string(), "King Tubby".to_string()],
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_SPRING_TYPE as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+        desc.params.push(ParamDescriptor {
+            name: "stereo width".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.7,
+            kind: ParamKind::Continuous {
+                unit: Some("%".to_string()),
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_STEREO_WIDTH as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+
+        desc
+    }
+
+    /// Built-in Dimension chorus (Roland SDD-320 style): two antiphase
+    /// BBD-voiced delay lines with an inverted stereo crossmix, compander,
+    /// and band-limited wet path. No feedback anywhere.
+    pub fn builtin_dimension() -> Self {
+        let mut desc = Self {
+            name: "Dimension".to_string(),
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                Self::enabled_param(crate::dimension::DIMENSION_PARAM_ENABLED as u32, 1.0),
+                ParamDescriptor {
+                    name: "mode 1".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_BTN1 as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mode 2".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_BTN2 as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mode 3".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_BTN3 as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mode 4".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_BTN4 as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "dynamic color".to_string(),
+                    min: 0.0,
+                    max: 3.0,
+                    default: 1.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "smooth".to_string(),
+                            "default".to_string(),
+                            "lf sat 1".to_string(),
+                            "lf sat 2".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_COLOR as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "lfo shape".to_string(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "default".to_string(),
+                            "sine".to_string(),
+                            "ramp".to_string(),
+                            "square".to_string(),
+                            "triangle".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_SHAPE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "rate".to_string(),
+                    min: 0.25,
+                    max: 4.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("x".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_RATE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "depth".to_string(),
+                    min: 0.0,
+                    max: 2.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("x".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_DEPTH as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "width".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_WIDTH as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "tone".to_string(),
+                    min: 2000.0,
+                    max: 16000.0,
+                    default: 7200.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_TONE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mix".to_string(),
+                    min: 0.0,
+                    max: 1.5,
+                    default: 0.7,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_MIX as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+            ],
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let depth_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "depth")
+            .expect("built-in Dimension depth param should exist");
+        let mix_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "mix")
+            .expect("built-in Dimension mix param should exist");
+
+        let mut append_depth_targets = |base_param_idx: usize,
+                                        destination_name: &str,
+                                        depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+                                        depth_min: f32,
+                                        depth_max: f32| {
+            for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                let depth_param_idx = desc.params.len();
+                desc.params.push(ParamDescriptor {
+                    name: format!("mod {destination_name} slot {} amt", slot + 1),
+                    min: depth_min,
+                    max: depth_max,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: node_param_idx as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                });
+                desc.instrument_modulation_targets
+                    .push(InstrumentModulationTarget {
+                        base_param_idx,
+                        source_param_idx: None,
+                        modulator_slot: slot + 1,
+                        depth_param_idx,
+                        active_param_idx: None,
+                        depth_min,
+                        depth_max,
+                        depth_unit: None,
+                    });
+            }
+        };
+
+        append_depth_targets(
+            depth_idx,
+            "depth",
+            [
+                crate::dimension::DIMENSION_PARAM_MOD_DEPTH_DEPTH_1,
+                crate::dimension::DIMENSION_PARAM_MOD_DEPTH_DEPTH_2,
+                crate::dimension::DIMENSION_PARAM_MOD_DEPTH_DEPTH_3,
+                crate::dimension::DIMENSION_PARAM_MOD_DEPTH_DEPTH_4,
+            ],
+            -2.0,
+            2.0,
+        );
+        append_depth_targets(
+            mix_idx,
+            "mix",
+            [
+                crate::dimension::DIMENSION_PARAM_MOD_MIX_DEPTH_1,
+                crate::dimension::DIMENSION_PARAM_MOD_MIX_DEPTH_2,
+                crate::dimension::DIMENSION_PARAM_MOD_MIX_DEPTH_3,
+                crate::dimension::DIMENSION_PARAM_MOD_MIX_DEPTH_4,
+            ],
+            -1.5,
+            1.5,
+        );
+
+        desc
     }
 
     pub fn builtin_dj_mixer() -> Self {
-        Self {
+        let mut desc = Self {
             name: "DJ Mixer".to_string(),
-            input_channels: 2,
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: Vec::new(),
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::dj_mixer::DJ_MIXER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1932,19 +3306,168 @@ impl EffectDescriptor {
                     host_control: None,
                     ui_metadata: None,
                 },
+                ParamDescriptor {
+                    name: "sync".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_SYNC as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "div".to_string(),
+                    min: 0.0,
+                    max: 5.0,
+                    default: 4.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "1/16".to_string(),
+                            "1/8".to_string(),
+                            "1/4".to_string(),
+                            "1/2".to_string(),
+                            "1 bar".to_string(),
+                            "2 bars".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_DIV as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "warp".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_WARP as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
             ],
-        }
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let mut append_depth_targets =
+            |target_name: &str,
+             depth_params: [u64; 4],
+             depth_min: f32,
+             depth_max: f32,
+             depth_unit: Option<&str>| {
+                let base_param_idx = desc
+                    .params
+                    .iter()
+                    .position(|param| param.name == target_name)
+                    .expect("dj mixer modulation target param should exist");
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {} slot {} amt", target_name, slot + 1),
+                        min: depth_min,
+                        max: depth_max,
+                        default: 0.0,
+                        kind: ParamKind::Continuous {
+                            unit: depth_unit.map(str::to_string),
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min,
+                            depth_max,
+                            depth_unit: depth_unit.map(str::to_string),
+                        });
+                }
+            };
+        append_depth_targets(
+            "enabled",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            "speed",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_SPEED_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_SPEED_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_SPEED_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_SPEED_DEPTH_4,
+            ],
+            -2.0,
+            2.0,
+            None,
+        );
+        append_depth_targets(
+            "length",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LENGTH_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LENGTH_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LENGTH_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LENGTH_DEPTH_4,
+            ],
+            -3.0,
+            3.0,
+            Some("oct"),
+        );
+        append_depth_targets(
+            "loop",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LOOP_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LOOP_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LOOP_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LOOP_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            "warp",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_WARP_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_WARP_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_WARP_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_WARP_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        desc
     }
 
-    /// Built-in reverb as an insert effect. The DSP node is mono-in/stereo-out,
-    /// so stereo predecessors are currently folded to its mono input by graph wiring.
+    /// Built-in reverb as a stereo insert effect.
     pub fn builtin_reverb_insert() -> Self {
         Self {
             name: "Reverb".to_string(),
-            input_channels: 1,
+            input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mix".to_string(),
@@ -2018,6 +3541,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -2214,6 +3738,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "threshold".to_string(),
@@ -2302,6 +3827,173 @@ impl EffectDescriptor {
         }
     }
 
+    /// OTT-style 3-band upward+downward compressor.
+    pub fn builtin_ott() -> Self {
+        Self {
+            name: "OTT".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                ParamDescriptor {
+                    name: "depth".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_DEPTH as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "time".to_string(),
+                    min: 0.1,
+                    max: 2.5,
+                    default: 1.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::ott::OTT_PARAM_TIME as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "upward".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_UPWARD as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "downward".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_DOWNWARD as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "low gain".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_LOW_GAIN_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mid gain".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_MID_GAIN_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "high gain".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_HIGH_GAIN_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "xover low".to_string(),
+                    min: 40.0,
+                    max: 400.0,
+                    default: 100.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::ott::OTT_PARAM_XOVER_LOW_HZ as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "xover high".to_string(),
+                    min: 1000.0,
+                    max: 8000.0,
+                    default: 2500.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::ott::OTT_PARAM_XOVER_HIGH_HZ as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "input".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_INPUT_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "output".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_OUTPUT_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                Self::enabled_param(crate::ott::OTT_PARAM_ENABLED as u32, 1.0),
+            ],
+        }
+    }
+
     /// General-purpose lookahead limiter.
     pub fn builtin_limiter() -> Self {
         Self {
@@ -2310,6 +4002,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "input".to_string(),
@@ -2380,6 +4073,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "drive".to_string(),
@@ -2641,10 +4335,15 @@ impl EffectDescriptor {
             ParamDescriptor {
                 name: "mode".to_string(),
                 min: 0.0,
-                max: 0.0,
+                max: 3.0,
                 default: 0.0,
                 kind: ParamKind::Enum {
-                    labels: vec!["transient".to_string()],
+                    labels: vec![
+                        "beats".to_string(),
+                        "tones".to_string(),
+                        "texture".to_string(),
+                        "re-pitch".to_string(),
+                    ],
                 },
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::sampler::PARAM_WARP_MODE as u32,
@@ -2769,6 +4468,62 @@ impl EffectDescriptor {
             host_control: None,
             ui_metadata: None,
         });
+        // Beats-warp params. Appended at the tail (like "smooth") so plock
+        // indices of older params stay stable in saved projects.
+        params.push(ParamDescriptor {
+            name: "preserve".to_string(),
+            min: 0.0,
+            max: 6.0,
+            default: crate::warp_grid::PRESERVE_TRANSIENTS as f32,
+            kind: ParamKind::Enum {
+                labels: vec![
+                    "1 bar".to_string(),
+                    "1/2".to_string(),
+                    "1/4".to_string(),
+                    "1/8".to_string(),
+                    "1/16".to_string(),
+                    "1/32".to_string(),
+                    "transients".to_string(),
+                ],
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::sampler::PARAM_WARP_PRESERVE as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+        params.push(ParamDescriptor {
+            name: "fill".to_string(),
+            min: 0.0,
+            max: 2.0,
+            default: crate::sampler::SEG_LOOP_FORWARD as f32,
+            kind: ParamKind::Enum {
+                labels: vec![
+                    "off".to_string(),
+                    "loop".to_string(),
+                    "ping-pong".to_string(),
+                ],
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+        params.push(ParamDescriptor {
+            name: "decay".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            kind: ParamKind::Continuous {
+                unit: Some("%".to_string()),
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
         Self {
             name: "Sampler".to_string(),
             input_channels: 0,
@@ -2780,6 +4535,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets,
+            tensor_params: Vec::new(),
             params,
         }
     }
@@ -2791,7 +4547,7 @@ impl EffectDescriptor {
     /// Full default chain: MAX_CUSTOM_FX empty insert slots.
     pub fn default_full_chain() -> Vec<Self> {
         let mut chain = Self::default_chain();
-        for _ in 0..crate::lisp_effect::MAX_CUSTOM_FX {
+        for _ in 0..crate::lisp_host::MAX_CUSTOM_FX {
             chain.push(Self::empty_custom_slot());
         }
         chain
@@ -2802,6 +4558,7 @@ impl EffectDescriptor {
         Self {
             name: String::new(),
             params: Vec::new(),
+            tensor_params: Vec::new(),
             input_channels: 0,
             output_channels: 0,
             instrument_modulators: Vec::new(),
@@ -2812,7 +4569,7 @@ impl EffectDescriptor {
     /// Construct from a lisp effect manifest.
     pub fn from_lisp_manifest(
         name: &str,
-        params: &[crate::lisp_effect::DGenParam],
+        params: &[crate::lisp_host::DGenParam],
         input_channels: usize,
         output_channels: usize,
     ) -> Self {
@@ -2828,7 +4585,7 @@ impl EffectDescriptor {
                     unit: p.unit.clone(),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: (crate::lisp_effect::HEADER_SLOTS + p.cell_id) as u32,
+                node_param_idx: (crate::lisp_host::HEADER_SLOTS + p.cell_id) as u32,
                 node_param_span: p.cell_span as u32,
                 host_control: None,
                 ui_metadata: crate::effects::ParamUiMetadata::new(
@@ -2839,12 +4596,13 @@ impl EffectDescriptor {
             })
             .collect();
         descriptors.push(Self::enabled_param(
-            crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+            crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
             1.0,
         ));
         Self {
             name: name.to_string(),
             params: descriptors,
+            tensor_params: Vec::new(),
             input_channels,
             output_channels,
             instrument_modulators: Vec::new(),
@@ -2863,6 +4621,12 @@ pub struct SlotPLockData {
     id_logical_ids: Vec<AtomicU64>,
     id_node_param_indices: Vec<AtomicU32>,
     max_params: usize,
+    /// Number of non-NaN cells. Lets snapshot capture/restore and per-step
+    /// plock masks take O(1) fast paths for the common plock-free slot.
+    plock_count: AtomicU32,
+    /// Number of non-NaN cells per step. Lets per-step queries and snapshot
+    /// capture/restore skip the param scan for plock-free steps.
+    step_counts: Vec<AtomicU32>,
 }
 
 impl SlotPLockData {
@@ -2877,11 +4641,58 @@ impl SlotPLockData {
             id_logical_ids,
             id_node_param_indices,
             max_params,
+            plock_count: AtomicU32::new(0),
+            step_counts: (0..MAX_STEPS).map(|_| AtomicU32::new(0)).collect(),
         }
     }
 
     fn index(&self, step: usize, param_idx: usize) -> usize {
         step * self.max_params + param_idx
+    }
+
+    pub fn has_any_plock(&self) -> bool {
+        self.plock_count.load(Ordering::Relaxed) > 0
+    }
+
+    /// Adjust plock_count and the step's count for a cell transitioning
+    /// between old and new bits.
+    fn note_cell_transition(&self, step: usize, old_bits: u32, new_bits: u32) {
+        let old_set = !f32::from_bits(old_bits).is_nan();
+        let new_set = !f32::from_bits(new_bits).is_nan();
+        if !old_set && new_set {
+            self.plock_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(count) = self.step_counts.get(step) {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if old_set && !new_set {
+            self.plock_count.fetch_sub(1, Ordering::Relaxed);
+            if let Some(count) = self.step_counts.get(step) {
+                count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn step_count(&self, step: usize) -> u32 {
+        self.step_counts
+            .get(step)
+            .map(|count| count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Clear every plock value and param id.
+    pub fn clear_all(&self) {
+        if !self.has_any_plock() {
+            return;
+        }
+        for idx in 0..self.data.len() {
+            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        }
+        self.plock_count.store(0, Ordering::Relaxed);
+        for count in &self.step_counts {
+            count.store(0, Ordering::Relaxed);
+        }
     }
 
     pub fn get(&self, step: usize, param_idx: usize) -> Option<f32> {
@@ -2901,7 +4712,8 @@ impl SlotPLockData {
     pub fn set(&self, step: usize, param_idx: usize, val: f32) {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
-            self.data[idx].store(val.to_bits(), Ordering::Relaxed);
+            let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+            self.note_cell_transition(step, old_bits, val.to_bits());
             self.id_logical_ids[idx].store(0, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
@@ -2910,7 +4722,8 @@ impl SlotPLockData {
     pub fn set_with_id(&self, step: usize, param_idx: usize, val: f32, param_id: ParamNodeId) {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
-            self.data[idx].store(val.to_bits(), Ordering::Relaxed);
+            let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+            self.note_cell_transition(step, old_bits, val.to_bits());
             self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
         }
@@ -2934,10 +4747,14 @@ impl SlotPLockData {
     }
 
     pub fn clear_step(&self, step: usize) {
+        if self.step_count(step) == 0 {
+            return;
+        }
         for p in 0..self.max_params {
             let idx = self.index(step, p);
             if idx < self.data.len() {
-                self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+                let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+                self.note_cell_transition(step, old_bits, NAN_BITS);
                 self.id_logical_ids[idx].store(0, Ordering::Relaxed);
                 self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
             }
@@ -2947,23 +4764,145 @@ impl SlotPLockData {
     pub fn clear_param(&self, step: usize, param_idx: usize) {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
-            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+            let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+            self.note_cell_transition(step, old_bits, NAN_BITS);
             self.id_logical_ids[idx].store(0, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
-    pub fn step_has_any_plock(&self, step: usize, num_params: usize) -> bool {
-        for p in 0..num_params.min(self.max_params) {
-            let idx = self.index(step, p);
-            if idx < self.data.len() {
-                let bits = self.data[idx].load(Ordering::Relaxed);
-                if !f32::from_bits(bits).is_nan() {
-                    return true;
+    /// Bulk capture of all step plock values and param ids in one flat pass.
+    /// Equivalent to calling `get`/`get_id` for every (step, param) but
+    /// without the per-element call overhead.
+    pub fn capture_rows(
+        &self,
+        num_params: usize,
+    ) -> (Vec<Vec<Option<f32>>>, Vec<Vec<Option<ParamNodeId>>>) {
+        if !self.has_any_plock() {
+            // No plocks anywhere: empty row sets denote "all None" and avoid
+            // allocating MAX_STEPS * num_params Options per slot.
+            return (Vec::new(), Vec::new());
+        }
+        let read_np = num_params.min(self.max_params);
+        let mut plocks = Vec::with_capacity(MAX_STEPS);
+        let mut plock_param_ids = Vec::with_capacity(MAX_STEPS);
+        for step in 0..MAX_STEPS {
+            if self.step_count(step) == 0 {
+                // Empty rows denote "all None" for this step (consumers use
+                // guarded .get() access) and skip the per-param atomic scan.
+                plocks.push(Vec::new());
+                plock_param_ids.push(Vec::new());
+                continue;
+            }
+            let base = step * self.max_params;
+            let mut row = vec![None; num_params];
+            let mut id_row = vec![None; num_params];
+            for p in 0..read_np {
+                let idx = base + p;
+                let val = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+                if !val.is_nan() {
+                    row[p] = Some(val);
+                }
+                let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+                if logical_id != 0 {
+                    let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+                    if node_param_idx != u32::MAX {
+                        id_row[p] = Some(ParamNodeId {
+                            logical_id,
+                            node_param_idx,
+                        });
+                    }
+                }
+            }
+            plocks.push(row);
+            plock_param_ids.push(id_row);
+        }
+        (plocks, plock_param_ids)
+    }
+
+    /// Bulk restore matching EffectSlotSnapshot::restore semantics: values
+    /// present in the snapshot rows are written (with their param ids), `None`
+    /// entries are cleared, and steps/params missing from the snapshot are
+    /// left untouched.
+    pub fn restore_rows(
+        &self,
+        plocks: &[Vec<Option<f32>>],
+        plock_param_ids: &[Vec<Option<ParamNodeId>>],
+        num_params: usize,
+    ) {
+        if plocks.is_empty() {
+            // Empty row set means "no plocks at all" (see capture_rows).
+            self.clear_all();
+            return;
+        }
+        let np = num_params.min(self.max_params);
+        for (step, row) in plocks.iter().enumerate().take(MAX_STEPS) {
+            if row.is_empty() {
+                // Empty row means "all None" at this step (see capture_rows):
+                // clear it, which is a no-op when the step holds nothing.
+                self.clear_step(step);
+                continue;
+            }
+            // Skip steps where the snapshot row carries no values and the slot
+            // holds none either: every cell write below would be a no-op.
+            if self.step_count(step) == 0 && !row.iter().any(|value| value.is_some()) {
+                continue;
+            }
+            let base = step * self.max_params;
+            let id_row = plock_param_ids.get(step);
+            for p in 0..np.min(row.len()) {
+                let idx = base + p;
+                match row[p] {
+                    Some(val) => {
+                        let param_id = id_row.and_then(|ids| ids.get(p)).copied().flatten();
+                        let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+                        self.note_cell_transition(step, old_bits, val.to_bits());
+                        match param_id {
+                            Some(param_id) => {
+                                self.id_logical_ids[idx]
+                                    .store(param_id.logical_id, Ordering::Relaxed);
+                                self.id_node_param_indices[idx]
+                                    .store(param_id.node_param_idx, Ordering::Relaxed);
+                            }
+                            None => {
+                                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    None => {
+                        let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+                        self.note_cell_transition(step, old_bits, NAN_BITS);
+                        self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                        self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                    }
                 }
             }
         }
-        false
+    }
+
+    /// OR a per-step "has any plock" bit into `mask` (one bit per step) in a
+    /// single flat scan.
+    pub fn or_step_plock_mask(&self, mask: &mut [u64; MAX_STEPS / 64], num_params: usize) {
+        if !self.has_any_plock() {
+            return;
+        }
+        let np = num_params.min(self.max_params);
+        if np == 0 {
+            return;
+        }
+        for step in 0..MAX_STEPS {
+            if self.step_count(step) > 0 {
+                mask[step / 64] |= 1u64 << (step % 64);
+            }
+        }
+    }
+
+    pub fn step_has_any_plock(&self, step: usize, num_params: usize) -> bool {
+        if num_params.min(self.max_params) == 0 {
+            return false;
+        }
+        self.step_count(step) > 0
     }
 }
 
@@ -3012,6 +4951,385 @@ impl SlotParamDefaults {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SlotTensorParamMeta {
+    name: String,
+    shape: Vec<usize>,
+    cell_offset: usize,
+    flat_offset: usize,
+    len: usize,
+}
+
+pub struct SlotTensorParamData {
+    metadata: Mutex<Vec<SlotTensorParamMeta>>,
+    num_params: AtomicU32,
+    cell_offsets: Vec<AtomicU32>,
+    flat_offsets: Vec<AtomicU32>,
+    lengths: Vec<AtomicU32>,
+    defaults: Vec<AtomicU32>,
+    plocks: Vec<AtomicU32>,
+    plock_count: AtomicU32,
+    step_counts: Vec<AtomicU32>,
+}
+
+impl SlotTensorParamData {
+    pub fn new() -> Self {
+        Self {
+            metadata: Mutex::new(Vec::new()),
+            num_params: AtomicU32::new(0),
+            cell_offsets: (0..MAX_SLOT_TENSOR_PARAMS)
+                .map(|_| AtomicU32::new(u32::MAX))
+                .collect(),
+            flat_offsets: (0..MAX_SLOT_TENSOR_PARAMS)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
+            lengths: (0..MAX_SLOT_TENSOR_PARAMS)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
+            defaults: (0..MAX_SLOT_TENSOR_CELLS)
+                .map(|_| AtomicU32::new(0.0_f32.to_bits()))
+                .collect(),
+            plocks: (0..MAX_STEPS * MAX_SLOT_TENSOR_CELLS)
+                .map(|_| AtomicU32::new(NAN_BITS))
+                .collect(),
+            plock_count: AtomicU32::new(0),
+            step_counts: (0..MAX_STEPS).map(|_| AtomicU32::new(0)).collect(),
+        }
+    }
+
+    fn metadata(&self) -> std::sync::MutexGuard<'_, Vec<SlotTensorParamMeta>> {
+        self.metadata
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn meta_at(&self, tensor_idx: usize) -> Option<SlotTensorParamMeta> {
+        self.metadata().get(tensor_idx).cloned()
+    }
+
+    fn plock_index(step: usize, flat_offset: usize, cell_idx: usize) -> usize {
+        step * MAX_SLOT_TENSOR_CELLS + flat_offset + cell_idx
+    }
+
+    fn has_plock_for_meta(&self, step: usize, meta: &SlotTensorParamMeta) -> bool {
+        if step >= MAX_STEPS || meta.len == 0 {
+            return false;
+        }
+        let idx = Self::plock_index(step, meta.flat_offset, 0);
+        idx < self.plocks.len()
+            && !f32::from_bits(self.plocks[idx].load(Ordering::Relaxed)).is_nan()
+    }
+
+    fn note_plock_transition(&self, step: usize, old_set: bool, new_set: bool) {
+        if !old_set && new_set {
+            self.plock_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(count) = self.step_counts.get(step) {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if old_set && !new_set {
+            self.plock_count.fetch_sub(1, Ordering::Relaxed);
+            if let Some(count) = self.step_counts.get(step) {
+                count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn has_any_plock(&self) -> bool {
+        self.plock_count.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn clear_all_plocks(&self) {
+        if !self.has_any_plock() {
+            return;
+        }
+        for value in &self.plocks {
+            value.store(NAN_BITS, Ordering::Relaxed);
+        }
+        self.plock_count.store(0, Ordering::Relaxed);
+        for count in &self.step_counts {
+            count.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub fn clear(&self) {
+        *self.metadata() = Vec::new();
+        self.num_params.store(0, Ordering::Relaxed);
+        for idx in 0..MAX_SLOT_TENSOR_PARAMS {
+            self.cell_offsets[idx].store(u32::MAX, Ordering::Relaxed);
+            self.flat_offsets[idx].store(0, Ordering::Relaxed);
+            self.lengths[idx].store(0, Ordering::Relaxed);
+        }
+        for value in &self.defaults {
+            value.store(0.0_f32.to_bits(), Ordering::Relaxed);
+        }
+        self.clear_all_plocks();
+    }
+
+    pub fn apply_descriptor(&self, descriptors: &[TensorParamDescriptor]) {
+        self.clear();
+        let mut metadata = Vec::new();
+        let mut flat_offset = 0usize;
+        for desc in descriptors.iter().take(MAX_SLOT_TENSOR_PARAMS) {
+            let len = desc.default.len();
+            if len == 0 || len > MAX_SLOT_TENSOR_PARAM_CELLS {
+                continue;
+            }
+            let Some(next_offset) = flat_offset.checked_add(len) else {
+                break;
+            };
+            if next_offset > MAX_SLOT_TENSOR_CELLS {
+                break;
+            }
+            let idx = metadata.len();
+            self.cell_offsets[idx].store(desc.cell_offset as u32, Ordering::Relaxed);
+            self.flat_offsets[idx].store(flat_offset as u32, Ordering::Relaxed);
+            self.lengths[idx].store(len as u32, Ordering::Relaxed);
+            for (cell_idx, value) in desc.default.iter().copied().enumerate() {
+                self.defaults[flat_offset + cell_idx]
+                    .store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
+            }
+            metadata.push(SlotTensorParamMeta {
+                name: desc.name.clone(),
+                shape: desc.shape.clone(),
+                cell_offset: desc.cell_offset,
+                flat_offset,
+                len,
+            });
+            flat_offset = next_offset;
+        }
+        self.num_params
+            .store(metadata.len() as u32, Ordering::Relaxed);
+        *self.metadata() = metadata;
+    }
+
+    pub fn num_params(&self) -> usize {
+        self.num_params.load(Ordering::Relaxed) as usize
+    }
+
+    pub fn tensor_len(&self, tensor_idx: usize) -> usize {
+        self.lengths
+            .get(tensor_idx)
+            .map(|len| len.load(Ordering::Relaxed) as usize)
+            .unwrap_or(0)
+    }
+
+    pub fn tensor_cell_offset(&self, tensor_idx: usize) -> Option<usize> {
+        let raw = self.cell_offsets.get(tensor_idx)?.load(Ordering::Relaxed);
+        (raw != u32::MAX).then_some(raw as usize)
+    }
+
+    pub fn default_values(&self, tensor_idx: usize) -> Option<Vec<f32>> {
+        let meta = self.meta_at(tensor_idx)?;
+        let mut values = Vec::with_capacity(meta.len);
+        for cell_idx in 0..meta.len {
+            values.push(f32::from_bits(
+                self.defaults[meta.flat_offset + cell_idx].load(Ordering::Relaxed),
+            ));
+        }
+        Some(values)
+    }
+
+    pub fn plock_values(&self, step: usize, tensor_idx: usize) -> Option<Vec<f32>> {
+        let meta = self.meta_at(tensor_idx)?;
+        if !self.has_plock_for_meta(step, &meta) {
+            return None;
+        }
+        let mut values = Vec::with_capacity(meta.len);
+        for cell_idx in 0..meta.len {
+            let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
+            values.push(f32::from_bits(self.plocks[idx].load(Ordering::Relaxed)));
+        }
+        Some(values)
+    }
+
+    pub fn resolved_values(&self, step: Option<usize>, tensor_idx: usize) -> Option<Vec<f32>> {
+        step.and_then(|step| self.plock_values(step, tensor_idx))
+            .or_else(|| self.default_values(tensor_idx))
+    }
+
+    pub fn set_default(&self, tensor_idx: usize, values: &[f32]) -> bool {
+        let Some(meta) = self.meta_at(tensor_idx) else {
+            return false;
+        };
+        if values.len() != meta.len {
+            return false;
+        }
+        for (cell_idx, value) in values.iter().copied().enumerate() {
+            self.defaults[meta.flat_offset + cell_idx]
+                .store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
+        }
+        true
+    }
+
+    pub fn set_default_cell(
+        &self,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> Option<Vec<f32>> {
+        let mut values = self.default_values(tensor_idx)?;
+        if cell_idx >= values.len() {
+            return None;
+        }
+        values[cell_idx] = clamped_tensor_cell(value);
+        self.set_default(tensor_idx, &values).then_some(values)
+    }
+
+    pub fn set_plock(&self, step: usize, tensor_idx: usize, values: &[f32]) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        let Some(meta) = self.meta_at(tensor_idx) else {
+            return false;
+        };
+        if values.len() != meta.len {
+            return false;
+        }
+        let had_plock = self.has_plock_for_meta(step, &meta);
+        for (cell_idx, value) in values.iter().copied().enumerate() {
+            let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
+            self.plocks[idx].store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
+        }
+        self.note_plock_transition(step, had_plock, true);
+        true
+    }
+
+    pub fn set_plock_cell(
+        &self,
+        step: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> Option<Vec<f32>> {
+        let mut values = self
+            .plock_values(step, tensor_idx)
+            .or_else(|| self.default_values(tensor_idx))?;
+        if cell_idx >= values.len() {
+            return None;
+        }
+        values[cell_idx] = clamped_tensor_cell(value);
+        self.set_plock(step, tensor_idx, &values).then_some(values)
+    }
+
+    pub fn clear_plock(&self, step: usize, tensor_idx: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        let Some(meta) = self.meta_at(tensor_idx) else {
+            return false;
+        };
+        let had_plock = self.has_plock_for_meta(step, &meta);
+        if !had_plock {
+            return true;
+        }
+        for cell_idx in 0..meta.len {
+            let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
+            self.plocks[idx].store(NAN_BITS, Ordering::Relaxed);
+        }
+        self.note_plock_transition(step, true, false);
+        true
+    }
+
+    pub fn capture(&self) -> Vec<TensorParamSnapshot> {
+        let metadata = self.metadata().clone();
+        let mut snapshots = Vec::with_capacity(metadata.len());
+        for (tensor_idx, meta) in metadata.iter().enumerate() {
+            let default = self.default_values(tensor_idx).unwrap_or_default();
+            let mut plocks = if self.has_any_plock() {
+                vec![None; MAX_STEPS]
+            } else {
+                Vec::new()
+            };
+            if self.has_any_plock() {
+                for step in 0..MAX_STEPS {
+                    plocks[step] = self.plock_values(step, tensor_idx);
+                }
+            }
+            snapshots.push(TensorParamSnapshot {
+                name: meta.name.clone(),
+                shape: meta.shape.clone(),
+                cell_offset: meta.cell_offset,
+                default,
+                plocks,
+            });
+        }
+        snapshots
+    }
+
+    pub fn restore_snapshots(&self, snapshots: &[TensorParamSnapshot]) {
+        let descriptors = snapshots
+            .iter()
+            .filter_map(|snapshot| {
+                let cell_count = exposed_tensor_cell_count(&snapshot.shape)?;
+                if snapshot.default.len() != cell_count {
+                    return None;
+                }
+                Some(TensorParamDescriptor {
+                    name: snapshot.name.clone(),
+                    shape: snapshot.shape.clone(),
+                    cell_offset: snapshot.cell_offset,
+                    default: snapshot.default.clone(),
+                    min: 0.0,
+                    max: 1.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.apply_descriptor(&descriptors);
+        for (tensor_idx, snapshot) in snapshots.iter().enumerate().take(self.num_params()) {
+            self.set_default(tensor_idx, &snapshot.default);
+            for (step, values) in snapshot.plocks.iter().enumerate().take(MAX_STEPS) {
+                if let Some(values) = values {
+                    self.set_plock(step, tensor_idx, values);
+                }
+            }
+        }
+    }
+
+    pub fn migrate_matching_snapshots(
+        &self,
+        descriptors: &[TensorParamDescriptor],
+        old_snapshots: &[TensorParamSnapshot],
+    ) {
+        for (tensor_idx, desc) in descriptors.iter().enumerate().take(self.num_params()) {
+            let Some(old) = old_snapshots
+                .iter()
+                .find(|snapshot| snapshot.same_identity_as_descriptor(desc))
+            else {
+                continue;
+            };
+            self.set_default(tensor_idx, &old.default);
+            for (step, values) in old.plocks.iter().enumerate().take(MAX_STEPS) {
+                if let Some(values) = values {
+                    self.set_plock(step, tensor_idx, values);
+                }
+            }
+        }
+    }
+
+    pub fn or_step_plock_mask(&self, mask: &mut [u64; MAX_STEPS / 64]) {
+        if !self.has_any_plock() {
+            return;
+        }
+        for step in 0..MAX_STEPS {
+            if self
+                .step_counts
+                .get(step)
+                .map(|count| count.load(Ordering::Relaxed) > 0)
+                .unwrap_or(false)
+            {
+                mask[step / 64] |= 1u64 << (step % 64);
+            }
+        }
+    }
+
+    pub fn step_has_any_plock(&self, step: usize) -> bool {
+        self.step_counts
+            .get(step)
+            .map(|count| count.load(Ordering::Relaxed) > 0)
+            .unwrap_or(false)
+    }
+}
+
 // ── EffectSlotState (runtime state for one effect in a track's chain) ──
 
 pub struct EffectSlotState {
@@ -3019,9 +5337,11 @@ pub struct EffectSlotState {
     pub modulator_node_id: AtomicU32, // optional host modulation bank node
     pub plocks: SlotPLockData,
     pub defaults: SlotParamDefaults,
+    pub tensor_params: SlotTensorParamData,
     pub num_params: AtomicU32,
     pub param_node_indices: Vec<AtomicU32>, // per-param: idx field for ParamMsg
     pub param_node_spans: Vec<AtomicU32>,   // per-param: contiguous DGen cells updated by idx
+    pub transport_phase_param_idx: AtomicU32,
 }
 
 impl EffectSlotState {
@@ -3040,15 +5360,22 @@ impl EffectSlotState {
             .map(|p| AtomicU32::new(p.node_param_span.max(1)))
             .collect();
         param_node_spans.resize_with(capacity, || AtomicU32::new(1));
-        Self {
+        let state = Self {
             node_id: AtomicU32::new(node_id),
             modulator_node_id: AtomicU32::new(0),
             plocks: SlotPLockData::new(capacity),
             defaults: SlotParamDefaults::new_from_descriptor(desc),
+            tensor_params: SlotTensorParamData::new(),
             num_params: AtomicU32::new(num_params as u32),
             param_node_indices,
             param_node_spans,
-        }
+            transport_phase_param_idx: AtomicU32::new(
+                desc.transport_phase_param_idx()
+                    .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
+            ),
+        };
+        state.tensor_params.apply_descriptor(&desc.tensor_params);
+        state
     }
 
     /// Resolve the audio graph param index for a given param.
@@ -3114,9 +5441,11 @@ impl EffectSlotState {
             modulator_node_id: AtomicU32::new(0),
             plocks: SlotPLockData::new(MAX_SLOT_PARAMS),
             defaults: SlotParamDefaults::new_zeroed(MAX_SLOT_PARAMS),
+            tensor_params: SlotTensorParamData::new(),
             num_params: AtomicU32::new(0),
             param_node_indices: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(0)).collect(),
             param_node_spans: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(1)).collect(),
+            transport_phase_param_idx: AtomicU32::new(NO_TRANSPORT_PHASE_PARAM),
         }
     }
 
@@ -3136,6 +5465,11 @@ impl EffectSlotState {
             .store(modulator_node_id, Ordering::Relaxed);
         self.num_params
             .store(desc.params.len() as u32, Ordering::Relaxed);
+        self.transport_phase_param_idx.store(
+            desc.transport_phase_param_idx()
+                .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
+            Ordering::Relaxed,
+        );
         for (i, p) in desc.params.iter().enumerate() {
             self.defaults.set(i, p.default);
             if i < self.param_node_indices.len() {
@@ -3145,6 +5479,7 @@ impl EffectSlotState {
                 self.param_node_spans[i].store(p.node_param_span.max(1), Ordering::Relaxed);
             }
         }
+        self.tensor_params.apply_descriptor(&desc.tensor_params);
     }
 
     /// Rebind this live slot to the current graph descriptor/node while
@@ -3170,6 +5505,7 @@ impl EffectSlotState {
 
         let mut saved_plocks = Vec::with_capacity(MAX_STEPS);
         let mut saved_plock_ids = Vec::with_capacity(MAX_STEPS);
+        let saved_tensor_params = self.tensor_params.capture();
         for step in 0..MAX_STEPS {
             let mut step_plocks = Vec::with_capacity(preserve);
             let mut step_ids = Vec::with_capacity(preserve);
@@ -3182,6 +5518,8 @@ impl EffectSlotState {
         }
 
         self.apply_descriptor_with_modulator(desc, node_id, modulator_node_id);
+        self.tensor_params
+            .migrate_matching_snapshots(&desc.tensor_params, &saved_tensor_params);
 
         for param_idx in 0..preserve {
             self.defaults.set(param_idx, saved_defaults[param_idx]);
@@ -3233,6 +5571,7 @@ impl EffectSlotState {
     ) {
         let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
         let mut migrated = Vec::new();
+        let old_tensor_params = self.tensor_params.capture();
 
         for (new_idx, new_param) in new_desc.params.iter().enumerate() {
             let Some(old_idx) = unique_param_index_by_name(old_desc, &new_param.name) else {
@@ -3267,6 +5606,8 @@ impl EffectSlotState {
         }
 
         self.apply_descriptor_with_modulator(new_desc, node_id, modulator_node_id);
+        self.tensor_params
+            .migrate_matching_snapshots(&new_desc.tensor_params, &old_tensor_params);
         for step in 0..MAX_STEPS {
             for param_idx in 0..MAX_SLOT_PARAMS {
                 self.plocks.clear_param(step, param_idx);
@@ -3346,6 +5687,7 @@ impl EffectSlotState {
     pub fn clear(&self) {
         self.node_id.store(0, Ordering::Relaxed);
         self.num_params.store(0, Ordering::Relaxed);
+        self.tensor_params.clear();
         for i in 0..MAX_SLOT_PARAMS {
             self.defaults.set(i, 0.0);
             if i < self.param_node_indices.len() {
@@ -3393,8 +5735,10 @@ pub struct EffectSlotSnapshot {
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
     pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    pub tensor_params: Vec<TensorParamSnapshot>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
+    pub transport_phase_param_idx: u32,
     /// Convolution Reverb IR reference (sample hash/stem) carried through
     /// save/restore. None for every other effect.
     pub ir: Option<String>,
@@ -3412,18 +5756,8 @@ impl EffectSlotSnapshot {
             defaults.push(slot.defaults.get(i));
         }
 
-        let mut plocks = Vec::with_capacity(MAX_STEPS);
-        let mut plock_param_ids = Vec::with_capacity(MAX_STEPS);
-        for s in 0..MAX_STEPS {
-            let mut step_plocks = Vec::with_capacity(np);
-            let mut step_param_ids = Vec::with_capacity(np);
-            for i in 0..np {
-                step_plocks.push(slot.plocks.get(s, i));
-                step_param_ids.push(slot.plocks.get_id(s, i));
-            }
-            plocks.push(step_plocks);
-            plock_param_ids.push(step_param_ids);
-        }
+        let (plocks, plock_param_ids) = slot.plocks.capture_rows(np);
+        let tensor_params = slot.tensor_params.capture();
 
         let mut param_node_indices = Vec::with_capacity(np);
         let mut param_node_spans = Vec::with_capacity(np);
@@ -3447,8 +5781,10 @@ impl EffectSlotSnapshot {
             defaults,
             plocks,
             plock_param_ids,
+            tensor_params,
             param_node_indices,
             param_node_spans,
+            transport_phase_param_idx: slot.transport_phase_param_idx.load(Ordering::Relaxed),
             ir: crate::conv_reverb::ir_ref_for(node_id as i32),
         }
     }
@@ -3458,6 +5794,8 @@ impl EffectSlotSnapshot {
         slot.modulator_node_id
             .store(self.modulator_node_id, Ordering::Relaxed);
         slot.num_params.store(self.num_params, Ordering::Relaxed);
+        slot.transport_phase_param_idx
+            .store(self.transport_phase_param_idx, Ordering::Relaxed);
         let np = self.num_params as usize;
 
         for i in 0..np {
@@ -3474,30 +5812,9 @@ impl EffectSlotSnapshot {
             }
         }
 
-        for s in 0..MAX_STEPS {
-            if s < self.plocks.len() {
-                for i in 0..np {
-                    if i < self.plocks[s].len() {
-                        match self.plocks[s][i] {
-                            Some(val) => {
-                                if let Some(param_id) = self
-                                    .plock_param_ids
-                                    .get(s)
-                                    .and_then(|step| step.get(i))
-                                    .copied()
-                                    .flatten()
-                                {
-                                    slot.plocks.set_with_id(s, i, val, param_id);
-                                } else {
-                                    slot.plocks.set(s, i, val);
-                                }
-                            }
-                            None => slot.plocks.clear_param(s, i),
-                        }
-                    }
-                }
-            }
-        }
+        slot.plocks
+            .restore_rows(&self.plocks, &self.plock_param_ids, np);
+        slot.tensor_params.restore_snapshots(&self.tensor_params);
     }
 
     pub fn new_default(desc: &EffectDescriptor, node_id: u32) -> Self {
@@ -3518,6 +5835,17 @@ impl EffectSlotSnapshot {
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect();
+        let tensor_params = desc
+            .tensor_params
+            .iter()
+            .map(|tensor| TensorParamSnapshot {
+                name: tensor.name.clone(),
+                shape: tensor.shape.clone(),
+                cell_offset: tensor.cell_offset,
+                default: tensor.default.clone(),
+                plocks: Vec::new(),
+            })
+            .collect();
 
         Self {
             node_id,
@@ -3526,8 +5854,12 @@ impl EffectSlotSnapshot {
             defaults,
             plocks,
             plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; np]).collect(),
+            tensor_params,
             param_node_indices,
             param_node_spans,
+            transport_phase_param_idx: desc
+                .transport_phase_param_idx()
+                .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
             ir: None,
         }
     }
@@ -3540,14 +5872,192 @@ impl EffectSlotSnapshot {
             defaults: Vec::new(),
             plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+            tensor_params: Vec::new(),
             param_node_indices: Vec::new(),
             param_node_spans: Vec::new(),
+            transport_phase_param_idx: NO_TRANSPORT_PHASE_PARAM,
             ir: None,
         }
     }
 
     pub fn clear(&mut self) {
         *self = Self::new_empty();
+    }
+
+    fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {
+        let raw_idx = self.param_node_indices.get(param_idx).copied()?;
+        ParamNodeId::from_slot_param(self.node_id, self.modulator_node_id, raw_idx)
+    }
+
+    fn ensure_plock_row_capacity(&mut self, step: usize, num_params: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        while self.plocks.len() <= step {
+            self.plocks.push(Vec::new());
+        }
+        while self.plock_param_ids.len() <= step {
+            self.plock_param_ids.push(Vec::new());
+        }
+        if self.plocks[step].len() < num_params {
+            self.plocks[step].resize(num_params, None);
+        }
+        if self.plock_param_ids[step].len() < num_params {
+            self.plock_param_ids[step].resize(num_params, None);
+        }
+        true
+    }
+
+    pub fn set_plock(&mut self, step: usize, param_idx: usize, value: f32) -> bool {
+        let num_params = self.num_params as usize;
+        if param_idx >= num_params || !self.ensure_plock_row_capacity(step, num_params) {
+            return false;
+        }
+        self.plocks[step][param_idx] = Some(value);
+        self.plock_param_ids[step][param_idx] = self.param_node_id(param_idx);
+        true
+    }
+
+    pub fn clear_plock(&mut self, step: usize, param_idx: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        if let Some(step_plocks) = self.plocks.get_mut(step) {
+            if param_idx < step_plocks.len() {
+                step_plocks[param_idx] = None;
+            }
+        }
+        if let Some(step_ids) = self.plock_param_ids.get_mut(step) {
+            if param_idx < step_ids.len() {
+                step_ids[param_idx] = None;
+            }
+        }
+        true
+    }
+
+    pub fn clear_step_plocks(&mut self, step: usize) {
+        if step >= MAX_STEPS {
+            return;
+        }
+        if let Some(step_plocks) = self.plocks.get_mut(step) {
+            for value in step_plocks {
+                *value = None;
+            }
+        }
+        if let Some(step_ids) = self.plock_param_ids.get_mut(step) {
+            for value in step_ids {
+                *value = None;
+            }
+        }
+    }
+
+    pub fn tensor_default_values(&self, tensor_idx: usize) -> Option<&[f32]> {
+        self.tensor_params
+            .get(tensor_idx)
+            .map(|tensor| tensor.default.as_slice())
+    }
+
+    pub fn tensor_plock_values(&self, step: usize, tensor_idx: usize) -> Option<&[f32]> {
+        self.tensor_params
+            .get(tensor_idx)
+            .and_then(|tensor| tensor.plocks.get(step))
+            .and_then(|values| values.as_deref())
+    }
+
+    pub fn resolved_tensor_values(&self, step: usize, tensor_idx: usize) -> Option<&[f32]> {
+        self.tensor_plock_values(step, tensor_idx)
+            .or_else(|| self.tensor_default_values(tensor_idx))
+    }
+
+    pub fn set_tensor_default(&mut self, tensor_idx: usize, values: Vec<f32>) -> bool {
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if values.len() != tensor.cell_count() {
+            return false;
+        }
+        tensor.default = values.into_iter().map(clamped_tensor_cell).collect();
+        true
+    }
+
+    pub fn set_tensor_default_cell(
+        &mut self,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if cell_idx >= tensor.default.len() {
+            return false;
+        }
+        tensor.default[cell_idx] = clamped_tensor_cell(value);
+        true
+    }
+
+    fn ensure_tensor_plock_rows(&mut self, tensor_idx: usize) -> bool {
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if tensor.plocks.is_empty() {
+            tensor.plocks = vec![None; MAX_STEPS];
+        } else if tensor.plocks.len() < MAX_STEPS {
+            tensor.plocks.resize_with(MAX_STEPS, || None);
+        }
+        true
+    }
+
+    pub fn set_tensor_plock(&mut self, step: usize, tensor_idx: usize, values: Vec<f32>) -> bool {
+        if step >= MAX_STEPS || !self.ensure_tensor_plock_rows(tensor_idx) {
+            return false;
+        }
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if values.len() != tensor.cell_count() {
+            return false;
+        }
+        tensor.plocks[step] = Some(values.into_iter().map(clamped_tensor_cell).collect());
+        true
+    }
+
+    pub fn set_tensor_plock_cell(
+        &mut self,
+        step: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        let Some(base) = self
+            .tensor_plock_values(step, tensor_idx)
+            .or_else(|| self.tensor_default_values(tensor_idx))
+            .map(|values| values.to_vec())
+        else {
+            return false;
+        };
+        if cell_idx >= base.len() {
+            return false;
+        }
+        let mut values = base;
+        values[cell_idx] = clamped_tensor_cell(value);
+        self.set_tensor_plock(step, tensor_idx, values)
+    }
+
+    pub fn clear_tensor_plock(&mut self, step: usize, tensor_idx: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if let Some(plock) = tensor.plocks.get_mut(step) {
+            *plock = None;
+        }
+        true
     }
 
     pub fn sync_to_descriptor(&mut self, desc: &EffectDescriptor, node_id: u32) {
@@ -3563,6 +6073,7 @@ impl EffectSlotSnapshot {
         let new_np = desc.params.len();
         let old_defaults = self.defaults.clone();
         let old_plocks = self.plocks.clone();
+        let old_tensor_params = self.tensor_params.clone();
 
         self.node_id = node_id;
         self.modulator_node_id = modulator_node_id;
@@ -3574,8 +6085,34 @@ impl EffectSlotSnapshot {
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect();
+        self.transport_phase_param_idx = desc
+            .transport_phase_param_idx()
+            .unwrap_or(NO_TRANSPORT_PHASE_PARAM);
         self.plocks = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
         self.plock_param_ids = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
+        self.tensor_params = desc
+            .tensor_params
+            .iter()
+            .map(|tensor| TensorParamSnapshot {
+                name: tensor.name.clone(),
+                shape: tensor.shape.clone(),
+                cell_offset: tensor.cell_offset,
+                default: tensor.default.clone(),
+                plocks: Vec::new(),
+            })
+            .collect();
+        for (tensor_idx, desc_tensor) in desc.tensor_params.iter().enumerate() {
+            let Some(old_tensor) = old_tensor_params
+                .iter()
+                .find(|snapshot| snapshot.same_identity_as_descriptor(desc_tensor))
+            else {
+                continue;
+            };
+            if let Some(new_tensor) = self.tensor_params.get_mut(tensor_idx) {
+                new_tensor.default = old_tensor.default.clone();
+                new_tensor.plocks = old_tensor.plocks.clone();
+            }
+        }
 
         let preserve = old_defaults.len().min(new_np);
         for i in 0..preserve {

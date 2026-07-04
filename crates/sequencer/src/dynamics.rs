@@ -498,6 +498,7 @@ pub fn dynamics_vtable() -> NodeVTable {
         init: Some(dynamics_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

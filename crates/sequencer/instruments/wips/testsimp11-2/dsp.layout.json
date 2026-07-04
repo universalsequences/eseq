@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 82.015,
+        "y": 26.982498
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 3.8373723
+      },
+      "audio": {
+        "x": 85.495,
+        "y": 33.664997
+      },
+      "clock": {
+        "x": 204.48,
+        "y": 8.0
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 10.68
+      },
+      "env": {
+        "x": 97.525,
+        "y": 20.3
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "gate": {
+        "x": 136.815,
+        "y": 8.0
+      },
+      "phasor1": {
+        "x": 122.25145,
+        "y": 29.251476
+      },
+      "pitch": {
+        "x": 84.915,
+        "y": 8.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "simp111": {
+        "x": 109.125,
+        "y": 28.034119
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 13.360001
+      },
+      "trigger": {
+        "x": 159.865,
+        "y": 8.0
+      },
+      "value1": {
+        "x": 121.73061,
+        "y": 25.74235
+      },
+      "velocity": {
+        "x": 109.125,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 24.431248
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 14.150001
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 17.150002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.18
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 18.96
+      }
+    },
+    "inputPresentation": {
+      "*#0:0": "cable",
+      "audio:0": "cable",
+      "phasor1:0": "cable",
+      "phasor1:1": "cable",
+      "simp111:0": "cable",
+      "simp111:1": "cable"
+    }
+  },
+  "macros": {}
+}

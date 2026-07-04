@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "engine_name": "drums/md-cymbal/",
+  "source_file": "instruments/drums/md-cymbal/dsp.lisp",
+  "presets": [
+    {"id": "808 Cymbal", "name": "808 Cymbal", "base_note_offset": 0.0, "params": {"engine": 1, "rich": 0.42, "dec": 900, "top": 0.38, "ttun": 7100, "size": 0.20, "peak": 2.1}},
+    {"id": "Ride Ping", "name": "Ride Ping", "base_note_offset": 0.0, "params": {"engine": 3, "dec": 1700, "hard": 0.32, "clsn": 0.18, "ring": 0.86, "grab": 0.0}},
+    {"id": "PI Crash", "name": "PI Crash", "base_note_offset": 0.0, "params": {"engine": 4, "dec": 1900, "hard": 0.70, "clsn": 0.62, "ring": 0.64, "grab": 0.12}},
+    {"id": "EFM Trash", "name": "EFM Trash", "base_note_offset": 0.0, "params": {"engine": 2, "dec": 620, "mod_amt": 0.88, "mfrq": 6900, "mdec": 180, "fb": 0.86, "hpf": 6900, "dist": 0.20}}
+  ]
+}

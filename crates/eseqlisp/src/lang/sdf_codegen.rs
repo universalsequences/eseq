@@ -1477,6 +1477,7 @@ mod tests {
             std::collections::HashMap::new(),
             0,
             rt.macros().clone(),
+            None,
         );
         compiler.expand_macros(&parse_one_expr(src), 0)
     }

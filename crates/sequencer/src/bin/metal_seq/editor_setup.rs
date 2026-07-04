@@ -7,6 +7,7 @@ use super::custom_ui::reload_custom_instrument_ui;
 use super::state_values::push_project_scratch_to_named_buffer;
 
 const METAL_SEQ_TEXT_FONT_SIZE_PT: f64 = 13.0;
+const STARTUP_GRID_LAYOUT_EXPR: &str = "(seq-apply-fx-layout)";
 
 pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
@@ -39,7 +40,7 @@ pub(crate) fn create_editor_and_backend(
         .into());
     }
     editor.process_lisp_reload_report(report);
-    editor.refresh_runtime_side_effects();
+    apply_startup_grid_layout(&mut editor)?;
     log_lisp_ui_load_diagnostics(&mut editor);
     reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
@@ -59,6 +60,17 @@ pub(crate) fn create_editor_and_backend(
     }
 
     Ok((editor, backend))
+}
+
+pub(crate) fn apply_startup_grid_layout(
+    editor: &mut Editor,
+) -> Result<(), Box<dyn std::error::Error>> {
+    editor
+        .runtime_mut()
+        .eval_str(STARTUP_GRID_LAYOUT_EXPR)
+        .map_err(|err| format!("failed to apply startup grid layout: {err:?}"))?;
+    editor.refresh_runtime_side_effects();
+    Ok(())
 }
 
 fn read_eseqlisp_init_source() -> (String, Option<std::path::PathBuf>) {

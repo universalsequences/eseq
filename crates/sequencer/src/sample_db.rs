@@ -379,6 +379,56 @@ impl SampleDb {
         Ok(title.and_then(clean_display_title))
     }
 
+    pub fn contains_sample(&self, hash: &str) -> Result<bool> {
+        Ok(self.sample_id(hash.trim())?.is_some())
+    }
+
+    pub fn insert_sample_with_tags(
+        &mut self,
+        hash: &str,
+        title: Option<&str>,
+        tags: &[String],
+    ) -> Result<bool> {
+        let hash = hash.trim();
+        if hash.is_empty() {
+            return Ok(false);
+        }
+        let title = title.map(clean_display_title_str).unwrap_or(None);
+        let tx = self.conn.transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO samples(hash, title) VALUES (?, ?)",
+            params![hash, title],
+        )? > 0;
+        if !inserted {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let sample_id: i64 = tx.query_row(
+            "SELECT id FROM samples WHERE hash = ?",
+            params![hash],
+            |row| row.get(0),
+        )?;
+        let mut seen = HashSet::new();
+        for tag in tags {
+            let tag = tag.trim();
+            if tag.is_empty() || !seen.insert(tag.to_lowercase()) {
+                continue;
+            }
+            tx.execute("INSERT OR IGNORE INTO tags(name) VALUES (?)", params![tag])?;
+            let tag_id: i64 = tx.query_row(
+                "SELECT id FROM tags WHERE name = ? COLLATE NOCASE",
+                params![tag],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO sample_tags(sample_id, tag_id) VALUES (?, ?)",
+                params![sample_id, tag_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn add_tag(&self, hash: &str, tag: &str) -> Result<()> {
         let Some(sample_id) = self.sample_id(hash)? else {
             return Ok(());
@@ -537,6 +587,10 @@ fn normalized_tag_set(tags: &[&str]) -> HashSet<String> {
 }
 
 fn clean_display_title(title: String) -> Option<String> {
+    clean_display_title_str(&title)
+}
+
+fn clean_display_title_str(title: &str) -> Option<String> {
     let without_controls: String = title.chars().filter(|ch| !ch.is_control()).collect();
     let title = without_controls.trim();
     (!title.is_empty()).then(|| title.to_string())

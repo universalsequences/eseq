@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "pitch-transpose",
+  "params": [
+    "hz",
+    "semitones"
+  ],
+  "outputs": [
+    "out"
+  ]
+}

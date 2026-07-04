@@ -673,6 +673,7 @@ pub fn tape_vtable() -> NodeVTable {
         init: Some(tape_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

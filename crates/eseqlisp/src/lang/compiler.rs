@@ -1,5 +1,6 @@
 use crate::parser::Expression;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -8,6 +9,8 @@ pub struct Chunk {
     pub strings: Vec<String>, // string constants pool
     pub symbols: Vec<String>,
     pub upvalues: Vec<String>,
+    pub source_symbol: Option<String>,
+    pub source_module: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -74,10 +77,12 @@ pub enum OpCode {
     EffectEnd(u32),
     SubtreeBegin,
     SubtreeEnd,
-    LoadReactive(usize, usize),  // namespace idx, field idx
-    StoreReactive(usize, usize), // namespace idx, field idx
-    GetField(usize),             // pop a map, push map[strings[idx]]
-    EmitTree,                    // pop widget tree from stack and route it to the runtime
+    LoadReactive(usize, usize),    // namespace idx, field idx
+    LoadReactiveNth(usize, usize), // namespace idx, field idx; pops list index from stack
+    LoadReactiveLen(usize, usize), // namespace idx, field idx; pushes list length
+    StoreReactive(usize, usize),   // namespace idx, field idx
+    GetField(usize),               // pop a map, push map[strings[idx]]
+    EmitTree,                      // pop widget tree from stack and route it to the runtime
     Return,
     Jump(usize),
     JumpIfFalse(usize),
@@ -102,6 +107,7 @@ pub struct Compiler {
     state_bindings: HashMap<String, u32>,
     next_node_id: u32,
     next_temp_id: u32,
+    source_module: Option<PathBuf>,
     pub macros: HashMap<String, MacroDef>,
 }
 
@@ -129,6 +135,7 @@ fn is_widget_name(name: &str) -> bool {
             | "tabs"
             | "patcher"
             | "response-curve-editor"
+            | "eq8-editor"
             | "scroll"
             | "tree"
     )
@@ -233,6 +240,7 @@ impl Compiler {
             state_bindings: HashMap::new(),
             next_node_id: 0,
             next_temp_id: 0,
+            source_module: None,
             macros: HashMap::new(),
         }
     }
@@ -248,6 +256,7 @@ impl Compiler {
         state_bindings: HashMap<String, u32>,
         next_node_id: u32,
         macros: HashMap<String, MacroDef>,
+        source_module: Option<PathBuf>,
     ) -> Self {
         Compiler {
             expressions,
@@ -260,6 +269,7 @@ impl Compiler {
             state_bindings,
             next_node_id,
             next_temp_id: 0,
+            source_module,
             macros,
         }
     }
@@ -542,6 +552,8 @@ impl Compiler {
             strings: vec![],
             symbols: vec![],
             upvalues: vec![],
+            source_symbol: None,
+            source_module: self.source_module.clone(),
         });
 
         if is_effect {
@@ -1047,6 +1059,15 @@ impl Compiler {
         self.scopes.last_mut().unwrap()
     }
 
+    /// True when `name` resolves to a local or upvalue somewhere in the scope
+    /// chain (i.e. a builtin like `nth` has been shadowed). Read-only variant
+    /// of resolve_symbol that never captures upvalues.
+    fn symbol_is_locally_bound(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| {
+            scope.symbols.iter().any(|s| s == name) || scope.upvalues.iter().any(|s| s == name)
+        })
+    }
+
     fn resolve_symbol(&mut self, name: &str) -> SymbolResolution {
         if let Some(idx) = self.get_scope_mut().symbols.iter().position(|s| *s == name) {
             return SymbolResolution::Local(idx);
@@ -1168,6 +1189,8 @@ impl Compiler {
             strings: vec![],
             symbols,
             upvalues: vec![],
+            source_symbol: name.clone(),
+            source_module: self.source_module.clone(),
         });
         self.compile_expression(&wrapped_body)?;
 
@@ -1322,6 +1345,35 @@ impl Compiler {
                     return Err(CompilerError::InvalidArg);
                 }
                 return self.compile_expression(&expanded);
+            }
+        }
+
+        // Indexed reactive reads — (nth SEQ.field idx) and (len SEQ.field) —
+        // compile to dedicated opcodes so the reactive DAG can record
+        // per-index dependencies and skip subtree reruns when untouched
+        // elements of a list change.
+        if let Some(Expression::Symbol(head)) = list.first()
+            && ((head == "nth" && list.len() == 3) || (head == "len" && list.len() == 2))
+            && let Some(Expression::Symbol(target)) = list.get(1)
+            && !self.symbol_is_locally_bound(head)
+            && !self.derived_bindings.contains_key(target)
+        {
+            let parts: Vec<&str> = target.splitn(2, '.').collect();
+            if parts.len() == 2
+                && !parts[0].is_empty()
+                && !parts[1].is_empty()
+                && !parts[1].contains('.')
+                && self.reactive_namespaces.contains(parts[0])
+            {
+                let ns_idx = self.use_string_constant(parts[0]);
+                let field_idx = self.use_string_constant(parts[1]);
+                if head == "nth" {
+                    self.compile_expression(&list[2])?;
+                    self.emit(OpCode::LoadReactiveNth(ns_idx, field_idx));
+                } else {
+                    self.emit(OpCode::LoadReactiveLen(ns_idx, field_idx));
+                }
+                return Ok(());
             }
         }
 
@@ -1509,6 +1561,10 @@ impl Compiler {
             // program for the *sequencer* runtime, so it must be captured as data
             // here (in the UI/editor runtime) and shipped, not evaluated locally.
             let is_def_sequencer = matches!(op, Expression::Symbol(s) if s == "def-sequencer");
+            let is_def_process = matches!(op, Expression::Symbol(s) if s == "def-process");
+            let is_defchan = matches!(op, Expression::Symbol(s) if s == "defchan");
+            let is_process_sugar = matches!(op, Expression::Symbol(s)
+                if s == "every" || s == "after" || s == "on" || s == "tap");
             // Graph-mode `def-sequencer`: the *entire* body (`:shape`, sequencer-level
             // config, `def-node` and `edges` sub-forms) is a manifest for the sequencer
             // runtime and must be captured as data, not evaluated here. Detected by the
@@ -1535,6 +1591,10 @@ impl Compiler {
                     quote_next = false;
                     continue;
                 }
+                if is_process_sugar {
+                    self.compile_quoted_expression(elem)?;
+                    continue;
+                }
                 match elem {
                     Expression::Number(c) => {
                         let constant_idx = self.use_constant(*c);
@@ -1546,6 +1606,10 @@ impl Compiler {
                     }
                     Expression::Symbol(c) => match op {
                         Expression::Symbol(s) if s == "def" && i == 0 => continue,
+                        Expression::Symbol(_) if (is_def_process || is_defchan) && i == 0 => {
+                            let idx = self.use_string_constant(c);
+                            self.emit(OpCode::PushSymbol(idx));
+                        }
                         _ => {
                             self.compile_expression(&Expression::Symbol(c.clone()))?;
                         }
@@ -1560,6 +1624,19 @@ impl Compiler {
                             quote_next = true;
                         }
                         if is_def_sequencer && (k == "tick" || k == "init") {
+                            quote_next = true;
+                        }
+                        if is_def_process
+                            && (k == "in"
+                                || k == "out"
+                                || k == "state"
+                                || k == "every"
+                                || k == "phase"
+                                || k == "listen"
+                                || k == "run"
+                                || k == "init"
+                                || k.starts_with("on-"))
+                        {
                             quote_next = true;
                         }
                     }
@@ -1693,6 +1770,8 @@ impl Compiler {
             strings: vec![],
             symbols: vec![],
             upvalues: vec![],
+            source_symbol: None,
+            source_module: self.source_module.clone(),
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {

@@ -14,7 +14,10 @@
 //!   pad/truncate to K*hop samples -> temp f32 WAV -> `partition-ir` via the
 //!   DGenLisp tool -> extract the two K*N float blocks (re, im) per channel.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 /// FFT size (must match `conv_stereo.lisp` `@N`).
 pub const N: usize = 1024;
@@ -73,6 +76,17 @@ pub struct StereoIr {
 /// per-channel partitioned spectra. Mono files are applied to both channels;
 /// files with >2 channels use channels 0 and 1.
 pub fn prepare_ir(path: &Path, host_sr: u32) -> Result<StereoIr, String> {
+    if let Some(ir) = try_read_cached_ir(path, host_sr)? {
+        return Ok(ir);
+    }
+    let ir = prepare_ir_uncached(path, host_sr)?;
+    if let Err(error) = write_cached_ir(path, host_sr, &ir) {
+        eprintln!("[convolution reverb] failed to write IR cache: {error}");
+    }
+    Ok(ir)
+}
+
+fn prepare_ir_uncached(path: &Path, host_sr: u32) -> Result<StereoIr, String> {
     let (interleaved, src_sr, channels) = decode_wav(path)?;
     if interleaved.is_empty() {
         return Err("IR file contains no samples".to_string());
@@ -103,6 +117,168 @@ pub fn prepare_ir(path: &Path, host_sr: u32) -> Result<StereoIr, String> {
         left: left_ir,
         right: right_ir,
     })
+}
+
+const IR_CACHE_MAGIC: &[u8; 8] = b"ESEQIR01";
+
+fn ir_cache_root() -> PathBuf {
+    crate::paths::workspace_root()
+        .join(".eseq")
+        .join("dgenlisp-cache")
+        .join("ir-prep")
+}
+
+fn ir_cache_key(path: &Path, host_sr: u32) -> Result<String, String> {
+    let ir_bytes = std::fs::read(path).map_err(|e| format!("read IR for cache key: {e}"))?;
+    let tool = crate::lisp_host::dgenlisp_tool_path();
+    let tool_bytes = std::fs::read(&tool).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(b"eseq-conv-ir-cache-v1");
+    hasher.update(host_sr.to_le_bytes());
+    hasher.update((N as u64).to_le_bytes());
+    hasher.update((HOP as u64).to_le_bytes());
+    hasher.update((K as u64).to_le_bytes());
+    hasher.update((ir_bytes.len() as u64).to_le_bytes());
+    hasher.update(sha256_bytes(&ir_bytes));
+    hasher.update(tool.to_string_lossy().as_bytes());
+    hasher.update((tool_bytes.len() as u64).to_le_bytes());
+    hasher.update(sha256_bytes(&tool_bytes));
+    let digest = hasher.finalize();
+    Ok(hex_digest(&digest))
+}
+
+fn try_read_cached_ir(path: &Path, host_sr: u32) -> Result<Option<StereoIr>, String> {
+    let key = ir_cache_key(path, host_sr)?;
+    let cache_path = ir_cache_root().join(key).join("ir.bin");
+    let Ok(mut file) = std::fs::File::open(&cache_path) else {
+        return Ok(None);
+    };
+    match read_cached_ir_file(&mut file, host_sr) {
+        Ok(ir) => Ok(Some(ir)),
+        Err(error) => {
+            eprintln!(
+                "[convolution reverb] ignoring invalid IR cache {}: {error}",
+                cache_path.display()
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn write_cached_ir(path: &Path, host_sr: u32, ir: &StereoIr) -> Result<(), String> {
+    let key = ir_cache_key(path, host_sr)?;
+    let dir = ir_cache_root().join(key);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create IR cache dir: {e}"))?;
+    let tmp = dir.join(format!("ir-{}-{}.tmp", std::process::id(), next_seq()));
+    {
+        let mut file =
+            std::fs::File::create(&tmp).map_err(|e| format!("create IR cache temp file: {e}"))?;
+        write_cached_ir_file(&mut file, host_sr, ir)?;
+        file.flush()
+            .map_err(|e| format!("flush IR cache temp file: {e}"))?;
+    }
+    std::fs::rename(&tmp, dir.join("ir.bin")).map_err(|e| format!("commit IR cache file: {e}"))
+}
+
+fn write_cached_ir_file<W: Write>(
+    mut writer: W,
+    host_sr: u32,
+    ir: &StereoIr,
+) -> Result<(), String> {
+    writer
+        .write_all(IR_CACHE_MAGIC)
+        .map_err(|e| format!("write IR cache magic: {e}"))?;
+    for value in [N as u32, HOP as u32, K as u32, host_sr, PART_LEN as u32] {
+        writer
+            .write_all(&value.to_le_bytes())
+            .map_err(|e| format!("write IR cache header: {e}"))?;
+    }
+    write_f32_block(&mut writer, &ir.left.re)?;
+    write_f32_block(&mut writer, &ir.left.im)?;
+    write_f32_block(&mut writer, &ir.right.re)?;
+    write_f32_block(&mut writer, &ir.right.im)?;
+    Ok(())
+}
+
+fn read_cached_ir_file<R: Read>(mut reader: R, host_sr: u32) -> Result<StereoIr, String> {
+    let mut magic = [0_u8; 8];
+    reader
+        .read_exact(&mut magic)
+        .map_err(|e| format!("read IR cache magic: {e}"))?;
+    if &magic != IR_CACHE_MAGIC {
+        return Err("bad IR cache magic".to_string());
+    }
+    let n = read_u32(&mut reader)?;
+    let hop = read_u32(&mut reader)?;
+    let k = read_u32(&mut reader)?;
+    let sr = read_u32(&mut reader)?;
+    let part_len = read_u32(&mut reader)?;
+    if n != N as u32 || hop != HOP as u32 || k != K as u32 || sr != host_sr {
+        return Err("IR cache dimensions do not match current runtime".to_string());
+    }
+    if part_len != PART_LEN as u32 {
+        return Err("IR cache partition length does not match current runtime".to_string());
+    }
+    Ok(StereoIr {
+        left: ChannelIr {
+            re: read_f32_block(&mut reader, PART_LEN)?,
+            im: read_f32_block(&mut reader, PART_LEN)?,
+        },
+        right: ChannelIr {
+            re: read_f32_block(&mut reader, PART_LEN)?,
+            im: read_f32_block(&mut reader, PART_LEN)?,
+        },
+    })
+}
+
+fn write_f32_block<W: Write>(writer: &mut W, data: &[f32]) -> Result<(), String> {
+    if data.len() != PART_LEN {
+        return Err(format!(
+            "IR cache block has {} floats, expected {PART_LEN}",
+            data.len()
+        ));
+    }
+    for value in data {
+        writer
+            .write_all(&value.to_le_bytes())
+            .map_err(|e| format!("write IR cache block: {e}"))?;
+    }
+    Ok(())
+}
+
+fn read_f32_block<R: Read>(reader: &mut R, len: usize) -> Result<Vec<f32>, String> {
+    let mut out = Vec::with_capacity(len);
+    let mut bytes = [0_u8; 4];
+    for _ in 0..len {
+        reader
+            .read_exact(&mut bytes)
+            .map_err(|e| format!("read IR cache block: {e}"))?;
+        out.push(f32::from_le_bytes(bytes));
+    }
+    Ok(out)
+}
+
+fn read_u32<R: Read>(reader: &mut R) -> Result<u32, String> {
+    let mut bytes = [0_u8; 4];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("read IR cache header: {e}"))?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 // ── WAV decode ──
@@ -432,7 +608,7 @@ pub fn clear_instance(node_id: i32) {
 
 impl StereoIrSlots {
     /// Pull the four IR tensor offsets out of a compiled manifest by name.
-    pub fn from_manifest(m: &crate::lisp_effect::DGenManifest) -> Option<Self> {
+    pub fn from_manifest(m: &crate::lisp_host::DGenManifest) -> Option<Self> {
         let find = |name: &str| {
             m.tensors
                 .iter()
@@ -460,7 +636,7 @@ pub unsafe fn apply_ir_to_node(
     slots: &StereoIrSlots,
     ir: &StereoIr,
 ) -> Result<(), String> {
-    use crate::lisp_effect::queue_tensor_write;
+    use crate::lisp_host::queue_tensor_write;
     let ok = queue_tensor_write(lg, node_id, slots.l_re, &ir.left.re)
         && queue_tensor_write(lg, node_id, slots.l_im, &ir.left.im)
         && queue_tensor_write(lg, node_id, slots.r_re, &ir.right.re)
@@ -494,6 +670,34 @@ mod tests {
         assert_eq!(fit_to_ir_len(&vec![1.0; IR_LEN * 2]).len(), IR_LEN);
     }
 
+    #[test]
+    fn ir_cache_binary_roundtrip_preserves_blocks() {
+        let block = |seed: f32| {
+            (0..PART_LEN)
+                .map(|idx| seed + (idx as f32 * 0.000_001))
+                .collect::<Vec<_>>()
+        };
+        let ir = StereoIr {
+            left: ChannelIr {
+                re: block(0.1),
+                im: block(0.2),
+            },
+            right: ChannelIr {
+                re: block(0.3),
+                im: block(0.4),
+            },
+        };
+
+        let mut bytes = Vec::new();
+        write_cached_ir_file(&mut bytes, 44_100, &ir).expect("write cache");
+        let restored = read_cached_ir_file(&bytes[..], 44_100).expect("read cache");
+
+        assert_eq!(restored.left.re[123], ir.left.re[123]);
+        assert_eq!(restored.left.im[456], ir.left.im[456]);
+        assert_eq!(restored.right.re[789], ir.right.re[789]);
+        assert_eq!(restored.right.im[1024], ir.right.im[1024]);
+    }
+
     // Compiles the bundled DSP through the real effect path (preamble included)
     // and checks the four IR tensors are present at distinct offsets.
     #[test]
@@ -502,9 +706,9 @@ mod tests {
             eprintln!("skipping: DGenLisp tool not found at {:?}", tool_path());
             return;
         }
-        let json = crate::lisp_effect::compile_lisp(dsp_source(), 44100)
+        let json = crate::lisp_host::compile_lisp(dsp_source(), 44100)
             .expect("compile bundled conv reverb DSP");
-        let manifest = crate::lisp_effect::parse_manifest(&json).expect("parse manifest");
+        let manifest = crate::lisp_host::parse_manifest(&json).expect("parse manifest");
         let slots = StereoIrSlots::from_manifest(&manifest)
             .expect("manifest should expose irL_re/irL_im/irR_re/irR_im");
         // All four offsets distinct.

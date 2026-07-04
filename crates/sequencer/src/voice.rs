@@ -141,6 +141,58 @@ impl VoicePool {
         self.allocate_voice(note)
     }
 
+    pub fn allocate_voice_retriggering_same_note_with_limit(
+        &mut self,
+        note: f32,
+        max_polyphony: usize,
+    ) -> &mut VoiceSlot {
+        let max_polyphony = max_polyphony.max(1).min(self.num_voices.max(1));
+        if max_polyphony > 1 && self.num_voices > 1 {
+            for i in 0..self.num_voices {
+                if self.voices[i].active && (self.voices[i].note - note).abs() < 0.01 {
+                    self.age_counter += 1;
+                    let slot = &mut self.voices[i];
+                    slot.age = self.age_counter;
+                    slot.active = true;
+                    slot.note = note;
+                    return slot;
+                }
+            }
+        }
+
+        self.age_counter += 1;
+        let mut active_count = 0usize;
+        let mut oldest_active_idx = 0usize;
+        let mut oldest_active_age = u64::MAX;
+        let mut oldest_idle_idx = None;
+        let mut oldest_idle_age = u64::MAX;
+
+        for i in 0..self.num_voices {
+            let voice = &self.voices[i];
+            if voice.active {
+                active_count += 1;
+                if voice.age < oldest_active_age {
+                    oldest_active_idx = i;
+                    oldest_active_age = voice.age;
+                }
+            } else if voice.age < oldest_idle_age {
+                oldest_idle_idx = Some(i);
+                oldest_idle_age = voice.age;
+            }
+        }
+
+        let idx = if active_count >= max_polyphony {
+            oldest_active_idx
+        } else {
+            oldest_idle_idx.unwrap_or(oldest_active_idx)
+        };
+        let slot = &mut self.voices[idx];
+        slot.age = self.age_counter;
+        slot.active = true;
+        slot.note = note;
+        slot
+    }
+
     pub fn release_voice_by_note(&mut self, note: f32) {
         for i in 0..self.num_voices {
             if self.voices[i].active && (self.voices[i].note - note).abs() < 0.01 {
@@ -201,5 +253,36 @@ mod tests {
         assert_eq!(first, 1);
         assert_eq!(second, 2);
         assert_eq!(repeated, first);
+    }
+
+    #[test]
+    fn limited_sampler_allocation_respects_max_polyphony() {
+        let mut pool = VoicePool::new();
+        for lid in 1..=4 {
+            pool.add_voice(lid, lid as i32);
+        }
+
+        assert_eq!(
+            pool.allocate_voice_retriggering_same_note_with_limit(0.0, 2)
+                .logical_id,
+            1
+        );
+        assert_eq!(
+            pool.allocate_voice_retriggering_same_note_with_limit(4.0, 2)
+                .logical_id,
+            2
+        );
+        assert_eq!(
+            pool.allocate_voice_retriggering_same_note_with_limit(7.0, 2)
+                .logical_id,
+            1
+        );
+        assert_eq!(
+            pool.voices[..pool.num_voices]
+                .iter()
+                .filter(|voice| voice.active)
+                .count(),
+            2
+        );
     }
 }

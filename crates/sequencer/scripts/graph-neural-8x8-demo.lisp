@@ -24,7 +24,7 @@
 ;;
 ;; Loading this file only publishes the graph/UI and syncs controls from the current
 ;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
-;;   (g8-init-ring-defaults)
+;;   (script-init-fn)
 
 (def-sequencer "neural-8x8-demo"
   :shape (line 8)
@@ -36,7 +36,8 @@
   ;; :deterministic :propagation :random :loudest :lowest-transpose :highest-transpose
   ;; :seed-first (seed-originated fires win their slots before neural-only ones).
   :max-poly-selection :propagation
-
+  :duration (steps 1)
+  
   (def-node nrn
     :resolution :16
     :delay 1
@@ -51,29 +52,33 @@
     ;; :strongest.
     :event :newest
     :params ((threshold :float 0 4 :default 0.55)
-             (transpose :int -48 48 :default 0)
-             (vel-decay :float 0 2 :default 0.9)
-             (dampening :float 0 1 :default 0.14)
-             (recovery :float 0 1 :default 0.94))
+      (transpose :int -48 48 :default 0)
+      (vel-decay :float 0 2 :default 0.9)
+      (dampening :float 0 1 :default 0.14)
+      (recovery :float 0 1 :default 0.94))
     :state ((energy :leak (per-step :energy-decay)))
     ;; Fire when energy clears threshold. The else-branch returns nil (no fire).
     :update (if (>= (energy) (param :threshold))
-              (do
-                (dampen-incoming (param :dampening))
-                (emit :note (+ (in-note) (param :transpose))
-                      :vel  (* (in-vel) (param :vel-decay))))
-              (recover-incoming (param :recovery))))
-
+      (do
+        (dampen-incoming (param :dampening))
+        (emit :note (+ (in-note) (param :transpose))
+          :dur (* 4 (delay))
+          :vel  (* (in-vel) (param :vel-decay))))
+      (recover-incoming (param :recovery))))
+  
   (edges
     :from nrn
     :to nrn
     :topology (all-to-all)
     :gather (- (edge :weight) (edge :dampening))
     :params ((weight :float -1 1 :default 0.0)
-             (dampening :float 0 1 :default 0))))
+      (dampening :float 0 1 :default 0))))
 
 (def g8-name "neural-8x8-demo")
 (def g8-node-count 8)
+(def script-buffer-name "*8x8*")
+(def script-tab-label "8x8")
+(def script-sequencer-name g8-name)
 
 ;; ── dropdown option lists (order is the index space bind-graph maps into) ──
 
@@ -152,7 +157,14 @@
   (do
     (set! g8-weights (g8-ring-weights))
     (g8-apply-weights g8-weights)
-    (graph-node g8-name 0 :seed-from 0)))
+    (graph-node g8-name 0 :seed-from 0)
+    (graph-node g8-name 1 :seed-from 1)
+    (graph-node g8-name 2 :seed-from 2)
+    (graph-node g8-name 3 :seed-from 4)
+    ))
+
+(def script-init-fn ()
+  (g8-init-ring-defaults))
 
 ;; ── edit helpers: dirty the bound widget (reactive-set) + persist the override ──
 ;; `graph-key` gives the canonical GRAPH field name a `bind-graph` handle reads, so a
@@ -182,9 +194,9 @@
 
 ;; ── UI ──
 
-(def g8-row-height 1.3)
+(def g8-row-height 1.0)
 (def g8-node-width 1.4)
-(def g8-control-width 7.0)
+(def g8-control-width 6)
 
 (def g8-num (key value lo hi stp dec on-change)
   (number-picker
@@ -197,12 +209,12 @@
   (dropdown
     :key key
     :value-index value-index :options options
-    :width g8-control-width :height g8-row-height :font-size 9
+    :width g8-control-width :height g8-row-height :font-size 7
     :on-change on-change))
 
 (def g8-row (n)
   (h-stack :gap 0.4 :align :center
-    (label (str n) :width g8-node-width :height g8-row-height :font-size 9 :h-align :center :color :dim)
+    (label (str n) :width g8-node-width :height g8-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
     (g8-pick (str "graph-8x8-route-" n)
       (bind-graph g8-name n :route g8-route-options) g8-route-options
       (lambda (v) (g8-edit-enum n :route g8-route-options v (g8-route->internal v))))
@@ -230,17 +242,17 @@
 
 (def g8-header ()
   (h-stack :gap 0.4 :align :center
-    (label "node"   :width g8-node-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "route"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "delay"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "transp" :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "vel x"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "dampen" :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "recover" :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "res"    :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "quant"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)))
+    (label "node"   :width g8-node-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "route"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "delay"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "transp" :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "vel x"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "dampen" :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "recover" :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "res"    :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "quant"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
 
-(def g8-panel (current-pattern graph-visualizations)
+(def g8-panel (current-pattern graph-visualizations track-events track-event-current-beat track-colors)
   (do
     ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
     ;; per-node knobs need no sync — `bind-graph` re-seeds their slots as the rows
@@ -251,60 +263,134 @@
       (box
         :padding 0.85
         :gap 0.6
-        :width 37
+        :width 87
         :height 45
-        (v-stack :gap 0.5
+        (v-stack :gap 0.5 :width :fill
           ;; ── sequencer-level config (on top) ──
-          (h-stack :gap 0.6 :align :center
-            (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
-            (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (g8-num "graph-8x8-reset-bars"
-              (bind-graph-config g8-name :reset-bars) 0 64 1 0
-              (lambda (v) (g8-edit-config :reset-bars v)))
-            (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (g8-num "graph-8x8-max-poly"
-              (bind-graph-config g8-name :max-poly) 0 16 1 0
-              (lambda (v) (g8-edit-config :max-poly v))))
+          
+          (box :padding 0.5 :background-color :mixer-strip-bg :border-color :mixer-strip-border :corner-radius 16
+            (h-stack :gap 1.0
+              (v-stack
+                (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
+                (h-stack :gap 0.6 :align :center
+                  (v-stack :gap 0.05 :align :center
+                    (label "reset bars" :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
+                    (g8-num "graph-8x8-reset-bars"
+                      (bind-graph-config g8-name :reset-bars) 0 64 1 0
+                      (lambda (v) (g8-edit-config :reset-bars v))))
+                  (v-stack :gap 0.1 :align :center
+                    (label "max poly"  :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
+                    (g8-num "graph-8x8-max-poly"
+                      (bind-graph-config g8-name :max-poly) 0 16 1 0
+                      (lambda (v) (g8-edit-config :max-poly v))))
+                  ))
+              (matrix
+                :key "graph-8x8-dampening-matrix"
+                :rows 8
+                :cols 8
+                :width 12
+                :height 6
+                
+                :control :grid
+                :background (rgba 0.1 0.1 0.1 0.4)
+                :fill :primary
+                :min 0
+                :max 1
+                :value (g8-viz-matrix viz :dampening-matrix (g8-zero-matrix))
+                )
+              
+              (event-view
+                :key "graph-8x8-event-view"
+                :events (if viz (get viz :event-history) (list))
+                :current-beat (if viz (get viz :current-beat) 0)
+                :renderer :isometric
+                :x :transpose
+                :x-min -24
+                :background (rgba 0.1 0.1 0.1 0.5)
+                :x-max 24
+                :y :node
+                :y-min 0
+                :y-max 7
+                :z :beat-phase
+                :z-min 0
+                :z-max 16
+                :phase-beats 16
+                :window-beats 16
+                :brightness :velocity
+                :cube-padding 0
+                :auto-rotate true
+                :width 12
+                :height 6)
+              
+              (event-view
+                :key "graph-8x8-track-event-view"
+                :events track-events
+                :current-beat track-event-current-beat
+                :renderer :heatmap
+                :x :beat-phase
+                :x-min 0
+                :x-max 16
+                :y :transpose
+                :y-min -60
+                :y-max 60
+                :phase-beats 16
+                :window-beats 16
+                :brightness :velocity
+                :color-by :track
+                :color-mode :categorical
+                :color-palette track-colors
+                :color-min 0
+                :color-max 15
+                :color-count 16
+                :x-bins 64
+                :y-bins 120
+                :background (rgba 0.1 0.1 0.1 0.5)
+                :width 42
+                :height 6)
+              )
+            )
+          
           (h-stack
-            (v-stack :gap 0.5
-              (h-stack :gap 0.5 :align :center
-                (label "per-node knobs" :width 14 :height 1.2 :font-size 9 :color :dim))
-              (v-stack :gap 0.2
-                (g8-header)
-                (each (range 0 g8-node-count) |n| (g8-row n))))
+            
+            (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1.0 :corner-radius 16
+              (v-stack :gap 0.5
+                (v-stack :gap 0.2
+                  (g8-header)
+                  (each (range 0 g8-node-count) |n| (g8-row n)))))
             
             (v-stack :gap 0.35
-              (label "trig" :width 2 :height 2.5 :font-size 8 :color :dim)
+              (box :width 0 :height 1.2)
               (matrix
                 :key "graph-8x8-trigger-matrix"
                 :rows 8
                 :cols 1
                 :width 1
-                :height 12
+                :height 9.5
                 :min 0
                 :max 1
                 :value (g8-viz-matrix viz :trigger-matrix (g8-zero-column-matrix))))            
             
             (v-stack :gap 0.35
-              (label "energy" :width 3 :height 2.5 :font-size 8 :color :dim)
+              (box :width 0 :height 1.2 :font-size 8 :color :dim)
               (matrix
                 :key "graph-8x8-energy-matrix"
                 :rows 8
                 :cols 1
                 :width 2
-                :height 12
+                :height 9.5
                 :min 0
                 :max 4
                 :value (g8-viz-matrix viz :energy-matrix (g8-zero-column-matrix))))            
             (v-stack :gap 0.35
-              (label "weights (from row -> to col)" :width 18 :height 2.5 :font-size 8 :color :dim)
+              (box :width 0 :height 1.2 :font-size 8 :color :dim)
               (matrix
                 :key "graph-8x8-weight-matrix"
                 :rows 8
                 :cols 8
-                :width 26
-                :height 12
+                :width 22
+                :height 9.5
                 :min 0
+                :color :blue
                 :max 1
                 :value g8-weights
                 :on-cell-change (lambda (r c v)
@@ -312,22 +398,7 @@
                     (set! g8-weights (g8-set-cell g8-weights r c v))
                     (graph-edge g8-name :from r :to c :weight v))))))
           (v-stack :gap 0.5
-            
-            
-            (label "live dampening (from row -> to col)" :width 18 :height 1.2 :font-size 8 :color :dim)
-            (matrix
-              :key "graph-8x8-dampening-matrix"
-              :rows 8
-              :cols 8
-              :width 26
-              :height 12
-              
-            :control :grid
-            :background :black
-            :fill :primary
-              :min 0
-              :max 1
-              :value (g8-viz-matrix viz :dampening-matrix (g8-zero-matrix)))))))))
+            ))))))
 
-(effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-step-sequencer-tab "8x8" "*8x8*")
+(effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-events SEQ.track-event-current-beat SEQ.track-colors))
+(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

@@ -1164,8 +1164,8 @@ mod tests {
     use super::*;
     use crate::accumulator::ResolvedStep;
     use crate::scheduled_event::{
-        EventSource, ScheduledChordData, ScheduledInstrumentParams, ScheduledSamplerParams,
-        StepEvent,
+        EventSource, ScheduledChordData, ScheduledInstrumentParams,
+        ScheduledInstrumentTensorParams, ScheduledSamplerParams, StepEvent,
     };
     use crate::voice::MAX_VOICES;
 
@@ -1192,6 +1192,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Step {
                 track,
@@ -1253,6 +1254,7 @@ mod tests {
             crate::graph::GraphPayload {
                 note: seed.resolved.transpose,
                 velocity: seed.resolved.velocity,
+                duration_beats: seed.resolved.duration,
             },
         );
         let mut graph_out = Vec::new();

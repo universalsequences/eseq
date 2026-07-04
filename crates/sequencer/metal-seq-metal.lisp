@@ -96,7 +96,7 @@
           :bg :transparent))
       (h-stack :align :center :gap 0.35
         (dropdown :value (bus-seq-timebase)
-          :options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh")
+          :options seq-timebase-options
           :on-change (lambda (v) (do (cool-off-follow) (bus-set-sequencer-label "timebase" v)))
           :width 6 :height 1.45 :font-size 10)))
 
@@ -277,7 +277,7 @@
             :bg :transparent))
         (h-stack :align :center :gap 0.35
           (dropdown :value SEQ.tp-timebase
-            :options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh")
+            :options seq-timebase-options
             :on-change (lambda (v)
               (do
                 (cool-off-follow)

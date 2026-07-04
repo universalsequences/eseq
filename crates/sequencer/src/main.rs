@@ -315,7 +315,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_headless_custom_repro(app: &mut ui::App) -> Result<(), Box<dyn std::error::Error>> {
-    let instrument_names = sequencer::lisp_effect::list_saved_instruments();
+    let instrument_names = sequencer::lisp_host::list_saved_instruments();
     if instrument_names.is_empty() {
         return Err("No saved instruments found in instruments/".into());
     }

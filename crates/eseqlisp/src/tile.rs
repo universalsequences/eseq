@@ -22,10 +22,11 @@ pub enum TileNode {
     Split(TileSplit),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TileBufferTab {
     pub label: String,
     pub buffer_idx: usize,
+    pub on_close: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +34,9 @@ pub struct TileTabLayout {
     pub index: usize,
     pub label: String,
     pub rect: Rect,
+    pub label_rect: Rect,
+    pub close_rect: Option<Rect>,
+    pub close_visible: bool,
     pub selected: bool,
 }
 
@@ -40,6 +44,9 @@ pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.28;
 pub const TILE_TAB_TOP_INSET: f32 = 0.18;
 const TILE_TAB_LABEL_PAD: f32 = 2.0;
 const TILE_TAB_HORIZONTAL_INSET: f32 = 0.55;
+const TILE_TAB_CLOSE_LEFT_INSET: f32 = 0.55;
+const TILE_TAB_CLOSE_WIDTH: f32 = 1.65;
+const TILE_TAB_CLOSE_RESERVED_WIDTH: f32 = 2.6;
 
 pub struct TileLeaf {
     pub id: TileId,
@@ -204,6 +211,15 @@ pub fn tile_tab_layouts(
     tabs: &[TileBufferTab],
     selected_tab: Option<usize>,
 ) -> Vec<TileTabLayout> {
+    tile_tab_layouts_with_hover(rect, tabs, selected_tab, None)
+}
+
+pub fn tile_tab_layouts_with_hover(
+    rect: Rect,
+    tabs: &[TileBufferTab],
+    selected_tab: Option<usize>,
+    hovered_tab: Option<usize>,
+) -> Vec<TileTabLayout> {
     if tabs.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
         return Vec::new();
     }
@@ -219,15 +235,36 @@ pub fn tile_tab_layouts(
         .map(|(index, tab)| {
             let is_selected = index == selected;
             let col = rect.col + TILE_TAB_HORIZONTAL_INSET + tab_width * index as f32;
+            let tab_rect = Rect {
+                row: rect.row + TILE_TAB_TOP_INSET,
+                col,
+                width: tab_width,
+                height: TILE_TAB_STRIP_HEIGHT,
+            };
+            let close_rect = tab.on_close.as_ref().map(|_| Rect {
+                row: tab_rect.row,
+                col: tab_rect.col + TILE_TAB_CLOSE_LEFT_INSET.min(tab_rect.width.max(0.0)),
+                width: TILE_TAB_CLOSE_WIDTH.min(tab_rect.width.max(0.0)),
+                height: tab_rect.height,
+            });
+            let close_width = if close_rect.is_some() {
+                TILE_TAB_CLOSE_RESERVED_WIDTH.min(tab_rect.width.max(0.0))
+            } else {
+                0.0
+            };
+            let label_rect = Rect {
+                row: tab_rect.row,
+                col: tab_rect.col + close_width,
+                width: (tab_rect.width - close_width).max(0.0),
+                height: tab_rect.height,
+            };
             let layout = TileTabLayout {
                 index,
-                label: truncate_tab_label(&tab.label, tab_width),
-                rect: Rect {
-                    row: rect.row + TILE_TAB_TOP_INSET,
-                    col,
-                    width: tab_width,
-                    height: TILE_TAB_STRIP_HEIGHT,
-                },
+                label: truncate_tab_label(&tab.label, label_rect.width),
+                rect: tab_rect,
+                label_rect,
+                close_rect,
+                close_visible: tab.on_close.is_some() && hovered_tab == Some(index),
                 selected: is_selected,
             };
             layout
@@ -281,10 +318,12 @@ mod tests {
                 TileBufferTab {
                     label: "iii".to_string(),
                     buffer_idx: 0,
+                    on_close: None,
                 },
                 TileBufferTab {
                     label: "WWW".to_string(),
                     buffer_idx: 1,
+                    on_close: None,
                 },
             ],
             Some(0),
@@ -312,10 +351,12 @@ mod tests {
                 TileBufferTab {
                     label: "Seq".to_string(),
                     buffer_idx: 0,
+                    on_close: None,
                 },
                 TileBufferTab {
                     label: "Matrix".to_string(),
                     buffer_idx: 1,
+                    on_close: None,
                 },
             ],
             Some(0),

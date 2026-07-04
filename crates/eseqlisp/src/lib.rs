@@ -65,9 +65,11 @@ pub use ui::tui;
 // ── Root-level modules ───────────────────────────────────────────────────
 pub mod audio;
 pub mod buffer;
+pub mod defmacro_library;
 pub mod editor;
 pub mod host;
 pub mod hot_reload;
+pub mod live_audio;
 pub mod mode;
 pub mod reactive;
 pub mod runtime;
@@ -2591,9 +2593,9 @@ mod tests {
                                 (label (fmt "{}" step)
                                   :color (if selected
                                            :yellow
-                                           (if (reactive-get "APP" (fmt "active-{}" step))
-                                             :white
-                                             :gray))))))))))
+                                             (if (reactive-get "APP" (fmt "active-{}" step))
+                                               :white
+                                             :gray)))))))))))
                 "#,
             )
             .expect("eval grid subtree effect");

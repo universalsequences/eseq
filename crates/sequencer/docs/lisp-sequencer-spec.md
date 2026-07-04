@@ -24,16 +24,16 @@ This spec builds on machinery that is already in the tree. Do not re-architect t
 
 - The **scheduler thread** (`"sequencer-scheduler"`, scheduler.rs:~2466) runs ahead of the audio RT thread, reads `Arc<SequencerSnapshot>` state, and pushes `ScheduledEvent`s into a lookahead queue (`ScheduledEventQueue<4096>`) that the cpal callback (audio.rs:~3737) drains. It advances `total_beats: f64` and detects per-grid boundary crossings.
 - The **neural runtime is on the scheduler thread**, not the audio thread. It is a `&mut NeuralRuntime` owned by the scheduler loop (`neural_runtime` at scheduler.rs:~2480; `process_boundaries_with_outputs` called at scheduler.rs:~2434/3276; `process_seed_at` at ~3231/3262). The neural-sequencer-spec's "owned by the audio thread" wording is loose — it runs on the same non-RT thread as the lisp VM below.
-- The **scheduler-thread lisp VM** is a persistent `ScratchControlRuntime` wrapping one `eseqlisp::Runtime` (lisp_effect.rs:~3153). It allocates freely (no RT constraint; lookahead absorbs jitter) and is **a separate instance from the UI VM** that renders panels (e.g. `neural-8x8-track-router.lisp`). Same interpreter, different builtin sets.
+- The **scheduler-thread lisp VM** is a persistent `ScratchControlRuntime` wrapping one `eseqlisp::Runtime` (lisp_host.rs:~3153). It allocates freely (no RT constraint; lookahead absorbs jitter) and is **a separate instance from the UI VM** that renders panels (e.g. `neural-8x8-track-router.lisp`). Same interpreter, different builtin sets.
 
 ### A working reactive-transform lisp tier (accumulators + MIDI FX)
 
 The scheduler-thread VM already runs user lisp per event:
 
-- **MIDI FX** (`midi-fx/*/dsp.lisp`, invoked at lisp_effect.rs:~3433, chain runner scheduler.rs:~1968): per-track chains of 0..4 slots; input `MidiFxEvent` (resolved step, chord, step, track, note spans, params, `arp_phase_beats`), output `AccumulatorEvalOutput` (resolved, `suppressed`, `emitted: Vec`, modified params). Pre/post-accumulator position is a per-track param.
-- **Script accumulators** (`def-accumulator`, invoked lisp_effect.rs:~3309): per-step transforms with persistent per-track value.
+- **MIDI FX** (`midi-fx/*/dsp.lisp`, invoked at lisp_host.rs:~3433, chain runner scheduler.rs:~1968): per-track chains of 0..4 slots; input `MidiFxEvent` (resolved step, chord, step, track, note spans, params, `arp_phase_beats`), output `AccumulatorEvalOutput` (resolved, `suppressed`, `emitted: Vec`, modified params). Pre/post-accumulator position is a per-track param.
+- **Script accumulators** (`def-accumulator`, invoked lisp_host.rs:~3309): per-step transforms with persistent per-track value.
 - **Emission in musical coordinates already exists:** `fx-emit` / `acc-emit` take a musical offset (timebase keyword like `:16`, or numeric source-step-relative), `:vel`, `:note`, etc., and the engine resolves to samples. Arp helpers (`fx-arp-emit`, `acc-arp-emit`) are duration-aware.
-- **Persistent state already exists:** `fx-state-get` / `fx-state-set` over a `HashMap<String, EValue>` keyed per-track/per-FX (lisp_effect.rs:~3099/3181).
+- **Persistent state already exists:** `fx-state-get` / `fx-state-set` over a `HashMap<String, EValue>` keyed per-track/per-FX (lisp_host.rs:~3099/3181).
 - **P-locks by identity already exist:** `ParamNodeId { logical_id, node_param_idx }` (neural.rs:30), with `acc-plock-effect`, `acc-set-instrument-param`, etc. baking values validated against param identity.
 - **Runtime→UI telemetry already exists** as a hand-wired special case: `state.set_neural_visualization(...)` publishes a snapshot the UI reads via `SEQ.neural-energy-matrix`, `SEQ.neural-trigger-matrix`, `SEQ.neural-dampening-matrix`.
 

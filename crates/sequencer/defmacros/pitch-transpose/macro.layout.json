@@ -1,0 +1,64 @@
+{
+  "macros": {
+    "pitch-transpose": {
+      "cables": {
+        "/#0:0->factor:1": {
+          "segmented": true,
+          "y": 14.193749
+        },
+        "2:0->factor:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "factor:0->return:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "hz:0->return:0": {
+          "segmented": true,
+          "y": 14.81375
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "semitones:0->/#0:0": {
+          "segmented": true,
+          "y": 8.13125
+        }
+      },
+      "nodes": {
+        "/#0": {
+          "x": 48.434998,
+          "y": 10.6825
+        },
+        "2": {
+          "x": 58.725,
+          "y": 10.6825
+        },
+        "factor": {
+          "x": 49.015,
+          "y": 17.365
+        },
+        "hz": {
+          "x": 24.24,
+          "y": 4.0
+        },
+        "out": {
+          "x": 23.894197,
+          "y": 30.73
+        },
+        "return": {
+          "x": 24.24,
+          "y": 24.0475
+        },
+        "semitones": {
+          "x": 48.434998,
+          "y": 4.0
+        }
+      }
+    }
+  },
+  "root": {},
+  "version": 1
+}

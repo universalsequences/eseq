@@ -46,18 +46,40 @@ static inline uint64_t nsec_now(void) {
 }
 
 // ===================== Kernel ABI =====================
+#define GBE_AUX_CAP 32
+
+typedef enum {
+  GBE_NOTE_ON = 1,
+  GBE_GATE_OFF,
+  GBE_PULSE,
+} GraphBlockEventKind;
+
+typedef struct {
+  uint64_t logical_id;   // engine: routing
+  uint32_t frame_offset; // engine: outer-callback offset, rebased per slice
+  uint32_t sequence;     // engine: stable tie-break
+  uint32_t kind;         // node-interpreted tag
+  uint32_t aux_count;    // valid entries in aux[]
+  float aux[GBE_AUX_CAP]; // opaque to the engine
+} GraphBlockEvent;
+
 typedef void (*KernelFn)(float *const *in, float *const *out, int nframes,
                          void *state, void *buffers);
 typedef void (*InitFn)(void *state, int sampleRate, int maxBlock,
                        const void *initial_state);
 typedef void (*ResetFn)(void *state);
 typedef void (*MigrateFn)(void *newState, const void *oldState);
+typedef void (*BeginEventSliceFn)(void *state, uint64_t block_serial,
+                                  int slice_start, int slice_nframes);
+typedef bool (*ScheduleEventFn)(void *state, const GraphBlockEvent *event);
 
 typedef struct {
   KernelFn process;
   InitFn init;       // optional
   ResetFn reset;     // optional
   MigrateFn migrate; // optional: copy persistent state on graph swap
+  BeginEventSliceFn begin_event_slice; // optional: audio thread, before slice
+  ScheduleEventFn schedule_event;      // optional: audio thread, slice-local event
 } NodeVTable;
 
 // ===================== Parameter Mailbox =====================
@@ -69,13 +91,21 @@ typedef struct {
   float fvalue;        // e.g., new gain
 } ParamMsg;
 
-#define PARAM_RING_CAP 2048
+#define PARAM_RING_CAP 16384
 
 typedef struct ParamRing {
   ParamMsg buf[PARAM_RING_CAP];
   _Atomic uint32_t head; // producer writes
   _Atomic uint32_t tail; // consumer reads
 } ParamRing;
+
+#define BLOCK_EVENT_RING_CAP 16384
+
+typedef struct BlockEventRing {
+  GraphBlockEvent buf[BLOCK_EVENT_RING_CAP];
+  _Atomic uint32_t head; // producer writes
+  _Atomic uint32_t tail; // consumer reads
+} BlockEventRing;
 
 // ===================== MPMC Work Queue =====================
 
@@ -98,6 +128,26 @@ static inline bool params_pop(ParamRing *r, ParamMsg *out) {
   if (t == h)
     return false; // empty
   *out = r->buf[t % PARAM_RING_CAP];
+  atomic_store_explicit(&r->tail, t + 1, memory_order_release);
+  return true;
+}
+
+static inline bool block_events_push(BlockEventRing *r, GraphBlockEvent m) {
+  uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+  uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
+  if ((h - t) >= BLOCK_EVENT_RING_CAP)
+    return false; // full
+  r->buf[h % BLOCK_EVENT_RING_CAP] = m;
+  atomic_store_explicit(&r->head, h + 1, memory_order_release);
+  return true;
+}
+
+static inline bool block_events_pop(BlockEventRing *r, GraphBlockEvent *out) {
+  uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+  uint32_t h = atomic_load_explicit(&r->head, memory_order_acquire);
+  if (t == h)
+    return false; // empty
+  *out = r->buf[t % BLOCK_EVENT_RING_CAP];
   atomic_store_explicit(&r->tail, t + 1, memory_order_release);
   return true;
 }

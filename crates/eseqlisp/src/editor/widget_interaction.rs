@@ -198,6 +198,8 @@ enum PatchPortDirection {
 struct PatchPortLayout {
     direction: PatchPortDirection,
     track: usize,
+    dest_kind: String,
+    dest: usize,
     input: usize,
     active: bool,
     pending: bool,
@@ -232,6 +234,13 @@ fn node_usize_prop(node: &LayoutNode, key: &str) -> Option<usize> {
     }
 }
 
+fn node_string_prop(node: &LayoutNode, key: &str) -> Option<String> {
+    match node.props.get(key) {
+        Some(Value::String(value)) | Some(Value::Keyword(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
 fn node_usize_list_prop(node: &LayoutNode, key: &str) -> Vec<usize> {
     let Some(Value::List(values)) = node.props.get(key) else {
         return Vec::new();
@@ -247,12 +256,21 @@ fn node_usize_list_prop(node: &LayoutNode, key: &str) -> Vec<usize> {
 
 fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout>) {
     if node_bool_prop(node, "patch-port") {
-        if let (Some(direction), Some(track)) =
-            (patch_port_direction(node), node_usize_prop(node, "track"))
-        {
+        if let Some(direction) = patch_port_direction(node) {
+            let track = node_usize_prop(node, "track");
+            let dest_kind = node_string_prop(node, "dest-kind").unwrap_or_else(|| "track".into());
+            let dest = node_usize_prop(node, "dest").or(track);
+            let Some(track_or_dest) = track.or(dest) else {
+                for child in &node.children {
+                    collect_patch_port_layouts(child, ports);
+                }
+                return;
+            };
             ports.push(PatchPortLayout {
                 direction,
-                track,
+                track: track.unwrap_or(track_or_dest),
+                dest_kind,
+                dest: dest.unwrap_or(track_or_dest),
                 input: node_usize_prop(node, "input").unwrap_or(0),
                 active: node_bool_prop(node, "active"),
                 pending: node_bool_prop(node, "pending"),
@@ -315,7 +333,7 @@ fn patch_cable_click_output(
             }
             match best {
                 Some((best_distance, ..)) if best_distance <= distance => {}
-                _ => best = Some((distance, *source, port.track, port.input, callback.clone())),
+                _ => best = Some((distance, *source, port.dest, port.input, callback.clone())),
             }
         }
     }
@@ -374,7 +392,7 @@ fn patch_drop_output(
         .filter(|port| {
             port.direction == PatchPortDirection::In
                 && port.active
-                && port.track != source.track
+                && !(port.dest_kind == "track" && port.dest == source.track)
                 && port.on_patch_drop.is_some()
         })
         .map(|port| {
@@ -395,7 +413,7 @@ fn patch_drop_output(
         callback: dest.on_patch_drop.clone()?,
         args: vec![
             Value::Number(source.track as f64),
-            Value::Number(dest.track as f64),
+            Value::Number(dest.dest as f64),
             Value::Number(dest.input as f64),
         ],
     })
@@ -1600,9 +1618,15 @@ impl Editor {
             "widget-drop: dispatch drag_type={drag_type}; target_type={}; target_key={:?}; payload={payload:?}",
             target.widget_type, target.stable_key
         );
-        let event = crate::widget_render::box_widget::box_drop_info(
-            &target, &drag_type, payload, hit_col, hit_row,
-        );
+        let event = if target.widget_type == "tree" {
+            crate::widget_render::tree::tree_drop_info(
+                &target, &drag_type, payload, hit_col, hit_row,
+            )
+        } else {
+            crate::widget_render::box_widget::box_drop_info(
+                &target, &drag_type, payload, hit_col, hit_row,
+            )
+        };
         Some(crate::widget_render::EventOutput {
             callback,
             args: vec![event],

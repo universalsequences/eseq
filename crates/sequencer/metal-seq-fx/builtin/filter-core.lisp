@@ -133,22 +133,24 @@
       :width 4.8 :height 1.05 :font-size 9.5)))
 
 (def builtin-fx-filter-mini-number (fx label-text p)
-  (h-stack :gap 0.18 :align :baseline
-    (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-    (number-picker :value (fx-param-value-for fx p)
-      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-      :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (param-set-control-value fx p v))
-      :width 4.6 :height 1.0)))
+  (param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
+    (h-stack :gap 0.18 :align :baseline
+      (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+      (number-picker :value (fx-param-value-for fx p)
+        :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
+        :noui true :font-size 9.5 :text-color :fg
+        :on-change (lambda (v) (param-set-control-value fx p v))
+        :width 4.6 :height 1.0))))
 
 (def builtin-fx-filter-mini-cutoff (fx p)
-  (h-stack :gap 0.18 :align :baseline
-    (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-    (number-picker :value (builtin-fx-filter-cutoff-value fx p)
-      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-      :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (param-set-control-value fx p v))
-      :width 4.6 :height 1.0)))
+  (param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
+    (h-stack :gap 0.18 :align :baseline
+      (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+      (number-picker :value (builtin-fx-filter-cutoff-value fx p)
+        :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
+        :noui true :font-size 9.5 :text-color :fg
+        :on-change (lambda (v) (param-set-control-value fx p v))
+        :width 4.6 :height 1.0))))
 
 (def builtin-fx-filter-mini-resonance (fx p)
   (h-stack :gap 0.18 :align :baseline
@@ -179,13 +181,14 @@
     :on-change (lambda (v) (param-set-control-value fx p v))))
 
 (def builtin-fx-filter-mini-percent (fx label-text p)
-  (h-stack :gap 0.18 :align :baseline
-    (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-    (number-picker :value (fx-param-value p)
-      :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
-      :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (fx-set-effect-value fx p v))
-      :width 4.6 :height 1.0)))
+  (param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
+    (h-stack :gap 0.18 :align :baseline
+      (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+      (number-picker :value (fx-param-value-for fx p)
+        :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
+        :noui true :font-size 9.5 :text-color :fg
+        :on-change (lambda (v) (param-set-control-value fx p v))
+        :width 4.6 :height 1.0))))
 
 (def builtin-fx-filter-mini-option (fx p)
   (dropdown :value (get p :text-value)

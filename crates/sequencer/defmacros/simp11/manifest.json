@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "name": "simp11",
+  "params": [
+    "input",
+    "shape",
+    "depth"
+  ],
+  "outputs": [
+    "out"
+  ]
+}

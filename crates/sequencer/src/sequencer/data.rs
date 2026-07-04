@@ -4,6 +4,18 @@ use std::sync::Mutex;
 use crate::voice::MAX_VOICES;
 
 pub const MAX_TRACKS: usize = 64;
+pub const MAX_RACK_SLOTS: usize = 16;
+pub const DRUM_RACK_PAD_COUNT: usize = 16;
+// Banks move by octave while the visible 4x4 grid spans sixteen chromatic pads.
+pub const DRUM_RACK_PAD_BANK_STRIDE: i32 = 12;
+pub const DRUM_RACK_TOTAL_PAD_NOTES: usize = 128;
+pub const DRUM_RACK_FIRST_PAD_NOTE: i32 = 0;
+pub const DRUM_RACK_LAST_PAD_NOTE: i32 =
+    DRUM_RACK_FIRST_PAD_NOTE + DRUM_RACK_TOTAL_PAD_NOTES as i32 - 1;
+pub const DRUM_RACK_LAST_PAD_BANK_START: i32 =
+    DRUM_RACK_LAST_PAD_NOTE - DRUM_RACK_PAD_COUNT as i32 + 1;
+pub const MAX_INSTRUMENT_ENGINES: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
+pub const MAX_SAMPLER_POOLS: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_STEPS: usize = 256;
 pub const STEPS_PER_PAGE: usize = 16;
 pub const NUM_PARAMS: usize = 10;
@@ -12,6 +24,13 @@ pub const TRACK_PATTERN_WORDS: usize = MAX_STEPS / 64;
 pub const MIX_BUS_ID: u64 = 0;
 pub const DEFAULT_BUS_A_ID: u64 = 1;
 pub const DEFAULT_BUS_B_ID: u64 = 2;
+
+pub fn rack_slot_pool_index(track_idx: usize, slot_idx: usize) -> Option<usize> {
+    if track_idx >= MAX_TRACKS || slot_idx >= MAX_RACK_SLOTS {
+        return None;
+    }
+    Some(MAX_TRACKS + track_idx * MAX_RACK_SLOTS + slot_idx)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BusId(pub u64);
@@ -46,17 +65,20 @@ pub enum InstrumentType {
     Sampler,
     Custom,
     Modulator,
+    Rack,
 }
 
 impl InstrumentType {
-    pub const COUNT: usize = 3;
-    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom, Self::Modulator];
+    pub const COUNT: usize = 4;
+    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom, Self::Modulator, Self::Rack];
+    pub const ADD_TRACK_TYPES: [Self; 3] = [Self::Sampler, Self::Custom, Self::Modulator];
 
     pub fn label(&self) -> &'static str {
         match self {
             InstrumentType::Sampler => "Sampler",
             InstrumentType::Custom => "Custom",
             InstrumentType::Modulator => "Modulator",
+            InstrumentType::Rack => "Rack",
         }
     }
 
@@ -65,6 +87,7 @@ impl InstrumentType {
             InstrumentType::Sampler => 0,
             InstrumentType::Custom => 1,
             InstrumentType::Modulator => 2,
+            InstrumentType::Rack => 3,
         }
     }
 
@@ -72,9 +95,17 @@ impl InstrumentType {
         match flag {
             1 => InstrumentType::Custom,
             2 => InstrumentType::Modulator,
+            3 => InstrumentType::Rack,
             _ => InstrumentType::Sampler,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RackRouting {
+    #[default]
+    Broadcast,
+    ByPitch,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,9 +149,15 @@ impl CustomInstrumentRunMode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ModDestination {
+    Track(usize),
+    Bus(BusId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ModConnection {
     pub source_track: usize,
-    pub dest_track: usize,
+    pub destination: ModDestination,
     pub dest_input: usize,
 }
 
@@ -564,6 +601,43 @@ impl StepData {
         let idx = step * NUM_PARAMS + param.index();
         self.data[idx].store(clamped.to_bits(), Ordering::Relaxed);
     }
+
+    /// Bulk read of every step's params in one flat pass (avoids the
+    /// per-element call overhead of `get` in hot snapshot paths).
+    pub fn load_rows(&self) -> Vec<[f32; NUM_PARAMS]> {
+        let mut rows = Vec::with_capacity(MAX_STEPS);
+        for step in 0..MAX_STEPS {
+            let base = step * NUM_PARAMS;
+            let mut params = [0.0f32; NUM_PARAMS];
+            for (offset, slot) in params.iter_mut().enumerate() {
+                *slot = f32::from_bits(self.data[base + offset].load(Ordering::Relaxed));
+            }
+            rows.push(params);
+        }
+        rows
+    }
+
+    /// Bulk write of step params with the same clamping as `set`. Missing
+    /// rows are filled with parameter defaults.
+    pub fn store_rows_clamped(&self, rows: &[[f32; NUM_PARAMS]]) {
+        for step in 0..MAX_STEPS {
+            let base = step * NUM_PARAMS;
+            match rows.get(step) {
+                Some(params) => {
+                    for (offset, param) in StepParam::ALL.iter().enumerate() {
+                        let clamped = params[offset].clamp(param.min(), param.max());
+                        self.data[base + offset].store(clamped.to_bits(), Ordering::Relaxed);
+                    }
+                }
+                None => {
+                    for (offset, param) in StepParam::ALL.iter().enumerate() {
+                        self.data[base + offset]
+                            .store(param.default_value().to_bits(), Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub struct TrackPattern {
@@ -644,6 +718,8 @@ pub struct TrackParams {
     pub accum_limit: AtomicU32,
     pub accum_mode: AtomicU32,
     pub fts_scale: AtomicU32,
+    pub mute_group: AtomicU32,
+    pub global_transpose: AtomicBool,
 }
 
 impl TrackParams {
@@ -672,6 +748,8 @@ impl TrackParams {
             accum_limit: AtomicU32::new(48.0_f32.to_bits()),
             accum_mode: AtomicU32::new(0),
             fts_scale: AtomicU32::new(0),
+            mute_group: AtomicU32::new(0),
+            global_transpose: AtomicBool::new(true),
         }
     }
 
@@ -856,6 +934,19 @@ impl TrackParams {
     pub fn set_fts_scale(&self, idx: usize) {
         self.fts_scale.store(idx as u32, Ordering::Relaxed);
     }
+    pub fn get_mute_group(&self) -> u8 {
+        self.mute_group.load(Ordering::Relaxed).min(8) as u8
+    }
+    pub fn set_mute_group(&self, group: u8) {
+        self.mute_group
+            .store(group.min(8) as u32, Ordering::Relaxed);
+    }
+    pub fn uses_global_transpose(&self) -> bool {
+        self.global_transpose.load(Ordering::Relaxed)
+    }
+    pub fn set_global_transpose(&self, enabled: bool) {
+        self.global_transpose.store(enabled, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -898,6 +989,8 @@ pub struct TrackParamsSnapshot {
     pub accum_limit: f32,
     pub accum_mode: u32,
     pub fts_scale: usize,
+    pub mute_group: u8,
+    pub global_transpose: bool,
 }
 
 impl Default for TrackParamsSnapshot {
@@ -926,11 +1019,13 @@ impl Default for TrackParamsSnapshot {
             accum_limit: 48.0,
             accum_mode: 0,
             fts_scale: 0,
+            mute_group: 0,
+            global_transpose: true,
         }
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TrackSoundState {
     pub engine_id: Option<usize>,
     pub loaded_preset: Option<String>,

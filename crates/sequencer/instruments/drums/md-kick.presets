@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "engine_name": "drums/md-kick/",
+  "source_file": "instruments/drums/md-kick/dsp.lisp",
+  "presets": [
+    {"id": "808 Long", "name": "808 Long", "base_note_offset": -24.0, "params": {"engine": 1, "ptch": -30, "dec": 1400, "ramp": 34, "rdec": 48, "strt": 24, "nois": 0.12, "harm": 0.12, "clip": 0.08, "dist": 0.04}},
+    {"id": "808 Knock", "name": "808 Knock", "base_note_offset": -24.0, "params": {"engine": 1, "ptch": -24, "dec": 520, "ramp": 44, "rdec": 30, "strt": 34, "nois": 0.24, "harm": 0.32, "clip": 0.22, "dist": 0.10}},
+    {"id": "B2 Wobble Sub", "name": "B2 Wobble Sub", "base_note_offset": -36.0, "params": {"engine": 2, "ptch": -36, "dec": 900, "ramp": 22, "hold": 240, "tick": 0.18, "dirt": 0.20, "clip": 0.16}},
+    {"id": "EFM Click House", "name": "EFM Click House", "base_note_offset": -24.0, "params": {"engine": 3, "ptch": -26, "dec": 420, "ramp": 55, "rdec": 24, "mod_amt": 0.78, "mfrq": 230, "mdec": 22, "mfb": 0.35}},
+    {"id": "PI Floor Tom Kick", "name": "PI Floor Tom Kick", "base_note_offset": -24.0, "params": {"engine": 4, "ptch": -20, "dec": 820, "hard": 0.34, "hamr": 3.8, "tens": 0.52, "damp": 0.22, "clip": 0.10}},
+    {"id": "GND Sub Layer", "name": "GND Sub Layer", "base_note_offset": -36.0, "params": {"engine": 5, "ptch": -36, "dec": 720, "ramp": 12, "rdec": 80, "dist": 0.02}},
+    {"id": "Gabber", "name": "Gabber", "base_note_offset": -24.0, "params": {"engine": 2, "ptch": -26, "dec": 520, "hold": 35, "tick": 0.72, "dirt": 0.82, "clip": 0.84, "dist": 0.70, "srr": 0.18}}
+  ]
+}

@@ -75,6 +75,14 @@ LiveGraph *create_live_graph(int initial_capacity, int block_size,
 
   // Parameter mailbox
   lg->params = calloc(1, sizeof(ParamRing));
+  lg->block_events = calloc(1, sizeof(BlockEventRing));
+  lg->block_event_scratch_capacity = BLOCK_EVENT_RING_CAP;
+  lg->block_event_scratch =
+      calloc((size_t)lg->block_event_scratch_capacity, sizeof(GraphBlockEvent));
+  lg->block_event_sort_scratch =
+      calloc((size_t)lg->block_event_scratch_capacity, sizeof(GraphBlockEvent));
+  lg->block_event_scratch_count = 0;
+  atomic_init(&lg->block_event_serial, 1);
 
   lg->graphEditQueue = calloc(1, sizeof(GraphEditQueue));
   geq_init(lg->graphEditQueue, 8192 * 16);
@@ -215,6 +223,12 @@ void destroy_live_graph(LiveGraph *lg) {
     rq_destroy(lg->sched.readyQueue);
   if (lg->params)
     free(lg->params);
+  if (lg->block_events)
+    free(lg->block_events);
+  if (lg->block_event_scratch)
+    free(lg->block_event_scratch);
+  if (lg->block_event_sort_scratch)
+    free(lg->block_event_sort_scratch);
   if (lg->graphEditQueue) {
     geq_deinit(lg->graphEditQueue);
     free(lg->graphEditQueue);

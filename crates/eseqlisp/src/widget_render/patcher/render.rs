@@ -112,6 +112,8 @@ pub(super) fn build_metal_primitives_for_patcher(
             let view_key = active_patcher_view_key(&interaction_state);
             let patch = active_patcher_patch(&root_patch, &interaction_state);
             let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
+            let autocomplete_macros =
+                super::autocomplete_macros_for_patch(&node.props, Some(&patch));
             sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
             let content_size = patch_content_size(&patch);
             if pan_uninitialized && patcher_fit_enabled(&node.props) {
@@ -132,6 +134,7 @@ pub(super) fn build_metal_primitives_for_patcher(
                 &pan_state,
                 &interaction_state,
                 &view_key,
+                &autocomplete_macros,
             );
             let mut bubble_prims = Vec::new();
             draw_agentic_bubbles(
@@ -630,6 +633,7 @@ pub(super) fn draw_patch(
         pan_state,
         &interaction_state,
         "root",
+        &patch.macros,
     );
 }
 
@@ -642,6 +646,7 @@ fn draw_patch_with_view_key(
     pan_state: &PatcherPanState,
     interaction_state: &PatcherInteractionState,
     view_key: &str,
+    autocomplete_macros: &[super::model::MacroPatch],
 ) {
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let origin = super::geometry::patcher_origin(rect, pan_state);
@@ -816,7 +821,7 @@ fn draw_patch_with_view_key(
             &mut overlay_prims,
             node_rect,
             edit,
-            &patch.macros,
+            &autocomplete_macros,
             viewport,
             zoom,
         );

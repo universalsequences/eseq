@@ -13,6 +13,7 @@
 (defstate sbrowser-selected-sample "")
 (defstate sbrowser-selected-tags (list))
 (defstate sbrowser-auditioned-sample "")
+(defstate sbrowser-loading-instrument-name "")
 
 ;; Editor state for inline instrument/effect creation
 (def sbrowser-editor-name (state ""))
@@ -153,9 +154,10 @@
   (status "New project"))
 
 (def sbrowser-add-instrument-track (name)
+  (set! sbrowser-loading-instrument-name name)
   (host-command "add-track-instrument" (dict :name name))
   (set! sbrowser-tab "presets")
-  (status (str "Add instrument track: " name)))
+  (status (str "Loading instrument: " name)))
 
 (def sbrowser-add-sampler-track ()
   (host-command "add-track-sampler" (dict))
@@ -166,6 +168,41 @@
   (host-command "add-track-modulator" (dict))
   (set! sbrowser-tab "instruments")
   (status "Add modulator track"))
+
+(def sbrowser-add-rack-track ()
+  (let ((path (sbrowser-sample-selected-path)))
+    (if (= path "")
+      (host-command "add-track-rack" (dict))
+      (do
+        (set! sbrowser-auditioned-sample path)
+        (host-command "add-track-rack" (dict :path path)))))
+  (set! sbrowser-tab "samples")
+  (status "Add drum rack"))
+
+(def sbrowser-current-rack-routing ()
+  (if (= SEQ.sidebar-kind "rack")
+    (if (> (len SEQ.instrument-panel) 0)
+      (get (nth SEQ.instrument-panel 0) :routing)
+      "")
+    ""))
+
+(def sbrowser-add-layer-rack-track ()
+  (let ((path (sbrowser-sample-selected-path)))
+    (if (and (= (sbrowser-current-rack-routing) "broadcast")
+             (not (= path "")))
+      (do
+        (set! sbrowser-auditioned-sample path)
+        (host-command "add-rack-sample-slot"
+          (dict :track SEQ.current-track :path path :preserve-browser-context true))
+        (status "Add layer"))
+      (do
+        (if (= path "")
+          (host-command "add-track-layer-rack" (dict))
+          (do
+            (set! sbrowser-auditioned-sample path)
+            (host-command "add-track-layer-rack" (dict :path path))))
+        (set! sbrowser-tab "samples")
+        (status "Add layer rack")))))
 
 ;; ── SDF widgets ──
 
@@ -248,6 +285,24 @@
         (status (str "Add track: " (get item :label))))
       (status "Select a sample file, not a folder"))))
 
+(def sbrowser-add-rack-layer (item)
+  (let ((path (get item :path)))
+    (if path
+      (do
+        (set! sbrowser-auditioned-sample path)
+        (host-command "add-rack-sample-slot"
+          (dict :track SEQ.current-track :path path :preserve-browser-context true))
+        (status (str "Add layer: " (get item :label))))
+      (status "Select a sample file, not a folder"))))
+
+(def sbrowser-add-selected-rack-layer ()
+  (sbrowser-add-layer-rack-track))
+
+(def sbrowser-modified-activate-sample (item)
+  (if (= SEQ.sidebar-kind "rack")
+    (sbrowser-add-rack-layer item)
+    (sbrowser-add-track item)))
+
 (def sbrowser-select-item (item)
   (if (or (sbrowser-create-sampler-mode?) (= SEQ.num-tracks 0) (= SEQ.sidebar-kind "instrument"))
     (sbrowser-add-track item)
@@ -255,9 +310,27 @@
 
 (def sbrowser-select-tab (name)
   (set! sbrowser-tab name)
-  (set! sbrowser-filter "")
   (if (not (= name "samples"))
     (set! sbrowser-selected-tags (list))))
+
+(def sbrowser-next-tab-name ()
+  (if (= sbrowser-tab "samples") "instruments"
+    (if (= sbrowser-tab "instruments") "audio-fx"
+      (if (= sbrowser-tab "audio-fx") "midi-fx"
+        (if (= sbrowser-tab "midi-fx") "presets"
+          (if (= sbrowser-tab "presets") "projects"
+            "samples"))))))
+
+(def sbrowser-next-tab ()
+  (sbrowser-select-tab (sbrowser-next-tab-name)))
+
+(def sbrowser-active-tree-key ()
+  (if (= sbrowser-tab "samples") "samples-tab-tree"
+    (if (= sbrowser-tab "instruments") "instruments-tab-tree"
+      (if (= sbrowser-tab "audio-fx") "audio-fx-tab-tree"
+        (if (= sbrowser-tab "midi-fx") "midi-fx-tab-tree"
+          (if (= sbrowser-tab "presets") "presets-tab-tree"
+            "projects-tab-tree"))))))
 
 (def sbrowser-list-contains? (items value)
   (> (len (filter (lambda (item) (= item value)) items)) 0))
@@ -280,14 +353,20 @@
 
 (def sbrowser-tag-chip (tag)
   (let ((name (get tag :name))
-        (selected (get tag :selected)))
+      (selected (get tag :selected)))
     (button name
       :variant :ghost
-      :background-color (if selected :black "#26272b")
-      :color (if selected :primary "#9ea1a8")
-      :height 1.02
-      :padding 0.32
-      :font-size 9.0
+      :background-color (if selected 
+        (rgba 1 0.6 0.3 1)
+        '(rgba 1 1 1 0.1))
+      :color (if selected (rgba 0.1 0.1 0.2 1) :white)
+      :border-color (if selected 
+        (rgba 0.05 0.08 0.95 1.0) 
+        (rgba 1 1 1 0.3)
+        )
+      :height 0.9
+      :padding 0.532
+      :font-size 11.0
       :on-click |x y r| (sbrowser-toggle-tag name))))
 
 (def sbrowser-search-placeholder ()
@@ -453,6 +532,24 @@
         (sbrowser-add-instrument-track (get item :name))
         (status "Open a folder or choose an instrument")))))
 
+(def sbrowser-focus-create-item (item)
+  (if (= (get item :kind) "instrument")
+    (status (str (get item :label)))
+    (if (= (get item :kind) "folder")
+      (status (str "Folder: " (get item :label)))
+      (status "Open a folder or choose an instrument"))))
+
+(def sbrowser-drop-instrument-on-folder (event)
+  (let ((payload (get event :payload))
+        (target (get event :target)))
+    (let ((name (get payload :name))
+          (folder (get target :folder)))
+      (if (and name folder)
+        (do
+          (host-command "move-saved-instrument" (dict :name name :folder folder))
+          (status (str "Move instrument to " (get target :label))))
+        (status "Drop instruments onto a folder")))))
+
 (def sbrowser-create-search-bar ()
   (box :key "create-search-bar" :width :fill :height 2.0 :padding 0.25
     (h-stack :width :fill :gap 0.5 :align :center
@@ -483,6 +580,14 @@
         :height 1.3
         :font-size 10.5
         :on-click |x y r| (sbrowser-add-modulator-track)
+        :color :white)
+      (button "Rack"
+        :variant :secondary
+        :icon :sampler
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-add-rack-track)
         :color :white))))
 
 (def sbrowser-library-label ()
@@ -492,10 +597,22 @@
       :color :gray
       :bg :transparent)))
 
+(def sbrowser-loading-instrument? ()
+  (not (= sbrowser-loading-instrument-name "")))
+
+(def sbrowser-instrument-loading-row ()
+  (if (sbrowser-loading-instrument?)
+    (box :key "instrument-loading-row" :width :fill :padding 0.25
+      (sbrowser-editor-status-row
+        (str "Loading " sbrowser-loading-instrument-name "...")
+        :gray))
+    (box :height 0)))
+
 (def sbrowser-create-picker ()
   (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
     (sbrowser-create-search-bar)
     (sbrowser-create-toolbar)
+    (sbrowser-instrument-loading-row)
     (sbrowser-library-label)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "create-picker-scroll" :width :fill :flex 1
@@ -505,13 +622,17 @@
           :background-color :buffer-bg
           :items (sbrowser-create-items)
           :expand-all (not (= sbrowser-filter ""))
-          :on-select (lambda (item) (sbrowser-select-create-item item))
+          :drag-type "instrument"
+          :drop-types (list "instrument")
+          :on-drop (lambda (event) (sbrowser-drop-instrument-on-folder event))
+          :on-select (lambda (item) (sbrowser-focus-create-item item))
           :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
 
 (def sbrowser-tab-button (name label)
   (button label
     :variant (if (= sbrowser-tab name) :primary :ghost)
     :width 8.5
+    :border-color (if (= sbrowser-tab name) :primary '(rgba 1 1 1 0.5))    
     :height 1.25
     :font-size 8.8
     :on-click |x y r| (sbrowser-select-tab name)
@@ -520,7 +641,7 @@
 (def sbrowser-tabs ()
   (v-stack :key "browser-tabs" :width 9.0 :gap 0.25
     (sbrowser-tab-button "samples" "Samples")
-    (sbrowser-tab-button "instruments" "Instr")
+    (sbrowser-tab-button "instruments" "Instruments")
     (sbrowser-tab-button "audio-fx" "Audio FX")
     (sbrowser-tab-button "midi-fx" "MIDI FX")
     (sbrowser-tab-button "presets" "Presets")
@@ -531,6 +652,24 @@
     (let ((tags (get browser :tags))
           (items (get browser :items)))
       (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
+        (box :key "sample-rack-actions" :width :fill :padding 0.15
+          (h-stack :width :fill :gap 0.35 :align :center
+            (button "Rack"
+              :variant :secondary
+              :icon :sampler
+              :height 1.15
+              :flex 1
+              :font-size 9.5
+              :on-click |x y r| (sbrowser-add-rack-track)
+              :color :white)
+            (button "Layer"
+              :variant :secondary
+              :icon :sampler
+              :height 1.15
+              :flex 1
+              :font-size 9.5
+              :on-click |x y r| (sbrowser-add-layer-rack-track)
+              :color :white)))
         (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
           (v-stack :width :fill :gap 0.35
             (if (> (len sbrowser-selected-tags) 0)
@@ -562,11 +701,13 @@
                 :drag-type "sample"
                 :on-select (lambda (item) (sbrowser-select-sample item))
                 :on-cursor-change (lambda (item) (sbrowser-select-sample item))
-                :on-activate (lambda (item) (sbrowser-activate-sample item))))))))))
+                :on-activate (lambda (item) (sbrowser-activate-sample item))
+                :on-modified-activate (lambda (item) (sbrowser-modified-activate-sample item))))))))))
 
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1
     (sbrowser-create-toolbar)
+    (sbrowser-instrument-loading-row)
     (sbrowser-library-label)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "instruments-tab-scroll" :width :fill :flex 1
@@ -576,8 +717,13 @@
           :background-color :buffer-bg
           :items (sbrowser-create-items)
           :expand-all (not (= sbrowser-filter ""))
-          :on-select (lambda (item) (sbrowser-select-create-item item))
-          :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
+          :focusable true
+          :drag-type "instrument"
+          :drop-types (list "instrument")
+          :on-drop (lambda (event) (sbrowser-drop-instrument-on-folder event))
+          :on-select (lambda (item) (sbrowser-focus-create-item item))
+          :on-activate (lambda (item) (sbrowser-select-create-item item))
+          :on-modified-activate (lambda (item) (sbrowser-select-create-item item)))))))
 
 (def sbrowser-audio-fx-toolbar ()
   (box :width :fill :padding 0.25
@@ -609,7 +755,8 @@
               :drag-type "audio-effect"
               :on-select (lambda (item) (sbrowser-select-audio-effect item))
               :on-cursor-change (lambda (item) (sbrowser-select-audio-effect item))
-              :on-activate (lambda (item) (sbrowser-activate-audio-effect item)))))))))
+              :on-activate (lambda (item) (sbrowser-activate-audio-effect item))
+              :on-modified-activate (lambda (item) (sbrowser-activate-audio-effect item)))))))))
 
 (def sbrowser-midi-fx-panel ()
   (let ((items (seq-midi-effect-tree sbrowser-filter)))
@@ -627,7 +774,8 @@
             :drag-type "midi-effect"
             :on-select (lambda (item) (sbrowser-select-midi-effect item))
             :on-cursor-change (lambda (item) (sbrowser-select-midi-effect item))
-            :on-activate (lambda (item) (sbrowser-activate-midi-effect item))))))))
+            :on-activate (lambda (item) (sbrowser-activate-midi-effect item))
+            :on-modified-activate (lambda (item) (sbrowser-activate-midi-effect item))))))))
 
 (def sbrowser-presets-tab-panel ()
   (v-stack :key "presets-tab-panel" :width :fill :gap 0.22 :padding 0.25 :flex 1
@@ -645,6 +793,7 @@
                 :items items
                 :selected-label SEQ.sidebar-loaded-preset
                 :expand-all false
+                :focusable true
                 :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
                 :on-activate (lambda (item) (sbrowser-load-preset (get item :label))))))))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
@@ -679,6 +828,7 @@
               :items items
               :selected-label SEQ.current-project-name
               :expand-all false
+              :focusable true
               :on-select (lambda (item) (sbrowser-load-project (get item :label)))
               :on-activate (lambda (item) (sbrowser-load-project (get item :label))))))))))
 
@@ -816,16 +966,26 @@
 
 ;; ── Editor sidebar panels ──
 
+(def sbrowser-editor-macro-action? ()
+  (or (= SEQ.editor-active-macro-action "save-to-library")
+      (= SEQ.editor-active-macro-action "fork")))
+
+(def sbrowser-editor-macro-action-label ()
+  (if (= SEQ.editor-active-macro-action "fork")
+    "Fork Macro"
+    "Save Macro to Library"))
+
 (def sbrowser-editor-header ()
   (box :width :fill :padding 0.25
     (v-stack :width :fill :gap 0.4
       (h-stack :width :fill :gap 0.5 :align :center
         (label
-          (if (= SEQ.editor-mode "new-instrument") "New Instrument"
-            (if (= SEQ.editor-mode "edit-instrument") "Edit Instrument"
-              (if (= SEQ.editor-mode "new-effect") "New Effect"
-                (if (= SEQ.editor-mode "edit-effect") "Edit Effect"
-                  "Editor"))))
+          (if (sbrowser-editor-macro-action?) "Defmacro"
+            (if (= SEQ.editor-mode "new-instrument") "New Instrument"
+              (if (= SEQ.editor-mode "edit-instrument") "Edit Instrument"
+                (if (= SEQ.editor-mode "new-effect") "New Effect"
+                  (if (= SEQ.editor-mode "edit-effect") "Edit Effect"
+                    "Editor")))))
           :font-size 12
           :color :white
           :bg :transparent)
@@ -836,7 +996,25 @@
             :font-size 9
             :color (if SEQ.editor-canceling :dim :gray)
             :bg :transparent)))
-      (if (= SEQ.editor-mode "new-instrument")
+      (if (sbrowser-editor-macro-action?)
+        (v-stack :width :fill :gap 0.35
+          (label "Current macro"
+            :font-size 9
+            :color :gray
+            :bg :transparent)
+          (label SEQ.editor-active-macro-name
+            :font-size 11
+            :color :white
+            :bg :transparent)
+          (label "Action"
+            :font-size 9
+            :color :gray
+            :bg :transparent)
+          (label (sbrowser-editor-macro-action-label)
+            :font-size 11
+            :color :white
+            :bg :transparent))
+        (if (= SEQ.editor-mode "new-instrument")
         (v-stack :width :fill :gap 0.35
           (label "Draft patch"
             :font-size 9
@@ -903,7 +1081,7 @@
           (label SEQ.editor-buffer-name
             :font-size 10
             :color :gray
-            :bg :transparent)))
+            :bg :transparent))))
       ;; Status display
       (if SEQ.editor-canceling
         (sbrowser-editor-status-row "Canceling..." :gray)
@@ -919,24 +1097,27 @@
       (if (sbrowser-editor-busy?)
         (box :height 1.2)
         (button
-          (if (= SEQ.editor-mode "new-instrument")
+          (if (sbrowser-editor-macro-action?)
+            (sbrowser-editor-macro-action-label)
+            (if (= SEQ.editor-mode "new-instrument")
             "Finalize"
             (if (= SEQ.editor-mode "new-effect")
               "Save & Add"
-            "Save")
-          )
+            "Save")))
           :variant :primary
-          :width 10
+          :width (if (sbrowser-editor-macro-action?) 13.5 10)
           :height 1.2
           :font-size 11
           :on-click |x y r|
-            (if (= SEQ.editor-mode "new-instrument")
+            (if (sbrowser-editor-macro-action?)
+              (host-command "save-active-editor-macro" (dict))
+              (if (= SEQ.editor-mode "new-instrument")
               (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
               (if (= SEQ.editor-mode "edit-instrument")
                 (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
                 (if (= SEQ.editor-mode "new-effect")
                   (host-command "save-new-effect" (dict :name sbrowser-editor-name))
-                  (host-command "update-effect" (dict)))))
+                  (host-command "update-effect" (dict))))))
           :color :white)))))
 
 (def sbrowser-editor-panel ()

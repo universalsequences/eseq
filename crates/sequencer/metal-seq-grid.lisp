@@ -15,10 +15,51 @@
 (def seq-has-selected-bus? ()
   (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names))))
 
+(defstate samples-sidebar-visible true)
+(defstate mixer-panel-visible true)
+
+; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
+(defstate param-mode 0)
+
+(def page-size 16)
+
+;; Step cursor helpers are used by the FX step buffer root, so define them
+;; before loading render roots.
+(defstate cursor-step 0)
+
+(def cursor-num-steps ()
+  (if (seq-has-selected-bus?)
+    (nth SEQ.bus-num-steps selected-bus)
+    SEQ.tp-num-steps))
+
+(def current-step ()
+  (mod cursor-step (max 1 (cursor-num-steps))))
+
+(def page-count ()
+  (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
+
+(def current-page ()
+  (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
+
+(def visible-page ()
+  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
+    (playhead-page)
+    (current-page)))
+
+(def playhead-page ()
+  (min SEQ.playhead-page
+    (- (page-count) 1)))
+
+(def page-offset ()
+  (* (visible-page) page-size))
+
+(def cool-off-follow ()
+  (seq-pause-auto-follow))
+
 (load "metal-seq-browser.lisp")
+(load "metal-seq-mixer-v2.lisp")
 (load "metal-seq-fx.lisp")
 (load "metal-seq-piano-roll.lisp")
-(load "metal-seq-mixer-v2.lisp")
 (load "metal-seq-transport.lisp")
 (load "metal-seq-agent.lisp")
 
@@ -33,18 +74,41 @@
 (defstate step-panel-buffer "*sequencer*")
 (defstate remembered-step-panel-buffer "*sequencer*")
 (defstate lower-panel-buffer "*fx*")
+(defstate seq-layout-mode :lower-panel)
+(defstate seq-patcher-buffer "")
+(defstate seq-patcher-source-buffer "")
 (defstate seq-registered-step-tabs '())
 
-(def lower-fx-layout-height 10.5)
+(def lower-fx-layout-height 11.5)
+
+(def seq-step-tab-label (tab)
+  (nth tab 0))
 
 (def seq-step-tab-buffer (tab)
   (nth tab 1))
 
+(def seq-step-tab-sequencer-name (tab)
+  (if (> (len tab) 2) (nth tab 2) ""))
+
+(def seq-step-tab-source-path (tab)
+  (if (> (len tab) 3) (nth tab 3) ""))
+
 (def seq-step-tab-matches-buffer? (tab buffer)
   (= (seq-step-tab-buffer tab) buffer))
 
+(def seq-render-step-tab (tab)
+  (let ((name (seq-step-tab-sequencer-name tab))
+        (buffer (seq-step-tab-buffer tab)))
+    (if (= name "")
+      (list (seq-step-tab-label tab) buffer)
+      (list (seq-step-tab-label tab)
+        buffer
+        :on-close
+        (lambda (closed-buffer tab-index)
+          (seq-delete-script-sequencer-with-buffer name closed-buffer))))))
+
 (def seq-main-step-tabs ()
-  (append (list (list "Seq" "*sequencer*")) seq-registered-step-tabs))
+  (append (list (list "Seq" "*sequencer*")) (map seq-render-step-tab seq-registered-step-tabs)))
 
 (def seq-main-step-tab-buffer? (buffer)
   (> (len (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
@@ -84,28 +148,320 @@
         (list (list label buffer))))
     (seq-refresh-step-tabs-if-present)))
 
+(def seq-register-script-step-sequencer-tab (label buffer sequencer-name source-path)
+  (do
+    (set! seq-registered-step-tabs
+      (append
+        (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
+          seq-registered-step-tabs)
+        (list (list label buffer sequencer-name source-path))))
+    (seq-refresh-step-tabs-if-present)))
+
+(def seq-unregister-step-sequencer-tab (buffer)
+  (do
+    (set! seq-registered-step-tabs
+      (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
+        seq-registered-step-tabs))
+    (if (= step-panel-buffer buffer) (set! step-panel-buffer "*sequencer*") nil)
+    (if (= remembered-step-panel-buffer buffer) (set! remembered-step-panel-buffer "*sequencer*") nil)
+    (set-window-buffer-for buffer "*sequencer*")
+    (seq-refresh-step-tabs-if-present)
+    (if (= (len seq-registered-step-tabs) 0)
+      (clear-window-tabs-for "*sequencer*")
+      false)))
+
+(def seq-select-main-step-tab-by-index (index)
+  (let ((tab-index (- index 1))
+        (tabs (seq-main-step-tabs)))
+    (if (and (>= tab-index 0) (< tab-index (len tabs)))
+      (let ((buffer (seq-step-tab-buffer (nth tabs tab-index))))
+        (do
+          (set! step-panel-buffer buffer)
+          (set! remembered-step-panel-buffer buffer)
+          (set-window-buffer buffer)
+          (seq-refresh-step-tabs-if-present)
+          true))
+      false)))
+
+;; ── Script picker ──────────────────────────────────────────────────────────
+;; Scripts can expose this lightweight contract. The picker resets it before each
+;; load, then calls script-init-fn once after a successful load.
+(def script-buffer-name "")
+(def script-tab-label "")
+(def script-sequencer-name "")
+(def script-init-fn () false)
+
+(def seq-script-reset-contract ()
+  (do
+    (set! script-buffer-name "")
+    (set! script-tab-label "")
+    (set! script-sequencer-name "")
+    (def script-init-fn () false)))
+
+(def seq-script-default-dir ()
+  (if (directory? "scripts")
+    "scripts"
+    (if (directory? "crates/sequencer/scripts")
+      "crates/sequencer/scripts"
+      "scripts")))
+
+(def seq-script-picker-current-dir (seq-script-default-dir))
+(def seq-script-picker-entries '())
+(def seq-script-picker-source-buffer "")
+
+(def seq-switch-or-create-buffer (name)
+  (let ((bufs (buffer-list))
+        (exists (reduce |acc b| (if (= b name) true acc) false bufs)))
+    (if exists
+      (switch-to-buffer name)
+      (create-buffer name))))
+
+(define-mode "seq-script-picker-mode" :read-only true)
+(mode-bind-key "seq-script-picker-mode" "g" "seq-script-picker-refresh")
+(mode-bind-key "seq-script-picker-mode" "q" "seq-script-picker-quit")
+(mode-bind-key "seq-script-picker-mode" "-" "seq-script-picker-up")
+(mode-bind-key "seq-script-picker-mode" "RET" "seq-script-picker-open-at-point")
+
+(def seq-script-entry-visible? (entry)
+  (or (get entry :directory)
+    (string-ends-with? (get entry :name) ".lisp")))
+
+(def seq-script-picker-styles ()
+  (append
+    (list
+      (style-bg-current-line :widget-focus-bg)
+      (style-bold-fg 0 0 8 :status-accent)
+      (style-bold-fg 0 9 200 :blue))
+    (dired-row-styles 2 true)
+    (dired-entry-styles seq-script-picker-entries 3)))
+
+(def seq-script-picker-current-entry ()
+  (let ((line (current-line-number)))
+    (if (= line 3)
+      :parent
+      (if (>= line 4)
+        (nth seq-script-picker-entries (- line 4))
+        nil))))
+
+(def seq-script-picker-refresh ()
+  (if (not (directory? seq-script-picker-current-dir))
+    (do
+      (set! seq-script-picker-entries '())
+      (render-widget nil)
+      (set-buffer-lines
+        (list (str "Scripts > " seq-script-picker-current-dir)
+          ""
+          "script directory not found"))
+      (status (fmt "Script directory not found: {}" seq-script-picker-current-dir)))
+    (let ((entries (filter (lambda (entry) (seq-script-entry-visible? entry)) (list-directory seq-script-picker-current-dir)))
+          (dirs (filter |e| (get e :directory) entries))
+          (files (filter |e| (not (get e :directory)) entries)))
+      (set! seq-script-picker-entries (append dirs files))
+      (render-widget nil)
+      (set-buffer-lines
+        (append
+          (list (str "Scripts > " seq-script-picker-current-dir)
+            ""
+            "drwxr-xr-x  1      0            .. ../")
+          (map dired-format-entry seq-script-picker-entries)))
+      (set-buffer-styles (seq-script-picker-styles))
+      (goto-line 3)
+      (status (fmt "{} scripts" (len files))))))
+
+(def seq-script-picker-up ()
+  (let ((parent (path-parent seq-script-picker-current-dir)))
+    (if (= parent nil)
+      (status "Already at root")
+      (do
+        (set! seq-script-picker-current-dir parent)
+        (seq-script-picker-refresh)))))
+
+(def seq-script-scratch-path (path)
+  (if (string-starts-with? path "crates/sequencer/")
+    path
+    (if (string-starts-with? path "scripts/")
+      (str "crates/sequencer/" path)
+      (if (string-starts-with? path "/")
+        path
+        (str "crates/sequencer/" path)))))
+
+(def seq-script-scratch-entry (path)
+  (list (source (list 'load (seq-script-scratch-path path)))))
+
+(def seq-script-append-to-scratch (path)
+  (append-buffer-lines-for "*scratch*" (seq-script-scratch-entry path)))
+
+(def seq-script-remove-from-scratch (path)
+  (remove-buffer-lines-for "*scratch*" (seq-script-scratch-entry path)))
+
+(def seq-script-register-loaded-tab ()
+  (if (not (= script-buffer-name ""))
+    (seq-register-script-step-sequencer-tab
+      (if (= script-tab-label "") script-buffer-name script-tab-label)
+      script-buffer-name
+      script-sequencer-name
+      "")
+    false))
+
+(def seq-script-register-loaded-tab-from-path (path)
+  (if (not (= script-buffer-name ""))
+    (seq-register-script-step-sequencer-tab
+      (if (= script-tab-label "") script-buffer-name script-tab-label)
+      script-buffer-name
+      script-sequencer-name
+      path)
+    false))
+
+(def seq-script-tab-matches-sequencer? (tab name)
+  (= (seq-step-tab-sequencer-name tab) name))
+
+(def seq-script-tab-for-sequencer (name)
+  (let ((hits (filter (lambda (tab) (seq-script-tab-matches-sequencer? tab name))
+                seq-registered-step-tabs)))
+    (if (> (len hits) 0) (nth hits 0) nil)))
+
+(def seq-delete-step-sequencer-tab (buffer)
+  (seq-unregister-step-sequencer-tab buffer))
+
+(def seq-delete-script-sequencer-by-buffer (buffer)
+  (let ((hits (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
+                seq-registered-step-tabs)))
+    (if (> (len hits) 0)
+      (let ((tab (nth hits 0))
+            (name (seq-step-tab-sequencer-name (nth hits 0)))
+            (path (seq-step-tab-source-path (nth hits 0))))
+        (do
+          (if (not (= name "")) (seq-unpublish-sequencer name) false)
+          (if (not (= path "")) (seq-script-remove-from-scratch path) false)
+          (seq-unregister-step-sequencer-tab buffer)
+          (status (fmt "Deleted sequencer tab {}" buffer))
+          true))
+      false)))
+
+(def seq-delete-script-sequencer (name)
+  (let ((tab (seq-script-tab-for-sequencer name)))
+    (do
+      (seq-unpublish-sequencer name)
+      (if tab
+        (do
+          (if (not (= (seq-step-tab-source-path tab) ""))
+            (seq-script-remove-from-scratch (seq-step-tab-source-path tab))
+            false)
+          (seq-unregister-step-sequencer-tab (seq-step-tab-buffer tab)))
+        false)
+      (status (fmt "Deleted sequencer {}" name))
+      true)))
+
+(def seq-delete-script-sequencer-with-buffer (name buffer)
+  (let ((hits (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
+                seq-registered-step-tabs)))
+    (do
+      (seq-unpublish-sequencer name)
+      (if (> (len hits) 0)
+        (let ((path (seq-step-tab-source-path (nth hits 0))))
+          (if (not (= path ""))
+            (seq-script-remove-from-scratch path)
+            false))
+        false)
+      (seq-unregister-step-sequencer-tab buffer)
+      (status (fmt "Deleted sequencer {}" name))
+      true)))
+
+(def seq-script-return-to-source-buffer ()
+  (if (not (= seq-script-picker-source-buffer ""))
+    (switch-to-buffer seq-script-picker-source-buffer)
+    (switch-to-buffer "*sequencer*")))
+
+(def seq-script-load-file (path)
+  (do
+    (seq-script-reset-contract)
+    (let ((load-result (load path)))
+      (if (string-starts-with? (str load-result) "load:")
+        (status (str load-result))
+        (do
+          (seq-script-append-to-scratch path)
+          (script-init-fn)
+          (seq-script-register-loaded-tab-from-path path)
+          (seq-script-return-to-source-buffer)
+          (status (fmt "Loaded script {}" (path-filename path))))))))
+
+(def seq-script-picker-open-entry (entry)
+  (let ((name (get entry :name))
+        (is-dir (get entry :directory)))
+    (if is-dir
+      (do
+        (set! seq-script-picker-current-dir (path-join seq-script-picker-current-dir name))
+        (seq-script-picker-refresh))
+      (seq-script-load-file (path-join seq-script-picker-current-dir name)))))
+
+(def seq-script-picker-open-at-point ()
+  (let ((entry (seq-script-picker-current-entry)))
+    (if (= entry :parent)
+      (seq-script-picker-up)
+      (if entry
+        (seq-script-picker-open-entry entry)
+        (status "No script on this line")))))
+
+(def seq-script-picker-quit ()
+  (if (not (= seq-script-picker-source-buffer ""))
+    (switch-to-buffer seq-script-picker-source-buffer)
+    (switch-to-buffer "*sequencer*")))
+
+(def seq-script-picker ()
+  (do
+    (set! seq-script-picker-source-buffer (current-buffer-name))
+    (set! seq-script-picker-current-dir (seq-script-default-dir))
+    (seq-switch-or-create-buffer "*scripts*")
+    (set-view-mode "text")
+    (set-buffer-mode "seq-script-picker-mode")
+    (seq-script-picker-refresh)))
+
+(bind-key "C-c s" "seq-script-picker")
+
 (def seq-step-and-track-panel-layout-spec (lower-buffer)
   (if (= lower-buffer "*piano-roll*")
     (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
     (list :cols :gap 1
       0.78 (seq-main-step-tile-layout-spec)
-      0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))))
+      0.22 (list :rows :gap 1
+        0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)
+        0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)))))
+
+(def seq-samples-sidebar-layout-spec ()
+  (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42))
+
+(def seq-main-and-mixer-layout-spec (lower-buffer)
+  (if mixer-panel-visible
+    (list :rows :gap 1
+      0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
+      0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 14 :max-height 14))
+    (seq-step-and-track-panel-layout-spec lower-buffer)))
 
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (list :rows :gap 1
     0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-    0.95 (list :cols :gap 1
-      0.2 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42)
-      0.8 (list :rows :gap 1
-        0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
-        0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13)))
+    0.95 (if samples-sidebar-visible
+      (list :cols :gap 1
+        0.2 (seq-samples-sidebar-layout-spec)
+        0.8 (seq-main-and-mixer-layout-spec lower-buffer))
+      (seq-main-and-mixer-layout-spec lower-buffer))
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
 (def seq-patcher-bottom-bar-layout-spec ()
-  (list :cols :gap 1
-    0.333 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
-    0.334 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
-    0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13)))
+  (if (and samples-sidebar-visible mixer-panel-visible)
+    (list :cols :gap 1
+      0.333 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
+      0.334 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
+      0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
+    (if samples-sidebar-visible
+      (list :cols :gap 1
+        0.5 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
+        0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
+      (if mixer-panel-visible
+        (list :cols :gap 1
+          0.5 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
+          0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
+        (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13)))))
 
 (def seq-instrument-patcher-layout-spec (patcher-buffer)
   (list :rows :gap 1
@@ -123,6 +479,7 @@
 
 (def seq-apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
   (do
+    (set! seq-layout-mode :lower-panel)
     (set-layout (seq-lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
     (host-command "refresh-mixer-ui" (dict))))
 
@@ -139,14 +496,40 @@
 (def seq-apply-instrument-patcher-layout (patcher-buffer)
   (do
     (set! remembered-step-panel-buffer (seq-current-step-buffer))
+    (set! seq-layout-mode :instrument-patcher)
+    (set! seq-patcher-buffer patcher-buffer)
+    (set! seq-patcher-source-buffer "")
     (set-layout (seq-instrument-patcher-layout-spec patcher-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def seq-apply-instrument-patcher-source-layout (patcher-buffer source-buffer)
   (do
     (set! remembered-step-panel-buffer (seq-current-step-buffer))
+    (set! seq-layout-mode :instrument-patcher-source)
+    (set! seq-patcher-buffer patcher-buffer)
+    (set! seq-patcher-source-buffer source-buffer)
     (set-layout (seq-instrument-patcher-source-layout-spec patcher-buffer source-buffer))
     (host-command "refresh-mixer-ui" (dict))))
+
+(def seq-refresh-current-layout ()
+  (if (and (= seq-layout-mode :instrument-patcher-source) (not (= seq-patcher-buffer "")) (not (= seq-patcher-source-buffer "")))
+    (seq-apply-instrument-patcher-source-layout seq-patcher-buffer seq-patcher-source-buffer)
+    (if (and (= seq-layout-mode :instrument-patcher) (not (= seq-patcher-buffer "")))
+      (seq-apply-instrument-patcher-layout seq-patcher-buffer)
+      (if (= lower-panel-buffer "*piano-roll*")
+        (seq-apply-piano-roll-layout)
+        (seq-apply-fx-layout)))))
+
+(def seq-toggle-samples-sidebar ()
+  (do
+    (set! samples-sidebar-visible (not samples-sidebar-visible))
+    (seq-refresh-current-layout)))
+
+(def seq-toggle-mixer-panel ()
+  (do
+    (seq-sync-step-panel-buffer-from-current-window)
+    (set! mixer-panel-visible (not mixer-panel-visible))
+    (seq-refresh-current-layout)))
 
 (def seq-restore-instrument-patcher-layout ()
   (do
@@ -160,6 +543,14 @@
     (if (= step-panel-buffer "*piano-roll*")
       remembered-step-panel-buffer
       step-panel-buffer)))
+
+(def seq-sync-step-panel-buffer-from-current-window ()
+  (let ((buffer (current-buffer-name)))
+    (if (seq-main-step-tab-buffer? buffer)
+      (do
+        (set! step-panel-buffer buffer)
+        (set! remembered-step-panel-buffer buffer))
+      nil)))
 
 (def seq-piano-roll-open? ()
   (or (= step-panel-buffer "*piano-roll*")
@@ -278,45 +669,8 @@
     (instrument-toggle-mods-view)
     (seq-show-fx-lower-panel)))
 
-(bind-key "Tab" "seq-toggle-current-track-expanded-main")
+(bind-key "Tab" "seq-toggle-mixer-panel")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
-
-; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
-(defstate param-mode 0)
-
-(def page-size 16)
-
-;; ── Step cursor ──
-(defstate cursor-step 0)
-
-(def cursor-num-steps ()
-  (if (seq-has-selected-bus?)
-    (nth SEQ.bus-num-steps selected-bus)
-    SEQ.tp-num-steps))
-
-(def current-step ()
-  (min cursor-step (- (max 1 (cursor-num-steps)) 1)))
-
-(def page-count ()
-  (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
-
-(def current-page ()
-  (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
-
-(def visible-page ()
-  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
-    (playhead-page)
-    (current-page)))
-
-(def playhead-page ()
-  (min SEQ.playhead-page
-    (- (page-count) 1)))
-
-(def page-offset ()
-  (* (visible-page) page-size))
-
-(def cool-off-follow ()
-  (seq-pause-auto-follow))
 
 (def page-button-width 2.8)
 
@@ -338,11 +692,13 @@
   (if (seq-has-selection?)
     (do
       (cool-off-follow)
+      (set! step-key-select-anchor nil)
       (if (seq-has-selected-bus?)
         (bus-shift-selected-steps -1)
         (seq-shift-selected-steps -1)))
     (do
       (cool-off-follow)
+      (set! step-key-select-anchor nil)
       (let ((num-steps (max 1 (cursor-num-steps))))
         (set-track-cursor-step
           (if (= (current-step) 0)
@@ -353,20 +709,50 @@
   (if (seq-has-selection?)
     (do
       (cool-off-follow)
+      (set! step-key-select-anchor nil)
       (if (seq-has-selected-bus?)
         (bus-shift-selected-steps 1)
         (seq-shift-selected-steps 1)))
     (do
       (cool-off-follow)
+      (set! step-key-select-anchor nil)
       (let ((num-steps (max 1 (cursor-num-steps))))
         (set-track-cursor-step
           (if (>= (current-step) (- num-steps 1))
             0
             (+ (current-step) 1)))))))
 
+(defstate step-key-select-anchor nil)
+
+(def cursor-select-step-range (start end)
+  (if (seq-has-selected-bus?)
+    (bus-select-step-range start end)
+    (seq-select-step-range start end)))
+
+(def cursor-select-move (direction)
+  (do
+    (cool-off-follow)
+    (let ((num-steps (max 1 (cursor-num-steps)))
+          (start (current-step)))
+      (let ((anchor (if (= step-key-select-anchor nil) start step-key-select-anchor))
+            (next (if (< direction 0)
+                    (if (= start 0) 0 (- start 1))
+                    (if (>= start (- num-steps 1)) (- num-steps 1) (+ start 1)))))
+        (do
+          (set! step-key-select-anchor anchor)
+          (set-track-cursor-step next)
+          (cursor-select-step-range anchor next))))))
+
+(def cursor-select-left ()
+  (cursor-select-move -1))
+
+(def cursor-select-right ()
+  (cursor-select-move 1))
+
 (def cursor-toggle ()
   (do
     (cool-off-follow)
+    (set! step-key-select-anchor nil)
     (if (seq-has-selected-bus?)
       (bus-toggle-step (bus-current-step))
       (seq-toggle-step (current-step)))))
@@ -397,6 +783,7 @@
 (def step-select-drag-start (step evt)
   (do
     (cool-off-follow)
+    (set! step-key-select-anchor nil)
     (set-track-cursor-step step)
     (set! step-click-pending nil)
     (set! step-drag-anchor step)
@@ -873,6 +1260,8 @@
 
 (load "metal-seq-metal.lisp")
 (load "metal-seq-sequencer.lisp")
+(load "metal-seq-fx/step-buffer.lisp")
 
-; Layout: samples on the left; metal + mixer on the right; fx spans the bottom.
-(seq-apply-fx-layout)
+; Startup layout is applied by Rust after this file loads. Keep this file free of
+; top-level layout side effects so hot reload and buffer re-evaluation do not
+; replace the active editor layout.

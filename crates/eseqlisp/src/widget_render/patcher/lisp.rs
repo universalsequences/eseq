@@ -1,20 +1,63 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage, parse_use_defmacro};
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::model::{
-    ConnectionKind, MacroSignature, NodeKind, OperatorPortShape, Patch, PatcherIntent,
+    ConnectionKind, MacroOrigin, MacroPatch, MacroSignature, NodeKind, OperatorPortShape, Patch,
+    PatcherIntent,
 };
 use super::project::{Projector, dgenlisp_constant_names, dgenlisp_operator_port_shapes};
+use super::sidecar;
 
 pub fn parse_patch_source(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
+    let exprs = parse_source_exprs(source)?;
+    let macros = local_macro_signatures(&exprs);
+    Ok(Projector::new(macros, intent).project(&exprs))
+}
+
+pub fn parse_patch_source_with_library(
+    source: &str,
+    intent: PatcherIntent,
+    library: &DefmacroLibrary,
+) -> Result<Patch, String> {
+    let exprs = parse_source_exprs(source)?;
+    let mut macros = local_macro_signatures(&exprs);
+    for package in library.packages().values() {
+        macros
+            .entry(package.name.clone())
+            .or_insert_with(|| MacroSignature {
+                params: package.params.clone(),
+                outputs: package.outputs.clone(),
+            });
+    }
+    let mut patch = Projector::new(macros.clone(), intent).project(&exprs);
+    for package in library.packages().values() {
+        if patch
+            .macros
+            .iter()
+            .any(|macro_patch| macro_patch.name == package.name)
+        {
+            continue;
+        }
+        patch
+            .macros
+            .push(project_library_macro_patch(package, &macros, intent)?);
+    }
+    Ok(patch)
+}
+
+fn parse_source_exprs(source: &str) -> Result<Vec<Expression>, String> {
     let tokens = Parser::new(source.to_string())
         .parse()
         .map_err(|error| format!("failed to tokenize dsp.lisp: {error:?}"))?;
-    let exprs = ASTParser::new(tokens)
+    ASTParser::new(tokens)
         .parse()
-        .map_err(|error| format!("failed to parse dsp.lisp: {error:?}"))?;
-    let macros = exprs
+        .map_err(|error| format!("failed to parse dsp.lisp: {error:?}"))
+}
+
+fn local_macro_signatures(exprs: &[Expression]) -> HashMap<String, MacroSignature> {
+    exprs
         .iter()
         .filter_map(|expr| {
             let Expression::List(items) = expr else {
@@ -42,8 +85,32 @@ pub fn parse_patch_source(source: &str, intent: PatcherIntent) -> Result<Patch, 
                 },
             ))
         })
-        .collect();
-    Ok(Projector::new(macros, intent).project(&exprs))
+        .collect()
+}
+
+fn project_library_macro_patch(
+    package: &DefmacroPackage,
+    macro_signatures: &HashMap<String, MacroSignature>,
+    intent: PatcherIntent,
+) -> Result<MacroPatch, String> {
+    let exprs = parse_source_exprs(&package.source)?;
+    let mut projected = Projector::new(macro_signatures.clone(), intent).project(&exprs);
+    sidecar::apply_layout_file(&package.layout_path, &mut projected)?;
+    let mut macro_patch = projected
+        .macros
+        .into_iter()
+        .find(|macro_patch| macro_patch.name == package.name)
+        .ok_or_else(|| {
+            format!(
+                "library macro package '{}' did not project its public defmacro",
+                package.name
+            )
+        })?;
+    macro_patch.origin = MacroOrigin::Library {
+        source_path: package.source_path.to_string_lossy().to_string(),
+        layout_path: package.layout_path.to_string_lossy().to_string(),
+    };
+    Ok(macro_patch)
 }
 
 fn infer_macro_outputs(body: &[Expression]) -> Vec<String> {
@@ -108,6 +175,10 @@ pub(super) fn node_kind_for_op(op: &str, macros: &HashSet<String>) -> NodeKind {
         _ if macros.contains(op) => NodeKind::MacroInstance,
         _ => NodeKind::Builtin,
     }
+}
+
+pub(super) fn is_use_defmacro_form(expr: &Expression) -> bool {
+    parse_use_defmacro(expr).ok().flatten().is_some()
 }
 
 pub(super) fn is_unsupported_call_head(op: &str) -> bool {

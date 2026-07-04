@@ -21,7 +21,7 @@ the source of truth so that:
   inconvenient (advanced macros, tensor work) without leaving the workflow.
 
 The patcher is not a new compiler. It is a **source generator with hot-reload**
-sitting on top of the existing `lisp_effect` / `compile_instrument` pipeline.
+sitting on top of the existing `lisp_host` / `compile_instrument` pipeline.
 
 ---
 
@@ -663,7 +663,7 @@ edit → emit dsp.lisp text → write to disk →
 ```
 
 The patcher does **not** invent its own compile loop. It calls the existing
-entry points in `crates/sequencer/src/lisp_effect.rs`
+entry points in `crates/sequencer/src/lisp_host.rs`
 (`compile_and_load`, `compile_and_load_instrument`).
 
 ### 12.3 Parameter stability

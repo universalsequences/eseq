@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "gain2",
+  "params": [
+    "x"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Multiply a signal by 2.",
+  "tags": [
+    "utility",
+    "gain"
+  ]
+}

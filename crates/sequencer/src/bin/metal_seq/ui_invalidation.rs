@@ -192,6 +192,8 @@ pub(crate) enum TrackParamInvalidation {
     Gate,
     Poly,
     MaxPolyphony,
+    MuteGroup,
+    GlobalTranspose,
     Timebase,
     SwingResolution,
     Fts,
@@ -206,6 +208,7 @@ pub(crate) enum TrackParamInvalidation {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum InstrumentInvalidation {
     Param { param: usize },
+    Plock { param: usize },
     BaseNote,
     SamplerSelectionTime,
     PanelTopology,

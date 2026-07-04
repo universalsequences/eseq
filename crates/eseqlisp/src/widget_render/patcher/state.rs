@@ -59,7 +59,7 @@ thread_local! {
         RefCell::new(HashMap::new());
     static PATCHER_INTERACTION_STATES: RefCell<HashMap<u64, PatcherInteractionState>> =
         RefCell::new(HashMap::new());
-    static PATCHER_PATH_KEYS: RefCell<HashMap<String, HashSet<u64>>> =
+    static PATCHER_PATH_KEYS: RefCell<HashMap<String, Vec<u64>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -128,6 +128,18 @@ pub(super) struct PatcherInteractionState {
     pub(super) last_pointer_model_position: Option<(f32, f32)>,
     pub(super) active_macro: Option<String>,
     pub(super) drag: Option<PatcherDragState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PatcherMacroLibraryActionKind {
+    SaveToLibrary,
+    Fork,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PatcherMacroLibraryAction {
+    pub(super) kind: PatcherMacroLibraryActionKind,
+    pub(super) macro_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -386,14 +398,8 @@ pub(super) fn reset_patcher_widget_state(key: u64) {
 
 pub(super) fn reset_patcher_widget_states_for_path(path: impl AsRef<Path>, fallback_key: u64) {
     let path = path.as_ref().to_string_lossy().to_string();
-    let mut keys = PATCHER_PATH_KEYS.with(|paths| {
-        paths
-            .borrow_mut()
-            .remove(&path)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>()
-    });
+    let mut keys =
+        PATCHER_PATH_KEYS.with(|paths| paths.borrow_mut().remove(&path).unwrap_or_default());
     keys.push(fallback_key);
     keys.sort_unstable();
     keys.dedup();
@@ -405,7 +411,10 @@ pub(super) fn reset_patcher_widget_states_for_path(path: impl AsRef<Path>, fallb
 pub(super) fn register_patcher_path_key(path: impl AsRef<Path>, key: u64) {
     let path = path.as_ref().to_string_lossy().to_string();
     PATCHER_PATH_KEYS.with(|paths| {
-        paths.borrow_mut().entry(path).or_default().insert(key);
+        let mut paths = paths.borrow_mut();
+        let keys = paths.entry(path).or_default();
+        keys.retain(|existing| *existing != key);
+        keys.push(key);
     });
 }
 

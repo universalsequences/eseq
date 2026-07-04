@@ -54,6 +54,8 @@ static int choose_active_worker_count(LiveGraph *lg);
 Engine g_engine;
 _Atomic uint64_t g_param_push_count = 0;
 _Atomic uint64_t g_param_push_fail_count = 0;
+_Atomic uint64_t g_block_event_push_count = 0;
+_Atomic uint64_t g_block_event_push_fail_count = 0;
 
 // Worker threads should be less aggressive than the audio callback thread.
 // The audio thread still actively helps drain the graph, but idle helper
@@ -85,6 +87,11 @@ static _Atomic uint32_t g_graph_trace_silent_streak = 0;
 static _Atomic uint64_t g_param_apply_count = 0;
 static _Atomic uint64_t g_param_drop_oob_count = 0;
 static _Atomic uint64_t g_param_drop_nonfinite_count = 0;
+static _Atomic uint64_t g_block_event_apply_count = 0;
+static _Atomic uint64_t g_block_event_drop_stale_count = 0;
+static _Atomic uint64_t g_block_event_drop_unsupported_count = 0;
+static _Atomic uint64_t g_block_event_drop_invalid_count = 0;
+static _Atomic uint64_t g_block_event_schedule_reject_count = 0;
 
 static bool using_inline_in_cache(const RTNode *node) {
   return node->cached_inPtrs == (float **)node->cached_inInline;
@@ -206,9 +213,20 @@ void initialize_engine(int block_Size, int sample_rate) {
   atomic_store_explicit(&g_graph_trace_silent_streak, 0, memory_order_relaxed);
   atomic_store_explicit(&g_param_push_count, 0, memory_order_relaxed);
   atomic_store_explicit(&g_param_push_fail_count, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_block_event_push_count, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_block_event_push_fail_count, 0, memory_order_relaxed);
   atomic_store_explicit(&g_param_apply_count, 0, memory_order_relaxed);
   atomic_store_explicit(&g_param_drop_oob_count, 0, memory_order_relaxed);
   atomic_store_explicit(&g_param_drop_nonfinite_count, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_block_event_apply_count, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_block_event_drop_stale_count, 0,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_block_event_drop_unsupported_count, 0,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_block_event_drop_invalid_count, 0,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_block_event_schedule_reject_count, 0,
+                        memory_order_relaxed);
 #if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   for (int i = 0; i < MAX_TRACKED_EXECUTION_SLOTS; i++) {
     atomic_store_explicit(&g_inflight_node_ids[i], -1, memory_order_relaxed);
@@ -298,6 +316,204 @@ void apply_params(LiveGraph *g) {
   if (applied > 0) {
     atomic_fetch_add_explicit(&g_param_apply_count, applied, memory_order_acq_rel);
   }
+}
+
+static inline bool graph_block_event_less_or_equal(const GraphBlockEvent *a,
+                                                   const GraphBlockEvent *b) {
+  if (a->frame_offset != b->frame_offset)
+    return a->frame_offset < b->frame_offset;
+  return a->sequence <= b->sequence;
+}
+
+static void stable_sort_block_events(GraphBlockEvent *events,
+                                     GraphBlockEvent *scratch, int count) {
+  if (!events || !scratch || count <= 1)
+    return;
+
+  GraphBlockEvent *src = events;
+  GraphBlockEvent *dst = scratch;
+  bool src_is_events = true;
+  for (int width = 1; width < count; width *= 2) {
+    for (int left = 0; left < count; left += width * 2) {
+      int mid = left + width;
+      int right = left + width * 2;
+      if (mid > count)
+        mid = count;
+      if (right > count)
+        right = count;
+
+      int i = left;
+      int j = mid;
+      int k = left;
+      while (i < mid && j < right) {
+        if (graph_block_event_less_or_equal(&src[i], &src[j])) {
+          dst[k++] = src[i++];
+        } else {
+          dst[k++] = src[j++];
+        }
+      }
+      while (i < mid)
+        dst[k++] = src[i++];
+      while (j < right)
+        dst[k++] = src[j++];
+    }
+
+    GraphBlockEvent *tmp = src;
+    src = dst;
+    dst = tmp;
+    src_is_events = !src_is_events;
+  }
+
+  if (!src_is_events) {
+    memcpy(events, src, (size_t)count * sizeof(GraphBlockEvent));
+  }
+}
+
+static bool block_event_target_is_valid(LiveGraph *lg,
+                                        const GraphBlockEvent *event) {
+  int node_id = (int)event->logical_id;
+  if (node_id < 0 || node_id >= lg->node_count)
+    return false;
+  RTNode *node = &lg->nodes[node_id];
+  if (!node->state || node->logical_id != event->logical_id)
+    return false;
+  return true;
+}
+
+static int drain_block_events_for_callback(LiveGraph *lg, int nframes) {
+  if (!lg || !lg->block_events || !lg->block_event_scratch ||
+      !lg->block_event_sort_scratch) {
+    return 0;
+  }
+
+  int count = 0;
+  GraphBlockEvent event;
+  while (block_events_pop(lg->block_events, &event)) {
+    if (event.aux_count > GBE_AUX_CAP)
+      event.aux_count = GBE_AUX_CAP;
+    if (event.frame_offset >= (uint32_t)nframes) {
+      uint64_t dropped = atomic_fetch_add_explicit(
+                             &g_block_event_drop_invalid_count, 1,
+                             memory_order_acq_rel) +
+                         1;
+      if (dropped <= 16 || (dropped % 128u) == 0) {
+        fprintf(stderr,
+                "[audiograph] dropped out-of-callback block event logical=%llu frame=%u nframes=%d drops=%llu\n",
+                (unsigned long long)event.logical_id, event.frame_offset,
+                nframes, (unsigned long long)dropped);
+      }
+      continue;
+    }
+    if (!block_event_target_is_valid(lg, &event)) {
+      uint64_t dropped = atomic_fetch_add_explicit(
+                             &g_block_event_drop_stale_count, 1,
+                             memory_order_acq_rel) +
+                         1;
+      if (dropped <= 16 || (dropped % 128u) == 0) {
+        fprintf(stderr,
+                "[audiograph] dropped stale block event logical=%llu frame=%u kind=%u drops=%llu\n",
+                (unsigned long long)event.logical_id, event.frame_offset,
+                event.kind, (unsigned long long)dropped);
+      }
+      continue;
+    }
+
+    RTNode *node = &lg->nodes[(int)event.logical_id];
+    if (!node->vtable.schedule_event) {
+      uint64_t dropped = atomic_fetch_add_explicit(
+                             &g_block_event_drop_unsupported_count, 1,
+                             memory_order_acq_rel) +
+                         1;
+      if (dropped <= 16 || (dropped % 128u) == 0) {
+        fprintf(stderr,
+                "[audiograph] dropped unsupported block event logical=%llu frame=%u kind=%u drops=%llu\n",
+                (unsigned long long)event.logical_id, event.frame_offset,
+                event.kind, (unsigned long long)dropped);
+      }
+      continue;
+    }
+
+    if (count >= lg->block_event_scratch_capacity) {
+      uint64_t dropped = atomic_fetch_add_explicit(
+                             &g_block_event_drop_invalid_count, 1,
+                             memory_order_acq_rel) +
+                         1;
+      if (dropped <= 16 || (dropped % 128u) == 0) {
+        fprintf(stderr,
+                "[audiograph] dropped block event scratch overflow logical=%llu frame=%u kind=%u drops=%llu\n",
+                (unsigned long long)event.logical_id, event.frame_offset,
+                event.kind, (unsigned long long)dropped);
+      }
+      continue;
+    }
+
+    lg->block_event_scratch[count++] = event;
+  }
+
+  stable_sort_block_events(lg->block_event_scratch, lg->block_event_sort_scratch,
+                           count);
+  lg->block_event_scratch_count = count;
+  return count;
+}
+
+static void begin_event_slice_for_nodes(LiveGraph *lg, uint64_t block_serial,
+                                        int slice_start,
+                                        int slice_nframes) {
+  for (int i = 0; i < lg->node_count; i++) {
+    RTNode *node = &lg->nodes[i];
+    bool deleted = (node->vtable.process == NULL && node->nInputs == 0 &&
+                    node->nOutputs == 0);
+    if (deleted || !node->state || !node->vtable.begin_event_slice)
+      continue;
+    if (lg->sched.is_orphaned && lg->sched.is_orphaned[i])
+      continue;
+    node->vtable.begin_event_slice(node->state, block_serial, slice_start,
+                                   slice_nframes);
+  }
+}
+
+static int deliver_block_events_for_slice(LiveGraph *lg, int start_index,
+                                          int slice_start,
+                                          int slice_nframes) {
+  int slice_end = slice_start + slice_nframes;
+  int index = start_index;
+  while (index < lg->block_event_scratch_count &&
+         (int)lg->block_event_scratch[index].frame_offset < slice_start) {
+    index++;
+  }
+
+  while (index < lg->block_event_scratch_count) {
+    GraphBlockEvent event = lg->block_event_scratch[index];
+    if ((int)event.frame_offset >= slice_end)
+      break;
+
+    int node_id = (int)event.logical_id;
+    if (node_id >= 0 && node_id < lg->node_count) {
+      RTNode *node = &lg->nodes[node_id];
+      if (node->state && node->logical_id == event.logical_id &&
+          node->vtable.schedule_event) {
+        event.frame_offset -= (uint32_t)slice_start;
+        bool accepted = node->vtable.schedule_event(node->state, &event);
+        if (accepted) {
+          atomic_fetch_add_explicit(&g_block_event_apply_count, 1,
+                                    memory_order_acq_rel);
+        } else {
+          uint64_t rejected = atomic_fetch_add_explicit(
+                                  &g_block_event_schedule_reject_count, 1,
+                                  memory_order_acq_rel) +
+                              1;
+          if (rejected <= 16 || (rejected % 128u) == 0) {
+            fprintf(stderr,
+                    "[audiograph] node rejected block event logical=%llu local_frame=%u kind=%u drops=%llu\n",
+                    (unsigned long long)event.logical_id, event.frame_offset,
+                    event.kind, (unsigned long long)rejected);
+          }
+        }
+      }
+    }
+    index++;
+  }
+  return index;
 }
 
 // ===================== Block Processing =====================
@@ -1203,9 +1419,23 @@ static void graph_trace_log_block(LiveGraph *lg, int nframes, float peak,
       atomic_load_explicit(&g_param_push_fail_count, memory_order_acquire);
   uint64_t param_applied =
       atomic_load_explicit(&g_param_apply_count, memory_order_acquire);
+  uint64_t event_pushes =
+      atomic_load_explicit(&g_block_event_push_count, memory_order_acquire);
+  uint64_t event_fails =
+      atomic_load_explicit(&g_block_event_push_fail_count, memory_order_acquire);
+  uint64_t events_applied =
+      atomic_load_explicit(&g_block_event_apply_count, memory_order_acquire);
+  uint64_t events_stale =
+      atomic_load_explicit(&g_block_event_drop_stale_count, memory_order_acquire);
+  uint64_t events_invalid =
+      atomic_load_explicit(&g_block_event_drop_invalid_count, memory_order_acquire);
+  uint64_t events_unsupported = atomic_load_explicit(
+      &g_block_event_drop_unsupported_count, memory_order_acquire);
+  uint64_t events_rejected = atomic_load_explicit(
+      &g_block_event_schedule_reject_count, memory_order_acquire);
 
   fprintf(stderr,
-          "[audiograph-trace] block=%llu nframes=%d peak=%0.6f silent_streak=%u topology_event=%d edits_ok=%d jobsInFlight=%d activeJobs=%d readyQ=%d waiters=%d readyHead=%llu readyTail=%llu readyMask=%u node_count=%d cached_total_jobs=%d recounted_total_jobs=%d source_count=%d recounted_source_count=%d orphaned=%d deleted=%d dirty=%d has_cycle=%d workers=%d active_workers=%d param_backlog=%u param_head=%u param_tail=%u param_pushes=%llu param_applied=%llu param_fails=%llu\n",
+          "[audiograph-trace] block=%llu nframes=%d peak=%0.6f silent_streak=%u topology_event=%d edits_ok=%d jobsInFlight=%d activeJobs=%d readyQ=%d waiters=%d readyHead=%llu readyTail=%llu readyMask=%u node_count=%d cached_total_jobs=%d recounted_total_jobs=%d source_count=%d recounted_source_count=%d orphaned=%d deleted=%d dirty=%d has_cycle=%d workers=%d active_workers=%d param_backlog=%u param_head=%u param_tail=%u param_pushes=%llu param_applied=%llu param_fails=%llu event_pushes=%llu event_applied=%llu event_fails=%llu event_stale=%llu event_invalid=%llu event_unsupported=%llu event_rejected=%llu\n",
           (unsigned long long)block, nframes, peak, silent_streak,
           topology_event ? 1 : 0, edits_ok ? 1 : 0, jobs, active_jobs,
           ready_qlen, ready_waiters, (unsigned long long)ready_head,
@@ -1215,7 +1445,12 @@ static void graph_trace_log_block(LiveGraph *lg, int nframes, float peak,
           lg->sched.dirty ? 1 : 0, lg->sched.has_cycle ? 1 : 0,
           g_engine.workerCount, active_workers, param_head - param_tail, param_head,
           param_tail, (unsigned long long)param_pushes,
-          (unsigned long long)param_applied, (unsigned long long)param_fails);
+          (unsigned long long)param_applied, (unsigned long long)param_fails,
+          (unsigned long long)event_pushes, (unsigned long long)events_applied,
+          (unsigned long long)event_fails, (unsigned long long)events_stale,
+          (unsigned long long)events_invalid,
+          (unsigned long long)events_unsupported,
+          (unsigned long long)events_rejected);
 
   if (silent_checkpoint &&
       (silent_streak == 1 || silent_streak == 16 ||
@@ -1768,14 +2003,21 @@ void process_next_block(LiveGraph *lg, float *output_buffer, int nframes) {
   }
 
   apply_params(lg);
+  (void)drain_block_events_for_callback(lg, nframes);
+  uint64_t block_serial =
+      atomic_fetch_add_explicit(&lg->block_event_serial, 1, memory_order_acq_rel);
 
   // Process in slices if callback frames exceed internal block size.
   int remaining = nframes;
   int out_offset = 0; // in frames
+  int event_index = 0;
   while (remaining > 0) {
     int slice = remaining;
     if (slice > lg->block_size)
       slice = lg->block_size;
+
+    begin_event_slice_for_nodes(lg, block_serial, out_offset, slice);
+    event_index = deliver_block_events_for_slice(lg, event_index, out_offset, slice);
 
     process_live_block_internal(lg, slice, false);
 

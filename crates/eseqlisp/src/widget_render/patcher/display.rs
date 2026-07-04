@@ -5,6 +5,8 @@ use super::metrics::{
 };
 use super::model::{ArgValue, NodeKind, PatchNode};
 
+const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
+
 pub(super) fn preview(text: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (idx, ch) in text.chars().enumerate() {
@@ -34,6 +36,9 @@ pub(super) fn node_display_label(node: &PatchNode) -> String {
             continue;
         }
         match &node.args[idx] {
+            ArgValue::Literal(value) if value == MISSING_INPUT_SENTINEL => {
+                label.push_str(" ?");
+            }
             ArgValue::Literal(value) if value != "<expr>" => {
                 label.push(' ');
                 label.push_str(value);
@@ -51,6 +56,9 @@ pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
     let display_start = if matches!(
         node.args.first(),
         Some(ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr)
+    ) || matches!(
+        node.args.first(),
+        Some(ArgValue::Literal(value)) if value == MISSING_INPUT_SENTINEL
     ) {
         1
     } else {
@@ -70,7 +78,9 @@ pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
             {
                 Some(idx)
             }
-            ArgValue::Literal(value) if value != "<expr>" => Some(idx),
+            ArgValue::Literal(value) if value != "<expr>" && value != MISSING_INPUT_SENTINEL => {
+                Some(idx)
+            }
             _ => None,
         })
         .last();
@@ -92,6 +102,7 @@ pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
                 return Some(idx);
             }
             match arg {
+                ArgValue::Literal(value) if value == MISSING_INPUT_SENTINEL => Some(idx),
                 ArgValue::Literal(value) if value != "<expr>" => Some(idx),
                 ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr => Some(idx),
                 _ => None,

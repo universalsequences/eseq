@@ -1,0 +1,5 @@
+(defmacro simp7 (input)
+  (def phasor1 (phasor input))
+  (def triangle1 (triangle phasor1))
+  (def scale1 (scale triangle1 0.0 1.0 -1.0 1.0))
+  scale1)

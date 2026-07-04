@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "engine_name": "drums/ultraperc/",
+  "source_file": "instruments/drums/ultraperc/dsp.lisp",
+  "presets": [
+    {"id": "808 Cowbell", "name": "808 Cowbell", "base_note_offset": 0.0, "params": {"engine": 1, "ptch": 0, "dec": 320, "bx": 0.45, "by": 0.45, "bz": 0.15, "ttyp": 1, "tamt": 0.25, "ttun": 2400, "ratl": 0, "ring": 0.08, "driv": 0.25}},
+    {"id": "Claves", "name": "Claves", "base_note_offset": 12.0, "params": {"engine": 2, "ptch": 6, "dec": 180, "bx": 0.6, "by": 0.0, "bz": 0.55, "ttyp": 2, "tamt": 0.35, "ttun": 5200, "tdec": 3, "ratl": 0, "ring": 0}},
+    {"id": "Woodblock Duo", "name": "Woodblock Duo", "base_note_offset": 0.0, "params": {"engine": 2, "ptch": 0, "dec": 240, "bx": 0.5, "by": 0.7, "bz": 0.4, "ttyp": 1, "tamt": 0.4, "ttun": 2000, "ratl": 0.05, "ring": 0.1, "rtun": 5.5}},
+    {"id": "Gamelan Hit", "name": "Gamelan Hit", "base_note_offset": -5.0, "params": {"engine": 3, "ptch": -4, "dec": 1100, "bx": 0.75, "by": 0.3, "bz": 0.5, "ttyp": 1, "tamt": 0.2, "ttun": 2000, "ring": 0.3, "rtun": 6.8, "rdec": 800, "driv": 0.12}},
+    {"id": "Shaker 16s", "name": "Shaker 16s", "base_note_offset": 0.0, "params": {"engine": 4, "dec": 130, "bx": 0.55, "by": 0.35, "bz": 0.5, "tamt": 0.1, "ratl": 0.2, "rgrn": 0.6, "rlen": 15, "ring": 0, "hpf": 800}},
+    {"id": "Tambourine", "name": "Tambourine", "base_note_offset": 0.0, "params": {"engine": 4, "dec": 380, "bx": 0.7, "by": 0.6, "bz": 0.9, "tamt": 0.15, "ttyp": 0, "ttun": 8000, "ratl": 0.55, "rgrn": 0.8, "rlen": 45, "ring": 0.2, "rtun": 9.0, "rdec": 200, "hpf": 1500}},
+    {"id": "Laser Zap", "name": "Laser Zap", "base_note_offset": 12.0, "params": {"engine": 3, "ptch": 10, "dec": 420, "sweep": -40, "swpt": 90, "bx": 0.4, "by": 0.2, "bz": 0.2, "ttyp": 2, "tamt": 0.4, "ttun": 3500, "pnch": 0.5, "driv": 0.3}},
+    {"id": "Trash Bell", "name": "Trash Bell", "base_note_offset": 0.0, "params": {"engine": 1, "ptch": -2, "dec": 260, "bx": 0.8, "by": 0.75, "bz": 0.35, "ttyp": 3, "tamt": 0.5, "ratl": 0.15, "ring": 0.3, "rtun": 7.7, "dirt": 0.5, "driv": 0.45, "lpf": 9000}}
+  ]
+}

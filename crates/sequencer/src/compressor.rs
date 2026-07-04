@@ -128,5 +128,6 @@ pub fn compressor_vtable() -> NodeVTable {
         init: Some(compressor_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }

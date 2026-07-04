@@ -105,5 +105,6 @@ pub fn stereo_panner_vtable() -> NodeVTable {
         init: Some(stereo_panner_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }

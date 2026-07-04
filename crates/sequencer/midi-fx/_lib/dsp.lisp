@@ -4,8 +4,23 @@
 (def fx-max (a b)
   (if (> a b) a b))
 
+(def fx-clamp (value low high)
+  (fx-min (fx-max value low) high))
+
+(def fx-positive-mod (value divisor)
+  (mod (+ (mod value divisor) divisor) divisor))
+
 (def fx-positive-int (value)
   (fx-max 1 (round value)))
+
+(def fx-wrap-transpose-into-range (note low high)
+  (let ((lo (fx-min low high))
+        (hi (fx-max low high)))
+    (if (< note lo)
+      (fx-clamp (+ lo (fx-positive-mod (- note lo) 12)) lo hi)
+      (if (> note hi)
+        (fx-clamp (- hi (fx-positive-mod (- hi note) 12)) lo hi)
+        note))))
 
 (def fx-note-shift (note semitones)
   (merge note :note (+ (get note :note) semitones)))

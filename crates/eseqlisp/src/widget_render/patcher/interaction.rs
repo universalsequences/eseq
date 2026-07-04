@@ -72,22 +72,17 @@ pub(super) fn pan_patcher_by_delta(node: &LayoutNode, delta_x: f32, delta_y: f32
     set_patcher_pan_state(key, state);
 }
 
-pub(super) fn sync_patcher_pan_bounds(node: &LayoutNode, state: &mut PatcherPanState) {
+pub(super) fn sync_patcher_pan_bounds_from_patch(
+    node: &LayoutNode,
+    state: &mut PatcherPanState,
+    patch: &Patch,
+) {
     state.viewport_width = node.rect.width;
     state.viewport_height = node.rect.height;
     let zoom = patcher_zoom(state);
-    if let Ok((_, patch)) = load_patch_from_props(&node.props) {
-        let interaction_state = get_patcher_interaction_state(patcher_state_key(node));
-        let view_key = active_patcher_view_key(&interaction_state);
-        let patch = active_patcher_patch(&patch, &interaction_state);
-        let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
-        let content_size = patch_content_size(&patch);
-        state.content_width = (content_size.0 * zoom).max(node.rect.width);
-        state.content_height = (content_size.1 * zoom).max(node.rect.height);
-    } else {
-        state.content_width = node.rect.width;
-        state.content_height = node.rect.height;
-    }
+    let content_size = patch_content_size(patch);
+    state.content_width = (content_size.0 * zoom).max(node.rect.width);
+    state.content_height = (content_size.1 * zoom).max(node.rect.height);
 }
 
 pub(super) fn zoom_patcher_by_magnify(
@@ -141,7 +136,7 @@ fn load_interactive_patch_for_node(node: &LayoutNode) -> Option<(Patch, PatcherP
     sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
     set_patcher_interaction_state(key, interaction_state);
     let mut pan_state = get_patcher_pan_state(key);
-    sync_patcher_pan_bounds(node, &mut pan_state);
+    sync_patcher_pan_bounds_from_patch(node, &mut pan_state, &patch);
     Some((patch, pan_state, view_key))
 }
 
@@ -1046,7 +1041,7 @@ pub(super) fn handle_patcher_double_click(
     let patch = active_patcher_patch(&root_patch, &state);
     let patch = patch_with_interaction_state(patch, &state, &view_key);
     let mut pan_state = get_patcher_pan_state(key);
-    sync_patcher_pan_bounds(node, &mut pan_state);
+    sync_patcher_pan_bounds_from_patch(node, &mut pan_state, &patch);
     sync_patcher_z_order(&mut state, &view_key, &patch);
     let ordered_nodes = ordered_patch_nodes(&patch, &state, &view_key);
     if let Some(node_id) = hit_patcher_node(

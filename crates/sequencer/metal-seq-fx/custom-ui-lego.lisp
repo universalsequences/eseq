@@ -5,14 +5,15 @@
 (def ui-accent-green () (rgba 0.30 0.82 0.48 1.0))
 (def ui-accent-violet () (rgba 0.62 0.45 0.95 1.0))
 
-(def ui-lego-gap () 0.25)
+(def ui-lego-gap () 0.06125)
 (def ui-lego-small-h () 1.95)
 (def ui-lego-medium-h () 4.08)
-(def ui-lego-dense-h () 3.08)
+(def ui-lego-dense-h () 3.8)
 (def ui-lego-full-h ()
   (+ (ui-lego-medium-h) (ui-lego-small-h) (ui-lego-small-h)
      (ui-lego-gap) (ui-lego-gap)))
 (def ui-lego-col-w () 24.0)
+(def ui-lego-wide-col-w () 30.0)
 (def ui-lego-strip-w () 7.2)
 
 (def ui-lego-title (title accent)
@@ -45,16 +46,16 @@
        :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
        :corner-radius 7
        :border-width 1
-       :padding 0.20
+       :padding 0.24
        :on-click (ui-section-select-callback section)
-    (v-stack :width :fill :height :fill :gap 0.12
+    (v-stack :width :fill :height :fill :gap 0.18
       (ui-lego-title title accent)
-      (box :width :fill :flex 1 :padding 0.06 body))))
+      (box :width :fill :flex 1 :padding 0.12 body))))
 
 (def ui-lego-panel-s (height section surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
-       :corner-radius 7
+       :corner-radius 8 
        :border-width 1
        :padding 0.18
        :on-click (ui-section-select-callback section)
@@ -96,6 +97,20 @@
         (box :width 0.55 :height 0.1)
         body))))
 
+(def ui-lego-plain-surface-width-s (width height section surface body)
+  (box :width width :height height
+       :background-color surface
+       :corner-radius 7
+       :border-width 1
+       :padding 0.16
+       :debug-name "ui-lego-plain-surface"
+       :v-align :center
+       :on-click (ui-section-select-callback section)
+    (box :width :fill :padding 0.12
+      (h-stack :width :fill :gap 0 :align :center
+        (box :width 0.55 :height 0.1)
+        body))))
+
 (def ui-lego-text-row-3 (a b c)
   (box :width :fill :height 1.28 :v-align :start :debug-name "ui-lego-text-row"
     (h-stack :gap 0.34 :align :start a b c)))
@@ -119,6 +134,12 @@
 (def ui-control-block-medium-s (title accent section body)
   (ui-lego-surface-s title (ui-lego-medium-h) accent section :instrument-group-bg body))
 
+(def ui-control-block-small-wide-s (title accent section body)
+  (ui-lego-surface-width-s title (ui-lego-wide-col-w) (ui-lego-small-h) accent section :instrument-group-bg body))
+
+(def ui-control-block-medium-wide-s (title accent section body)
+  (ui-lego-surface-width-s title (ui-lego-wide-col-w) (ui-lego-medium-h) accent section :instrument-group-bg body))
+
 (def ui-control-block-dense-s (title accent section body)
   (ui-lego-surface-s title (ui-lego-dense-h) accent section :instrument-group-bg body))
 
@@ -139,6 +160,9 @@
 
 (def ui-readout-block-small-s (title accent section body)
   (ui-lego-plain-surface-s (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-readout-block-small-wide-s (title accent section body)
+  (ui-lego-plain-surface-width-s (ui-lego-wide-col-w) (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
 
 (def ui-readout-block-dense-s (title accent section body)
   (ui-lego-surface-s title (ui-lego-dense-h) accent section (rgba 0.055 0.058 0.064 1.0) body))
@@ -166,6 +190,15 @@
 
 (def ui-lego-column-full (a)
   (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap) a))
+
+(def ui-lego-column-wide (a b c)
+  (v-stack :width (ui-lego-wide-col-w) :gap (ui-lego-gap) a b c))
+
+(def ui-lego-column-wide-2 (a b)
+  (v-stack :width (ui-lego-wide-col-w) :gap (ui-lego-gap) a b))
+
+(def ui-lego-column-wide-full (a)
+  (v-stack :width (ui-lego-wide-col-w) :gap (ui-lego-gap) a))
 
 (def ui-lego-strip-s (title accent section body)
   (ui-lego-surface-width-s title (ui-lego-strip-w) (ui-lego-full-h) accent section :instrument-group-bg body))
@@ -200,27 +233,28 @@
 (def ui-lego-knob (name title width accent decimals)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
-            :base-value (instrument-param-base-value-prop p)
-            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
-            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
-            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
-            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
-            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
-            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
-            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
-            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
-            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
-            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
-            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
-            :selected-mod-slot (instrument-selected-mod-slot-prop p)
+            :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
+            :base-value (custom-ui-param-base-value-prop p)
+            :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
+            :mod-range-0-slot (custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (custom-ui-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (custom-ui-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (custom-ui-param-knob-mod-slot-prop p 2) :mod-range-2-depth (custom-ui-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (custom-ui-param-knob-mod-slot-prop p 3) :mod-range-3-depth (custom-ui-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (custom-ui-param-knob-mod-slot-prop p 4) :mod-range-4-depth (custom-ui-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (custom-ui-param-knob-mod-slot-prop p 5) :mod-range-5-depth (custom-ui-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (custom-ui-param-knob-mod-slot-prop p 6) :mod-range-6-depth (custom-ui-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (custom-ui-param-knob-mod-slot-prop p 7) :mod-range-7-depth (custom-ui-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (custom-ui-param-knob-mod-slot-prop p 8) :mod-range-8-depth (custom-ui-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
-            :width width :height 2.62
+	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
+            :width width :height 2.82
             :value-align :center
             :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
@@ -228,40 +262,42 @@
 (def ui-lego-knob-s (section name title width accent decimals)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
-            :base-value (instrument-param-base-value-prop p)
-            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
-            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
-            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
-            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
-            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
-            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
-            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
-            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
-            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
-            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
-            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
-            :selected-mod-slot (instrument-selected-mod-slot-prop p)
+            :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
+            :base-value (custom-ui-param-base-value-prop p)
+            :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
+            :mod-range-0-slot (custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (custom-ui-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (custom-ui-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (custom-ui-param-knob-mod-slot-prop p 2) :mod-range-2-depth (custom-ui-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (custom-ui-param-knob-mod-slot-prop p 3) :mod-range-3-depth (custom-ui-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (custom-ui-param-knob-mod-slot-prop p 4) :mod-range-4-depth (custom-ui-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (custom-ui-param-knob-mod-slot-prop p 5) :mod-range-5-depth (custom-ui-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (custom-ui-param-knob-mod-slot-prop p 6) :mod-range-6-depth (custom-ui-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (custom-ui-param-knob-mod-slot-prop p 7) :mod-range-7-depth (custom-ui-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (custom-ui-param-knob-mod-slot-prop p 8) :mod-range-8-depth (custom-ui-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
-            :width width :height 2.62
+	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
+            :width width :height 3.12
             :value-align :center
+	    :arc-color accent
             :on-change (custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-num (name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
               :text-color accent :edit-color :yellow
@@ -273,12 +309,12 @@
 (def ui-lego-num-s (section name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
               :text-color accent :edit-color :yellow
@@ -290,12 +326,12 @@
 (def ui-lego-micro-num-s (section name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.18 :gap 0.16 :align :start
             (label title :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 9.0
               :text-color accent :edit-color :yellow
@@ -304,17 +340,37 @@
               :on-change (custom-ui-param-change-callback-s section p)))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
+(def ui-lego-matrix-s (section name title width height accent)
+  (let ((p (custom-ui-current-tensor-param name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-matrix-" (custom-ui-scope-name) "-" name)
+        (v-stack :width width :height height :gap 0.10 :align :start
+          (label title :font-size 8.2 :width width :height 0.50 :color accent :bg :transparent)
+          (matrix :rows (get p :rows) :cols (get p :cols)
+            :value (custom-ui-tensor-bound-values p)
+            :min (get p :min) :max (get p :max)
+            :control :grid
+            :width width :height (- height 0.60)
+            :on-cell-change (custom-ui-tensor-cell-change-callback-s section p))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
 (def ui-lego-option (name title width options accent)
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (dropdown :value-index (fx-param-value p)
+            (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
+              :bg-color :instrument-control-bg
+              :text-color accent
+              :chevron-color accent
+              :badge-color (rgba 0.16 0.17 0.20 1.0)
+              :border-color accent
+              :border-width 0.05
               :width width :height 0.78 :font-size 8.0
               :on-change (lambda (v)
                 (custom-ui-set-param-in-scope
@@ -327,13 +383,19 @@
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (dropdown :value-index (fx-param-value p)
+            (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
+              :bg-color :instrument-control-bg
+              :text-color accent
+              :chevron-color accent
+              :badge-color (rgba 0.16 0.17 0.20 1.0)
+              :border-color accent
+              :border-width 0.05
               :width width :height 0.78 :font-size 8.0
               :on-change (lambda (v)
                 (do
@@ -348,12 +410,18 @@
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-micro-option-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-micro-option-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-micro-option-" (custom-ui-scope-name) "-" name)
           (box :width width :height 1.18 :v-align :end
-            (dropdown :value-index (fx-param-value p)
+            (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
+              :bg-color '(rgba 0.1 0.1 0.1 1) ;:instrument-control-bg
+              :text-color accent
+              :chevron-color accent
+              :badge-color (rgba 0.16 0.17 0.20 1.0)
+              :border-color (rgba 1.0 1.0 1.0 0.2) 
+              :border-width 0.05
               :width width :height 0.92 :font-size 8.6
               :on-change (lambda (v)
                 (do
@@ -370,8 +438,8 @@
       (subtree :key (str "custom-ui-lego-micro-base-note-" (custom-ui-scope-name))
         (v-stack :width width :height 1.18 :gap 0.16 :align :start
           (label "note" :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
+          (number-picker :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 9.0
             :text-color accent :edit-color :yellow
@@ -383,12 +451,12 @@
 (def ui-lego-row (name title decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-row-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-row-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-row-" (custom-ui-scope-name) "-" name)
           (h-stack :width :fill :height 0.86 :gap 0.35 :align :baseline
             (label title :font-size 8.8 :width 6.2 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
               :text-align :left
@@ -403,8 +471,8 @@
       (subtree :key (str "custom-ui-lego-base-note-" (custom-ui-scope-name))
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
           (label "note" :font-size 8.2 :width width :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
+          (number-picker :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 10.2
             :text-color accent :edit-color :yellow
@@ -416,12 +484,12 @@
 (def ui-adsr-number (name title decimals unit)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label title :font-size 10 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.5
               :text-align :center
@@ -434,12 +502,12 @@
   (if name
     (let ((p (custom-ui-current-param name)))
       (if p
-        (instrument-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
+        (custom-ui-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
           (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
             (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
               (label title :font-size 10 :color :dim :bg :transparent)
-              (number-picker :value (fx-param-value p)
-                :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+              (number-picker :value (custom-ui-param-value p)
+                :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
                 :unit unit
                 :noui true :font-size 10.5
                 :text-align :center
@@ -628,3 +696,170 @@
   (if (= custom-ui-selected-section section-b)
     (ui-adsr-c title-b attack-b decay-b sustain-b release-b)
     (ui-adsr-c title-a attack-a decay-a sustain-a release-a)))
+
+;; ---------------------------------------------------------------------------
+;; Character variants — parametric pieces for giving an instrument its own
+;; visual identity instead of the uniform badge+dropdown look.
+;; ---------------------------------------------------------------------------
+
+;; Fully parametric panel: custom surface + border colors and an optional
+;; accent stripe down the left edge. stripe-color may be false for no stripe.
+(def ui-lego-panel-x-s (section width height surface border-color stripe-color body)
+  (box :width width :height height
+       :background-color surface
+       :corner-radius 16
+       :border-width 1
+       :border-color border-color
+       :padding 0.18
+       :on-click (ui-section-select-callback section)
+    (h-stack :width :fill :height :fill :gap 0.24 :align :center
+      (if stripe-color
+        (box :width 0.26 :height (* height 0.6) :background-color stripe-color :corner-radius 2)
+        (box :width 0.02 :height 0.1))
+      (box :flex 1 :height :fill :padding 0.04 body))))
+
+;; Solid colored tab block (Ableton-style source tag like "1" / "2" / "N").
+(def ui-lego-tab-s (section text width height color text-color)
+  (button text :width width :height height
+       :font-size 8.8 :color text-color
+       :background-color color
+       :corner-radius 3
+       :h-align :center :v-align :center
+       :on-click (ui-section-select-callback section)
+   ; (label text :font-size 8.8 :color text-color :bg :transparent)
+    ))
+
+;; Accent text header with underline — alternative to ui-lego-badge-s.
+(def ui-lego-header-s (section title width accent)
+  (box :width width :height 1.18 :v-align :end :on-click (ui-section-select-callback section)
+    (v-stack :width width :gap 0.14 :align :start
+      (label title :font-size 9.2 :width width :color accent :bg :transparent)
+      (box :width width :height 0.10 :background-color accent :corner-radius 1))))
+
+;; Param-bound vertical fader.
+(def ui-lego-vfader-s (section name width height accent)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-vfader-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-vfader-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
+          (vslider :width 0.1 :height height
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p)
+            :origin (custom-ui-param-control-min p)
+            :value (custom-ui-param-value p)
+            :color :white
+            :fill accent
+            :dot-color (rgba 0.16 0.16 0.18 1.0)
+            :on-change (custom-ui-param-change-callback-s section p))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+;; Fader cell: vertical fader with an editable value readout under it.
+(def ui-lego-fader-s (section name width fader-height accent decimals unit)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (v-stack :width width :gap 0.10 :align :center
+        (ui-lego-vfader-s section name 0.7 fader-height accent)
+        (number-picker :value (custom-ui-param-value p)
+          :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
+          :unit unit
+          :noui true :font-size 8.6
+          :text-color accent :edit-color :yellow
+          :text-align :center
+          :width width :height 0.46
+          :on-change (custom-ui-param-change-callback-s section p)))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+;; Click-to-cycle chip: shows the current option, click advances (wraps).
+;; For 2-3 option params where a dropdown is overkill.
+(def ui-lego-chip-cycle-s (section name labels width accent)
+  (let ((p (custom-ui-current-param name))
+        (scope (custom-ui-current-scope)))
+    (if p
+      ;; the value is read concretely, so it must be part of the subtree key
+      ;; for the chip to rebuild when the param changes
+      (let ((idx (round (- (reactive-value (custom-ui-param-value p)) (get p :min))))
+            (n (length labels)))
+        (subtree :key (str "custom-ui-lego-chip-cycle-" (custom-ui-scope-name) "-" name "-" idx)
+          (box :width width :height 1.18 :v-align :end
+            (button (nth labels idx)
+              :width width :height 0.92 :padding 0 :font-size 8.8
+              :background-color :instrument-control-bg
+              :color accent
+              :on-click (lambda (x y r)
+                (do
+                  (custom-ui-select-section-in-scope scope section)
+                  (custom-ui-set-param-in-scope scope p
+                    (+ (get p :min) (mod (+ idx 1) n)))))))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+;; ---------------------------------------------------------------------------
+;; Mode-driven center-panel pieces: a section click (any panel's on-click or a
+;; ui-lego-mode-tab-s) sets custom-ui-selected-section; the instrument
+;; dispatches on it to swap center views.
+;; ---------------------------------------------------------------------------
+
+;; Selection-aware surface: brighter color when the section drives the center.
+(def ui-lego-sel-surface (section selected-surface surface)
+  (if (= custom-ui-selected-section section) selected-surface surface))
+
+;; Mode tab (Ableton's little filled selector box): accent-filled when its
+;; section is selected, dark with accent text otherwise. Click selects.
+(def ui-lego-mode-tab-s (section text width height accent)
+  (ui-lego-tab-s section text width height
+    (if (= custom-ui-selected-section section) accent (rgba 0.13 0.135 0.15 1.0))
+    (if (= custom-ui-selected-section section) :black accent)))
+
+;; Accent-tinted detail ADSR body — panel-less, for composing inside a larger
+;; continuous surface (mode-driven center panels).
+(def ui-detail-adsr-body-x-s (section title accent attack decay sustain release)
+  (let ((scope (custom-ui-current-scope)))
+      (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+        (adsr-editor
+          :attack (ui-param-bound-value attack 5)
+          :decay (ui-param-bound-value decay 120)
+          :sustain (ui-param-bound-value sustain 0.7)
+          :release (ui-param-bound-value release 120)
+          :width 13.2 :height :fill
+          :background-color :instrument-control-bg
+          :on-change (lambda (env)
+            (do
+              (custom-ui-select-section-in-scope scope section)
+              (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
+              (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
+              (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
+              (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+        (v-stack :width 8.2 :height :fill :gap 0.10 :align :start
+          (ui-lego-badge-dark title 7.7 accent)
+          (h-stack :gap 0.14 :align :start
+            (ui-lego-micro-num-s section attack "atk" 3.7 0 "ms" accent)
+            (ui-lego-micro-num-s section decay "dec" 3.7 0 "ms" accent))
+          (h-stack :gap 0.14 :align :start
+            (ui-lego-micro-num-s section sustain "sus" 3.7 2 false accent)
+            (ui-lego-micro-num-s section release "rel" 3.7 0 "ms" accent))))))
+
+;; Accent-tinted detail ADSR — like ui-detail-adsr-s but with a custom accent
+;; so per-mode views keep their identity color.
+(def ui-detail-adsr-x-s (section title accent attack decay sustain release)
+  (ui-readout-panel-medium-s section
+    (ui-detail-adsr-body-x-s section title accent attack decay sustain release)))
+
+;; Hairline divider for sectioning a continuous panel.
+(def ui-lego-divider ()
+  (box :width :fill :height 0.05 :background-color (rgba 1.0 1.0 1.0 0.07) :corner-radius 1))
+
+;; On/off chip: filled with accent when on, dark when off. Click toggles.
+(def ui-lego-chip-toggle-s (section name text width accent)
+  (let ((p (custom-ui-current-param name))
+        (scope (custom-ui-current-scope)))
+    (if p
+      (let ((on (> (reactive-value (custom-ui-param-value p)) 0.5)))
+        (subtree :key (str "custom-ui-lego-chip-toggle-" (custom-ui-scope-name) "-" name "-" (if on 1 0))
+          (box :width width :height 1.18 :v-align :end
+            (button text
+              :width width :height 0.92 :padding 0 :font-size 8.8
+              :background-color (if on accent :instrument-control-bg)
+              :color (if on :black :dim)
+              :on-click (lambda (x y r)
+                (do
+                  (custom-ui-select-section-in-scope scope section)
+                  (custom-ui-set-param-in-scope scope p (if on 0 1))))))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))

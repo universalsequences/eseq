@@ -285,7 +285,7 @@ Engine-owned details (all timing math, hence not lisp):
 ### Compile-once update bodies (critical perf note)
 
 Tick mode today ships `:tick` as a **source string** re-evaluated each tick
-(`RegisteredAccumulatorCallback::Source`, `lisp_effect.rs:7572`). That is fine at low
+(`RegisteredAccumulatorCallback::Source`, `lisp_host.rs:7572`). That is fine at low
 tick rates but **will not scale** to per-node-event invocation. Graph mode must
 **compile each `:update` (and `:gather`) once** at manifest-load time into reusable
 bytecode/closures on the scheduler VM, then invoke with bound context per event.
@@ -401,7 +401,7 @@ overrides. `#[serde(default)]` everywhere; round-trip test (old projects load em
   `firing_candidate` (`:827`), `commit_firing` (`:864`), `quantized_fire_timing`
   (`:923`), `apply_energy_decay`/`finest_decay_index` (`:764`), `GridBoundaryClock`
   (`:236`), `neuron_seed_track_mask` (`:333`).
-- `crates/sequencer/src/lisp_effect.rs` — `def-sequencer`/`register_sequencer_impl`
+- `crates/sequencer/src/lisp_host.rs` — `def-sequencer`/`register_sequencer_impl`
   (`:4294`/`:7534`), `RegisteredAccumulatorCallback::Source` (`:7572`), `seq-emit`
   builtin + `build_seq_emit_event` (`:4309`/`:7629`), the gen-* / state-* context
   builtins (`:4326`+).

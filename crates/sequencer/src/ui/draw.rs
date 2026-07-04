@@ -216,8 +216,8 @@ fn draw_global_info(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 
     // ── Row 1: Pattern buttons ──
-    let cur_pat = app.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-    let num_pats = app.state.pattern.num_patterns.load(Ordering::Relaxed) as usize;
+    let cur_pat = app.state.current_scene_index();
+    let num_pats = app.state.scene_count();
 
     let row1_y = area.y + 1;
     let row1_w = area.width.saturating_sub(AUDIO_STATUS_WIDTH); // leave room for meter + CPU box

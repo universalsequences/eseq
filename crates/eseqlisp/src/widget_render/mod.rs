@@ -3,6 +3,8 @@ pub mod box_widget;
 pub mod button;
 pub mod cable;
 pub mod dropdown;
+pub mod eq8_editor;
+pub mod event_view;
 pub mod grid;
 pub mod hslider;
 pub mod hstack;
@@ -10,6 +12,7 @@ pub mod image;
 pub mod knob;
 pub mod knob_number;
 pub mod label;
+pub mod live_audio;
 pub mod matrix;
 pub mod mixer_meter;
 pub mod modulator_curve;
@@ -19,6 +22,7 @@ pub mod patcher;
 pub mod response_curve_editor;
 pub mod scroll;
 pub mod sdf_widget;
+pub mod spectrogram;
 pub mod tabs;
 pub mod text_input;
 pub mod time_view;
@@ -30,6 +34,7 @@ pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
 pub mod waveform;
+pub mod wavetable_viewer;
 pub mod wrap;
 
 use std::cell::RefCell;
@@ -370,6 +375,7 @@ pub enum MouseEventOutcome {
 pub enum WidgetCursor {
     Default,
     EwResize,
+    NsResize,
     DragCopy,
     DragNotAllowed,
 }
@@ -495,6 +501,42 @@ pub struct MetalWaveformPrimitive {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
+pub struct MetalWavetablePrimitive {
+    pub rect: Rect,
+    /// Cache key for the GPU buffer (the bank file path).
+    pub bank_key: String,
+    /// Full bank data, wave-major; uploaded once per bank_key.
+    pub data: std::sync::Arc<Vec<f32>>,
+    pub frame_len: u32,
+    pub set_base: u32,
+    pub waves_in_set: u32,
+    pub wave_pos: f32,
+    pub warp: f32,
+    pub fold: f32,
+    pub selected_color: Color,
+    pub inactive_color: Color,
+    pub bg_color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct MetalLiveSpectrogramPrimitive {
+    pub rect: Rect,
+    pub data_key: String,
+    pub mode: u32,
+    pub freq_scale: u32,
+    pub min_hz: f32,
+    pub max_hz: f32,
+    pub min_color: Color,
+    pub mid_color: Color,
+    pub max_color: Color,
+    pub eq_line_color: Color,
+    pub eq_fill_color: Color,
+    pub background_color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub struct MetalImagePrimitive {
     pub widget_id: u64,
     pub rect: Rect,
@@ -565,6 +607,8 @@ pub enum MetalPrimitive {
     PatchCable(MetalPatchCablePrimitive),
     Circle(MetalCirclePrimitive),
     Waveform(MetalWaveformPrimitive),
+    Wavetable(MetalWavetablePrimitive),
+    LiveSpectrogram(MetalLiveSpectrogramPrimitive),
     Image(MetalImagePrimitive),
     WidgetInstance {
         widget_type: String,
@@ -813,6 +857,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &vslider::VSLIDER_WIDGET,
     &button::BUTTON_WIDGET,
     &toggle::TOGGLE_WIDGET,
+    &event_view::EVENT_VIEW_WIDGET,
     &matrix::MATRIX_WIDGET,
     &knob::KNOB_WIDGET,
     &knob_number::KNOB_NUMBER_WIDGET,
@@ -825,6 +870,9 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &timeline::TIMELINE_WIDGET,
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
+    &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
+    &spectrogram::SPECTROGRAM_WIDGET,
+    &eq8_editor::EQ8_EDITOR_WIDGET,
     &vstack::VSTACK_WIDGET,
     &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,
@@ -964,7 +1012,7 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
             index.hash(hasher);
             kind.hash(hasher);
         }
-        Value::NativeFunction(_) => {}
+        Value::NativeFunction(_) | Value::HostHandle { .. } => {}
     }
 }
 
@@ -1020,7 +1068,10 @@ fn value_contains_reactive_ref(value: &Value) -> bool {
 
 #[cfg(target_os = "macos")]
 fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
-    let mut keys = props.keys().collect::<Vec<_>>();
+    let mut keys = props
+        .keys()
+        .filter(|key| !is_internal_source_prop(key))
+        .collect::<Vec<_>>();
     keys.sort();
     keys.len().hash(hasher);
     for key in keys {
@@ -1032,8 +1083,23 @@ fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
 }
 
 #[cfg(target_os = "macos")]
+fn is_internal_source_prop(key: &str) -> bool {
+    matches!(
+        key,
+        crate::vm::SOURCE_BUFFER_ID_PROP
+            | crate::vm::SOURCE_MODULE_PATH_PROP
+            | crate::vm::SOURCE_SYMBOL_PROP
+            | crate::vm::SOURCE_START_BYTE_PROP
+            | crate::vm::SOURCE_END_BYTE_PROP
+            | crate::vm::SOURCE_REVISION_PROP
+    )
+}
+
+#[cfg(target_os = "macos")]
 pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
     let mut shaders = Vec::new();
+    shaders.push(("tile-chrome", None, TILE_CHROME_SHADER));
+    shaders.push(("tile-tab", None, TILE_TAB_SHADER));
     shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
     shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
     shaders.push(("patcher-back-chevron", None, PATCHER_BACK_CHEVRON_SHADER));
@@ -1046,6 +1112,83 @@ pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'sta
     }
     shaders
 }
+
+#[cfg(target_os = "macos")]
+pub const TILE_CHROME_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.0001);
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+
+    float radius = clamp(in.corner_radius, 0.0, min(aspect, 1.0));
+    float2 half_size = float2(aspect, 1.0);
+    float d = sdf_rounded_rect(p, half_size, radius);
+    float aa = max(fwidth(d), 0.001);
+    float outer_mask = smoothstep(aa, -aa, d);
+
+    float border_px = max(in.uniform_a.x, 0.0);
+    float border_mask = 0.0;
+    float fill_mask = outer_mask;
+    if (border_px > 0.0) {
+        float border_thickness = border_px * aa;
+        float2 inner_size = max(half_size - float2(border_thickness), float2(0.001));
+        float inner_radius = max(radius - border_thickness, 0.0);
+        float inner_d = sdf_rounded_rect(p, inner_size, inner_radius);
+        float inner_aa = max(fwidth(inner_d), 0.001);
+        float inner_mask = smoothstep(inner_aa, -inner_aa, inner_d);
+        border_mask = clamp(outer_mask - inner_mask, 0.0, 1.0);
+        fill_mask = inner_mask;
+    }
+
+    float4 fill = float4(in.color_a.rgb, in.color_a.a * fill_mask);
+    float4 border = float4(in.color_b.rgb, in.color_b.a * border_mask);
+    float out_alpha = fill.a + border.a * (1.0 - fill.a);
+    if (out_alpha <= 0.002) {
+        discard_fragment();
+    }
+    float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
+    return float4(out_rgb, out_alpha);
+}
+"#;
+
+#[cfg(target_os = "macos")]
+pub const TILE_TAB_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * in.aspect, (in.uv.y - 0.5) * 2.0);
+
+    float r = in.corner_radius > 0.0 ? in.corner_radius : 0.75;
+    r = min(r, min(in.aspect, 1.0));
+    float2 half_size = float2(in.aspect - r, 1.0 - r);
+    float2 q = abs(p) - half_size;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+
+    float edge = fwidth(d) * 1.2;
+    float mask = smoothstep(edge, -edge, d);
+    if (mask < 0.002) { discard_fragment(); }
+
+    float border_px = in.value_t > 0.5 ? 1.25 : 0.0;
+    float inner_d = d + border_px * max(edge, 0.001);
+    float inner_mask = smoothstep(edge, -edge, inner_d);
+    float border_mask = clamp(mask - inner_mask, 0.0, 1.0);
+
+    float top_light = smoothstep(1.0, 0.10, in.uv.y);
+    float bottom_shadow = smoothstep(0.35, 1.0, in.uv.y);
+    float3 fill_lit = in.color_a.rgb;
+    fill_lit = mix(fill_lit, in.color_c.rgb, in.color_c.a * top_light * 0.05);
+    fill_lit = mix(fill_lit, in.color_d.rgb, in.color_d.a * bottom_shadow * 0.05);
+    float3 border_lit = in.color_b.rgb;
+    border_lit = mix(border_lit, in.color_c.rgb, in.color_c.a * top_light);
+    border_lit = mix(border_lit, in.color_d.rgb, in.color_d.a * bottom_shadow);
+
+    float4 fill = float4(fill_lit, in.color_a.a * inner_mask);
+    float4 border = float4(border_lit, in.color_b.a * border_mask);
+    float out_alpha = fill.a + border.a * (1.0 - fill.a);
+    if (out_alpha <= 0.002) { discard_fragment(); }
+    float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
+    return float4(out_rgb, out_alpha);
+}
+"#;
 
 #[cfg(target_os = "macos")]
 pub fn widget_primitives_for_node(
@@ -2045,6 +2188,8 @@ fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetVi
         }
         MetalPrimitive::Circle(c) => c.center[1] += dy,
         MetalPrimitive::Waveform(w) => w.rect.row += dy,
+        MetalPrimitive::Wavetable(w) => w.rect.row += dy,
+        MetalPrimitive::LiveSpectrogram(s) => s.rect.row += dy,
         MetalPrimitive::Image(i) => i.rect.row += dy,
         MetalPrimitive::WidgetInstance { instance, .. } => {
             let ndc_dy = -(dy * viewport.cell_h / viewport.vp_h) * 2.0;
@@ -2335,6 +2480,38 @@ mod tests {
                     "waveform:{}:{}",
                     rect_token(waveform.rect),
                     waveform.sample_key
+                )
+            }
+            MetalPrimitive::Wavetable(wavetable) => {
+                format!(
+                    "wavetable:{}:{}:{}:{}:{:08x}:{:08x}:{:08x}:{}:{}:{}",
+                    rect_token(wavetable.rect),
+                    wavetable.bank_key,
+                    wavetable.set_base,
+                    wavetable.waves_in_set,
+                    wavetable.wave_pos.to_bits(),
+                    wavetable.warp.to_bits(),
+                    wavetable.fold.to_bits(),
+                    color_token(wavetable.selected_color),
+                    color_token(wavetable.inactive_color),
+                    color_token(wavetable.bg_color)
+                )
+            }
+            MetalPrimitive::LiveSpectrogram(spectrogram) => {
+                format!(
+                    "live-spectrogram:{}:{}:{}:{}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}",
+                    rect_token(spectrogram.rect),
+                    spectrogram.data_key,
+                    spectrogram.mode,
+                    spectrogram.freq_scale,
+                    spectrogram.min_hz,
+                    spectrogram.max_hz,
+                    color_token(spectrogram.min_color),
+                    color_token(spectrogram.mid_color),
+                    color_token(spectrogram.max_color),
+                    color_token(spectrogram.eq_line_color),
+                    color_token(spectrogram.eq_fill_color),
+                    color_token(spectrogram.background_color)
                 )
             }
             MetalPrimitive::Image(image) => {

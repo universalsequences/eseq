@@ -119,6 +119,8 @@ struct Namespace {
 
 #[derive(Debug, Default)]
 pub struct ReactiveSetOutcome {
+    pub registered: bool,
+    pub changed: bool,
     pub effect_dirty: bool,
     pub widget_ids: Vec<u64>,
 }
@@ -156,6 +158,15 @@ impl ReactiveRegistry {
         Value::Map(map)
     }
 
+    /// Cheap unchanged check used by Runtime::set_reactive to skip the full
+    /// set pipeline (subscriber lookup, value clones) for no-op writes.
+    pub fn is_unchanged(&self, namespace: &str, field: &str, value: &Value) -> bool {
+        self.namespaces
+            .get(namespace)
+            .and_then(|namespace_entry| namespace_entry.fields.get(field))
+            .is_some_and(|current| current == value)
+    }
+
     pub fn set(
         &mut self,
         namespace: &str,
@@ -171,7 +182,22 @@ impl ReactiveRegistry {
         let changed_indices = changed_numeric_indices(previous, &value);
         let unchanged = previous.is_some_and(|current| *current == value);
         if unchanged {
-            return ReactiveSetOutcome::default();
+            return ReactiveSetOutcome {
+                registered: true,
+                ..ReactiveSetOutcome::default()
+            };
+        }
+        {
+            static SCENE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *SCENE_TRACE
+                .get_or_init(|| std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1"))
+            {
+                eprintln!(
+                    "[reactive-set-changed] {namespace}.{field} changed_indices={:?} had_previous={}",
+                    changed_indices,
+                    previous.is_some()
+                );
+            }
         }
 
         let key = ReactiveBindingKey::field(namespace, field);
@@ -216,6 +242,8 @@ impl ReactiveRegistry {
         widgets.sort_unstable();
         widgets.dedup();
         ReactiveSetOutcome {
+            registered: true,
+            changed: true,
             effect_dirty: enqueue_effect_dirty,
             widget_ids: widgets,
         }
@@ -244,7 +272,10 @@ impl ReactiveRegistry {
             .as_ref()
             .is_some_and(|previous| *previous == value)
         {
-            return ReactiveSetOutcome::default();
+            return ReactiveSetOutcome {
+                registered: true,
+                ..ReactiveSetOutcome::default()
+            };
         }
 
         if let Some(number) = numeric_value(&value) {
@@ -327,6 +358,8 @@ impl ReactiveRegistry {
         widgets.sort_unstable();
         widgets.dedup();
         ReactiveSetOutcome {
+            registered: true,
+            changed: true,
             effect_dirty: enqueue_effect_dirty,
             widget_ids: widgets,
         }

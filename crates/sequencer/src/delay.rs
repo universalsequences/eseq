@@ -212,5 +212,6 @@ pub fn delay_vtable() -> NodeVTable {
         init: Some(delay_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }

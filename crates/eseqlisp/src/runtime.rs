@@ -57,6 +57,7 @@ pub(crate) struct ClearedEffectSource {
 
 struct ActiveSubtreeReplacement {
     source_buffer_id: Option<BufferId>,
+    source_module: Option<PathBuf>,
     target: EffectTarget,
     subtree_root_id: u64,
     tree: Value,
@@ -76,6 +77,10 @@ pub struct UiInvalidationTrace {
     pub reevaluated_subtree_roots: usize,
     pub pending_subtree_patch_count: usize,
     pub subtree_failure_reason: Option<String>,
+    pub reactive_apply_duration: Duration,
+    pub reactive_flush_duration: Duration,
+    pub reactive_cycle_duration: Duration,
+    pub reactive_exec_timings: Vec<(String, Duration)>,
     pub relayout_mode: Option<String>,
     pub relayout_duration: Duration,
     pub relayout_failure_reason: Option<String>,
@@ -83,6 +88,7 @@ pub struct UiInvalidationTrace {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReactiveSetResult {
+    pub changed: bool,
     pub effects_dirty: bool,
     pub widgets_dirty: bool,
 }
@@ -348,7 +354,7 @@ fn format_ui_invalidation_trace(
     let relayout_failure = trace.relayout_failure_reason.as_deref().unwrap_or("-");
     let subtree_failure = trace.subtree_failure_reason.as_deref().unwrap_or("-");
     format!(
-        "[ui-trace] dirty=[{dirty_fields}] affected=[{affected_buffers}] targets=a{} i{} flushes={} pending={} reruns=full:{} sub:{} roots:{} patches:{} subtree-fail={} relayout={} relayout_ms={:.3} fail={} hot=[{}]",
+        "[ui-trace] dirty=[{dirty_fields}] affected=[{affected_buffers}] targets=a{} i{} flushes={} pending={} reruns=full:{} sub:{} roots:{} patches:{} apply_ms={:.3} flush_ms={:.3} total_ms={:.3} subtree-fail={} relayout={} relayout_ms={:.3} fail={} hot=[{}]",
         trace.active_buffer_targets,
         trace.inactive_buffer_targets,
         trace.widget_tree_flushes,
@@ -357,6 +363,9 @@ fn format_ui_invalidation_trace(
         trace.subtree_reruns,
         trace.reevaluated_subtree_roots,
         trace.pending_subtree_patch_count,
+        trace.reactive_apply_duration.as_secs_f64() * 1000.0,
+        trace.reactive_flush_duration.as_secs_f64() * 1000.0,
+        trace.reactive_cycle_duration.as_secs_f64() * 1000.0,
         subtree_failure,
         relayout_mode,
         trace.relayout_duration.as_secs_f64() * 1000.0,
@@ -366,7 +375,8 @@ fn format_ui_invalidation_trace(
 }
 
 fn trace_ui_enabled() -> bool {
-    std::env::var_os("ESEQLISP_TRACE_UI").is_some()
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQLISP_TRACE_UI").is_some())
 }
 
 fn trace_ui_field_enabled(namespace: &str, field: &str) -> bool {
@@ -437,6 +447,7 @@ fn expand_sdf_expression(
         HashMap::new(),
         0,
         macros.clone(),
+        None,
     )
     .expand_macros(expr, 0)
 }
@@ -664,14 +675,18 @@ pub enum TileOp {
         current: String,
         tabs: Vec<LayoutTabSpec>,
     },
+    ClearWindowTabsFor {
+        current: String,
+    },
     SetLayout(LayoutSpec),
 }
 
 /// Declarative layout specification for `set-layout`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayoutTabSpec {
     pub label: String,
     pub buffer_name: String,
+    pub on_close: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -734,6 +749,10 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_cleared_effect_sources: Vec<ClearedEffectSource>,
     pub pending_switch_buffer: Option<String>,
     pub pending_set_text: Option<String>,
+    pub pending_set_text_for: Vec<(String, String)>,
+    pub pending_append_text_for: Vec<(String, String, String)>,
+    pub pending_append_lines_for: Vec<(String, Vec<String>)>,
+    pub pending_remove_lines_for: Vec<(String, Vec<String>)>,
     pub pending_set_lines: Option<Vec<String>>,
     pub pending_set_buffer_styles: Option<Vec<BufferTextStyle>>,
     pub pending_goto_line: Option<usize>,
@@ -900,6 +919,7 @@ impl NativeContext {
             .pending_buffer_widget_trees
             .push(PendingUiUpdate::FullTree(PendingWidgetTree {
                 source_buffer_id,
+                source_module: None,
                 target: EffectTarget::BufferName(buffer_name),
                 tree: tree.deep_clone(),
                 reactive_dependencies: Vec::new(),
@@ -920,6 +940,34 @@ impl NativeContext {
 
     pub fn buffer_names(&self) -> Vec<String> {
         self.shared.borrow().buffer_names.clone()
+    }
+
+    pub fn set_buffer_text_for(&mut self, name: String, text: String) {
+        self.shared
+            .borrow_mut()
+            .pending_set_text_for
+            .push((name, text));
+    }
+
+    pub fn append_buffer_text_for(&mut self, name: String, text: String, separator: String) {
+        self.shared
+            .borrow_mut()
+            .pending_append_text_for
+            .push((name, text, separator));
+    }
+
+    pub fn append_buffer_lines_for(&mut self, name: String, lines: Vec<String>) {
+        self.shared
+            .borrow_mut()
+            .pending_append_lines_for
+            .push((name, lines));
+    }
+
+    pub fn remove_buffer_lines_for(&mut self, name: String, lines: Vec<String>) {
+        self.shared
+            .borrow_mut()
+            .pending_remove_lines_for
+            .push((name, lines));
     }
 
     // ── Tiling operations ─────────────────────────────────────────────────
@@ -985,6 +1033,13 @@ impl NativeContext {
             .borrow_mut()
             .pending_tile_ops
             .push(TileOp::SetWindowTabsFor { current, tabs });
+    }
+
+    pub fn clear_window_tabs_for(&mut self, current: String) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::ClearWindowTabsFor { current });
     }
 
     pub fn window_hide_status(&mut self) {
@@ -1120,10 +1175,11 @@ impl Runtime {
                     return Value::String(message);
                 }
             };
+            let loaded_path_display = loaded.path.display().to_string();
             match vm.eval_module_source(loaded.path, &loaded.text, loaded.revision) {
                 Ok(v) => v.unwrap_or(Value::Bool(true)),
                 Err(e) => {
-                    let message = format!("load: eval error: {e:?}");
+                    let message = format!("load: {loaded_path_display}: eval error: {e:?}");
                     vm.source_load_errors.push(message.clone());
                     Value::String(message)
                 }
@@ -1391,6 +1447,30 @@ impl Runtime {
         self.register_native_impl(name, Some(signature.into()), Some(docs.into()), f);
     }
 
+    pub fn register_vm_native_with_docs<F>(
+        &mut self,
+        name: &str,
+        signature: impl Into<String>,
+        docs: impl Into<String>,
+        f: F,
+    ) where
+        F: Fn(Vec<Value>, &mut crate::vm::VM) -> Value + 'static,
+    {
+        self.vm.register_native_with_vm(name, f);
+        self.symbol_metadata.insert(
+            name.to_string(),
+            SymbolMetadata {
+                signature: signature.into(),
+                docs: docs.into(),
+            },
+        );
+        self.invalidate_symbol_cache();
+    }
+
+    pub fn add_global_store_hook(&mut self, hook: crate::vm::GlobalStoreHook) {
+        self.vm.add_global_store_hook(hook);
+    }
+
     pub fn document_symbol(
         &mut self,
         name: impl Into<String>,
@@ -1529,6 +1609,7 @@ impl Runtime {
             "grid",
             "tabs",
             "response-curve-editor",
+            "eq8-editor",
             "timeline",
             "transport-clock",
             "waveform",
@@ -1630,6 +1711,34 @@ impl Runtime {
             }
             self.invalidate_symbol_cache();
             self.flush_widget_trees();
+        }
+        result
+    }
+
+    pub fn eval_source_at_path(
+        &mut self,
+        path: PathBuf,
+        source: &str,
+    ) -> Result<Option<Value>, crate::vm::VMError> {
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.vm.set_current_effect_context(current_buffer_id);
+        let path = self.vm.source_manager.canonicalize_path(&path);
+        let revision = crate::hot_reload::hash_source(source);
+        let result = self.vm.eval_module_source(path, source, revision);
+        if result.is_ok() {
+            self.flush_vm_reactive_sets();
+            if self.sync_theme_to_global {
+                self.sync_theme_from_vm();
+            }
+            self.invalidate_symbol_cache();
+            self.flush_widget_trees();
+        }
+        let load_errors = self.vm.take_source_load_errors();
+        if !load_errors.is_empty() {
+            for error in load_errors {
+                self.vm.source_manager.push_diagnostic(error);
+            }
+            return Err(crate::vm::VMError::CompileError);
         }
         result
     }
@@ -1874,6 +1983,13 @@ impl Runtime {
         self.vm.source_manager.module_graph().revision()
     }
 
+    pub fn evaluated_source_text(&self, path: &std::path::Path, revision: u64) -> Option<String> {
+        self.vm
+            .source_manager
+            .evaluated_source(path, revision)
+            .map(str::to_string)
+    }
+
     #[cfg(test)]
     pub(crate) fn profile_eval_str(
         &mut self,
@@ -1946,6 +2062,19 @@ impl Runtime {
         field: &str,
         value: Value,
     ) -> ReactiveSetResult {
+        // Fast path: unchanged writes skip the subscriber lookup and clones
+        // below. Hot sync paths issue thousands of no-op sets per frame.
+        if !trace_ui_enabled()
+            && self
+                .reactive_registry
+                .is_unchanged(namespace, field, &value)
+        {
+            return ReactiveSetResult {
+                changed: false,
+                effects_dirty: false,
+                widgets_dirty: false,
+            };
+        }
         let trace = trace_ui_field_enabled(namespace, field);
         let previous = if trace {
             self.vm.global_value(namespace).and_then(|namespace_value| {
@@ -1959,11 +2088,14 @@ impl Runtime {
         };
         let next_for_trace = trace.then(|| value.clone());
         let enqueue_effect_dirty = self.vm.has_reactive_subscribers(namespace, field);
-        self.vm
-            .update_reactive_global(namespace, field, value.clone());
+        let value_for_vm = value.clone();
         let outcome = self
             .reactive_registry
             .set(namespace, field, value, enqueue_effect_dirty);
+        if outcome.changed || !outcome.registered {
+            self.vm
+                .update_reactive_global(namespace, field, value_for_vm);
+        }
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
         if trace {
@@ -1999,6 +2131,7 @@ impl Runtime {
             self.sync_theme_from_registry();
         }
         ReactiveSetResult {
+            changed: outcome.changed || !outcome.registered,
             effects_dirty: outcome.effect_dirty,
             widgets_dirty,
         }
@@ -2020,8 +2153,10 @@ impl Runtime {
             value,
             enqueue_effect_dirty,
         );
-        self.vm
-            .update_reactive_global_list_index(namespace, field, index, value_for_vm);
+        if outcome.changed || !outcome.registered {
+            self.vm
+                .update_reactive_global_list_index(namespace, field, index, value_for_vm);
+        }
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
         for widget_id in widget_ids {
@@ -2030,6 +2165,7 @@ impl Runtime {
             }
         }
         ReactiveSetResult {
+            changed: outcome.changed || !outcome.registered,
             effects_dirty: outcome.effect_dirty,
             widgets_dirty,
         }
@@ -2180,10 +2316,16 @@ impl Runtime {
                 }
                 self.last_ui_invalidation_trace = Some(UiInvalidationTrace {
                     dirty_fields,
+                    reactive_apply_duration: apply_elapsed,
+                    reactive_exec_timings: exec_timings
+                        .iter()
+                        .map(|timing| (timing.profile_label(), timing.elapsed))
+                        .collect(),
                     ..UiInvalidationTrace::default()
                 });
                 let flush_started = Instant::now();
                 let flush_stats = self.flush_widget_trees();
+                let flush_elapsed = flush_started.elapsed();
                 if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                     trace.affected_buffers = flush_stats.affected_buffers.clone();
                     trace.active_buffer_targets = flush_stats.active_buffer_targets;
@@ -2194,6 +2336,8 @@ impl Runtime {
                     trace.subtree_reruns = flush_stats.subtree_reruns;
                     trace.reevaluated_subtree_roots = flush_stats.reevaluated_subtree_roots;
                     trace.pending_subtree_patch_count = flush_stats.pending_subtree_patch_count;
+                    trace.reactive_flush_duration = flush_elapsed;
+                    trace.reactive_cycle_duration = total_started.elapsed();
                 }
                 if std::env::var_os("ESEQLISP_TRACE_UI").is_some()
                     && let Some(trace) = self.last_ui_invalidation_trace.as_ref()
@@ -2203,7 +2347,7 @@ impl Runtime {
                 self.perf_stats.note_reactive_cycle(
                     dirty_len,
                     apply_elapsed,
-                    flush_started.elapsed(),
+                    flush_elapsed,
                     total_started.elapsed(),
                     exec_timings,
                     &flush_stats,
@@ -2438,6 +2582,22 @@ impl Runtime {
 
     pub(crate) fn take_pending_set_text(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_set_text.take()
+    }
+
+    pub(crate) fn take_pending_set_text_for(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_set_text_for)
+    }
+
+    pub(crate) fn take_pending_append_text_for(&mut self) -> Vec<(String, String, String)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_append_text_for)
+    }
+
+    pub(crate) fn take_pending_append_lines_for(&mut self) -> Vec<(String, Vec<String>)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_append_lines_for)
+    }
+
+    pub(crate) fn take_pending_remove_lines_for(&mut self) -> Vec<(String, Vec<String>)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_remove_lines_for)
     }
 
     pub(crate) fn take_pending_set_lines(&mut self) -> Option<Vec<String>> {
@@ -2946,6 +3106,7 @@ impl Runtime {
                     fallback_pending.extend(replacements.drain(..).map(|replacement| {
                         PendingUiUpdate::ReplaceSubtree {
                             source_buffer_id: replacement.source_buffer_id,
+                            source_module: replacement.source_module,
                             target: replacement.target,
                             subtree_root_id: replacement.subtree_root_id,
                             tree: replacement.tree,
@@ -2988,6 +3149,7 @@ impl Runtime {
                                             active_subtree_replacements.push(
                                                 ActiveSubtreeReplacement {
                                                     source_buffer_id: pending.source_buffer_id,
+                                                    source_module: pending.source_module.clone(),
                                                     target: pending.target.clone(),
                                                     subtree_root_id,
                                                     tree: pending.tree.deep_clone(),
@@ -3045,6 +3207,7 @@ impl Runtime {
                     } => {
                         active_subtree_replacements.push(ActiveSubtreeReplacement {
                             source_buffer_id: *source_buffer_id,
+                            source_module: pending.source_module().map(PathBuf::from),
                             target: pending.target().clone(),
                             subtree_root_id: *subtree_root_id,
                             tree: tree.deep_clone(),

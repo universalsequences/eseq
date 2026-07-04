@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::defmacro_library::{DefmacroLibrary, parse_use_defmacro};
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::display::{node_display_input_slots, node_display_label};
-use super::lisp::{node_kind_for_op, parse_patch_source, positional_args, symbol_at};
+use super::lisp::{
+    node_kind_for_op, parse_patch_source, parse_patch_source_with_library, positional_args,
+    symbol_at,
+};
 use super::model::{
     ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
     OutputPortRef, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId,
@@ -110,6 +114,39 @@ pub(super) fn replace_macro_source(
     Ok(document.emit())
 }
 
+pub(super) fn extract_macro_source(
+    source: &str,
+    macro_name: &str,
+) -> Result<String, WriteBackError> {
+    let document = SourceDocument::parse(source)?;
+    document.emit_macro(macro_name)
+}
+
+pub(super) fn replace_macro_with_import(
+    source: &str,
+    macro_name: &str,
+) -> Result<String, WriteBackError> {
+    let mut document = SourceDocument::parse(source)?;
+    document.replace_macro_with_import(macro_name)?;
+    Ok(document.emit())
+}
+
+pub(super) fn replace_import_with_macro(
+    source: &str,
+    macro_name: &str,
+    macro_source: &str,
+) -> Result<String, WriteBackError> {
+    let mut document = SourceDocument::parse(source)?;
+    let expr =
+        parse_single_expression(macro_source).map_err(|reason| WriteBackError::InvalidEdit {
+            view_key: "root".to_string(),
+            node_id: String::new(),
+            reason,
+        })?;
+    document.replace_import_with_macro(macro_name, expr)?;
+    Ok(document.emit())
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct PatchWritebackResult {
     pub(super) source: String,
@@ -121,11 +158,46 @@ pub(super) fn emit_patch_writeback_result(
     intent: PatcherIntent,
     interaction_state: &PatcherInteractionState,
 ) -> Result<PatchWritebackResult, WriteBackError> {
-    let mut document = SourceDocument::parse(source)?;
-    register_created_modulatable_params(&mut document, interaction_state);
     let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
+    emit_patch_writeback_result_for_root_patch(source, intent, interaction_state, root_patch, None)
+}
+
+pub(super) fn emit_patch_writeback_result_with_library(
+    source: &str,
+    intent: PatcherIntent,
+    interaction_state: &PatcherInteractionState,
+    library: &DefmacroLibrary,
+) -> Result<PatchWritebackResult, WriteBackError> {
+    let root_patch =
+        parse_patch_source_with_library(source, intent, library).map_err(WriteBackError::Parse)?;
+    emit_patch_writeback_result_for_root_patch(
+        source,
+        intent,
+        interaction_state,
+        root_patch,
+        Some(library),
+    )
+}
+
+fn emit_patch_writeback_result_for_root_patch(
+    source: &str,
+    intent: PatcherIntent,
+    interaction_state: &PatcherInteractionState,
+    root_patch: Patch,
+    library: Option<&DefmacroLibrary>,
+) -> Result<PatchWritebackResult, WriteBackError> {
+    let mut document = SourceDocument::parse(source)?;
+    if let Some(library) = library {
+        document.register_external_macros(library.packages().keys().cloned());
+    }
+    register_created_modulatable_params(&mut document, interaction_state);
     apply_created_macro_writeback(&mut document, &root_patch, interaction_state)?;
     let effective_root_patch = patch_with_created_macros(root_patch.clone(), interaction_state);
+    apply_created_macro_scaffold_deletions(
+        &mut document,
+        &effective_root_patch,
+        interaction_state,
+    )?;
     apply_created_macro_parameter_writeback(&mut document, interaction_state)?;
 
     validate_connection_edits(&effective_root_patch, interaction_state)?;
@@ -269,6 +341,10 @@ pub(super) fn emit_patch_writeback_result(
     let macro_prune_candidates =
         macro_prune_candidate_names(&effective_root_patch, interaction_state);
     document.remove_unreferenced_candidate_macros(&macro_prune_candidates);
+    if let Some(library) = library {
+        document.add_imports_for_used_library_macros(&effective_root_patch, library);
+    }
+    document.enforce_binding_dependency_order();
 
     let mut generated_node_ids = generated.node_id_map();
     generated_node_ids.extend(history_bindings.node_id_map());
@@ -805,6 +881,47 @@ fn apply_created_macro_parameter_writeback(
     Ok(())
 }
 
+fn apply_created_macro_scaffold_deletions(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+) -> Result<(), WriteBackError> {
+    let mut deleted_params = interaction_state
+        .edit_state
+        .deleted_nodes
+        .iter()
+        .filter_map(|key| {
+            let (view_key, node_id) = split_scoped_key(key);
+            created_macro_scaffold_parameter_deletion(
+                root_patch,
+                interaction_state,
+                &view_key,
+                &node_id,
+            )
+            .map(|index| (view_key, node_id, index))
+        })
+        .collect::<Vec<_>>();
+    deleted_params.sort_by(|(view_a, _, index_a), (view_b, _, index_b)| {
+        view_a.cmp(view_b).then(index_b.cmp(index_a))
+    });
+    deleted_params.dedup_by(|(view_a, _, index_a), (view_b, _, index_b)| {
+        view_a == view_b && index_a == index_b
+    });
+
+    for (view_key, node_id, index) in deleted_params {
+        if !deleted_macro_parameter_has_no_live_source_consumers(
+            root_patch,
+            interaction_state,
+            &view_key,
+            &node_id,
+        ) {
+            continue;
+        }
+        document.remove_macro_param(&scope_for_view_key(&view_key), index, &view_key, &node_id)?;
+    }
+    Ok(())
+}
+
 fn apply_created_out_writeback(
     document: &mut SourceDocument,
     root_patch: &Patch,
@@ -1037,8 +1154,33 @@ fn apply_node_deletions(
             let Some(node) =
                 patch_for_view(root_patch, &view_key).and_then(|patch| patch_node(patch, &node_id))
             else {
-                return Err(WriteBackError::UnsupportedDeletedNode { view_key, node_id });
+                return Ok(Vec::new());
             };
+            if created_macro_scaffold_parameter_deletion(
+                root_patch,
+                interaction_state,
+                &view_key,
+                &node_id,
+            )
+            .is_some()
+                && deleted_macro_parameter_has_no_live_source_consumers(
+                    root_patch,
+                    interaction_state,
+                    &view_key,
+                    &node_id,
+                )
+            {
+                return Ok(Vec::new());
+            }
+            if deleted_macro_visual_return_has_out_replacement(
+                root_patch,
+                interaction_state,
+                &view_key,
+                &node_id,
+                node,
+            ) {
+                return Ok(Vec::new());
+            }
             let Some(source) = node.source.as_ref() else {
                 return Err(WriteBackError::MissingSourceOwner { view_key, node_id });
             };
@@ -1106,6 +1248,128 @@ fn apply_node_deletions(
     Ok(())
 }
 
+fn deleted_macro_visual_return_has_out_replacement(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+    node: &PatchNode,
+) -> bool {
+    if !view_key.starts_with("macro:") || node.kind == NodeKind::Out {
+        return false;
+    }
+    let Some(source) = node.source.as_ref() else {
+        return false;
+    };
+    if !matches!(source.owner, SourceOwner::TopLevelForm { .. }) {
+        return false;
+    }
+    let Some((form_id, _)) = source_owner_location(&source.owner, source.expr.as_ref()) else {
+        return false;
+    };
+    if !matches!(form_id.scope, SourceScopeId::Macro { .. }) {
+        return false;
+    }
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return false;
+    };
+    let out_node_ids = patch
+        .nodes
+        .iter()
+        .filter(|candidate| candidate.kind == NodeKind::Out)
+        .filter(|candidate| {
+            !interaction_state
+                .edit_state
+                .deleted_nodes
+                .contains(&node_edit_key(view_key, &candidate.id))
+        })
+        .map(|candidate| candidate.id.as_str())
+        .collect::<HashSet<_>>();
+    if out_node_ids.is_empty() {
+        return false;
+    }
+    let was_projected_as_macro_return = patch.connections.iter().any(|connection| {
+        connection.from_node == node_id
+            && connection.to_input == 0
+            && out_node_ids.contains(connection.to_node.as_str())
+    });
+    if !was_projected_as_macro_return {
+        return false;
+    }
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .any(|connection| {
+            connection.view_key == view_key
+                && connection.to.input_index == 0
+                && out_node_ids.contains(connection.to.node_id.as_str())
+                && connection.from.node_id != node_id
+                && !interaction_state
+                    .edit_state
+                    .deleted_nodes
+                    .contains(&node_edit_key(view_key, &connection.from.node_id))
+        })
+}
+
+fn created_macro_scaffold_parameter_deletion(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> Option<usize> {
+    let macro_name = view_key.strip_prefix("macro:")?;
+    interaction_state
+        .edit_state
+        .created_macros
+        .get(macro_name)?;
+    patch_for_view(root_patch, view_key)
+        .and_then(|patch| patch_node(patch, node_id))
+        .and_then(|node| node.source.as_ref())
+        .and_then(|source| match &source.owner {
+            SourceOwner::MacroParameter { index, .. } => Some(*index),
+            _ => None,
+        })
+}
+
+fn deleted_macro_parameter_has_no_live_source_consumers(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return true;
+    };
+    patch
+        .connections
+        .iter()
+        .filter(|connection| connection.from_node == node_id)
+        .all(|connection| {
+            interaction_state
+                .edit_state
+                .deleted_nodes
+                .contains(&node_edit_key(view_key, &connection.to_node))
+                || interaction_state
+                    .edit_state
+                    .deleted_connections
+                    .contains(&connection_edit_key(
+                        view_key,
+                        &source_connection_id(connection),
+                    ))
+                || interaction_state
+                    .edit_state
+                    .connections
+                    .values()
+                    .any(|edit| {
+                        edit.view_key == view_key
+                            && edit.to.node_id == connection.to_node
+                            && edit.to.input_index == connection.to_input
+                            && edit.from.node_id != node_id
+                    })
+        })
+}
+
 fn source_deletion_targets_for_owner(
     view_key: &str,
     node_id: &str,
@@ -1131,10 +1395,10 @@ fn source_deletion_targets_for_owner(
             }
             Ok(())
         }
-        SourceOwner::CodeIsland { .. } => Err(WriteBackError::EditedCodeIsland {
-            view_key: view_key.to_string(),
-            node_id: node_id.to_string(),
-        }),
+        SourceOwner::CodeIsland { form_id } => {
+            targets.push(SourceDeletionTarget::Form(form_id.clone()));
+            Ok(())
+        }
         SourceOwner::MacroParameter { .. } | SourceOwner::Created { .. } => {
             Err(WriteBackError::UnsupportedDeletedNode {
                 view_key: view_key.to_string(),
@@ -1161,6 +1425,7 @@ fn macro_prune_candidate_names(
         .macros
         .iter()
         .filter(|macro_patch| !newly_created.contains(macro_patch.name.as_str()))
+        .filter(|macro_patch| interaction_state.active_macro.as_deref() != Some(&macro_patch.name))
         .map(|macro_patch| macro_patch.name.clone())
         .collect()
 }
@@ -1273,6 +1538,37 @@ fn patch_for_view<'a>(root_patch: &'a Patch, view_key: &str) -> Option<&'a Patch
         .iter()
         .find(|macro_patch| macro_patch.name == macro_name)
         .map(|macro_patch| &macro_patch.patch)
+}
+
+fn used_macro_instance_names(root_patch: &Patch) -> HashSet<String> {
+    let mut names = root_patch
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::MacroInstance)
+        .map(|node| node.op.clone())
+        .collect::<HashSet<_>>();
+    for macro_patch in &root_patch.macros {
+        names.extend(used_macro_instance_names(&macro_patch.patch));
+    }
+    names
+}
+
+fn collect_library_macro_calls(
+    expr: &Expression,
+    library: &DefmacroLibrary,
+    names: &mut HashSet<String>,
+) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    if let Some(op) = symbol_at(items, 0)
+        && library.package(op).is_some()
+    {
+        names.insert(op.to_string());
+    }
+    for item in items {
+        collect_library_macro_calls(item, library, names);
+    }
 }
 
 fn patch_node<'a>(patch: &'a Patch, node_id: &str) -> Option<&'a PatchNode> {
@@ -1641,6 +1937,16 @@ impl GeneratedFormInsertion {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PendingGeneratedForm {
+    scope: SourceScopeId,
+    insertion: GeneratedFormInsertion,
+    dependency_depth: usize,
+    order: usize,
+    defined_names: Vec<String>,
+    expr: Expression,
+}
+
 impl GeneratedBindings {
     fn insert(&mut self, view_key: &str, node_id: &str, name: String) {
         self.insert_output(view_key, node_id, 0, name);
@@ -1779,13 +2085,7 @@ fn apply_generated_binding_writeback(
     let mut generated = GeneratedBindings::default();
     let mut allocator = GeneratedNameAllocator::new(document);
 
-    let mut pending_forms: Vec<(
-        SourceScopeId,
-        GeneratedFormInsertion,
-        usize,
-        usize,
-        Expression,
-    )> = Vec::new();
+    let mut pending_forms: Vec<PendingGeneratedForm> = Vec::new();
     let mut pending_consumer_rewrites = Vec::new();
     let mut next_generated_def_order = 0usize;
     for view_key in writeback_views(root_patch, interaction_state) {
@@ -1828,7 +2128,7 @@ fn apply_generated_binding_writeback(
                     name,
                 }
             })?;
-            generated.insert(&view_key, &edit.id, name);
+            generated.insert(&view_key, &edit.id, name.clone());
             materialized_nodes.insert(edit.id.clone());
             pending_consumer_rewrites.push((view_key.clone(), (*edit).clone()));
             let insertion_index = generated_def_insertion_index(
@@ -1841,13 +2141,14 @@ fn apply_generated_binding_writeback(
                 edit,
                 &generated_expr,
             )?;
-            pending_forms.push((
-                scope.clone(),
-                insertion_index,
-                0,
-                next_generated_def_order,
-                generated_expr,
-            ));
+            pending_forms.push(PendingGeneratedForm {
+                scope: scope.clone(),
+                insertion: insertion_index,
+                dependency_depth: 0,
+                order: next_generated_def_order,
+                defined_names: vec![name],
+                expr: generated_expr,
+            });
             next_generated_def_order += 1;
         }
         loop {
@@ -1918,13 +2219,14 @@ fn apply_generated_binding_writeback(
             )?;
             let dependency_depth =
                 generated_binding_dependency_depth(interaction_state, &view_key, &edit.id);
-            pending_forms.push((
-                scope.clone(),
-                insertion_index,
+            pending_forms.push(PendingGeneratedForm {
+                scope: scope.clone(),
+                insertion: insertion_index,
                 dependency_depth,
-                next_generated_def_order,
-                generated_def_expression(names, generated_expr),
-            ));
+                order: next_generated_def_order,
+                defined_names: names.clone(),
+                expr: generated_def_expression(names, generated_expr),
+            });
             next_generated_def_order += 1;
             pending_consumer_rewrites.push((view_key.clone(), edit.clone()));
         }
@@ -1937,6 +2239,17 @@ fn apply_generated_binding_writeback(
         )?;
     }
 
+    pending_consumer_rewrites.sort_by(|(view_a, edit_a), (view_b, edit_b)| {
+        generated_consumer_rewrite_source_depth(root_patch, interaction_state, view_b, &edit_b.id)
+            .cmp(&generated_consumer_rewrite_source_depth(
+                root_patch,
+                interaction_state,
+                view_a,
+                &edit_a.id,
+            ))
+            .then(view_a.cmp(view_b))
+            .then(edit_a.id.cmp(&edit_b.id))
+    });
     for (view_key, edit) in pending_consumer_rewrites {
         rewrite_created_value_consumers(
             document,
@@ -1948,20 +2261,139 @@ fn apply_generated_binding_writeback(
         )?;
     }
 
-    pending_forms.sort_by(
-        |(scope_a, insertion_a, depth_a, order_a, _),
-         (scope_b, insertion_b, depth_b, order_b, _)| {
-            view_key_for_scope(scope_b)
-                .cmp(&view_key_for_scope(scope_a))
-                .then(insertion_b.sort_index().cmp(&insertion_a.sort_index()))
-                .then(depth_a.cmp(depth_b))
-                .then(order_b.cmp(order_a))
-        },
-    );
-    for (scope, insertion, _, _, expr) in pending_forms {
-        document.insert_generated_form(&scope, &insertion, expr)?;
+    sort_pending_generated_forms(&mut pending_forms);
+    for form in pending_forms {
+        document.insert_generated_form(&form.scope, &form.insertion, form.expr)?;
     }
     Ok(generated)
+}
+
+fn sort_pending_generated_forms(forms: &mut [PendingGeneratedForm]) {
+    let generated_name_to_order = forms
+        .iter()
+        .flat_map(|form| {
+            form.defined_names
+                .iter()
+                .map(|name| (name.clone(), form.order))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut memo = HashMap::new();
+    let dependency_rank_by_order = forms
+        .iter()
+        .map(|form| {
+            (
+                form.order,
+                pending_generated_dependency_rank(
+                    form.order,
+                    forms,
+                    &generated_name_to_order,
+                    &mut memo,
+                    &mut HashSet::new(),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    forms.sort_by(|a, b| {
+        view_key_for_scope(&b.scope)
+            .cmp(&view_key_for_scope(&a.scope))
+            .then(b.insertion.sort_index().cmp(&a.insertion.sort_index()))
+            .then(
+                dependency_rank_by_order
+                    .get(&a.order)
+                    .copied()
+                    .unwrap_or(0)
+                    .cmp(&dependency_rank_by_order.get(&b.order).copied().unwrap_or(0)),
+            )
+            .then(a.dependency_depth.cmp(&b.dependency_depth))
+            .then(b.order.cmp(&a.order))
+    });
+}
+
+fn pending_generated_dependency_rank(
+    order: usize,
+    forms: &[PendingGeneratedForm],
+    generated_name_to_order: &HashMap<String, usize>,
+    memo: &mut HashMap<usize, usize>,
+    visiting: &mut HashSet<usize>,
+) -> usize {
+    if let Some(rank) = memo.get(&order) {
+        return *rank;
+    }
+    if !visiting.insert(order) {
+        return 0;
+    }
+    let Some(form) = forms.iter().find(|form| form.order == order) else {
+        visiting.remove(&order);
+        return 0;
+    };
+    let mut dependencies = HashSet::new();
+    collect_generated_symbol_dependencies(&form.expr, generated_name_to_order, &mut dependencies);
+    dependencies.remove(&order);
+    let rank = dependencies
+        .into_iter()
+        .map(|dependency| {
+            1 + pending_generated_dependency_rank(
+                dependency,
+                forms,
+                generated_name_to_order,
+                memo,
+                visiting,
+            )
+        })
+        .max()
+        .unwrap_or(0);
+    visiting.remove(&order);
+    memo.insert(order, rank);
+    rank
+}
+
+fn collect_generated_symbol_dependencies(
+    expr: &Expression,
+    generated_name_to_order: &HashMap<String, usize>,
+    out: &mut HashSet<usize>,
+) {
+    match expr {
+        Expression::Symbol(symbol) => {
+            if let Some(order) = generated_name_to_order.get(symbol) {
+                out.insert(*order);
+            }
+        }
+        Expression::List(items) | Expression::QuoteList(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                if matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
+                    || matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
+                {
+                    continue;
+                }
+                collect_generated_symbol_dependencies(item, generated_name_to_order, out);
+            }
+        }
+        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+            collect_generated_symbol_dependencies(inner, generated_name_to_order, out);
+        }
+        _ => {}
+    }
+}
+
+fn generated_consumer_rewrite_source_depth(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> usize {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == node_id)
+        .filter_map(|connection| {
+            patch_for_view(root_patch, view_key)
+                .and_then(|patch| patch_node(patch, &connection.to.node_id))
+                .and_then(source_owner_location_for_node)
+                .map(|(_, depth)| depth)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn materialized_created_node_binding(
@@ -2465,11 +2897,15 @@ fn out_channel_from_edit(edit: &super::state::PatcherNodeEdit) -> Result<usize, 
 }
 
 fn output_channel_from_node(node: &PatchNode) -> Option<usize> {
-    node.args
-        .first()
-        .and_then(|arg| match arg {
-            ArgValue::Literal(value) => value.parse::<usize>().ok(),
-            _ => None,
+    node.label
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            node.args.iter().rev().find_map(|arg| match arg {
+                ArgValue::Literal(value) => value.parse::<usize>().ok(),
+                _ => None,
+            })
         })
         .filter(|channel| *channel > 0)
 }
@@ -2677,7 +3113,194 @@ fn value_reference_expr(
             reason: "generated binding source must be source-backed or generated".to_string(),
         });
     };
-    node_reference_expr(document, node, view_key, from.output_index)
+    node_reference_expr_with_pending_source_input_rewrites(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        history_bindings,
+        node,
+        view_key,
+        from.output_index,
+    )
+}
+
+fn node_reference_expr_with_pending_source_input_rewrites(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    node: &PatchNode,
+    view_key: &str,
+    output_index: usize,
+) -> Result<Expression, WriteBackError> {
+    let mut expr =
+        node_reference_expr(document, node, view_key, output_index).or_else(|error| {
+            source_node_original_expression(document, node, output_index).ok_or(error)
+        })?;
+    if output_index != 0 || !source_node_accepts_positional_input_rewrites(node) {
+        return Ok(expr);
+    }
+    if !matches!(expr, Expression::List(_))
+        && let Some(original_expr) = source_node_original_expression(document, node, output_index)
+    {
+        expr = original_expr;
+    }
+    let Expression::List(items) = &mut expr else {
+        return Ok(expr);
+    };
+    for (input_index, value) in pending_source_input_rewrites_for_node(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        history_bindings,
+        view_key,
+        &node.id,
+    )? {
+        replace_or_insert_positional_arg(items, input_index, value);
+    }
+    Ok(expr)
+}
+
+fn source_node_original_expression(
+    document: &SourceDocument,
+    node: &PatchNode,
+    output_index: usize,
+) -> Option<Expression> {
+    if output_index != 0 {
+        return None;
+    }
+    let source = node.source.as_ref()?;
+    match &source.owner {
+        SourceOwner::NestedExpr { .. } | SourceOwner::TopLevelForm { .. } => source
+            .expr
+            .as_ref()
+            .and_then(|expr| document.original_expr(expr))
+            .map(|expr| {
+                param_name(expr)
+                    .map(|name| Expression::Symbol(name.to_string()))
+                    .unwrap_or_else(|| expr.clone())
+            }),
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Symbol(name),
+            ..
+        } => Some(Expression::Symbol(name.clone())),
+        _ => None,
+    }
+}
+
+fn source_node_accepts_positional_input_rewrites(node: &PatchNode) -> bool {
+    node.source
+        .as_ref()
+        .and_then(|source| source.call_shape.as_ref())
+        .is_some()
+}
+
+fn pending_source_input_rewrites_for_node(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    view_key: &str,
+    node_id: &str,
+) -> Result<Vec<(usize, Expression)>, WriteBackError> {
+    let mut rewrites = Vec::new();
+    let mut created_connections = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| {
+            connection.view_key == view_key
+                && matches!(connection.origin, PatcherConnectionOrigin::Created { .. })
+                && connection.to.node_id == node_id
+        })
+        .collect::<Vec<_>>();
+    created_connections.sort_by(|a, b| a.id.cmp(&b.id));
+    for connection in created_connections {
+        if connection_edit_touches_history(root_patch, interaction_state, connection)
+            || connection_edit_touches_created_out(interaction_state, connection)
+        {
+            continue;
+        }
+        let value = value_reference_expr(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            view_key,
+            &connection.from,
+        )?;
+        rewrites.push((connection.to.input_index, value));
+    }
+
+    let mut source_connections = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| {
+            connection.view_key == view_key
+                && matches!(connection.origin, PatcherConnectionOrigin::Source { .. })
+                && connection.to.node_id == node_id
+                && !source_connection_edit_is_layout_only(root_patch, connection)
+        })
+        .collect::<Vec<_>>();
+    source_connections.sort_by(|a, b| a.id.cmp(&b.id));
+    for connection in source_connections {
+        let value = value_reference_expr(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            view_key,
+            &connection.from,
+        )?;
+        rewrites.push((connection.to.input_index, value));
+    }
+
+    let deleted = interaction_state
+        .edit_state
+        .deleted_connections
+        .iter()
+        .map(|key| split_scoped_key(key))
+        .filter(|(deleted_view_key, _)| deleted_view_key == view_key)
+        .collect::<Vec<_>>();
+    for (_, connection_id) in deleted {
+        if deleted_connection_has_history_replacement(
+            root_patch,
+            interaction_state,
+            view_key,
+            &connection_id,
+        ) || deleted_connection_has_created_value_replacement(
+            root_patch,
+            interaction_state,
+            view_key,
+            &connection_id,
+        ) || deleted_connection_has_created_connection_replacement(
+            root_patch,
+            interaction_state,
+            view_key,
+            &connection_id,
+        ) {
+            continue;
+        }
+        let Some(connection) = source_connection(root_patch, view_key, &connection_id) else {
+            continue;
+        };
+        if connection.to_node == node_id {
+            rewrites.push((
+                connection.to_input,
+                Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
+            ));
+        }
+    }
+
+    rewrites.sort_by_key(|(input_index, _)| *input_index);
+    Ok(rewrites)
 }
 
 fn node_reference_expr(
@@ -2693,6 +3316,15 @@ fn node_reference_expr(
             view_key: view_key.to_string(),
             node_id: node.id.clone(),
         })?;
+    if output_index == 0
+        && let Some(name) = source
+            .expr
+            .as_ref()
+            .and_then(|expr| document.expr(expr))
+            .and_then(param_name)
+    {
+        return Ok(Expression::Symbol(name.to_string()));
+    }
     match &source.owner {
         SourceOwner::TopLevelForm { .. } | SourceOwner::BindingValue { .. }
             if node.kind == NodeKind::Param =>
@@ -2705,6 +3337,23 @@ fn node_reference_expr(
                 });
             };
             Ok(Expression::Symbol(name.to_string()))
+        }
+        SourceOwner::TopLevelForm { .. } => {
+            if let Some(expr) = source.expr.as_ref().and_then(|expr| document.expr(expr))
+                && let Some(name) = param_name(expr)
+            {
+                return Ok(Expression::Symbol(name.to_string()));
+            }
+            source
+                .expr
+                .as_ref()
+                .and_then(|expr| document.expr(expr))
+                .cloned()
+                .ok_or_else(|| WriteBackError::UnsupportedGeneratedBinding {
+                    view_key: view_key.to_string(),
+                    node_id: node.id.clone(),
+                    reason: "top-level source expression is missing".to_string(),
+                })
         }
         SourceOwner::BindingValue {
             binding: BindingTarget::Symbol(name),
@@ -2747,16 +3396,6 @@ fn node_reference_expr(
                 reason: "nested source expression is missing".to_string(),
             }
         }),
-        SourceOwner::TopLevelForm { .. } => source
-            .expr
-            .as_ref()
-            .and_then(|expr| document.expr(expr))
-            .cloned()
-            .ok_or_else(|| WriteBackError::UnsupportedGeneratedBinding {
-                view_key: view_key.to_string(),
-                node_id: node.id.clone(),
-                reason: "top-level source expression is missing".to_string(),
-            }),
         _ => Err(WriteBackError::UnsupportedGeneratedBinding {
             view_key: view_key.to_string(),
             node_id: node.id.clone(),
@@ -3674,6 +4313,16 @@ fn apply_cable_writeback(
                 connection_id: connection.id.clone(),
             });
         };
+        if source_node_call_path_was_replaced_by_created_rewrite(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            &connection.view_key,
+            dest,
+        ) {
+            continue;
+        }
         // Apply the edit to the destination node's source-owned call shape.
         // The helper preserves semantic input indexes and inserts sentinel
         // values for any missing positional gaps before attributes.
@@ -3693,6 +4342,135 @@ fn apply_cable_writeback(
         )?;
     }
     Ok(())
+}
+
+fn source_node_call_path_was_replaced_by_created_rewrite(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    node: &PatchNode,
+) -> bool {
+    let Some(call_shape) = node
+        .source
+        .as_ref()
+        .and_then(|source| source.call_shape.as_ref())
+    else {
+        return false;
+    };
+    if matches!(document.expr(&call_shape.call), Some(Expression::List(_))) {
+        return false;
+    }
+    source_node_feeds_generated_binding(
+        root_patch,
+        interaction_state,
+        generated,
+        view_key,
+        &node.id,
+    ) || source_node_feeds_created_value_rewrite(root_patch, interaction_state, view_key, &node.id)
+        || source_node_feeds_source_backed_rewrite(
+            root_patch,
+            interaction_state,
+            view_key,
+            &node.id,
+        )
+}
+
+fn source_node_feeds_generated_binding(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    let source_connections = patch_for_view(root_patch, view_key)
+        .into_iter()
+        .flat_map(|patch| patch.connections.iter())
+        .filter(|connection| connection.from_node == node_id)
+        .filter(|connection| {
+            !interaction_state
+                .edit_state
+                .deleted_connections
+                .contains(&connection_edit_key(
+                    view_key,
+                    &source_connection_id(connection),
+                ))
+        })
+        .any(|connection| generated.get(view_key, &connection.to_node).is_some());
+    let created_connections = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key)
+        .filter(|connection| connection.from.node_id == node_id)
+        .any(|connection| generated.get(view_key, &connection.to.node_id).is_some());
+    source_connections || created_connections
+}
+
+fn source_node_feeds_created_value_rewrite(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key)
+        .filter(|connection| connection.from.node_id == node_id)
+        .filter(|connection| {
+            created_value_node(interaction_state, view_key, &connection.to.node_id).is_some()
+        })
+        .any(|connection| {
+            created_value_has_source_backed_consumer(
+                root_patch,
+                interaction_state,
+                view_key,
+                &connection.to.node_id,
+            )
+        })
+}
+
+fn source_node_feeds_source_backed_rewrite(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key)
+        .filter(|connection| connection.from.node_id == node_id)
+        .any(|connection| {
+            patch_for_view(root_patch, view_key)
+                .and_then(|patch| patch_node(patch, &connection.to.node_id))
+                .and_then(|node| node.source.as_ref())
+                .is_some()
+        })
+}
+
+fn created_value_has_source_backed_consumer(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == node_id)
+        .any(|connection| {
+            connection_edit_touches_created_out(interaction_state, connection)
+                || patch_for_view(root_patch, view_key)
+                    .and_then(|patch| patch_node(patch, &connection.to.node_id))
+                    .and_then(|node| node.source.as_ref())
+                    .is_some()
+        })
 }
 
 fn apply_source_connection_edit_writeback(
@@ -5035,10 +5813,20 @@ fn parse_single_expression(source: &str) -> Result<Expression, String> {
     }
 }
 
+fn use_defmacro_expr(name: &str) -> Expression {
+    Expression::List(vec![
+        Expression::Symbol("use-defmacro".to_string()),
+        Expression::Symbol(name.to_string()),
+    ])
+}
+
 #[derive(Debug, Clone)]
 struct SourceDocument {
     forms: Vec<DocumentForm>,
     macros: HashMap<String, MacroDocument>,
+    original_forms: Vec<DocumentForm>,
+    original_macros: HashMap<String, MacroDocument>,
+    external_macros: HashSet<String>,
     virtual_modulatable_params: HashSet<(SourceScopeId, String)>,
 }
 
@@ -5093,14 +5881,31 @@ impl SourceDocument {
             }
         }
         Ok(Self {
+            original_forms: forms.clone(),
+            original_macros: macros.clone(),
             forms,
             macros,
+            external_macros: HashSet::new(),
             virtual_modulatable_params: HashSet::new(),
         })
     }
 
+    fn register_external_macros(&mut self, names: impl IntoIterator<Item = String>) {
+        self.external_macros.extend(names);
+    }
+
     fn expr(&self, expr_id: &SourceExprId) -> Option<&Expression> {
         let form = self.form_expr(&expr_id.form_id.scope, expr_id.form_id.index)?;
+        expr_at_path(form, &expr_id.path.0)
+    }
+
+    fn original_expr(&self, expr_id: &SourceExprId) -> Option<&Expression> {
+        let form = Self::form_expr_in(
+            &self.original_forms,
+            &self.original_macros,
+            &expr_id.form_id.scope,
+            expr_id.form_id.index,
+        )?;
         expr_at_path(form, &expr_id.path.0)
     }
 
@@ -5345,6 +6150,38 @@ impl SourceDocument {
         Ok(())
     }
 
+    fn remove_macro_param(
+        &mut self,
+        scope: &SourceScopeId,
+        index: usize,
+        view_key: &str,
+        node_id: &str,
+    ) -> Result<(), WriteBackError> {
+        let SourceScopeId::Macro { name } = scope else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: "macro parameter removal requires a macro scope".to_string(),
+            });
+        };
+        let Some(macro_doc) = self.macros.get_mut(name) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: "missing macro scope for parameter removal".to_string(),
+            });
+        };
+        if index >= macro_doc.params.len() {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: format!("missing macro parameter {}", index),
+            });
+        }
+        macro_doc.params.remove(index);
+        Ok(())
+    }
+
     fn ensure_macro_param(
         &mut self,
         scope: &SourceScopeId,
@@ -5439,9 +6276,17 @@ impl SourceDocument {
     }
 
     fn form_expr(&self, scope: &SourceScopeId, index: usize) -> Option<&Expression> {
+        Self::form_expr_in(&self.forms, &self.macros, scope, index)
+    }
+
+    fn form_expr_in<'a>(
+        forms: &'a [DocumentForm],
+        macros: &'a HashMap<String, MacroDocument>,
+        scope: &SourceScopeId,
+        index: usize,
+    ) -> Option<&'a Expression> {
         match scope {
-            SourceScopeId::Root => match &self
-                .forms
+            SourceScopeId::Root => match &forms
                 .iter()
                 .find(|form| form.original_index == Some(index))?
                 .form
@@ -5449,8 +6294,7 @@ impl SourceDocument {
                 SourceForm::Expr(expr) => Some(expr),
                 SourceForm::Macro(_) => None,
             },
-            SourceScopeId::Macro { name } => self
-                .macros
+            SourceScopeId::Macro { name } => macros
                 .get(name)?
                 .body
                 .iter()
@@ -5643,6 +6487,72 @@ impl SourceDocument {
             .filter_map(|form| self.emit_form(form))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn add_imports_for_used_library_macros(
+        &mut self,
+        root_patch: &Patch,
+        library: &DefmacroLibrary,
+    ) {
+        let local_macros = self.macros.keys().cloned().collect::<HashSet<_>>();
+        let existing_imports = self.imported_macro_names();
+        let mut needed = used_macro_instance_names(root_patch)
+            .into_iter()
+            .chain(self.library_macro_call_names(library))
+            .filter(|name| library.package(name).is_some())
+            .filter(|name| !local_macros.contains(name))
+            .filter(|name| !existing_imports.contains(name))
+            .collect::<Vec<_>>();
+        needed.sort();
+        for name in needed.into_iter().rev() {
+            self.forms.insert(
+                self.import_insert_position(),
+                DocumentForm {
+                    original_index: None,
+                    form: SourceForm::Expr(Expression::List(vec![
+                        Expression::Symbol("use-defmacro".to_string()),
+                        Expression::Symbol(name),
+                    ])),
+                },
+            );
+        }
+    }
+
+    fn imported_macro_names(&self) -> HashSet<String> {
+        self.forms
+            .iter()
+            .filter_map(|form| match &form.form {
+                SourceForm::Expr(expr) => parse_use_defmacro(expr).ok().flatten(),
+                SourceForm::Macro(_) => None,
+            })
+            .collect()
+    }
+
+    fn import_insert_position(&self) -> usize {
+        self.forms
+            .iter()
+            .position(|form| match &form.form {
+                SourceForm::Expr(expr) => parse_use_defmacro(expr).ok().flatten().is_none(),
+                SourceForm::Macro(_) => true,
+            })
+            .unwrap_or(self.forms.len())
+    }
+
+    fn library_macro_call_names(&self, library: &DefmacroLibrary) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for form in &self.forms {
+            match &form.form {
+                SourceForm::Expr(expr) => collect_library_macro_calls(expr, library, &mut names),
+                SourceForm::Macro(name) => {
+                    if let Some(macro_doc) = self.macros.get(name) {
+                        for form in &macro_doc.body {
+                            collect_library_macro_calls(&form.expr, library, &mut names);
+                        }
+                    }
+                }
+            }
+        }
+        names
     }
 
     fn emit_form(&self, form: &DocumentForm) -> Option<String> {
@@ -6003,6 +6913,96 @@ impl SourceDocument {
         Ok(())
     }
 
+    fn emit_macro(&self, name: &str) -> Result<String, WriteBackError> {
+        self.macros
+            .get(name)
+            .map(MacroDocument::emit)
+            .ok_or_else(|| WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("missing macro `{name}`"),
+            })
+    }
+
+    fn replace_macro_with_import(&mut self, name: &str) -> Result<(), WriteBackError> {
+        if !self.macros.contains_key(name) {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("missing local macro `{name}`"),
+            });
+        }
+        let mut replaced = false;
+        for form in &mut self.forms {
+            let SourceForm::Macro(form_name) = &form.form else {
+                continue;
+            };
+            if form_name == name {
+                form.form = SourceForm::Expr(use_defmacro_expr(name));
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("missing source form for local macro `{name}`"),
+            });
+        }
+        self.macros.remove(name);
+        Ok(())
+    }
+
+    fn replace_import_with_macro(
+        &mut self,
+        name: &str,
+        expr: Expression,
+    ) -> Result<(), WriteBackError> {
+        let Some(macro_doc) = MacroDocument::from_expr(&expr) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: "forked source did not parse as defmacro".to_string(),
+            });
+        };
+        if macro_doc.name != name {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!(
+                    "forked macro name `{}` does not match `{name}`",
+                    macro_doc.name
+                ),
+            });
+        }
+        if self.macros.contains_key(name) {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("local macro `{name}` already exists"),
+            });
+        }
+        let import_position = self.forms.iter().position(|form| match &form.form {
+            SourceForm::Expr(expr) => parse_use_defmacro(expr)
+                .ok()
+                .flatten()
+                .is_some_and(|imported| imported == name),
+            SourceForm::Macro(_) => false,
+        });
+        let form = DocumentForm {
+            original_index: None,
+            form: SourceForm::Macro(name.to_string()),
+        };
+        if let Some(position) = import_position {
+            self.forms[position] = form;
+        } else {
+            self.forms.insert(self.import_insert_position(), form);
+        }
+        self.macros.insert(name.to_string(), macro_doc);
+        Ok(())
+    }
+
     fn replace_macro(&mut self, name: &str, expr: Expression) -> Result<(), WriteBackError> {
         let Some(macro_doc) = MacroDocument::from_expr(&expr) else {
             return Err(WriteBackError::InvalidEdit {
@@ -6090,6 +7090,16 @@ impl SourceDocument {
             }
         }
         live
+    }
+
+    fn enforce_binding_dependency_order(&mut self) {
+        enforce_form_binding_dependency_order(&mut self.forms, |form| match &form.form {
+            SourceForm::Expr(expr) => Some(expr),
+            SourceForm::Macro(_) => None,
+        });
+        for macro_doc in self.macros.values_mut() {
+            enforce_form_binding_dependency_order(&mut macro_doc.body, |form| Some(&form.expr));
+        }
     }
 
     fn insert_history_write(
@@ -6377,11 +7387,13 @@ impl SourceDocument {
                 | "param"
                 | "in"
                 | "out"
+                | "use-defmacro"
                 | "make-history"
                 | "read-history"
                 | "write-history"
         ) || dgenlisp_operator_names().contains(operator)
             || self.macros.contains_key(operator)
+            || self.external_macros.contains(operator)
     }
 }
 
@@ -6794,6 +7806,98 @@ fn collect_scope_binding_names(expr: &Expression, names: &mut HashSet<String>) {
             if let Some(name) = symbol_at(items, 1) {
                 names.insert(name.to_string());
             }
+        }
+        _ => {}
+    }
+}
+
+fn enforce_form_binding_dependency_order<T, F>(forms: &mut Vec<T>, expr_for_form: F)
+where
+    F: Fn(&T) -> Option<&Expression>,
+{
+    let mut binding_positions = HashMap::new();
+    for (position, form) in forms.iter().enumerate() {
+        let Some(expr) = expr_for_form(form) else {
+            continue;
+        };
+        let mut names = HashSet::new();
+        collect_scope_binding_names(expr, &mut names);
+        for name in names {
+            binding_positions.entry(name).or_insert(position);
+        }
+    }
+
+    let dependencies = forms
+        .iter()
+        .enumerate()
+        .map(|(position, form)| {
+            let mut references = HashSet::new();
+            if let Some(expr) = expr_for_form(form) {
+                collect_scope_value_references(expr, &mut references);
+            }
+            references
+                .into_iter()
+                .filter_map(|name| binding_positions.get(&name).copied())
+                .filter(|dependency| *dependency != position)
+                .collect::<HashSet<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut emitted = HashSet::new();
+    let mut order = Vec::with_capacity(forms.len());
+    while order.len() < forms.len() {
+        let order_len = order.len();
+        for (position, form_dependencies) in dependencies.iter().enumerate() {
+            if emitted.contains(&position)
+                || !form_dependencies
+                    .iter()
+                    .all(|dependency| emitted.contains(dependency))
+            {
+                continue;
+            }
+            emitted.insert(position);
+            order.push(position);
+        }
+        if order.len() == order_len {
+            for position in 0..forms.len() {
+                if emitted.insert(position) {
+                    order.push(position);
+                }
+            }
+        }
+    }
+    if order.iter().copied().eq(0..forms.len()) {
+        return;
+    }
+
+    let mut ordered = forms.drain(..).map(Some).collect::<Vec<_>>();
+    for position in order {
+        if let Some(form) = ordered[position].take() {
+            forms.push(form);
+        }
+    }
+}
+
+fn collect_scope_value_references(expr: &Expression, references: &mut HashSet<String>) {
+    match expr {
+        Expression::Symbol(symbol) => {
+            references.insert(symbol.clone());
+        }
+        Expression::List(items) | Expression::QuoteList(items) => {
+            let head = symbol_at(items, 0);
+            for (idx, item) in items.iter().enumerate() {
+                if idx == 0
+                    || matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
+                    || matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
+                    || (idx == 1 && matches!(head, Some("def" | "param" | "make-history")))
+                {
+                    continue;
+                }
+                collect_scope_value_references(item, references);
+            }
+        }
+        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+            collect_scope_value_references(inner, references);
         }
         _ => {}
     }

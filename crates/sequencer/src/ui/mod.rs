@@ -18,11 +18,15 @@ use crate::agent::ui_validate::validate_effect_ui_source;
 use crate::analysis::{AnalysisJob, AnalysisService};
 use crate::audiograph::LiveGraphPtr;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScaling};
-use crate::lisp_effect::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
+use crate::lisp_host::{
+    dylib_cache::DylibCacheManager, DGenManifest, DylibLease, LoadedDGenLib, ScratchControlRuntime,
+};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
-    BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState, StepParam,
-    StepSnapshot, SwingResolution, Timebase, MAX_STEPS, STEPS_PER_PAGE,
+    BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
+    KeyboardTrigger, RackRouting, RackTrackSnapshot, SequencerState, StepParam, StepSnapshot,
+    DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START, DRUM_RACK_LAST_PAD_NOTE,
+    DRUM_RACK_PAD_BANK_STRIDE, DRUM_RACK_PAD_COUNT, MAX_STEPS, STEPS_PER_PAGE,
 };
 use crate::track_color::TrackColor;
 
@@ -212,7 +216,7 @@ struct PendingHookInvocation {
 }
 
 struct PendingCompile {
-    receiver: std::sync::mpsc::Receiver<Result<crate::lisp_effect::CompileResult, String>>,
+    receiver: std::sync::mpsc::Receiver<Result<crate::lisp_host::CompileResult, String>>,
     target: CompileTarget,
     tick: usize,
 }
@@ -289,7 +293,7 @@ impl EngineRegistry {
 #[cfg(test)]
 mod engine_registry_tests {
     use super::{EngineDescriptor, EngineRegistry};
-    use crate::lisp_effect::DGenManifest;
+    use crate::lisp_host::DGenManifest;
 
     fn manifest() -> DGenManifest {
         DGenManifest {
@@ -399,8 +403,12 @@ pub struct EditorState {
     pending_editor: Option<PendingEditor>,
     pending_compile: Option<PendingCompile>,
     pending_project_load: Option<PendingProjectLoad>,
+    pub dylib_cache: DylibCacheManager,
     lisp_libs: Vec<LoadedDGenLib>,
+    track_effect_leases: Vec<Vec<Option<DylibLease>>>,
+    bus_effect_leases: Vec<Vec<Option<DylibLease>>>,
     pub instrument_libs: Vec<LoadedDGenLib>,
+    instrument_lib_leases: Vec<Option<DylibLease>>,
     pub picker_cursor: usize,
     pub picker_filter: String,
     pub picker_items: Vec<String>,
@@ -474,6 +482,11 @@ pub struct GraphState {
     pub instrument_descriptors: Vec<EffectDescriptor>,
     pub record_armed: Vec<bool>,
     pub keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+    /// Cross-track mod routes currently connected in the audiograph, stored as
+    /// (source mod_out node id, dest mod_in_clip node id). Owned exclusively by
+    /// GraphController::sync_current_pattern_mod_routes so scene switches can
+    /// diff instead of disconnecting every possible track pair.
+    pub applied_mod_routes: Vec<(i32, i32)>,
 }
 
 impl GraphState {
@@ -488,7 +501,7 @@ impl GraphState {
                 .and_then(|engine| engine.as_ref())
                 .map(|engine| !engine.mod_output_channels.is_empty())
                 .unwrap_or(false),
-            Some(InstrumentType::Sampler) | None => false,
+            Some(InstrumentType::Sampler) | Some(InstrumentType::Rack) | None => false,
         }
     }
 }
@@ -586,6 +599,21 @@ pub struct TrackNodeIds {
     pub mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT],
     pub mod_env_id: i32,
     pub bus_send_ids: Vec<BusSendNodeIds>,
+    pub rack_slots: Vec<RackSlotNodeIds>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct RackSlotNodeIds {
+    pub sampler_pool_id: Option<usize>,
+    pub engine_id: Option<usize>,
+    pub sampler_voice_lids: Vec<u64>,
+    pub sampler_ids: Vec<i32>,
+    pub sampler_gatepitch_ids: Vec<i32>,
+    pub sampler_modulator_ids: Vec<i32>,
+    pub slot_sum_l_id: i32,
+    pub slot_sum_r_id: i32,
+    pub slot_pan_id: i32,
 }
 
 #[derive(Clone)]
@@ -614,6 +642,7 @@ pub struct BusNodeIds {
     pub merge_id: i32,
     pub gate_id: i32,
     pub volume_id: i32,
+    pub mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT],
 }
 
 #[derive(Clone)]
@@ -637,85 +666,6 @@ pub struct BusChannelState {
     pub custom_effect_names: Vec<Option<String>>,
 }
 
-#[derive(Clone)]
-pub struct BusPatternSnapshot {
-    pub id: BusId,
-    pub gate_sequence: BusGateSequence,
-    pub effect_plocks: Vec<Vec<Vec<Option<f32>>>>,
-}
-
-#[derive(Clone)]
-pub struct BusGateSequence {
-    pub steps: [bool; MAX_STEPS],
-    pub velocities: [f32; MAX_STEPS],
-    pub durations: [f32; MAX_STEPS],
-    pub syncs: [f32; MAX_STEPS],
-    pub num_steps: usize,
-    pub timebase: Timebase,
-    pub swing: f32,
-    pub swing_resolution: SwingResolution,
-    pub timebase_plocks: [Option<Timebase>; MAX_STEPS],
-    pub swing_plocks: [Option<f32>; MAX_STEPS],
-    pub swing_resolution_plocks: [Option<SwingResolution>; MAX_STEPS],
-}
-
-impl Default for BusGateSequence {
-    fn default() -> Self {
-        Self {
-            steps: [true; MAX_STEPS],
-            velocities: [1.0; MAX_STEPS],
-            durations: [1.0; MAX_STEPS],
-            syncs: [0.0; MAX_STEPS],
-            num_steps: 16,
-            timebase: Timebase::Sixteenth,
-            swing: 50.0,
-            swing_resolution: SwingResolution::Sixteenth,
-            timebase_plocks: [None; MAX_STEPS],
-            swing_plocks: [None; MAX_STEPS],
-            swing_resolution_plocks: [None; MAX_STEPS],
-        }
-    }
-}
-
-impl BusGateSequence {
-    pub fn toggle_step(&mut self, step: usize) -> Option<bool> {
-        let value = self.steps.get_mut(step)?;
-        *value = !*value;
-        Some(*value)
-    }
-
-    pub fn set_step_velocity(&mut self, step: usize, value: f32) -> Option<f32> {
-        let slot = self.velocities.get_mut(step)?;
-        *slot = value.clamp(0.0, 1.0);
-        Some(*slot)
-    }
-
-    pub fn set_step_duration(&mut self, step: usize, value: f32) -> Option<f32> {
-        let slot = self.durations.get_mut(step)?;
-        *slot = value.clamp(0.1, 2.0);
-        Some(*slot)
-    }
-
-    pub fn set_step_sync(&mut self, step: usize, value: f32) -> Option<f32> {
-        let slot = self.syncs.get_mut(step)?;
-        *slot = value
-            .round()
-            .clamp(0.0, (crate::sequencer::SYNC_COUNT - 1) as f32);
-        Some(*slot)
-    }
-
-    pub fn set_num_steps(&mut self, value: usize) {
-        self.num_steps = value.clamp(1, MAX_STEPS);
-    }
-
-    pub fn has_step_plock(&self, step: usize) -> bool {
-        step < MAX_STEPS
-            && (self.timebase_plocks[step].is_some()
-                || self.swing_plocks[step].is_some()
-                || self.swing_resolution_plocks[step].is_some())
-    }
-}
-
 impl BusChannelState {
     pub fn new(id: BusId, name: impl Into<String>) -> Self {
         Self {
@@ -727,18 +677,18 @@ impl BusChannelState {
             gate_sequence: BusGateSequence::default(),
             effect_descriptors: Self::default_effect_descriptors(),
             effect_slots: Self::default_effect_slots(),
-            custom_effect_names: vec![None; crate::lisp_effect::MAX_CUSTOM_FX],
+            custom_effect_names: vec![None; crate::lisp_host::MAX_CUSTOM_FX],
         }
     }
 
     pub fn default_effect_descriptors() -> Vec<EffectDescriptor> {
-        (0..crate::lisp_effect::MAX_CUSTOM_FX)
+        (0..crate::lisp_host::MAX_CUSTOM_FX)
             .map(|_| EffectDescriptor::empty_custom_slot())
             .collect()
     }
 
     pub fn default_effect_slots() -> Vec<EffectSlotSnapshot> {
-        (0..crate::lisp_effect::MAX_CUSTOM_FX)
+        (0..crate::lisp_host::MAX_CUSTOM_FX)
             .map(|_| EffectSlotSnapshot::new_empty())
             .collect()
     }
@@ -820,8 +770,10 @@ pub struct App {
     pub track_colors: Vec<TrackColor>,
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
-    pub bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
+    pub groups: Vec<crate::project::ProjectTrackGroup>,
     pub sampler_paths: Vec<Option<PathBuf>>,
+    pub rack_selected_slots: Vec<usize>,
+    pub rack_pad_bank_starts: Vec<i32>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
     pub current_project_name: Option<String>,
@@ -882,6 +834,103 @@ impl App {
     pub fn replace_track_collapsed(&mut self, collapsed: Vec<bool>) {
         self.track_collapsed = collapsed;
         self.normalize_track_collapsed();
+    }
+
+    pub fn normalize_rack_selected_slots(&mut self) {
+        self.rack_selected_slots.truncate(self.tracks.len());
+        while self.rack_selected_slots.len() < self.tracks.len() {
+            self.rack_selected_slots.push(0);
+        }
+        self.rack_pad_bank_starts.truncate(self.tracks.len());
+        while self.rack_pad_bank_starts.len() < self.tracks.len() {
+            self.rack_pad_bank_starts.push(DRUM_RACK_FIRST_PAD_NOTE);
+        }
+    }
+
+    pub fn rack_selected_slot(&self, track: usize, slot_count: usize) -> usize {
+        if slot_count == 0 {
+            return 0;
+        }
+        self.rack_selected_slots
+            .get(track)
+            .copied()
+            .unwrap_or(0)
+            .min(slot_count - 1)
+    }
+
+    pub fn set_rack_selected_slot(&mut self, track: usize, slot_idx: usize) {
+        self.normalize_rack_selected_slots();
+        if let Some(selected) = self.rack_selected_slots.get_mut(track) {
+            *selected = slot_idx;
+        }
+    }
+
+    pub fn rack_selected_pad_note(&self, track: usize) -> i32 {
+        let raw = self.rack_selected_slots.get(track).copied().unwrap_or(0) as i32;
+        raw.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE)
+    }
+
+    fn drum_rack_bank_start_for_pad_note(pad_note: i32) -> i32 {
+        let clamped = pad_note.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE);
+        let relative = clamped - DRUM_RACK_FIRST_PAD_NOTE;
+        let start = DRUM_RACK_FIRST_PAD_NOTE
+            + (relative / DRUM_RACK_PAD_BANK_STRIDE) * DRUM_RACK_PAD_BANK_STRIDE;
+        start.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START)
+    }
+
+    pub fn rack_pad_bank_start(&self, track: usize) -> i32 {
+        self.rack_pad_bank_starts
+            .get(track)
+            .copied()
+            .unwrap_or(DRUM_RACK_FIRST_PAD_NOTE)
+            .clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START)
+    }
+
+    pub fn set_rack_pad_bank_start(&mut self, track: usize, bank_start: i32) {
+        self.normalize_rack_selected_slots();
+        let bank_start = bank_start.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START);
+        if let Some(selected_bank) = self.rack_pad_bank_starts.get_mut(track) {
+            *selected_bank = bank_start;
+        }
+        let selected_pad = self.rack_selected_pad_note(track);
+        let bank_end = bank_start + DRUM_RACK_PAD_COUNT as i32 - 1;
+        if selected_pad < bank_start || selected_pad > bank_end {
+            self.set_rack_selected_pad_note(track, bank_start);
+        }
+    }
+
+    pub fn set_rack_selected_pad_note(&mut self, track: usize, pad_note: i32) {
+        self.normalize_rack_selected_slots();
+        let pad_note = pad_note.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE);
+        if let Some(selected) = self.rack_selected_slots.get_mut(track) {
+            *selected = pad_note as usize;
+        }
+        let bank_start = self.rack_pad_bank_start(track);
+        let bank_end = bank_start + DRUM_RACK_PAD_COUNT as i32 - 1;
+        if pad_note < bank_start || pad_note > bank_end {
+            let new_bank_start = Self::drum_rack_bank_start_for_pad_note(pad_note);
+            if let Some(selected_bank) = self.rack_pad_bank_starts.get_mut(track) {
+                *selected_bank = new_bank_start;
+            }
+        }
+    }
+
+    pub fn selected_rack_slot_index_for_rack(
+        &self,
+        track: usize,
+        rack: &RackTrackSnapshot,
+    ) -> Option<usize> {
+        match rack.routing {
+            RackRouting::Broadcast => {
+                (!rack.slots.is_empty()).then(|| self.rack_selected_slot(track, rack.slots.len()))
+            }
+            RackRouting::ByPitch => {
+                let selected_pad = self.rack_selected_pad_note(track);
+                rack.slots
+                    .iter()
+                    .position(|slot| slot.pad_note == Some(selected_pad))
+            }
+        }
     }
 
     pub fn submit_sample_analysis(&self, loaded: &crate::sampler::LoadedSample) {
@@ -953,6 +1002,11 @@ impl App {
                     .iter()
                     .map(|slot| slot.plocks.clone())
                     .collect(),
+                effect_defaults: bus
+                    .effect_slots
+                    .iter()
+                    .map(|slot| slot.defaults.clone())
+                    .collect(),
             })
             .collect()
     }
@@ -970,6 +1024,16 @@ impl App {
             };
             bus.gate_sequence = saved.gate_sequence.clone();
             for (slot_idx, slot) in bus.effect_slots.iter_mut().enumerate() {
+                // Recall per-scene base parameter values. Legacy snapshots (and
+                // slots missing from the saved set) carry no defaults, so the
+                // slot's current values are left untouched.
+                if let Some(saved_defaults) = saved.effect_defaults.get(slot_idx) {
+                    for (param_idx, value) in saved_defaults.iter().copied().enumerate() {
+                        if param_idx < slot.defaults.len() {
+                            slot.defaults[param_idx] = value;
+                        }
+                    }
+                }
                 let Some(saved_plocks) = saved.effect_plocks.get(slot_idx) else {
                     slot.plocks = (0..MAX_STEPS)
                         .map(|_| vec![None; slot.num_params as usize])
@@ -993,55 +1057,50 @@ impl App {
             }
         }
         self.publish_bus_gate_runtime();
+        // Push the recalled base values to the live audio nodes so the scene's
+        // effect settings take immediately (not just on the next gate step).
+        for bus_idx in 0..self.buses.len() {
+            let slot_count = self.buses[bus_idx].effect_slots.len();
+            for slot_idx in 0..slot_count {
+                self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+            }
+        }
     }
 
-    pub fn save_current_bus_pattern(&mut self) {
-        let current_pattern = self
-            .state
-            .pattern
-            .current_pattern
-            .load(std::sync::atomic::Ordering::Relaxed) as usize;
-        let num_patterns = self
-            .state
-            .pattern
-            .num_patterns
-            .load(std::sync::atomic::Ordering::Relaxed) as usize;
-        self.ensure_bus_pattern_bank_len(num_patterns.max(current_pattern + 1));
-        self.bus_pattern_bank[current_pattern] = self.capture_bus_pattern_snapshot();
+    pub fn save_current_bus_pattern(&self) {
+        self.state
+            .save_current_bus_pattern_snapshot(self.capture_bus_pattern_snapshot());
     }
 
     pub fn ensure_bus_pattern_bank_len(&mut self, len: usize) {
-        while self.bus_pattern_bank.len() < len {
-            self.bus_pattern_bank
-                .push(self.capture_bus_pattern_snapshot());
-        }
+        let default_snapshot = self.capture_bus_pattern_snapshot();
+        self.state
+            .ensure_bus_pattern_repository_len(len, &default_snapshot);
     }
 
     pub fn switch_bus_pattern(&mut self, new_idx: usize) {
         self.save_current_bus_pattern();
-        self.ensure_bus_pattern_bank_len(new_idx + 1);
-        let snapshot = self.bus_pattern_bank[new_idx].clone();
+        let default_snapshot = self.capture_bus_pattern_snapshot();
+        let snapshot = self
+            .state
+            .bus_pattern_snapshot_or_default(new_idx, &default_snapshot);
         self.restore_bus_pattern_snapshot(&snapshot);
     }
 
     pub fn clone_bus_pattern_from_to(&mut self, source_idx: usize, new_idx: usize) {
         self.save_current_bus_pattern();
+        let default_snapshot = self.capture_bus_pattern_snapshot();
         let source = self
-            .bus_pattern_bank
-            .get(source_idx)
-            .cloned()
-            .unwrap_or_else(|| self.capture_bus_pattern_snapshot());
-        self.ensure_bus_pattern_bank_len(new_idx + 1);
-        self.bus_pattern_bank[new_idx] = source.clone();
+            .state
+            .clone_bus_pattern_snapshot(source_idx, new_idx, &default_snapshot);
         self.restore_bus_pattern_snapshot(&source);
     }
 
     pub fn delete_bus_pattern_at(&mut self, deleted_idx: usize, new_idx: usize) {
-        if self.bus_pattern_bank.len() > 1 && deleted_idx < self.bus_pattern_bank.len() {
-            self.bus_pattern_bank.remove(deleted_idx);
-        }
-        self.ensure_bus_pattern_bank_len(new_idx + 1);
-        let snapshot = self.bus_pattern_bank[new_idx].clone();
+        let default_snapshot = self.capture_bus_pattern_snapshot();
+        let snapshot =
+            self.state
+                .delete_bus_pattern_snapshot(deleted_idx, new_idx, &default_snapshot);
         self.restore_bus_pattern_snapshot(&snapshot);
     }
 
@@ -1118,8 +1177,10 @@ impl App {
             track_colors: Vec::new(),
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
-            bus_pattern_bank: Vec::new(),
+            groups: Vec::new(),
             sampler_paths: Vec::new(),
+            rack_selected_slots: Vec::new(),
+            rack_pad_bank_starts: Vec::new(),
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),
             current_project_name: None,
@@ -1185,8 +1246,12 @@ impl App {
                 pending_editor: None,
                 pending_compile: None,
                 pending_project_load: None,
+                dylib_cache: DylibCacheManager::workspace_default(),
                 lisp_libs: Vec::new(),
+                track_effect_leases: Vec::new(),
+                bus_effect_leases: Vec::new(),
                 instrument_libs: Vec::new(),
+                instrument_lib_leases: Vec::new(),
                 picker_cursor: 0,
                 picker_filter: String::new(),
                 picker_items: Vec::new(),
@@ -1255,6 +1320,7 @@ impl App {
                 instrument_descriptors: Vec::new(),
                 record_armed: Vec::new(),
                 keyboard_tx,
+                applied_mod_routes: Vec::new(),
             },
         };
         app.ensure_bus_pattern_bank_len(1);
@@ -1433,7 +1499,7 @@ impl App {
         });
         let current_instrument_source = current_instrument_name
             .as_deref()
-            .and_then(|name| crate::lisp_effect::load_instrument_source(name).ok());
+            .and_then(|name| crate::lisp_host::load_instrument_source(name).ok());
         let current_effect_slot = self
             .selected_effect_slot()
             .filter(|slot| !self.tracks.is_empty() && *slot >= crate::effects::BUILTIN_SLOT_COUNT);
@@ -1446,10 +1512,10 @@ impl App {
         });
         let current_effect_source = current_effect_name
             .as_deref()
-            .and_then(|name| crate::lisp_effect::load_effect_source(name).ok());
+            .and_then(|name| crate::lisp_host::load_effect_source(name).ok());
         let current_effect_ui_source = current_effect_name
             .as_deref()
-            .and_then(|name| crate::lisp_effect::load_effect_ui_source(name).ok());
+            .and_then(|name| crate::lisp_host::load_effect_ui_source(name).ok());
         let current_instrument_preset_schema = self.current_agent_instrument_preset_schema(
             current_track_index,
             current_instrument_name.as_deref(),
@@ -1759,9 +1825,8 @@ impl App {
     ) -> Result<(), String> {
         validate_effect_dsp_source(dsp_source)
             .map_err(|error| format!("dsp.lisp validation error for '{name}':\n{error}"))?;
-        let compile_result =
-            crate::lisp_effect::compile_and_load(dsp_source, self.graph.sample_rate)
-                .map_err(|error| format!("compile error for '{name}':\n{error}"))?;
+        let compile_result = crate::lisp_host::compile_and_load(dsp_source, self.graph.sample_rate)
+            .map_err(|error| format!("compile error for '{name}':\n{error}"))?;
         validate_effect_ui_source(ui_source, &compile_result.manifest)
             .map_err(|error| format!("ui.lisp validation error for '{name}':\n{error}"))?;
         let audition = audition_loaded_effect(&compile_result, self.graph.sample_rate)
@@ -1780,8 +1845,8 @@ impl App {
             .clone()
             .ok_or_else(|| "No validated draft effect artifact exists to finalize.".to_string())?;
         let final_name = format!("{}/", name.trim_end_matches('/'));
-        if crate::lisp_effect::effect_source_path(&final_name).exists()
-            || crate::lisp_effect::effect_ui_path(&final_name).exists()
+        if crate::lisp_host::effect_source_path(&final_name).exists()
+            || crate::lisp_host::effect_ui_path(&final_name).exists()
         {
             return Err(format!(
                 "Effect '{}' already exists.",
@@ -1807,11 +1872,11 @@ impl App {
         dsp_source: &str,
         ui_source: &str,
     ) -> Result<(), String> {
-        let previous_source = crate::lisp_effect::load_effect_source(name).ok();
-        let previous_ui = crate::lisp_effect::load_effect_ui_source(name).ok();
-        crate::lisp_effect::save_effect(name, dsp_source)
+        let previous_source = crate::lisp_host::load_effect_source(name).ok();
+        let previous_ui = crate::lisp_host::load_effect_ui_source(name).ok();
+        crate::lisp_host::save_effect(name, dsp_source)
             .map_err(|error| format!("Failed to save effect '{}': {error}", name))?;
-        if let Err(error) = crate::lisp_effect::save_effect_ui(name, ui_source) {
+        if let Err(error) = crate::lisp_host::save_effect_ui(name, ui_source) {
             self.restore_effect_source(name, previous_source.as_deref())?;
             self.restore_effect_ui_source(name, previous_ui.as_deref())?;
             return Err(format!("Failed to save effect UI '{}': {error}", name));
@@ -1860,8 +1925,8 @@ impl App {
                 self.finalize_agent_effect_artifact(name)
             }
             AgentAppAction::CreateInstrumentTrack { name, source } => {
-                let previous_source = crate::lisp_effect::load_instrument_source(&name).ok();
-                crate::lisp_effect::save_instrument(&name, &source)
+                let previous_source = crate::lisp_host::load_instrument_source(&name).ok();
+                crate::lisp_host::save_instrument(&name, &source)
                     .map_err(|error| format!("Failed to save instrument '{}': {error}", name))?;
                 let track_idx = match self.add_saved_instrument_track_sync(&name) {
                     Ok(track_idx) => track_idx,
@@ -1893,8 +1958,8 @@ impl App {
                             .unwrap_or_else(|| "current track".to_string())
                     )
                 })?;
-                let previous_source = crate::lisp_effect::load_effect_source(&name).ok();
-                crate::lisp_effect::save_effect(&name, &source)
+                let previous_source = crate::lisp_host::load_effect_source(&name).ok();
+                crate::lisp_host::save_effect(&name, &source)
                     .map_err(|error| format!("Failed to save effect '{}': {error}", name))?;
                 if let Err(error) = self.load_saved_effect_to_slot_sync(track, slot_idx, &name) {
                     self.restore_effect_source(&name, previous_source.as_deref())?;
@@ -1911,7 +1976,7 @@ impl App {
                 ))
             }
             AgentAppAction::UpdateCurrentEffect { name, source } => {
-                let previous_source = crate::lisp_effect::load_effect_source(&name).ok();
+                let previous_source = crate::lisp_host::load_effect_source(&name).ok();
                 if let Err(error) = self.replace_current_effect_sync(&name, &source) {
                     self.restore_effect_source(&name, previous_source.as_deref())?;
                     return Err(error);
@@ -1919,8 +1984,8 @@ impl App {
                 Ok(format!("Updated current effect to '{}'.", name))
             }
             AgentAppAction::UpdateCurrentInstrument { name, source } => {
-                let previous_source = crate::lisp_effect::load_instrument_source(&name).ok();
-                crate::lisp_effect::save_instrument(&name, &source)
+                let previous_source = crate::lisp_host::load_instrument_source(&name).ok();
+                crate::lisp_host::save_instrument(&name, &source)
                     .map_err(|error| format!("Failed to save instrument '{}': {error}", name))?;
                 if let Err(error) = self.replace_current_custom_instrument_sync(&name, &source) {
                     self.restore_instrument_source(&name, previous_source.as_deref())?;
@@ -1944,7 +2009,7 @@ impl App {
         let instrument_name = current_instrument_name?;
         let desc = self.graph.instrument_descriptors.get(track)?;
         let slot = self.state.pattern.instrument_slots.get(track)?;
-        let existing_presets = crate::lisp_effect::load_instrument_presets(instrument_name)
+        let existing_presets = crate::lisp_host::load_instrument_presets(instrument_name)
             .map(|presets| presets.into_iter().map(|preset| preset.name).collect())
             .unwrap_or_default();
         let synth_indices = self.synth_param_indices(track);
@@ -2003,7 +2068,7 @@ impl App {
             .current_instrument_descriptor()
             .ok_or_else(|| "No current instrument descriptor is available.".to_string())?;
         let existing =
-            crate::lisp_effect::load_instrument_presets(instrument_name).map_err(|error| {
+            crate::lisp_host::load_instrument_presets(instrument_name).map_err(|error| {
                 format!(
                     "Failed to load preset bank for '{}': {error}",
                     instrument_name
@@ -2038,7 +2103,7 @@ impl App {
                 let _ = idx;
                 params.insert(param_name.clone(), *value);
             }
-            let preset = crate::lisp_effect::InstrumentPreset {
+            let preset = crate::lisp_host::InstrumentPreset {
                 id: draft.name.clone(),
                 name: draft.name.clone(),
                 base_note_offset: draft
@@ -2051,14 +2116,12 @@ impl App {
 
         let mut presets = presets_by_name.into_values().collect::<Vec<_>>();
         presets.sort_by(|a, b| a.name.cmp(&b.name));
-        crate::lisp_effect::save_instrument_presets(instrument_name, &presets).map_err(
-            |error| {
-                format!(
-                    "Failed to save preset bank for '{}': {error}",
-                    instrument_name
-                )
-            },
-        )?;
+        crate::lisp_host::save_instrument_presets(instrument_name, &presets).map_err(|error| {
+            format!(
+                "Failed to save preset bank for '{}': {error}",
+                instrument_name
+            )
+        })?;
         Ok(format!(
             "Saved {} preset(s) for '{}': {}.",
             drafts.len(),
@@ -2077,7 +2140,7 @@ impl App {
         previous_source: Option<&str>,
     ) -> Result<(), String> {
         match previous_source {
-            Some(source) => crate::lisp_effect::save_instrument(name, source)
+            Some(source) => crate::lisp_host::save_instrument(name, source)
                 .map_err(|error| format!("Failed to restore instrument '{}': {error}", name)),
             None => std::fs::remove_file(format!("instruments/{name}.lisp"))
                 .or_else(|error| {
@@ -2097,9 +2160,9 @@ impl App {
         previous_source: Option<&str>,
     ) -> Result<(), String> {
         match previous_source {
-            Some(source) => crate::lisp_effect::save_effect(name, source)
+            Some(source) => crate::lisp_host::save_effect(name, source)
                 .map_err(|error| format!("Failed to restore effect '{}': {error}", name)),
-            None => std::fs::remove_file(crate::lisp_effect::effect_source_path(name))
+            None => std::fs::remove_file(crate::lisp_host::effect_source_path(name))
                 .or_else(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
                         Ok(())
@@ -2117,9 +2180,9 @@ impl App {
         previous_source: Option<&str>,
     ) -> Result<(), String> {
         match previous_source {
-            Some(source) => crate::lisp_effect::save_effect_ui(name, source)
+            Some(source) => crate::lisp_host::save_effect_ui(name, source)
                 .map_err(|error| format!("Failed to restore effect UI '{}': {error}", name)),
-            None => std::fs::remove_file(crate::lisp_effect::effect_ui_path(name))
+            None => std::fs::remove_file(crate::lisp_host::effect_ui_path(name))
                 .or_else(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
                         Ok(())

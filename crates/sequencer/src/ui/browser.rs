@@ -9,7 +9,7 @@ use super::params::draw_track_params_column;
 use super::{
     App, BrowserState, InputMode, PresetPromptKind, Region, SidebarMode, SidebarTab, UiState,
 };
-use crate::lisp_effect;
+use crate::lisp_host;
 
 // ── Sample Browser tree ──
 
@@ -497,35 +497,41 @@ impl BrowserState {
                 }
             }
             KeyCode::Down => {
-                if app.ui.instrument_picker_cursor + 1 < InstrumentType::COUNT {
+                if app.ui.instrument_picker_cursor + 1 < InstrumentType::ADD_TRACK_TYPES.len() {
                     app.ui.instrument_picker_cursor += 1;
                 }
             }
-            KeyCode::Enter => match InstrumentType::ALL[app.ui.instrument_picker_cursor] {
-                InstrumentType::Sampler => {
-                    app.browser.cursor = 0;
-                    app.browser.filter.clear();
-                    app.browser.scroll_offset = 0;
-                    app.ui.sidebar_mode = SidebarMode::AddTrack;
-                    app.ui.sidebar_search_focused = true;
-                }
-                InstrumentType::Custom => {
-                    app.editor.picker_cursor = 0;
-                    app.editor.picker_filter.clear();
-                    app.editor.picker_items = crate::lisp_effect::list_saved_instruments();
-                    app.ui.input_mode = super::InputMode::InstrumentPicker;
-                }
-                InstrumentType::Modulator => match app.graph_controller().add_modulator_track() {
-                    Ok(_) => {
-                        app.ui.sidebar_tab = SidebarTab::Tools;
-                        app.ui.sidebar_mode = SidebarMode::Audition;
-                        app.ui.sidebar_search_focused = false;
+            KeyCode::Enter => {
+                match InstrumentType::ADD_TRACK_TYPES[app.ui.instrument_picker_cursor] {
+                    InstrumentType::Sampler => {
+                        app.browser.cursor = 0;
+                        app.browser.filter.clear();
+                        app.browser.scroll_offset = 0;
+                        app.ui.sidebar_mode = SidebarMode::AddTrack;
+                        app.ui.sidebar_search_focused = true;
                     }
-                    Err(error) => {
-                        app.editor.status_message = Some((error, std::time::Instant::now()));
+                    InstrumentType::Custom => {
+                        app.editor.picker_cursor = 0;
+                        app.editor.picker_filter.clear();
+                        app.editor.picker_items = crate::lisp_host::list_saved_instruments();
+                        app.ui.input_mode = super::InputMode::InstrumentPicker;
                     }
-                },
-            },
+                    InstrumentType::Modulator => match app.graph_controller().add_modulator_track()
+                    {
+                        Ok(_) => {
+                            app.ui.sidebar_tab = SidebarTab::Tools;
+                            app.ui.sidebar_mode = SidebarMode::Audition;
+                            app.ui.sidebar_search_focused = false;
+                        }
+                        Err(error) => {
+                            app.editor.status_message = Some((error, std::time::Instant::now()));
+                        }
+                    },
+                    InstrumentType::Rack => {
+                        unreachable!("rack is not exposed in the add-track picker")
+                    }
+                }
+            }
             KeyCode::Esc => {
                 if !app.tracks.is_empty() {
                     app.ui.sidebar_tab = SidebarTab::Tools;
@@ -572,7 +578,7 @@ impl App {
         let Some(name) = self.current_custom_instrument_name() else {
             return Vec::new();
         };
-        let mut items: Vec<String> = lisp_effect::load_instrument_presets(name)
+        let mut items: Vec<String> = lisp_host::load_instrument_presets(name)
             .unwrap_or_default()
             .into_iter()
             .map(|p| p.name)
@@ -674,7 +680,7 @@ impl App {
         let Some(selected_name) = self.selected_preset_name() else {
             return;
         };
-        let presets = match lisp_effect::load_instrument_presets(instrument_name) {
+        let presets = match lisp_host::load_instrument_presets(instrument_name) {
             Ok(p) => p,
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
@@ -724,7 +730,7 @@ impl App {
         for (idx, param) in desc.params.iter().enumerate() {
             params.insert(param.name.clone(), slot.defaults.get(idx));
         }
-        let preset = lisp_effect::InstrumentPreset {
+        let preset = lisp_host::InstrumentPreset {
             id: preset_name.to_string(),
             name: preset_name.to_string(),
             base_note_offset: f32::from_bits(
@@ -734,7 +740,7 @@ impl App {
             params,
         };
 
-        let mut presets = match lisp_effect::load_instrument_presets(instrument_name) {
+        let mut presets = match lisp_host::load_instrument_presets(instrument_name) {
             Ok(p) => p,
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
@@ -757,7 +763,7 @@ impl App {
             presets.sort_by(|a, b| a.name.cmp(&b.name));
         }
 
-        match lisp_effect::save_instrument_presets(instrument_name, &presets) {
+        match lisp_host::save_instrument_presets(instrument_name, &presets) {
             Ok(()) => {
                 let engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
                 self.set_track_sound_state(track, engine_id, Some(preset_name.to_string()), false);

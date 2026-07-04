@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eseqlisp::vm::Value;
 
@@ -12,7 +12,7 @@ use sequencer::ui;
 use super::current_custom_instrument_name;
 use super::values::{build_flat_tree_items, list_value, map_value};
 
-pub(crate) const SAMPLE_BROWSER_MAX_RESULTS: usize = 200;
+pub(crate) const SAMPLE_BROWSER_MAX_RESULTS: usize = 2000;
 
 #[derive(Clone)]
 pub(crate) struct SampleTreeNode {
@@ -26,6 +26,7 @@ pub(crate) struct SampleTreeNode {
 pub(crate) struct InstrumentTreeNode {
     label: String,
     name: Option<String>,
+    folder: Option<String>,
     children: Vec<InstrumentTreeNode>,
 }
 
@@ -463,6 +464,7 @@ fn build_instrument_tree_nodes(
                 items.push(InstrumentTreeNode {
                     label,
                     name: Some(instrument_name),
+                    folder: None,
                     children: Vec::new(),
                 });
             }
@@ -471,9 +473,15 @@ fn build_instrument_tree_nodes(
 
         let children = build_instrument_tree_nodes(&path, root);
         if !children.is_empty() {
+            let folder = path
+                .strip_prefix(root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .filter(|folder| !folder.is_empty());
             items.push(InstrumentTreeNode {
                 label,
                 name: None,
+                folder,
                 children,
             });
         }
@@ -482,6 +490,7 @@ fn build_instrument_tree_nodes(
         items.push(InstrumentTreeNode {
             label,
             name: Some(name),
+            folder: None,
             children: Vec::new(),
         });
     }
@@ -506,6 +515,15 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
                     map.insert(
                         "kind".to_string(),
                         Rc::new(RefCell::new(Value::String("instrument".to_string()))),
+                    );
+                } else if let Some(folder) = &item.folder {
+                    map.insert(
+                        "folder".to_string(),
+                        Rc::new(RefCell::new(Value::String(folder.clone()))),
+                    );
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("folder".to_string()))),
                     );
                 }
                 if !item.children.is_empty() {
@@ -588,17 +606,81 @@ pub(crate) fn filter_sample_tree_nodes(
     filtered
 }
 
-fn visible_project_items() -> Vec<String> {
-    sequencer::project::list_project_names().unwrap_or_default()
-}
-
 pub(crate) fn build_project_tree(query: &str) -> Value {
     let query = query.trim().to_lowercase();
-    let mut items = visible_project_items();
+    let mut items = sequencer::project::list_project_entries().unwrap_or_default();
+    items.sort_by(|a, b| {
+        b.modified_at
+            .cmp(&a.modified_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     if !query.is_empty() {
-        items.retain(|item| item.to_lowercase().contains(&query));
+        items.retain(|item| item.name.to_lowercase().contains(&query));
     }
-    build_flat_tree_items(&items)
+    list_value(items.into_iter().map(|item| {
+        map_value([
+            ("label", Value::String(item.name)),
+            (
+                "detail",
+                Value::String(format_project_recency(item.modified_at)),
+            ),
+        ])
+    }))
+}
+
+fn format_project_recency(modified_at: Option<SystemTime>) -> String {
+    format_project_recency_at(SystemTime::now(), modified_at)
+}
+
+fn format_project_recency_at(now: SystemTime, modified_at: Option<SystemTime>) -> String {
+    let Some(modified_at) = modified_at else {
+        return String::new();
+    };
+    let Ok(age) = now.duration_since(modified_at) else {
+        return "just now".to_string();
+    };
+
+    let minutes = age.as_secs() / 60;
+    if minutes < 60 {
+        return format!("{} min ago", minutes.max(1));
+    }
+
+    let hours = age.as_secs() / 3_600;
+    if hours < 48 {
+        let unit = if hours == 1 { "hour" } else { "hours" };
+        return format!("{hours} {unit} ago");
+    }
+
+    let days = age.as_secs() / 86_400;
+    if days < 30 {
+        let unit = if days == 1 { "day" } else { "days" };
+        return format!("{days} {unit} ago");
+    }
+
+    format_system_date(modified_at)
+}
+
+fn format_system_date(time: SystemTime) -> String {
+    let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
+        return String::new();
+    };
+    let days = (duration.as_secs() / 86_400) as i64;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year as i32, m as u32, d as u32)
 }
 
 pub(crate) fn build_preset_tree_from_list(items_value: Option<&Value>, query: &str) -> Value {
@@ -665,7 +747,7 @@ pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
         .collect();
 
     let custom: Vec<Value> =
-        filter_effect_names(sequencer::lisp_effect::list_saved_effects(), &query_lower)
+        filter_effect_names(sequencer::lisp_host::list_saved_effects(), &query_lower)
             .into_iter()
             .map(|name| effect_leaf(name, "custom-audio-effect"))
             .collect();
@@ -682,7 +764,7 @@ pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
 
 pub(crate) fn build_midi_effect_tree(query: &str) -> Value {
     let query_lower = query.trim().to_lowercase();
-    let mut names: Vec<String> = sequencer::lisp_effect::load_midi_fx_descriptors()
+    let mut names: Vec<String> = sequencer::lisp_host::load_midi_fx_descriptors()
         .into_iter()
         .map(|desc| desc.name)
         .collect();
@@ -708,7 +790,7 @@ pub(crate) fn visible_preset_items_for_track(app: &ui::App, track: usize) -> Vec
     let Some(name) = current_custom_instrument_name(app, track) else {
         return Vec::new();
     };
-    let mut items: Vec<String> = sequencer::lisp_effect::load_instrument_presets(&name)
+    let mut items: Vec<String> = sequencer::lisp_host::load_instrument_presets(&name)
         .unwrap_or_default()
         .into_iter()
         .map(|preset| preset.name)
@@ -720,6 +802,28 @@ pub(crate) fn visible_preset_items_for_track(app: &ui::App, track: usize) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_project_recency_windows() {
+        let now = UNIX_EPOCH + Duration::from_secs(60 * 60 * 24 * 40);
+
+        assert_eq!(
+            format_project_recency_at(now, Some(now - Duration::from_secs(25 * 60))),
+            "25 min ago"
+        );
+        assert_eq!(
+            format_project_recency_at(now, Some(now - Duration::from_secs(5 * 60 * 60))),
+            "5 hours ago"
+        );
+        assert_eq!(
+            format_project_recency_at(now, Some(now - Duration::from_secs(12 * 86_400))),
+            "12 days ago"
+        );
+        assert_eq!(
+            format_project_recency_at(now, Some(UNIX_EPOCH)),
+            "1970-01-01"
+        );
+    }
 
     fn sample_browser_db() -> Rc<SampleDb> {
         let db = Rc::new(SampleDb::open_in_memory().expect("open db"));

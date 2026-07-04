@@ -7,7 +7,7 @@
 //! This module owns only the timing/ordering concerns — one [`GridBoundaryClock`]
 //! per generator, a per-generator tick counter, and a per-generator RNG seed — and
 //! is deliberately lisp-agnostic so it can be driven by a plain Rust callback in
-//! tests. The actual lisp `:tick` closure invocation lives in `lisp_effect.rs`; the
+//! tests. The actual lisp `:tick` closure invocation lives in `lisp_host.rs`; the
 //! scheduler wires the two together by passing a `tick_fn` that calls into the
 //! scheduler-side lisp VM.
 //!
@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::accumulator::ResolvedStep;
-use crate::lisp_effect::EmittedAccumulatorEvent;
+use crate::lisp_host::EmittedAccumulatorEvent;
 use crate::neural::{process_grid_boundaries, GridBoundaryClock};
 
 /// Reference subdivision count used when converting a `Timebase` to beats. Only

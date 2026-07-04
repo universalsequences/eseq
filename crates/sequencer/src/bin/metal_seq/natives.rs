@@ -53,6 +53,43 @@ fn trace_ui_enabled() -> bool {
     std::env::var_os("ESEQLISP_TRACE_UI").is_some()
 }
 
+fn toggle_master_recording_capture(
+    master_recording: &AtomicBool,
+    master_recorder: &sequencer::recorder::MasterRecorder,
+) -> Result<(bool, String), String> {
+    if master_recording.load(Ordering::Acquire) {
+        let take = match master_recorder.stop() {
+            Ok(take) => take,
+            Err(error) => {
+                master_recording.store(false, Ordering::Release);
+                return Err(format!("Failed to stop master recording: {error}"));
+            }
+        };
+        master_recording.store(false, Ordering::Release);
+
+        let path = sequencer::recorder::resolve_recording_path(
+            &sequencer::recorder::default_recording_name(),
+        );
+        sequencer::recorder::save_recording_wav(&path, &take)
+            .map_err(|error| format!("Failed to save master recording: {error}"))?;
+        Ok((
+            false,
+            format!("Saved master recording to {}", path.display()),
+        ))
+    } else {
+        match master_recorder.start() {
+            Ok(()) => {
+                master_recording.store(true, Ordering::Release);
+                Ok((true, "Master WAV recording started".to_string()))
+            }
+            Err(error) => {
+                master_recording.store(false, Ordering::Release);
+                Err(format!("Failed to start master recording: {error}"))
+            }
+        }
+    }
+}
+
 fn parse_fx_delete_chain(value: &Value) -> Option<FxDeleteChain> {
     match value_string_field(value, "chain")?.as_str() {
         "audio" | "fx" => Some(FxDeleteChain::Audio),
@@ -69,16 +106,36 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
                 .ok_or_else(|| "mixer-track delete target expects :track".to_string())?;
             Ok(ActiveDeleteTarget::MixerTrack { track })
         }
+        Some("track-pattern") | Some("pattern") => {
+            let track = value_number_field(payload, "track")
+                .ok_or_else(|| "track-pattern delete target expects :track".to_string())?;
+            let pattern_id = value_number_field(payload, "pattern-id")
+                .or_else(|| value_number_field(payload, "pattern_id"))
+                .ok_or_else(|| "track-pattern delete target expects :pattern-id".to_string())?;
+            if pattern_id == 0 {
+                return Err("track-pattern delete target pattern id must be positive".to_string());
+            }
+            Ok(ActiveDeleteTarget::TrackPattern {
+                track,
+                pattern_id: PatternId(pattern_id as u64),
+            })
+        }
         Some("mod-route") | Some("route") | Some("cable") => {
             let source = value_number_field(payload, "source")
                 .ok_or_else(|| "mod-route delete target expects :source".to_string())?;
             let dest = value_number_field(payload, "dest")
                 .ok_or_else(|| "mod-route delete target expects :dest".to_string())?;
+            let destination = match value_string_field(payload, "dest-kind").as_deref() {
+                Some("bus") => sequencer::sequencer::ModDestination::Bus(
+                    sequencer::sequencer::BusId(dest as u64),
+                ),
+                _ => sequencer::sequencer::ModDestination::Track(dest),
+            };
             let input = value_number_field(payload, "input")
                 .ok_or_else(|| "mod-route delete target expects :input".to_string())?;
             Ok(ActiveDeleteTarget::ModRoute {
                 source,
-                dest,
+                destination,
                 input,
             })
         }
@@ -92,6 +149,13 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
                 return Err("bus fx-effect delete target expects :bus".to_string());
             }
             Ok(ActiveDeleteTarget::FxEffect { chain, bus, slot })
+        }
+        Some("rack-slot") | Some("rack-layer") => {
+            let track = value_number_field(payload, "track")
+                .ok_or_else(|| "rack-slot delete target expects :track".to_string())?;
+            let slot = value_number_field(payload, "slot")
+                .ok_or_else(|| "rack-slot delete target expects :slot".to_string())?;
+            Ok(ActiveDeleteTarget::RackSlot { track, slot })
         }
         Some(other) => Err(format!("unknown delete target kind :{other}")),
         None => Err("delete target kind must be a keyword or string".to_string()),
@@ -121,8 +185,10 @@ fn effect_param_target(
 fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
     match target {
         Some(ActiveDeleteTarget::MixerTrack { .. }) => Value::String("mixer-track".to_string()),
+        Some(ActiveDeleteTarget::TrackPattern { .. }) => Value::String("track-pattern".to_string()),
         Some(ActiveDeleteTarget::ModRoute { .. }) => Value::String("mod-route".to_string()),
         Some(ActiveDeleteTarget::FxEffect { .. }) => Value::String("fx-effect".to_string()),
+        Some(ActiveDeleteTarget::RackSlot { .. }) => Value::String("rack-slot".to_string()),
         None => Value::Bool(false),
     }
 }
@@ -171,8 +237,23 @@ mod delete_target_tests {
             .expect("mod route target"),
             ActiveDeleteTarget::ModRoute {
                 source: 0,
-                dest: 3,
+                destination: sequencer::sequencer::ModDestination::Track(3),
                 input: 1,
+            }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("track-pattern".to_string()),
+                &map_value([
+                    ("track", Value::Number(1.0)),
+                    ("pattern-id", Value::Number(4.0)),
+                ]),
+            )
+            .expect("track pattern target"),
+            ActiveDeleteTarget::TrackPattern {
+                track: 1,
+                pattern_id: PatternId(4),
             }
         );
 
@@ -191,6 +272,15 @@ mod delete_target_tests {
                 bus: Some(1),
                 slot: 4,
             }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("rack-slot".to_string()),
+                &map_value([("track", Value::Number(2.0)), ("slot", Value::Number(3.0))]),
+            )
+            .expect("rack slot target"),
+            ActiveDeleteTarget::RackSlot { track: 2, slot: 3 }
         );
     }
 
@@ -217,28 +307,37 @@ pub(crate) fn init_runtime(
     buses: Arc<Mutex<Vec<ui::BusChannelState>>>,
     bus_node_ids: Arc<Mutex<Vec<ui::BusNodeIds>>>,
     current_track: Arc<AtomicUsize>,
+    selected_tracks: Arc<Mutex<HashSet<usize>>>,
+    track_groups: Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,
     selected_steps: Arc<Mutex<HashSet<usize>>>,
     piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
     piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>>,
     recording: Arc<AtomicBool>,
+    master_recording: Arc<AtomicBool>,
+    master_recorder: Arc<sequencer::recorder::MasterRecorder>,
     record_armed: Arc<Mutex<Vec<bool>>>,
     ui_epoch: Arc<AtomicUsize>,
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
     expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
-    selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons,
+    selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons,
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
     auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) -> RuntimeInit {
     let mut runtime = Runtime::new();
-    sequencer::lisp_effect::register_neural_authoring_natives_with_selection(
+    sequencer::lisp_host::register_neural_authoring_natives_with_selection(
         &mut runtime,
         Arc::clone(&state),
         Arc::clone(&selected_neural_neurons),
     );
-    sequencer::lisp_effect::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+    sequencer::lisp_host::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+    sequencer::lisp_host::register_published_process_authoring_natives(
+        &mut runtime,
+        Arc::clone(&state),
+        Arc::clone(&ui_epoch),
+    );
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -256,19 +355,20 @@ pub(crate) fn init_runtime(
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
+                ("selected-tracks", Value::List(vec![])),
+                ("groups", Value::List(vec![])),
+                ("group-collapsed", Value::List(vec![])),
                 ("delete-target-version", Value::Number(0.0)),
+                ("selected-mod-routes", Value::List(vec![])),
                 (
                     "current-pattern",
-                    Value::Number(state.pattern.current_pattern.load(Ordering::Relaxed) as f64),
+                    Value::Number(state.current_scene_index() as f64),
                 ),
-                (
-                    "num-patterns",
-                    Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
-                ),
+                ("num-patterns", Value::Number(state.scene_count() as f64)),
                 ("neural-networks", build_neural_networks_value(&state)),
                 (
                     "selected-neural-neurons",
-                    sequencer::lisp_effect::selected_neural_neurons_to_value(
+                    sequencer::lisp_host::selected_neural_neurons_to_value(
                         &selected_neural_neurons.lock().unwrap(),
                     ),
                 ),
@@ -288,6 +388,11 @@ pub(crate) fn init_runtime(
                     "graph-visualizations",
                     build_graph_visualizations_value(&state),
                 ),
+                ("track-events", build_track_output_events_value(&state)),
+                (
+                    "track-event-current-beat",
+                    build_track_output_current_beat_value(&state),
+                ),
                 ("auto-follow", Value::Bool(true)),
                 ("playhead", Value::Number(0.0)),
                 ("transport-playhead", Value::Number(0.0)),
@@ -304,6 +409,10 @@ pub(crate) fn init_runtime(
                 ),
                 ("track-names", build_track_names(&track_names)),
                 ("track-collapsed", build_track_collapsed(app)),
+                (
+                    "track-pattern-cells",
+                    build_track_pattern_cells_value(&state, track_count),
+                ),
                 (
                     "track-num-steps",
                     build_all_track_num_steps_value(&state, app),
@@ -406,6 +515,15 @@ pub(crate) fn init_runtime(
                 ("track-mutes", build_track_mutes(&state)),
                 ("track-solos", build_track_solos(&state)),
                 ("track-muted-by-solo", build_track_muted_by_solo(&state)),
+                (
+                    "bus-ids",
+                    Value::List(
+                        app.buses
+                            .iter()
+                            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))))
+                            .collect(),
+                    ),
+                ),
                 (
                     "bus-names",
                     build_track_names(
@@ -600,6 +718,12 @@ pub(crate) fn init_runtime(
                     ),
                 ),
                 (
+                    "tp-mute-group",
+                    Value::String(mute_group_label(
+                        state.pattern.track_params[0].get_mute_group(),
+                    )),
+                ),
+                (
                     "tp-accumulator",
                     Value::String(selected_accumulator_name(&app, 0)),
                 ),
@@ -616,6 +740,7 @@ pub(crate) fn init_runtime(
                 ),
                 ("accumulator-options", build_accumulator_options(&app)),
                 ("fts-options", build_fts_options()),
+                ("mute-group-options", build_mute_group_options()),
                 ("accum-mode-options", build_accum_mode_options()),
                 (
                     "available-builtin-effects",
@@ -642,6 +767,7 @@ pub(crate) fn init_runtime(
                 ),
                 ("compiling", Value::Bool(false)),
                 ("recording", Value::Bool(false)),
+                ("master-recording", Value::Bool(false)),
                 ("cpu-load-pct", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
@@ -668,6 +794,8 @@ pub(crate) fn init_runtime(
                 ("editor-error", Value::String(String::new())),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
+                ("editor-active-macro-name", Value::String(String::new())),
+                ("editor-active-macro-action", Value::String(String::new())),
                 (
                     "editor-instrument-run-mode",
                     Value::String("instrument".to_string()),
@@ -682,6 +810,33 @@ pub(crate) fn init_runtime(
                     Box::leak(mixer_track_delete_target_field(idx).into_boxed_str()),
                     Value::Bool(false),
                 ));
+                for cell in state.track_pattern_cells(idx) {
+                    let pattern_id = cell.pattern_id.0;
+                    fields.push((
+                        Box::leak(
+                            track_pattern_cell_active_field(idx, pattern_id).into_boxed_str(),
+                        ),
+                        Value::Bool(cell.active_effective),
+                    ));
+                    fields.push((
+                        Box::leak(
+                            track_pattern_cell_assigned_field(idx, pattern_id).into_boxed_str(),
+                        ),
+                        Value::Bool(cell.assigned_to_current_scene),
+                    ));
+                    fields.push((
+                        Box::leak(
+                            track_pattern_cell_override_field(idx, pattern_id).into_boxed_str(),
+                        ),
+                        Value::Bool(cell.overridden),
+                    ));
+                    fields.push((
+                        Box::leak(
+                            track_pattern_cell_selected_field(idx, pattern_id).into_boxed_str(),
+                        ),
+                        Value::Bool(false),
+                    ));
+                }
                 fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
@@ -921,28 +1076,50 @@ pub(crate) fn init_runtime(
                     payload: Value::Map(map),
                 });
             }
+            ActiveDeleteTarget::TrackPattern { track, pattern_id } => {
+                if current_buffer != "*mixer*" {
+                    return Ok(Value::Bool(false));
+                }
+                let valid = track < st.active_track_count()
+                    && st
+                        .track_pattern_cells(track)
+                        .iter()
+                        .any(|cell| cell.pattern_id == pattern_id);
+                if !valid {
+                    ctx.set_status("Cannot delete missing track pattern");
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(track as f64))),
+                );
+                map.insert(
+                    "pattern-id".to_string(),
+                    Rc::new(RefCell::new(Value::Number(pattern_id.0 as f64))),
+                );
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-track-pattern".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
             ActiveDeleteTarget::ModRoute {
                 source,
-                dest,
+                destination,
                 input,
             } => {
                 if current_buffer != "*mixer*" {
                     return Ok(Value::Bool(false));
                 }
-                let current_pattern = st.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-                let route_exists = st
-                    .pattern
-                    .pattern_bank
-                    .lock()
-                    .unwrap()
-                    .get(current_pattern)
-                    .is_some_and(|pattern| {
-                        pattern.mod_connections.iter().any(|route| {
-                            route.source_track == source
-                                && route.dest_track == dest
-                                && route.dest_input == input
-                        })
-                    });
+                let route_exists = st.current_mod_connections().iter().any(|route| {
+                    route.source_track == source
+                        && route.destination == destination
+                        && route.dest_input == input
+                });
                 if !route_exists {
                     let mut guard = delete_target.lock().unwrap();
                     if guard.take().is_some() {
@@ -956,8 +1133,22 @@ pub(crate) fn init_runtime(
                     Rc::new(RefCell::new(Value::Number(source as f64))),
                 );
                 map.insert(
+                    "dest-kind".to_string(),
+                    Rc::new(RefCell::new(match destination {
+                        sequencer::sequencer::ModDestination::Track(_) => {
+                            Value::String("track".to_string())
+                        }
+                        sequencer::sequencer::ModDestination::Bus(_) => {
+                            Value::String("bus".to_string())
+                        }
+                    })),
+                );
+                map.insert(
                     "dest".to_string(),
-                    Rc::new(RefCell::new(Value::Number(dest as f64))),
+                    Rc::new(RefCell::new(Value::Number(match destination {
+                        sequencer::sequencer::ModDestination::Track(track) => track as f64,
+                        sequencer::sequencer::ModDestination::Bus(bus) => bus.0 as f64,
+                    }))),
                 );
                 map.insert(
                     "input".to_string(),
@@ -1033,12 +1224,89 @@ pub(crate) fn init_runtime(
                 };
                 ctx.enqueue_command(HostCommand::Custom { name, payload });
             }
+            ActiveDeleteTarget::RackSlot { track, slot } => {
+                if current_buffer != "*fx*" {
+                    return Ok(Value::Bool(false));
+                }
+                let valid = track < st.active_track_count()
+                    && st
+                        .pattern
+                        .rack_tracks
+                        .lock()
+                        .unwrap()
+                        .get(track)
+                        .and_then(|rack| rack.as_ref())
+                        .is_some_and(|rack| slot < rack.slots.len());
+                if !valid {
+                    ctx.set_status("Cannot delete missing rack layer");
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(track as f64))),
+                );
+                map.insert(
+                    "slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(slot as f64))),
+                );
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-rack-slot".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
         }
 
         let mut guard = delete_target.lock().unwrap();
         if guard.take().is_some() {
             bump_delete_target_version(&delete_target_version, &ui_ep);
         }
+        Ok(Value::Bool(true))
+    });
+
+    let st = state.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-clone-active-track-pattern", move |_args, ctx| {
+        let target = delete_target.lock().unwrap().clone();
+        let Some(ActiveDeleteTarget::TrackPattern { track, pattern_id }) = target else {
+            ctx.set_status("Select a track pattern to clone");
+            return Ok(Value::Bool(false));
+        };
+        if ctx.current_buffer_name() != "*mixer*" {
+            return Ok(Value::Bool(false));
+        }
+        let valid = track < st.active_track_count()
+            && st
+                .track_pattern_cells(track)
+                .iter()
+                .any(|cell| cell.pattern_id == pattern_id);
+        if !valid {
+            ctx.set_status("Cannot clone missing track pattern");
+            let mut guard = delete_target.lock().unwrap();
+            if guard.take().is_some() {
+                bump_delete_target_version(&delete_target_version, &ui_ep);
+            }
+            return Ok(Value::Bool(false));
+        }
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(track as f64))),
+        );
+        map.insert(
+            "pattern-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(pattern_id.0 as f64))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "clone-track-pattern".to_string(),
+            payload: Value::Map(map),
+        });
         Ok(Value::Bool(true))
     });
 
@@ -1232,14 +1500,17 @@ pub(crate) fn init_runtime(
         Ok(Value::String(status))
     });
 
-    // seq-set-track — switch current track
+    // seq-set-track — switch current track (single-select: resets the multi-select set)
     let st = state.clone();
     let ct = current_track.clone();
+    let sel_tracks = selected_tracks.clone();
     let sel = selected_steps.clone();
     let piano_sel = piano_roll_selection.clone();
     let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
     let ui_inv = ui_invalidations.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
     runtime.register_native("seq-set-track", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-set-track: expected track number".into());
@@ -1248,11 +1519,24 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track: track {track} out of range").into());
         }
+        {
+            let mut set = sel_tracks.lock().unwrap();
+            set.clear();
+            set.insert(track);
+        }
         let previous = ct.load(Ordering::Relaxed);
         ct.store(track, Ordering::Relaxed);
         if previous != track {
             sel.lock().unwrap().clear();
             piano_sel.lock().unwrap().clear();
+            let mut guard = delete_target.lock().unwrap();
+            if matches!(
+                guard.as_ref(),
+                Some(ActiveDeleteTarget::TrackPattern { .. })
+            ) {
+                guard.take();
+                bump_delete_target_version(&delete_target_version, &ui_ep);
+            }
             ui_inv.push(UiInvalidation::CurrentTrack {
                 previous,
                 current: track,
@@ -1272,6 +1556,68 @@ pub(crate) fn init_runtime(
             );
         }
         Ok(Value::Number(track as f64))
+    });
+
+    // seq-toggle-track-selected — (seq-toggle-track-selected track-idx)
+    // cmd-click multi-select: toggle this track's membership in the selection set.
+    // The last-clicked track becomes the focused current track. The set never
+    // becomes empty (toggling off the sole member re-selects it).
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel_tracks = selected_tracks.clone();
+    runtime.register_native("seq-toggle-track-selected", move |args, _ctx| {
+        let Some(Value::Number(track)) = args.first() else {
+            return Err("seq-toggle-track-selected: expected track number".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-toggle-track-selected: track {track} out of range").into());
+        }
+        let selected = {
+            let mut set = sel_tracks.lock().unwrap();
+            if set.contains(&track) {
+                set.remove(&track);
+                if set.is_empty() {
+                    set.insert(track);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                set.insert(track);
+                true
+            }
+        };
+        ct.store(track, Ordering::Relaxed);
+        Ok(Value::Bool(selected))
+    });
+
+    // seq-toggle-group-collapsed — (seq-toggle-group-collapsed group-id)
+    // Flips the collapsed flag on the in-memory group; the main loop rebuilds the
+    // SEQ.group-collapsed / SEQ.groups reactive surfaces from the project groups.
+    let groups_state = track_groups.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-toggle-group-collapsed", move |args, _ctx| {
+        let Some(Value::Number(group_id)) = args.first() else {
+            return Err("seq-toggle-group-collapsed: expected group id".into());
+        };
+        let group_id = *group_id as u64;
+        let collapsed = {
+            let mut groups = groups_state.lock().unwrap();
+            match groups.iter_mut().find(|g| g.id == group_id) {
+                Some(group) => {
+                    group.collapsed = !group.collapsed;
+                    group.collapsed
+                }
+                None => {
+                    return Err(
+                        format!("seq-toggle-group-collapsed: group {group_id} not found").into(),
+                    );
+                }
+            }
+        };
+        ui_inv.push(UiInvalidation::BusTopology);
+        Ok(Value::Bool(collapsed))
     });
 
     // seq-set-track-volume — (seq-set-track-volume track-idx volume)
@@ -2228,26 +2574,38 @@ pub(crate) fn init_runtime(
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-param", move |args, _ctx| {
-        let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
-            (args.first(), args.get(1))
+        let (Some(Value::Keyword(param_name)), Some(param_value)) = (args.first(), args.get(1))
         else {
             return Err("seq-set-track-param: expected (:param value)".into());
+        };
+        let numeric_value = match param_value {
+            Value::Number(value) => Some(*value),
+            _ => None,
         };
         let track = ct.load(Ordering::Relaxed);
         let tp = &st.pattern.track_params[track];
         let invalidation = match param_name.as_str() {
             "attack" => {
-                let v = (*val as f32).clamp(0.0, 500.0);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :attack expects a number".into());
+                };
+                let v = (val as f32).clamp(0.0, 500.0);
                 tp.set_attack_ms(v);
                 (TrackParamInvalidation::Attack, Ok(Value::Number(v as f64)))
             }
             "release" => {
-                let v = (*val as f32).clamp(0.0, 2000.0);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :release expects a number".into());
+                };
+                let v = (val as f32).clamp(0.0, 2000.0);
                 tp.set_release_ms(v);
                 (TrackParamInvalidation::Release, Ok(Value::Number(v as f64)))
             }
             "swing" => {
-                let v = (*val as f32).clamp(50.0, 75.0);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :swing expects a number".into());
+                };
+                let v = (val as f32).clamp(50.0, 75.0);
                 let steps = sel.lock().unwrap();
                 if steps.is_empty() {
                     tp.set_swing(v);
@@ -2259,7 +2617,10 @@ pub(crate) fn init_runtime(
                 (TrackParamInvalidation::Swing, Ok(Value::Number(v as f64)))
             }
             "num-steps" => {
-                let v = (*val as usize).clamp(1, MAX_STEPS);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :num-steps expects a number".into());
+                };
+                let v = (val as usize).clamp(1, MAX_STEPS);
                 tp.set_num_steps(v);
                 (
                     TrackParamInvalidation::NumSteps,
@@ -2267,12 +2628,18 @@ pub(crate) fn init_runtime(
                 )
             }
             "send" => {
-                let v = (*val as f32).clamp(0.0, 1.0);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :send expects a number".into());
+                };
+                let v = (val as f32).clamp(0.0, 1.0);
                 tp.set_send(v);
                 (TrackParamInvalidation::Send, Ok(Value::Number(v as f64)))
             }
             "gate" => {
-                let want_on = *val != 0.0;
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :gate expects a number".into());
+                };
+                let want_on = val != 0.0;
                 if want_on != tp.is_gate_on() {
                     tp.toggle_gate();
                 }
@@ -2282,7 +2649,10 @@ pub(crate) fn init_runtime(
                 )
             }
             "poly" => {
-                let want_on = *val != 0.0;
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :poly expects a number".into());
+                };
+                let want_on = val != 0.0;
                 if want_on != tp.is_polyphonic() {
                     tp.toggle_polyphonic();
                 }
@@ -2292,10 +2662,40 @@ pub(crate) fn init_runtime(
                 )
             }
             "max-poly" | "max-polyphony" | "voices" => {
-                tp.set_max_polyphony((*val).round().max(1.0) as usize);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :max-poly expects a number".into());
+                };
+                tp.set_max_polyphony(val.round().max(1.0) as usize);
                 (
                     TrackParamInvalidation::MaxPolyphony,
                     Ok(Value::Number(tp.get_max_polyphony() as f64)),
+                )
+            }
+            "mute-group" => {
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :mute-group expects a number".into());
+                };
+                tp.set_mute_group(val.round().clamp(0.0, 8.0) as u8);
+                (
+                    TrackParamInvalidation::MuteGroup,
+                    Ok(Value::Number(tp.get_mute_group() as f64)),
+                )
+            }
+            "global-transpose" => {
+                let enabled = match param_value {
+                    Value::Bool(value) => *value,
+                    Value::Number(value) => *value != 0.0,
+                    _ => {
+                        return Err(
+                            "seq-set-track-param: :global-transpose expects a bool or number"
+                                .into(),
+                        )
+                    }
+                };
+                tp.set_global_transpose(enabled);
+                (
+                    TrackParamInvalidation::GlobalTranspose,
+                    Ok(Value::Bool(tp.uses_global_transpose())),
                 )
             }
             other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),
@@ -2395,11 +2795,27 @@ pub(crate) fn init_runtime(
     let st_def_sequencer = state.clone();
     let ui_ep_def_sequencer = ui_epoch.clone();
     runtime.register_native("def-sequencer", move |args, _ctx| {
-        let published = sequencer::lisp_effect::published_sequencer_from_def_args(&args)?;
+        let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
         let name = published.name.clone();
         st_def_sequencer.publish_sequencer(published);
         ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(name))
+    });
+
+    let st_unpublish_sequencer = state.clone();
+    let ui_ep_unpublish_sequencer = ui_epoch.clone();
+    runtime.register_native("seq-unpublish-sequencer", move |args, _ctx| {
+        let name = match args.first() {
+            Some(Value::String(name) | Value::Symbol(name) | Value::Keyword(name)) => {
+                name.trim_start_matches(':').trim_start_matches('@')
+            }
+            _ => return Err("seq-unpublish-sequencer expects a sequencer name".into()),
+        };
+        let removed = st_unpublish_sequencer.unpublish_sequencer_by_name(name);
+        if removed {
+            ui_ep_unpublish_sequencer.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Value::Bool(removed))
     });
 
     let st = state.clone();
@@ -2768,6 +3184,21 @@ pub(crate) fn init_runtime(
         }
     });
 
+    let master_rec = master_recording.clone();
+    let master = master_recorder.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-master-recording", move |_args, ctx| {
+        let result = toggle_master_recording_capture(&master_rec, &master);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        match result {
+            Ok((active, status)) => {
+                ctx.set_status(status);
+                Ok(Value::Bool(active))
+            }
+            Err(error) => Err(error.into()),
+        }
+    });
+
     // seq-toggle-record-arm — toggle record arm for a given track index
     let ra = record_armed.clone();
     let rec = recording.clone();
@@ -2888,7 +3319,7 @@ pub(crate) fn init_runtime(
     });
     runtime.register_native("seq-saved-instruments", move |_args, _ctx| {
         Ok(Value::List(
-            sequencer::lisp_effect::list_saved_instruments()
+            sequencer::lisp_host::list_saved_instruments()
                 .into_iter()
                 .map(|name| Rc::new(RefCell::new(Value::String(name))))
                 .collect(),
@@ -3599,6 +4030,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Delete the active destructive keyboard target when valid for the current buffer.",
         ),
         (
+            "seq-clone-active-track-pattern",
+            "(seq-clone-active-track-pattern)",
+            "Clone the selected mixer track-pattern cell into the current scene.",
+        ),
+        (
             "seq-set-track-volume",
             "(seq-set-track-volume track volume)",
             "Set a track's mixer volume and update its audio panner.",
@@ -3729,6 +4165,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Internal helper that registers a MIDI FX preview label for UI selection.",
         ),
         (
+            "seq-unpublish-sequencer",
+            "(seq-unpublish-sequencer name)",
+            "Remove a UI-published def-sequencer by name.",
+        ),
+        (
             "seq-use-accumulator",
             "(seq-use-accumulator [track] name)",
             "Assign a script accumulator to a track.",
@@ -3804,6 +4245,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Toggle recording when at least one track is armed.",
         ),
         (
+            "seq-toggle-master-recording",
+            "(seq-toggle-master-recording)",
+            "Toggle final master-output WAV recording.",
+        ),
+        (
             "seq-toggle-track-collapsed",
             "(seq-toggle-track-collapsed track)",
             "Toggle whether a track is collapsed in track overview UIs.",
@@ -3874,6 +4320,7 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
 
     fn map_bool(value: &Value, key: &str) -> bool {
         let Value::Map(map) = value else {
@@ -3903,6 +4350,117 @@ mod tests {
             Some(Value::String(value)) => value,
             other => panic!("expected string field {key}, got {other:?}"),
         }
+    }
+
+    static CWD_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    struct TempCwdGuard {
+        original: std::path::PathBuf,
+        path: std::path::PathBuf,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl TempCwdGuard {
+        fn enter(name: &str) -> Self {
+            let guard = CWD_TEST_LOCK
+                .get_or_init(|| std::sync::Mutex::new(()))
+                .lock()
+                .expect("lock cwd test guard");
+            let original = std::env::current_dir().expect("read current dir");
+            let unique = format!(
+                "{}-{}-{}",
+                name,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock after unix epoch")
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&path).expect("create temp cwd");
+            std::env::set_current_dir(&path).expect("enter temp cwd");
+            Self {
+                original,
+                path,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for TempCwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn wav_files(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return Vec::new();
+        };
+        let mut files = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("wav"))
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn master_recording_toggle_starts_saves_wav_and_reports_empty_take() {
+        let cwd = TempCwdGuard::enter("metal-master-recording-toggle");
+        let recorder = sequencer::recorder::MasterRecorder::new(44_100, 2);
+        let master_recording = AtomicBool::new(false);
+
+        let (active, status) =
+            toggle_master_recording_capture(&master_recording, &recorder).expect("start capture");
+        assert!(active, "start should return active");
+        assert!(
+            status.contains("started"),
+            "start status should mention recording start: {status}"
+        );
+        assert!(master_recording.load(Ordering::Acquire));
+        assert!(recorder.is_active());
+
+        recorder.capture(&[0.25, -0.25, 0.5, -0.5]);
+        let (active, status) =
+            toggle_master_recording_capture(&master_recording, &recorder).expect("stop capture");
+        assert!(!active, "stop should return inactive");
+        assert!(
+            status.contains("Saved master recording to recordings/recording-"),
+            "stop status should include saved recordings path: {status}"
+        );
+        assert!(!master_recording.load(Ordering::Acquire));
+        assert!(!recorder.is_active());
+
+        let recordings_dir = cwd.path.join("recordings");
+        let saved = wav_files(&recordings_dir);
+        assert_eq!(saved.len(), 1, "expected one saved WAV in recordings/");
+        assert!(
+            std::fs::metadata(&saved[0])
+                .expect("saved WAV metadata")
+                .len()
+                > 44,
+            "saved WAV should contain audio samples"
+        );
+
+        let (active, _) = toggle_master_recording_capture(&master_recording, &recorder)
+            .expect("start empty take");
+        assert!(active);
+        let error = toggle_master_recording_capture(&master_recording, &recorder)
+            .expect_err("empty take should fail instead of writing");
+        assert!(
+            error.contains("Recording is empty"),
+            "empty-take error should be explicit: {error}"
+        );
+        assert!(!master_recording.load(Ordering::Acquire));
+        assert!(!recorder.is_active());
+        assert_eq!(
+            wav_files(&recordings_dir),
+            saved,
+            "empty recording should not create another WAV"
+        );
     }
 
     #[test]

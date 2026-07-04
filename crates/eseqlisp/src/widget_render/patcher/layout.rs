@@ -4,7 +4,9 @@ use super::display::node_size_for_ports;
 use super::geometry::{
     patch_input_indices, patch_input_slot_counts, patch_output_counts, port_x_offset,
 };
-use super::metrics::{LAYER_SPACING, NODE_COLUMN_GAP, VIEW_PADDING_X, VIEW_PADDING_Y};
+use super::metrics::{
+    LAYER_SPACING, NODE_COLUMN_GAP, PORT_EDGE_PADDING_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
+};
 use super::model::{
     CableSegmentInfo, ConnectionKind, NodeKind, Patch, connection_touches_hidden_inline_node,
     hidden_inline_node_ids,
@@ -20,7 +22,9 @@ const SEGMENT_RANGE_PADDING: f32 = 0.35;
 const SEGMENT_MIN_GAP: f32 = 0.55;
 const SEGMENT_LANE_SPACING: f32 = 0.62;
 const PARAM_EXIT_ROW_PADDING: f32 = 0.22;
-const FEEDBACK_SEGMENT_ROW_OFFSET: f32 = LAYOUT_LAYER_SPACING * 0.3;
+const FEEDBACK_SEGMENT_BOTTOM_PADDING: f32 = 0.9;
+const UPWARD_SEGMENT_EXTRA_RANGE: f32 = 5.4;
+const MAX_AUTO_NODE_WIDTH: f32 = 90.0;
 const PARAM_STACK_MIN_COUNT: usize = 3;
 const PARAM_STACK_VERTICAL_GAP: f32 = 1.1;
 
@@ -476,16 +480,10 @@ impl LayoutGraph {
             .iter()
             .map(|rank| rank_metrics(rank, &self.work_nodes, patch))
             .collect::<Vec<_>>();
-        let widest_rank = rank_metrics
-            .iter()
-            .map(|metrics| metrics.width)
-            .fold(0.0, f32::max);
-
         let mut y = VIEW_PADDING_Y;
         for (rank_idx, rank) in self.ranks.iter().enumerate() {
             let metrics = rank_metrics[rank_idx];
-            let rank_offset = ((widest_rank - metrics.width) * 0.5).max(0.0);
-            let mut x = VIEW_PADDING_X + rank_offset;
+            let mut x = VIEW_PADDING_X;
 
             let stacked_params = stacked_param_nodes(rank, &self.work_nodes, patch);
             if stacked_params.len() >= PARAM_STACK_MIN_COUNT {
@@ -521,6 +519,7 @@ impl LayoutGraph {
 
         self.refine_horizontal_positions(patch);
         self.place_local_sources_next_to_consumers(patch);
+        self.widen_nodes_for_straight_inlets(patch);
         self.resolve_rank_overlaps_by_x(patch);
         self.translate_to_positive_padding(patch);
         self.assign_generated_cable_segments(patch);
@@ -549,17 +548,7 @@ impl LayoutGraph {
                 .copied()
                 .map(|idx| (idx, self.ideal_x_for_node(idx, patch)))
                 .collect::<Vec<_>>();
-            let mut next_x = if real_rank.len() == 1 {
-                ideals
-                    .first()
-                    .map(|(_, ideal)| *ideal)
-                    .unwrap_or(VIEW_PADDING_X)
-            } else {
-                real_rank
-                    .iter()
-                    .map(|idx| patch.nodes[*idx].position.0)
-                    .fold(f32::INFINITY, f32::min)
-            };
+            let mut next_x = VIEW_PADDING_X;
             for (idx, ideal) in ideals {
                 let x = ideal.max(next_x);
                 patch.nodes[idx].position.0 = x;
@@ -572,8 +561,8 @@ impl LayoutGraph {
         if self.real_nodes[idx].is_history {
             return self.ideal_x_for_history(idx, patch);
         }
-        if let Some(center_x) = self.primary_chain_center_x(idx, patch) {
-            return center_x - self.real_nodes[idx].width * 0.5;
+        if let Some(x) = self.primary_chain_alignment_x(idx, patch) {
+            return x;
         }
 
         let mut targets = Vec::new();
@@ -621,7 +610,40 @@ impl LayoutGraph {
         }
     }
 
-    fn primary_chain_center_x(&self, idx: usize, patch: &Patch) -> Option<f32> {
+    /// X position that places this node's receiving inlet directly under the
+    /// source's outlet (or its outlet directly over the target's inlet), so
+    /// the primary chain cable renders perfectly vertical.
+    fn incoming_alignment_x(&self, edge: &LayoutEdge, patch: &Patch) -> f32 {
+        let source_outlet_x = patch.nodes[edge.from].position.0
+            + output_port_x_offset(
+                edge.from_output,
+                self.output_counts[edge.from],
+                self.real_nodes[edge.from].width,
+            );
+        source_outlet_x
+            - input_port_x_offset(
+                self.visible_input_slot(edge.to, edge.to_input),
+                self.input_slot_counts[edge.to],
+                self.real_nodes[edge.to].width,
+            )
+    }
+
+    fn outgoing_alignment_x(&self, edge: &LayoutEdge, patch: &Patch) -> f32 {
+        let target_inlet_x = patch.nodes[edge.to].position.0
+            + input_port_x_offset(
+                self.visible_input_slot(edge.to, edge.to_input),
+                self.input_slot_counts[edge.to],
+                self.real_nodes[edge.to].width,
+            );
+        target_inlet_x
+            - output_port_x_offset(
+                edge.from_output,
+                self.output_counts[edge.from],
+                self.real_nodes[edge.from].width,
+            )
+    }
+
+    fn primary_chain_alignment_x(&self, idx: usize, patch: &Patch) -> Option<f32> {
         if matches!(patch.nodes[idx].kind, NodeKind::Param | NodeKind::Constant) {
             return None;
         }
@@ -644,7 +666,7 @@ impl LayoutGraph {
                 )
             });
         if let Some(edge) = preferred_incoming {
-            return Some(node_center_x(edge.from, patch, &self.real_nodes));
+            return Some(self.incoming_alignment_x(edge, patch));
         }
 
         let incoming = self
@@ -659,7 +681,7 @@ impl LayoutGraph {
             })
             .collect::<Vec<_>>();
         if incoming.len() == 1 {
-            return Some(node_center_x(incoming[0].from, patch, &self.real_nodes));
+            return Some(self.incoming_alignment_x(incoming[0], patch));
         }
 
         let preferred_outgoing = self
@@ -679,7 +701,7 @@ impl LayoutGraph {
                     self.real_nodes[edge.to].stable_order,
                 )
             });
-        preferred_outgoing.map(|edge| node_center_x(edge.to, patch, &self.real_nodes))
+        preferred_outgoing.map(|edge| self.outgoing_alignment_x(edge, patch))
     }
 
     fn ideal_x_for_history(&self, idx: usize, patch: &Patch) -> f32 {
@@ -730,6 +752,53 @@ impl LayoutGraph {
                     self.output_counts[idx],
                     self.real_nodes[idx].width,
                 );
+        }
+    }
+
+    /// Widen nodes so their rightmost inlet sits directly under its source's
+    /// outlet, letting that cable render as a single vertical run instead of
+    /// a segmented route with multiple turns.
+    fn widen_nodes_for_straight_inlets(&mut self, patch: &mut Patch) {
+        for idx in 0..patch.nodes.len() {
+            if self.real_nodes[idx].is_hidden {
+                continue;
+            }
+            let input_count = self.input_slot_counts[idx];
+            if input_count < 2 {
+                continue;
+            }
+
+            let last_slot = input_count - 1;
+            let feeding_edge = self.real_edges.iter().find(|edge| {
+                edge.kind == ConnectionKind::Forward
+                    && edge.to == idx
+                    && !self.is_history_read_cycle_edge(**edge)
+                    && self.visible_input_slot(idx, edge.to_input) == last_slot
+                    && self.real_nodes[edge.from].rank < self.real_nodes[idx].rank
+            });
+            let Some(&edge) = feeding_edge else {
+                continue;
+            };
+
+            let source_outlet_x = patch.nodes[edge.from].position.0
+                + output_port_x_offset(
+                    edge.from_output,
+                    self.output_counts[edge.from],
+                    self.real_nodes[edge.from].width,
+                );
+            // With multiple slots the last inlet sits PORT_EDGE_PADDING_CELLS
+            // from the node's right edge.
+            let required_width =
+                source_outlet_x + PORT_EDGE_PADDING_CELLS - patch.nodes[idx].position.0;
+            if required_width <= self.real_nodes[idx].width + f32::EPSILON
+                || required_width > MAX_AUTO_NODE_WIDTH
+            {
+                continue;
+            }
+
+            patch.nodes[idx].width = Some(required_width);
+            self.real_nodes[idx].width = required_width;
+            self.work_nodes[idx].width = required_width;
         }
     }
 
@@ -839,7 +908,10 @@ impl LayoutGraph {
             );
 
             let segment_row = if connection.kind == ConnectionKind::Feedback {
-                Some(start.1.max(end.1) + FEEDBACK_SEGMENT_ROW_OFFSET)
+                // Loop tightly below both nodes (end.1 is the target's top, so
+                // use its bottom edge to avoid routing through the node body).
+                let to_bottom = to_position.1 + self.real_nodes[to].height;
+                Some(start.1.max(to_bottom) + FEEDBACK_SEGMENT_BOTTOM_PADDING)
             } else {
                 let (route_min, route_max) = segment_route_range(start, end);
                 let preferred = if patch.nodes[from].kind == NodeKind::Param {
@@ -933,6 +1005,9 @@ impl LayoutGraph {
         to: usize,
         patch: &Patch,
     ) -> f32 {
+        if end.1 < start.1 {
+            return start.1 + SEGMENT_RANGE_PADDING;
+        }
         let min_x = start.0.min(end.0);
         let max_x = start.0.max(end.0);
         let min_row = start.1.min(end.1);
@@ -1072,6 +1147,14 @@ fn preferred_history_rank(writer_ranks: &[usize], consumer_ranks: &[usize]) -> O
 }
 
 fn segment_route_range(start: (f32, f32), end: (f32, f32)) -> (f32, f32) {
+    if end.1 < start.1 {
+        // Upward cable: the horizontal run must sit below the outlet, matching
+        // the constraint interactive dragging enforces (segment_row_for_drag).
+        return (
+            start.1 + SEGMENT_RANGE_PADDING,
+            start.1 + UPWARD_SEGMENT_EXTRA_RANGE,
+        );
+    }
     let min_row = start.1.min(end.1);
     let max_row = start.1.max(end.1);
     let midpoint = (start.1 + end.1) * 0.5;
@@ -1269,8 +1352,4 @@ fn is_local_source_candidate(idx: usize, patch: &Patch, edges: &[LayoutEdge]) ->
         }
         _ => false,
     }
-}
-
-fn node_center_x(idx: usize, patch: &Patch, nodes: &[WorkNode]) -> f32 {
-    patch.nodes[idx].position.0 + nodes[idx].width * 0.5
 }

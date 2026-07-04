@@ -1,9 +1,16 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use std::time::Duration;
 
 use crate::layout::LayoutNode;
 use crossterm::event::Event;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackendEvent {
+    Terminal(Event),
+    FileDrop(Vec<PathBuf>),
+}
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -174,20 +181,29 @@ pub struct RenderFrame {
 use crate::layout::Rect;
 use crate::tile::{TileId, TileTabLayout};
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InspectOverlay {
+    /// Tile-content-local widget rect in logical cells.
+    pub rect: Rect,
+    pub fill: Color,
+    pub border: Color,
+}
+
 /// One tile's worth of rendering data, positioned within the full screen.
 pub struct TileFrame {
     pub tile_id: TileId,
-    pub rect: Rect,                            // screen position for this tile
-    pub body_rect: Rect,                       // screen position for the tile content body
-    pub tabs: Vec<TileTabLayout>,              // folder-style tile tabs in screen coordinates
-    pub is_active: bool,                       // colored border for active tile
-    pub show_status: bool,                     // whether to render per-tile status bar
-    pub show_border: bool,                     // whether to render tile border
-    pub border_width_px: f32,                  // Metal tile border width in pixels
-    pub border_radius_px: f32,                 // Metal tile border radius in pixels
-    pub background_color: Option<Color>,       // Metal default buffer background color
-    pub background_color_name: Option<String>, // Theme color name for live-resolved backgrounds
-    pub frame: RenderFrame,                    // the per-buffer frame
+    pub rect: Rect,                              // screen position for this tile
+    pub body_rect: Rect,                         // screen position for the tile content body
+    pub tabs: Vec<TileTabLayout>,                // folder-style tile tabs in screen coordinates
+    pub is_active: bool,                         // colored border for active tile
+    pub show_status: bool,                       // whether to render per-tile status bar
+    pub show_border: bool,                       // whether to render tile border
+    pub border_width_px: f32,                    // Metal tile border width in pixels
+    pub border_radius_px: f32,                   // Metal tile border radius in pixels
+    pub background_color: Option<Color>,         // Metal default buffer background color
+    pub background_color_name: Option<String>,   // Theme color name for live-resolved backgrounds
+    pub inspect_overlay: Option<InspectOverlay>, // hovered inspect target overlay
+    pub frame: RenderFrame,                      // the per-buffer frame
 }
 
 /// A complete frame with all tiles rendered, plus global UI elements.
@@ -209,6 +225,9 @@ pub trait Backend {
     /// Returns the drawable area in (cols, rows) — used by build_render_frame
     /// to compute the visible line range and adjust scroll.
     fn viewport_size(&self) -> (usize, usize);
+    fn poll_backend_event(&mut self, timeout: Duration) -> Option<BackendEvent> {
+        self.poll_event(timeout).map(BackendEvent::Terminal)
+    }
     fn poll_event(&mut self, timeout: Duration) -> Option<Event>;
     fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError>;
 }

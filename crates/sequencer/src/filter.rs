@@ -357,6 +357,7 @@ pub fn filter_vtable() -> NodeVTable {
         init: Some(filter_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::backend::{Cell, CellStyle, Color, RenderFrame, TiledRenderFrame};
+use crate::backend::{Cell, CellStyle, Color, InspectOverlay, RenderFrame, TiledRenderFrame};
 use crate::widget_render;
 use ratatui::{
     Frame,
@@ -322,6 +322,7 @@ pub fn render_tiled(frame: &mut Frame, tiled: &TiledRenderFrame) {
         render_tile_in_area(
             frame,
             &tile.frame,
+            tile.inspect_overlay,
             body_area,
             tile.is_active,
             tile.show_status,
@@ -426,10 +427,36 @@ fn render_tile_tabs(frame: &mut Frame, tile: &crate::backend::TileFrame) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(to_rcolor(border)))
             .style(Style::default().bg(to_rcolor(bg)));
-        let text = Paragraph::new(tab.label.clone())
-            .block(block)
-            .style(Style::default().fg(to_rcolor(fg)).bg(to_rcolor(bg)));
-        frame.render_widget(text, area);
+        frame.render_widget(block, area);
+
+        let label_col = tab.label_rect.col.round() as i32;
+        let label_width = tab.label_rect.width.round() as i32;
+        if label_col >= 0 && label_col < frame_area.width as i32 && label_width > 0 {
+            let label_area = Rect::new(
+                label_col as u16,
+                row as u16,
+                label_width.min(frame_area.width as i32 - label_col) as u16,
+                area.height,
+            );
+            let text = Paragraph::new(tab.label.clone())
+                .style(Style::default().fg(to_rcolor(fg)).bg(to_rcolor(bg)));
+            frame.render_widget(text, label_area);
+        }
+        if tab.close_visible
+            && let Some(close_rect) = tab.close_rect
+        {
+            let close_col = close_rect.col.round() as i32;
+            if close_col >= 0 && close_col < frame_area.width as i32 {
+                let close_area = Rect::new(close_col as u16, row as u16, 1, area.height);
+                let close = Paragraph::new("×").style(
+                    Style::default()
+                        .fg(to_rcolor(fg))
+                        .bg(to_rcolor(bg))
+                        .add_modifier(Modifier::BOLD),
+                );
+                frame.render_widget(close, close_area);
+            }
+        }
     }
 }
 
@@ -437,6 +464,7 @@ fn render_tile_tabs(frame: &mut Frame, tile: &crate::backend::TileFrame) {
 fn render_tile_in_area(
     frame: &mut Frame,
     render_frame: &RenderFrame,
+    inspect_overlay: Option<InspectOverlay>,
     tile_area: Rect,
     is_active: bool,
     show_status: bool,
@@ -515,6 +543,11 @@ fn render_tile_in_area(
         );
     }
 
+    if let Some(overlay) = inspect_overlay {
+        let inner = content_area.inner(ratatui::layout::Margin::new(1, 1));
+        render_inspect_overlay(frame, inner, render_frame, overlay);
+    }
+
     // ── Focus highlight ────────────────────────────────────────────────────
     if let (Some(layout), Some(focused_id)) =
         (&render_frame.widget_layout, render_frame.focused_widget_id)
@@ -550,6 +583,54 @@ fn render_tile_in_area(
                     }
                 }
             }
+        }
+    }
+}
+
+fn render_inspect_overlay(
+    frame: &mut Frame,
+    inner: Rect,
+    render_frame: &RenderFrame,
+    overlay: InspectOverlay,
+) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let row_start =
+        (overlay.rect.row - render_frame.text_scroll_top as f32 - render_frame.widget_scroll_top)
+            .floor() as i32;
+    let row_end = (overlay.rect.row + overlay.rect.height
+        - render_frame.text_scroll_top as f32
+        - render_frame.widget_scroll_top)
+        .ceil() as i32;
+    let col_start = (overlay.rect.col - render_frame.widget_scroll_left).floor() as i32;
+    let col_end =
+        (overlay.rect.col + overlay.rect.width - render_frame.widget_scroll_left).ceil() as i32;
+    if row_end <= 0
+        || col_end <= 0
+        || row_start >= inner.height as i32
+        || col_start >= inner.width as i32
+    {
+        return;
+    }
+    let fill = to_rcolor(overlay.fill);
+    let border = to_rcolor(overlay.border);
+    let buf = frame.buffer_mut();
+    for row in row_start.max(0)..row_end.min(inner.height as i32) {
+        let y = inner.y + row as u16;
+        let is_border_row = row == row_start || row == row_end - 1;
+        for col in col_start.max(0)..col_end.min(inner.width as i32) {
+            let x = inner.x + col as u16;
+            let is_border_col = col == col_start || col == col_end - 1;
+            let cell = &mut buf[(x, y)];
+            let bg = if is_border_row || is_border_col {
+                border
+            } else {
+                fill
+            };
+            let mut style = cell.style();
+            style = style.bg(bg);
+            cell.set_style(style);
         }
     }
 }

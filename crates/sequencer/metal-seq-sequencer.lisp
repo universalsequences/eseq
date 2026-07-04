@@ -5,7 +5,45 @@
 (load "metal-seq-track-collapse.lisp")
 
 (def seqv-track-peak (i)
-  (reactive-get "SEQ" (str "track-peak-" i)))
+  (bind-seq (str "track-peak-" i)))
+
+(def seqv-track-volume-field (track)
+  (str "track-" track "-volume"))
+
+(def seqv-track-volume-binding (track)
+  (bind-seq (seqv-track-volume-field track)))
+
+(def seqv-track-volume-value (track)
+  (if (< track (len SEQ.track-volumes))
+    (nth SEQ.track-volumes track)
+    1.0))
+
+(def seqv-track-volume-from-event (track event)
+  (let ((sx (get event :sx)))
+    (if (= sx nil)
+      (seqv-track-volume-value track)
+      (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0)))))))
+
+(def seqv-set-track-volume-from-event (track event)
+  (do
+    (seqv-activate-track-for-edit track)
+    (seq-set-track-volume track (seqv-track-volume-from-event track event))))
+
+(def seqv-track-color-r-binding (track)
+  (bind-seq-nth "track-color-r-effective" track))
+
+(def seqv-track-color-g-binding (track)
+  (bind-seq-nth "track-color-g-effective" track))
+
+(def seqv-track-color-b-binding (track)
+  (bind-seq-nth "track-color-b-effective" track))
+
+(def seqv-track-name-max-chars 9)
+
+(def seqv-track-name-display (name)
+  (if (> (len name) seqv-track-name-max-chars)
+    (str (substring name 0 (- seqv-track-name-max-chars 2)) "..")
+    name))
 
 (def seqv-muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
@@ -89,14 +127,32 @@
       (nth matches 0)
       -1)))
 
-(def seqv-activate-track-for-edit (track)
+(def seqv-global-cursor-step-for-track (track)
+  (mod cursor-step (max 1 (seqv-track-num-steps track))))
+
+(def seqv-sync-track-cursor-to-global (track)
+  (if (and (>= track 0) (< track (len SEQ.track-ids)))
+    (seqv-set-cursor-step
+      (seqv-track-id track)
+      cursor-step)
+    nil))
+
+(def seqv-sync-all-track-cursors-to-global ()
+  (for-each
+    (lambda (track) (seqv-sync-track-cursor-to-global track))
+    (range 0 (len SEQ.track-ids))))
+
+(def seqv-select-track-for-edit (track)
   (do
     (set! selected-bus -1)
     (if (= SEQ.current-track track)
       nil
       (seq-clear-selection))
     (seq-set-track track)
-    (set-track-cursor-step (seqv-current-step track (seqv-track-id track)))))
+    (seqv-sync-track-cursor-to-global track)))
+
+(def seqv-activate-track-for-edit (track)
+  (seqv-select-track-for-edit track))
 
 (def seqv-track-expanded? (track-id)
   (reactive-get "SEQV" (seqv-expanded-track-field track-id)))
@@ -120,7 +176,7 @@
       seqv-track-editor-state)))
     (if (> (len matches) 0)
       (nth matches 0)
-      (dict :id track-id :param-mode 0 :cursor-step 0))))
+      (dict :id track-id :param-mode 0))))
 
 (def seqv-upsert-editor-state (track-id next-state)
   (if (seqv-list-contains? (map (lambda (state) (get state :id)) seqv-track-editor-state) track-id)
@@ -144,7 +200,10 @@
         nil))))
 
 (def seqv-cursor-step (track-id)
-  (get (seqv-editor-state-for track-id) :cursor-step))
+  (let ((track (seqv-track-index-for-id track-id)))
+    (if (>= track 0)
+      (seqv-global-cursor-step-for-track track)
+      0)))
 
 (def seqv-cursor-highlight-field (track step)
   (str "seqv-track-cursor-" track "-" step))
@@ -153,24 +212,22 @@
   (bind "SEQV" (seqv-cursor-highlight-field track step)))
 
 (def seqv-set-cursor-step (track-id step)
-  (let ((old-step (seqv-cursor-step track-id))
-        (track (seqv-track-index-for-id track-id)))
-    (do
-      (seqv-upsert-editor-state track-id
-        (merge (seqv-editor-state-for track-id) :cursor-step step))
-      (if (>= track 0)
+  (let ((track (seqv-track-index-for-id track-id)))
+    (if (>= track 0)
+      (let ((projected-step (mod step (max 1 (seqv-track-num-steps track)))))
         (do
-          (reactive-set "SEQV" (seqv-cursor-highlight-field track old-step) false)
-          (reactive-set "SEQV" (seqv-cursor-highlight-field track step) true)
+          (for-each
+            (lambda (candidate-step)
+              (reactive-set "SEQV" (seqv-cursor-highlight-field track candidate-step) false))
+            (range 0 (seqv-track-num-steps track)))
+          (reactive-set "SEQV" (seqv-cursor-highlight-field track projected-step) true)
           (if (seqv-track-expanded? track-id)
             (seqv-sync-expanded-step-slots-for track track-id)
-            nil))
-        nil))))
+            nil)))
+      nil)))
 
 (def sequencer-cursor-step-changed (track step)
-  (if (and (>= track 0) (< track (len SEQ.track-ids)))
-    (seqv-set-cursor-step (seqv-track-id track) step)
-    nil))
+  (seqv-sync-all-track-cursors-to-global))
 
 (def seqv-current-track-id ()
   (seqv-track-id SEQ.current-track))
@@ -179,7 +236,7 @@
   (seqv-track-expanded? (seqv-current-track-id)))
 
 (def seqv-current-selected-step ()
-  (min cursor-step (- (max 1 (seqv-track-num-steps SEQ.current-track)) 1)))
+  (seqv-global-cursor-step-for-track SEQ.current-track))
 
 (def seqv-current-param-mode ()
   (seqv-param-mode (seqv-current-track-id)))
@@ -249,6 +306,31 @@
       (seqv-activate-track-for-edit track)
       (seqv-set-track-expanded track-id (not (seqv-track-expanded? track-id))))))
 
+(def seqv-drop-sample-on-track (event)
+  (let ((payload (get event :payload))
+        (target (get event :target)))
+    (let ((path (get payload :path))
+          (track (get target :track)))
+      (if path
+        (do
+          (seqv-activate-track-for-edit track)
+          (host-command "audition-sample" (dict :path path)))
+        (status "Drop a sample file, not a folder")))))
+
+(def seqv-drop-new-track (event)
+  (let ((payload (get event :payload)))
+    (let ((path (get payload :path))
+          (name (get payload :name)))
+      (if (= (get event :drag-type) "instrument")
+        (if name
+          (do
+            (set! sbrowser-loading-instrument-name name)
+            (host-command "add-track-instrument" (dict :name name)))
+          (status "Drop an instrument, not a folder"))
+        (if path
+          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+          (status "Drop a sample file, not a folder"))))))
+
 (defwidget seqv-track-container
   :width 1.5 :height 1.5
   :state ()
@@ -275,6 +357,95 @@
               (if (= active 1) 0.05 0.5)
               1.0)
             (rgba 0.99 0.15 0.15 1.0)))))))
+
+(defwidget seqv-track-color-badge
+  :width 0.68 :height 1.5
+  :paint-margin 0.08
+  :state (track-r track-g track-b)
+  :bindable (track-r track-g track-b)
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height 0.28)
+      (material
+        :lighting (lighting :edge-min -0.38 :edge-max 0.45
+          :light (vec3 0.0 -1.1 2.8) :shininess 54.0)
+        :color
+          (aqua-color
+            (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 1.0)
+            (rgba track-r track-g track-b 1.0))))))
+
+(defwidget seqv-track-volume-meter
+  :width 8.2 :height 1.05
+  :paint-margin 0.16
+  :state (level volume track-r track-g track-b)
+  :bindable (level volume track-r track-g track-b)
+  :shader
+  (let ((lvl (min 1.0 (max 0.0 level)))
+        (vol (min 1.0 (max 0.0 volume)))
+        (track (sdf/rounded-rect width height 0.18))
+        (green-end (min lvl 0.70))
+        (yellow-end (min lvl 0.88))
+        (red-end lvl)
+        (marker-start (max 0.0 (- vol 0.012)))
+        (marker-end (min 1.0 (+ vol 0.012))))
+    (sdf/layer
+      (sdf/fill track
+        (material
+          :lighting (lighting :edge-min -0.45 :edge-max 0.35
+            :light (vec3 0.0 -1.4 2.2) :shininess 24.0)
+          :color (rgba 0.035 0.040 0.050 0.2)))
+      (if (> green-end 0.005)
+        (sdf/fill
+          (let ((__start 0.0)
+                (__end green-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.30)
+                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.10 0.85 0.30 1.0)))
+        (rgba 0 0 0 0))
+      (if (> (- yellow-end 0.70) 0.005)
+        (sdf/fill
+          (let ((__start 0.70)
+                (__end yellow-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.30)
+                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.96 0.82 0.18 1.0)))
+        (rgba 0 0 0 0))
+      (if (> (- red-end 0.88) 0.005)
+        (sdf/fill
+          (let ((__start 0.88)
+                (__end red-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.30)
+                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.95 0.18 0.16 1.0)))
+        (rgba 0 0 0 0))
+      (sdf/fill
+        (let ((__start marker-start)
+              (__end marker-end)
+              (__half_w (* 0.5 aspect (- __end __start)))
+              (__half_h 0.44)
+              (__radius 0.045))
+          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                (y (* 0.5 y)))
+            (sdf/rounded-rect __half_w __half_h __radius)))
+        (material
+          :lighting (lighting :edge-min -0.30 :edge-max 0.45
+            :light (vec3 0.0 -1.0 2.6) :shininess 64.0)
+          :color
+            (aqua-color
+              (rgba (+ (* track-r 0.38) 0.45) (+ (* track-g 0.38) 0.45) (+ (* track-b 0.38) 0.45) 1.0)
+              (rgba 0.95 0.96 0.98 1.0)))))))
 
 (defwidget seqv-ellipsis-button
   :width 2.2 :height 1.2
@@ -414,20 +585,47 @@
 (def seqv-mute-bg (active)
   (if active
     (rgba 0.08 0.09 0.10 1.0)
-    (rgba 0.115 0.130 0.144 1.0)))
+         (rgba 0.95 0.48 0.18 1.0)))
 
 (def seqv-solo-bg (active)
   (if active
     (rgba 0.72 0.10 0.10 1.0)
     (rgba 0.08 0.09 0.10 1.0)))
 
-;; Compact mixer track row — same controls as metal-seq-mixer.lisp but no
-;; volume slider/meter or delete button (sequencer view stays focused on steps).
+;; Compact mixer track row — the common track actions plus an inline
+;; meter/fader so the sequencer remains usable when the mixer is hidden.
+;; The header lives in its own subtree so name/mute/solo/arm changes rerun
+;; only this header instead of the whole track row (incl. its step grid).
 (def seqv-track-header (i)
+  (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
+    (seqv-track-header-body i)))
+
+(def seqv-track-volume-control (i)
+  (box
+    :key (str "seqv-track-volume-control-" i)
+    :width 8.2 :height 0.85
+    :background "seqv-track-volume-meter"
+    :level (seqv-track-peak i)
+    :volume (seqv-track-volume-binding i)
+    :track-r (seqv-track-color-r-binding i)
+    :track-g (seqv-track-color-g-binding i)
+    :track-b (seqv-track-color-b-binding i)
+    :on-click (lambda (event) (seqv-set-track-volume-from-event i event))
+    :on-drag (lambda (event) (seqv-set-track-volume-from-event i event))))
+
+(def seqv-track-header-body (i)
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
       :padding 0.4
-      (h-stack :gap 0.5 :align :center
+      (h-stack :gap 0.4 :align :center
+        (box
+          :key (str "seqv-color-badge-" i)
+          :width 0.68 :height 1.5
+          :background "seqv-track-color-badge"
+          :track-r (seqv-track-color-r-binding i)
+          :track-g (seqv-track-color-g-binding i)
+          :track-b (seqv-track-color-b-binding i)
+          :on-click |x y r| (seqv-select-track-for-edit i))
         (box :width 2 :height 1.5
           :background "seqv-rec-arm-dot"
           :key (str "seqv-arm-" i)
@@ -437,7 +635,7 @@
           :key (str "seqv-mute-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :background-color (seqv-mute-bg (nth SEQ.track-mutes i))
-          :color (if (nth SEQ.track-mutes i) :gray :blue)
+          :color (if (nth SEQ.track-mutes i) :gray :black)
           :on-click |x y r| (do (seqv-activate-track-for-edit i) (seq-toggle-track-mute i)))
         (button "S"
           :key (str "seqv-solo-" i)
@@ -448,12 +646,15 @@
         (box :width 8.6 :height 1
           :key (str "seqv-select-" i)
           :background-color :transparent
-          :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
-          (label (substring name 0 12) :font-size 11 :width 8.6
+          :on-click |x y r| (seqv-select-track-for-edit i)
+          (label (seqv-track-name-display name)
+            :key (str "seqv-track-name-label-" i)
+            :font-size 11 :width 8.6
             :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
                      :dark-gray
                      :dim)
-            :bg :transparent))))))
+            :bg :transparent))
+        (seqv-track-volume-control i)))))
 
 (def seqv-track-actions (i)
   (h-stack :gap 0.35 :padding 0.85
@@ -529,9 +730,11 @@
       (odd1 (mod (floor (/ step 4)) 2))
       (odd2 (mod (floor (/ step 32)) 2))
       (odd (if (= odd2 1) (if (= odd1 1) 0 1) odd1))
-      (track-r (seqv-track-color-r track (seqv-muted? track)))
-      (track-g (seqv-track-color-g track (seqv-muted? track)))
-      (track-b (seqv-track-color-b track (seqv-muted? track))))
+      ;; Bindings (mute dim baked in Rust-side) so mute/solo/color changes
+      ;; recolor cells without rerunning the whole track-row subtree.
+      (track-r (bind-seq-nth "track-color-r-effective" track))
+      (track-g (bind-seq-nth "track-color-g-effective" track))
+      (track-b (bind-seq-nth "track-color-b-effective" track)))
     (box
       :width 3.05 :height 1.45
       :key (str "seqv-step-cell-" track "-" step)
@@ -547,13 +750,18 @@
         (if visible
           (seqv-step-pointer-up track step evt)
           nil))
-      :odd odd
-      :active (bind-seq (str "seq-track-step-active-" track "-" step))
-      :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
-      :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
-      :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
-      :track-r track-r :track-g track-g :track-b track-b
-      :background "seqv-step-shell")))
+      :active (seqv-cursor-highlight-binding track step)
+      :selected (seqv-track-selected-binding track)
+      :background "cursor-highlight"
+      (box
+        :width 3.05 :height 1.45
+        :odd odd
+        :active (bind-seq (str "seq-track-step-active-" track "-" step))
+        :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
+        :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
+        :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
+        :track-r track-r :track-g track-g :track-b track-b
+        :background "seqv-step-shell"))))
 
 (def seqv-playhead-row (track track-id row)
   (box
@@ -711,7 +919,7 @@
     (seqv-step-param-value mode value)))
 
 (def seqv-current-step (track track-id)
-  (min (seqv-cursor-step track-id) (- (max 1 (seqv-track-num-steps track)) 1)))
+  (seqv-global-cursor-step-for-track track))
 
 (def seqv-page-count (track)
   (max 1 (floor (/ (+ (seqv-track-num-steps track) (- page-size 1)) page-size))))
@@ -816,7 +1024,6 @@
 
 (def seqv-set-expanded-cursor (track track-id step)
   (do
-    (seqv-set-cursor-step track-id step)
     (set-track-cursor-step step)))
 
 (def seqv-expanded-step-click (track track-id step evt)
@@ -912,7 +1119,6 @@
     (do
       (seqv-activate-track-for-edit track)
       (cool-off-follow)
-      (seqv-set-cursor-step track-id step)
       (set-track-cursor-step step))))
 
 (def seqv-double-track-pattern (track track-id)
@@ -920,14 +1126,14 @@
     (seqv-activate-track-for-edit track)
     (cool-off-follow)
     (seq-double-track-pattern)
-    (seqv-set-cursor-step track-id (min (seqv-current-step track track-id) (- (max 1 (seqv-track-num-steps track)) 1)))))
+    (seqv-sync-all-track-cursors-to-global)))
 
 (def seqv-halve-track-pattern (track track-id)
   (do
     (seqv-activate-track-for-edit track)
     (cool-off-follow)
     (seq-halve-track-pattern)
-    (seqv-set-cursor-step track-id (min (seqv-current-step track track-id) (- (max 1 (seqv-track-num-steps track)) 1)))))
+    (seqv-sync-all-track-cursors-to-global)))
 
 (def seqv-param-tab (track track-id mode tab-label)
   (box :width 8 :height 2
@@ -940,151 +1146,158 @@
 
 (def seqv-expanded-track-quick-controls (track track-id)
   (let ((mode (seqv-param-mode track-id)))
-    (v-stack (box :height 0.2 :width 1)
-    (h-stack :gap 0.55 :align :center
-      (box :width 9.4 :height 1.3
-        :key (str "seqv-expanded-step-summary-" track-id)
-        (label (seqv-param-name mode)
-          :font-size 11 :width 9.4 :color :dim :bg :transparent))
-      (if (= mode 5)
-        (box :width 8 :height 1.3
-          :key (str "seqv-expanded-sync-label-" track-id)
-          (label (seqv-expanded-sync-current-label track track-id)
-            :font-size 11 :color :white :bg :transparent))
-        (number-picker :key (str "seqv-expanded-param-number-picker-" track-id)
-          :value (seqv-param-value-at track mode (seqv-current-step track track-id))
-          :min (seqv-param-min mode) :max (seqv-param-max mode) :decimals (seqv-param-decimals mode)
-          :on-change (lambda (v) (seqv-set-expanded-current-param track track-id mode v))
-          :width 8 :height 1.3 :font-size 11))
-      (h-stack :gap 0.4 :align :center
-        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-          :key (str "seqv-expanded-half-" track-id)
-          :on-click |x y r| (seqv-halve-track-pattern track track-id)
-          (v-stack :align :center
-            (label "-"
-              :font-size 12
-              :color :white
-              :bg :transparent)))
-        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-          :key (str "seqv-expanded-double-" track-id)
-          :on-click |x y r| (seqv-double-track-pattern track track-id)
-          (v-stack :align :center
-            (label "+"
-              :font-size 12
-              :color :white
-              :bg :transparent)))
-        (box :background "transport-btn-bg" :padding 0.2 :height 1.4
-          :key (str "seqv-expanded-pages-" track-id)
-          (h-stack :gap 0.1 :align :center
-            (each (range 0 (seqv-page-count track)) |page|
-              (box :width page-button-width :height 1.1
-                :key (str "seqv-expanded-page-" track-id "-" page)
-                :background "pattern-pill-bg"
-                :active (seqv-page-active-binding track-id page)
-                :style pattern-control-style
-                :on-click |x y r| (seqv-goto-page track track-id page)
-                (v-stack :align :center
-                  (label (fmt " {} " (+ page 1))
-                    :font-size 11
-                    :active (seqv-page-active-binding track-id page)
-                    :active-color :white
-                    :color :dim
-                    :bg :transparent)))))))))))
+    (v-stack 
+      (box :height 0.4 :width 1)
+      (h-stack :gap 0.55 :align :center
+        (box :width 9.4 :height 1.3
+          :key (str "seqv-expanded-step-summary-" track-id)
+          (label (seqv-param-name mode)
+            :font-size 11 :width 9.4 :color :white :bg :transparent))
+        (if (= mode 5)
+          (box :width 8 :height 1.3
+            :key (str "seqv-expanded-sync-label-" track-id)
+            (label (seqv-expanded-sync-current-label track track-id)
+              :font-size 11 :color :white :bg :transparent))
+          (number-picker :key (str "seqv-expanded-param-number-picker-" track-id)
+            :value (seqv-param-value-at track mode (seqv-current-step track track-id))
+            :min (seqv-param-min mode) :max (seqv-param-max mode) :decimals (seqv-param-decimals mode)
+            :on-change (lambda (v) (seqv-set-expanded-current-param track track-id mode v))
+            :width 8 :height 1.3 :font-size 11))
+        (h-stack :gap 0.4 :align :center
+          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+            :key (str "seqv-expanded-half-" track-id)
+            :on-click |x y r| (seqv-halve-track-pattern track track-id)
+            (v-stack :align :center
+              (label "-"
+                :font-size 12
+                :color :white
+                :bg :transparent)))
+          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+            :key (str "seqv-expanded-double-" track-id)
+            :on-click |x y r| (seqv-double-track-pattern track track-id)
+            (v-stack :align :center
+              (label "+"
+                :font-size 12
+                :color :white
+                :bg :transparent)))
+          (box :background "transport-btn-bg" :padding 0.2 :height 1.4
+            :key (str "seqv-expanded-pages-" track-id)
+            (h-stack :gap 0.1 :align :center
+              (each (range 0 (seqv-page-count track)) |page|
+                (box :width page-button-width :height 1.1
+                  :key (str "seqv-expanded-page-" track-id "-" page)
+                  :background "pattern-pill-bg"
+                  :active (seqv-page-active-binding track-id page)
+                  :style pattern-control-style
+                  :on-click |x y r| (seqv-goto-page track track-id page)
+                  (v-stack :align :center
+                    (label (fmt " {} " (+ page 1))
+                      :font-size 11
+                      :active (seqv-page-active-binding track-id page)
+                      :active-color :white
+                      :color :dim
+                      :bg :transparent)))))))))))
 
 (def seqv-expanded-track-editor (track track-id)
   (let ((mode (seqv-param-mode track-id)))
-    (v-stack :width :fill :padding 0.35 :gap 0.1
-      (h-stack :gap 0.5
-        (seqv-param-tab track track-id 0 "vel")
-        (seqv-param-tab track track-id 1 "dur")
-        (seqv-param-tab track track-id 2 "aux_a")
-        (seqv-param-tab track track-id 3 "xpose")
-        (seqv-param-tab track track-id 4 "pan")
-        (seqv-param-tab track track-id 5 "syn")
-        (seqv-param-tab track track-id 6 "dly")
-        (h-stack :align :center :gap 0.35
-          (dropdown :value (seqv-track-timebase track)
-            :key (str "seqv-expanded-timebase-" track-id)
-            :options seqv-timebase-options
-            :on-change (lambda (v) (seqv-set-expanded-timebase track v))
-            :width 6 :height 1.45 :font-size 10)))
-
-      (grid :cols 16 :col-width 4
-        (each (range 0 page-size) |i|
-          (box :padding 0.25
-              :key (str "seqv-expanded-step-column-" track-id "-" i)
-              :background "cursor-highlight"
-              :active (seqv-slot-cursor-binding track-id i)
-              :selected (seqv-track-selected-binding track)
-              :on-click (lambda (evt)
-                (seqv-expanded-slot-click track track-id i evt))
-              :on-drag (lambda (evt)
-                (seqv-expanded-slot-drag track track-id i evt))
-              (v-stack :align :center :gap 0.5
-                (let ((active-ref (seqv-slot-active-binding track-id i))
+    (box :padding 0.25
+      (box 
+        :background-color (rgba 0.1 0.1 0.1 0.2) :corner-radius 8
+        (v-stack :width :fill :padding 0.85 :gap 0.1
+          (h-stack :gap 0.5
+            (box :width 1)
+            (seqv-param-tab track track-id 0 "vel")
+            (seqv-param-tab track track-id 1 "dur")
+            (seqv-param-tab track track-id 2 "aux_a")
+            (seqv-param-tab track track-id 3 "xpose")
+            (seqv-param-tab track track-id 4 "pan")
+            (seqv-param-tab track track-id 5 "syn")
+            (seqv-param-tab track track-id 6 "dly")
+            (h-stack :align :center :gap 0.35
+              (dropdown :value (seqv-track-timebase track)
+                :key (str "seqv-expanded-timebase-" track-id)
+                :options seqv-timebase-options
+                :on-change (lambda (v) (seqv-set-expanded-timebase track v))
+                :width 6 :height 1.45 :font-size 10)))
+          
+          (grid :cols 16 :col-width 4
+            (each (range 0 page-size) |i|
+              (box :padding 0.25
+                :key (str "seqv-expanded-step-column-" track-id "-" i)
+                :background "cursor-highlight"
+                :active (seqv-slot-cursor-binding track-id i)
+                :selected (seqv-track-selected-binding track)
+                :on-click (lambda (evt)
+                  (seqv-expanded-slot-click track track-id i evt))
+                :on-drag (lambda (evt)
+                  (seqv-expanded-slot-drag track track-id i evt))
+                (v-stack :align :center :gap 0.5
+                  (let ((active-ref (seqv-slot-active-binding track-id i))
                       (plocked-ref (seqv-slot-plocked-binding track-id i))
                       (selected-ref (seqv-slot-selected-binding track-id i))
                       (track-r (seqv-expanded-track-color-r track))
                       (track-g (seqv-expanded-track-color-g track))
                       (track-b (seqv-expanded-track-color-b track)))
-                  (list
-                    (vslider :height 4
-                      :key (str "seqv-expanded-step-slider-" track-id "-" i)
-                      :width (if (= mode 5) 2 1)
-                      :min (seqv-param-slider-min mode) :max (seqv-param-slider-max mode)
-                      :origin (seqv-param-origin mode)
-                      :value (seqv-slot-param-slider-binding track-id mode i)
-                      :haptic-value (seqv-slot-param-haptic-binding track-id mode i)
-                      :haptic-min (seqv-param-min mode)
-                      :haptic-max (seqv-param-max mode)
-                      :haptic-pivot-position (seqv-param-haptic-pivot-position mode)
-                      :haptic-pivot-value (seqv-param-haptic-pivot-value mode)
-                      :haptic-exponent (seqv-param-haptic-exponent mode)
-                      :items (if (= mode 5) SEQ.sync-labels '())
-                      :font-size 11
-                      :color :white
-                      :fill (seqv-expanded-slider-fill track)
-                      :dot-color :dark-gray
-                      :active active-ref
-                      :track-r track-r
-                      :track-g track-g
-                      :track-b track-b
-                      :material (seqv-aqua-slider-track-material)
-                      :on-change (lambda (v)
-                        (seqv-set-expanded-slot-param track track-id i mode v)))
-                    (box
-                      :key (str "seqv-expanded-step-toggle-" track-id "-" i)
-                      :active active-ref
-                      :plocked plocked-ref
-                      :selected selected-ref
-                      :background "aqua-button"
-                      :align :center :width 3 :height 1.5
-                      :on-mouse-down (lambda (evt)
-                        (seqv-expanded-slot-pointer-down track track-id i evt))
-                      :on-drag (lambda (evt)
-                        (seqv-expanded-slot-drag track track-id i evt))
-                      :on-mouse-up (lambda (evt)
-                        (seqv-expanded-slot-pointer-up track track-id i evt))
-                      (metal-track-tick
+                    (list
+                      (vslider :height 4
+                        :key (str "seqv-expanded-step-slider-" track-id "-" i)
+                        :width (if (= mode 5) 2 1)
+                        :min (seqv-param-slider-min mode) :max (seqv-param-slider-max mode)
+                        :origin (seqv-param-origin mode)
+                        :value (seqv-slot-param-slider-binding track-id mode i)
+                        :haptic-value (seqv-slot-param-haptic-binding track-id mode i)
+                        :haptic-min (seqv-param-min mode)
+                        :haptic-max (seqv-param-max mode)
+                        :haptic-pivot-position (seqv-param-haptic-pivot-position mode)
+                        :haptic-pivot-value (seqv-param-haptic-pivot-value mode)
+                        :haptic-exponent (seqv-param-haptic-exponent mode)
+                        :items (if (= mode 5) SEQ.sync-labels '())
+                        :font-size 11
+                        :color :white
+                        :fill (seqv-expanded-slider-fill track)
+                        :dot-color :dark-gray
+                        :active active-ref
+                        :track-r track-r
+                        :track-g track-g
+                        :track-b track-b
+                        :material (seqv-aqua-slider-track-material)
+                        :on-change (lambda (v)
+                          (seqv-set-expanded-slot-param track track-id i mode v)))
+                      (box
+                        :key (str "seqv-expanded-step-toggle-" track-id "-" i)
                         :active active-ref
                         :plocked plocked-ref
                         :selected selected-ref
-                        :track-r track-r
-                        :track-g track-g
-                        :track-b track-b))))
-                (number-label
-                  :key (str "seqv-expanded-step-label-" track-id "-" i)
-                  :value (seqv-slot-label-binding track-id i)
-                  :active (seqv-slot-selected-binding track-id i)
-                  :active-color :yellow
-                  :decimals 0
-                  :width 2.8
-                  :h-align :center
-                  :font-size 10 :bg :transparent
-                  :color :dim)
-                (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
-                  (step-playhead-dot
-                    :active (seqv-slot-playhead-binding track-id i))))))))))
+                        :background "aqua-button"
+                        :align :center :width 3 :height 1.5
+                        :on-mouse-down (lambda (evt)
+                          (seqv-expanded-slot-pointer-down track track-id i evt))
+                        :on-drag (lambda (evt)
+                          (seqv-expanded-slot-drag track track-id i evt))
+                        :on-mouse-up (lambda (evt)
+                          (seqv-expanded-slot-pointer-up track track-id i evt))
+                        (metal-track-tick
+                          :active active-ref
+                          :plocked plocked-ref
+                          :selected selected-ref
+                          :track-r track-r
+                          :track-g track-g
+                          :track-b track-b))))
+                  (number-label
+                    :key (str "seqv-expanded-step-label-" track-id "-" i)
+                    :value (seqv-slot-label-binding track-id i)
+                    :active (seqv-slot-selected-binding track-id i)
+                    :active-color :yellow
+                    :decimals 0
+                    :width 2.8
+                    :h-align :center
+                    :font-size 10 :bg :transparent
+                    :color :dim)
+                  (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
+                    (step-playhead-dot
+                      :active (seqv-slot-playhead-binding track-id i))))))))))
+    )
+  )
 
 (def seqv-track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))
@@ -1106,32 +1319,56 @@
   (v-stack :padding 0.00 :gap 0.0
     (each (seq-visible-track-indices) |i|
       (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
-        (let ((muted (seqv-muted? i)))
-          (box :width :fill
-            :selected (seqv-track-selected-binding i)
-            :muted muted
-            :background-color :buffer-bg
-            :selected-background-color :mixer-strip-selected-bg
-            :muted-background-color :mixer-strip-muted-bg
-            :border-width 2
-            :corner-radius 10
-            :border-color :mixer-strip-border
-            :selected-border-color :mixer-strip-selected-border
-            :muted-border-color :mixer-strip-border
-            :padding 0.45
-            :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
-            (if (seqv-track-expanded? (nth SEQ.track-ids i))
-              (v-stack :width :fill :gap 0.2
-                (h-stack :width :fill :gap 0.6 :align :start
-                  (seqv-track-header i)
-                  (seqv-expanded-track-quick-controls i (nth SEQ.track-ids i))
-                  (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                  (seqv-track-actions i))
-                (seqv-expanded-track-editor i (nth SEQ.track-ids i)))
+        ;; :muted is a binding (not a value read) so mute/solo changes update
+        ;; the row chrome without rerunning this subtree.
+        (box :width :fill
+          :key (str "sequencer-track-drop-" i)
+          :selected (seqv-track-selected-binding i)
+          :muted (bind-seq-nth "track-muted-effective" i)
+          :background-color :buffer-bg
+          :selected-background-color :mixer-strip-selected-bg
+          :muted-background-color :mixer-strip-muted-bg
+          :border-width 2
+          :corner-radius 10
+          :border-color :mixer-strip-border
+          :selected-border-color :mixer-strip-selected-border
+          :muted-border-color :mixer-strip-border
+          :drop-hover-border-color :mixer-strip-selected-border
+          :drop-types (list "sample")
+          :drop-meta (dict :kind "track" :track i)
+          :on-drop (lambda (event) (seqv-drop-sample-on-track event))
+          :padding 0.0145
+          :on-click |x y r| (seqv-select-track-for-edit i)
+          (if (seqv-track-expanded? (nth SEQ.track-ids i))
+            (v-stack 
+              :width :fill :gap 0.2
               (h-stack :width :fill :gap 0.6 :align :start
                 (seqv-track-header i)
-                (seqv-track-grid i)
+                (seqv-expanded-track-quick-controls i (nth SEQ.track-ids i))
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                (seqv-track-actions i)))))))))
+                (seqv-track-actions i))
+              (seqv-expanded-track-editor i (nth SEQ.track-ids i)))
+            (h-stack :width :fill :gap 0.6 :align :start
+              (seqv-track-header i)
+              (seqv-track-grid i)
+              (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+              (seqv-track-actions i))))))
+    (box :key "sequencer-new-track-drop-zone"
+      :width :fill :height 2.4 :flex 1
+      :background-color :transparent
+      :drop-hover-background-color :mixer-control-bg
+      :border-width 1
+      :border-color :transparent
+      :drop-hover-border-color :mixer-strip-selected-border
+      :corner-radius 10
+      :drop-types (list "sample" "instrument")
+      :drop-meta (dict :kind "new-sample-track")
+      :on-drop (lambda (event) (seqv-drop-new-track event))
+      (label ""
+        :font-size 1
+        :color :transparent
+        :bg :transparent))))
 
 (set-buffer-mode-for "*sequencer*" "seq-grid-mode")
+
+(sequencer-cursor-step-changed SEQ.current-track cursor-step)

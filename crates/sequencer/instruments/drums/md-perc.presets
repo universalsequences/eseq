@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "engine_name": "drums/md-perc/",
+  "source_file": "instruments/drums/md-perc/dsp.lisp",
+  "presets": [
+    {"id": "808 Clap", "name": "808 Clap", "base_note_offset": 0.0, "params": {"engine": 1, "clpy": 3, "tone": 0.48, "rate": 11, "room": 0.48, "rsiz": 110, "rtun": 1050, "hard": 0.18}},
+    {"id": "Tight Clap", "name": "Tight Clap", "base_note_offset": 0.0, "params": {"engine": 1, "clpy": 2, "tone": 0.62, "rate": 8, "room": 0.16, "rsiz": 55, "rtun": 1250, "hard": 0.36}},
+    {"id": "808 Cowbell", "name": "808 Cowbell", "base_note_offset": 0.0, "params": {"engine": 2, "dec": 260, "enh": 0.68, "damp": 0.28, "bump": 6, "hard": 0.22}},
+    {"id": "Claves", "name": "Claves", "base_note_offset": 7.0, "params": {"engine": 3, "ptch": 4, "dec": 180, "dual": 0, "clic": 0.44, "damp": 0.12}},
+    {"id": "PI Shaker", "name": "PI Shaker", "base_note_offset": 0.0, "params": {"engine": 7, "dec": 620, "grns": 0.52, "glen": 0.34, "size": 0.46, "hard": 0.24}},
+    {"id": "PI Agogo", "name": "PI Agogo", "base_note_offset": 7.0, "params": {"engine": 6, "ptch": 8, "dec": 420, "hard": 0.50, "tens": 0.34, "size": 0.38}},
+    {"id": "Tambourine-ish", "name": "Tambourine-ish", "base_note_offset": 0.0, "params": {"engine": 4, "dec": 420, "hard": 0.58, "rattl": 0.72, "glen": 0.22, "rev": 0.0}}
+  ]
+}

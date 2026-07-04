@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::audiograph::NodeVTable;
 use crate::effects::{ParamDescriptor, ParamKind, ParamScaling, SyncDivision};
-use crate::sequencer::MAX_TRACKS;
+use crate::sequencer::{MAX_INSTRUMENT_ENGINES, MAX_SAMPLER_POOLS};
 
 pub const SLOT_COUNT: usize = 4;
 pub const NUM_OUTPUTS: usize = SLOT_COUNT;
@@ -104,9 +104,9 @@ pub fn sampler_voice_initial_state(
 }
 
 static PROCESS_STATS_ENABLED: AtomicBool = AtomicBool::new(false);
-static SAMPLER_ACTIVE_MASKS: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_ACTIVE_MASKS: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
 static PROCESS_CALLS: AtomicU64 = AtomicU64::new(0);
 static RENDERED_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -117,45 +117,45 @@ static UNBOUND_RENDERED_CALLS: AtomicU64 = AtomicU64::new(0);
 static RENDERED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static DISABLED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static ALL_SLOTS_OFF_FRAMES: AtomicU64 = AtomicU64::new(0);
-static CUSTOM_ENGINE_CALLS: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_CALLS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static CUSTOM_ENGINE_RENDERED_CALLS: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_RENDERED_CALLS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static CUSTOM_ENGINE_DISABLED_SKIPS: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_DISABLED_SKIPS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static CUSTOM_ENGINE_RENDERED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_RENDERED_FRAMES: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static CUSTOM_ENGINE_DISABLED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_DISABLED_FRAMES: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static SAMPLER_TRACK_CALLS: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_CALLS: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
-static SAMPLER_TRACK_RENDERED_CALLS: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_RENDERED_CALLS: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
-static SAMPLER_TRACK_DISABLED_SKIPS: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_DISABLED_SKIPS: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
-static SAMPLER_TRACK_RENDERED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_RENDERED_FRAMES: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
-static SAMPLER_TRACK_DISABLED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_DISABLED_FRAMES: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
 
 #[derive(Clone, Debug, Default)]
@@ -200,13 +200,13 @@ pub fn set_process_stats_enabled(enabled: bool) {
 }
 
 pub fn set_sampler_active_mask(track_idx: usize, active_mask: u64) {
-    if track_idx < MAX_TRACKS {
+    if track_idx < MAX_SAMPLER_POOLS {
         SAMPLER_ACTIVE_MASKS[track_idx].store(active_mask, Ordering::Release);
     }
 }
 
 pub fn take_process_stats() -> VoiceModulatorProcessStats {
-    let engines = (0..MAX_TRACKS)
+    let engines = (0..MAX_INSTRUMENT_ENGINES)
         .filter_map(|engine_id| {
             let calls = CUSTOM_ENGINE_CALLS[engine_id].swap(0, Ordering::AcqRel);
             let rendered_calls = CUSTOM_ENGINE_RENDERED_CALLS[engine_id].swap(0, Ordering::AcqRel);
@@ -218,7 +218,7 @@ pub fn take_process_stats() -> VoiceModulatorProcessStats {
             (calls > 0 || rendered_calls > 0 || disabled_skips > 0).then(|| {
                 VoiceModulatorEngineProcessStats {
                     engine_id,
-                    enabled_voices: crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id),
+                    enabled_voices: crate::lisp_host::get_dgen_engine_enabled_voices(engine_id),
                     calls,
                     rendered_calls,
                     disabled_skips,
@@ -228,7 +228,7 @@ pub fn take_process_stats() -> VoiceModulatorProcessStats {
             })
         })
         .collect();
-    let sampler_tracks = (0..MAX_TRACKS)
+    let sampler_tracks = (0..MAX_SAMPLER_POOLS)
         .filter_map(|track_idx| {
             let calls = SAMPLER_TRACK_CALLS[track_idx].swap(0, Ordering::AcqRel);
             let rendered_calls = SAMPLER_TRACK_RENDERED_CALLS[track_idx].swap(0, Ordering::AcqRel);
@@ -305,6 +305,10 @@ pub fn slot_source_node_param_idx(slot: usize) -> u32 {
 
 pub fn is_source_param(node_param_idx: u32) -> bool {
     node_param_idx >= MOD_PARAM_BASE
+}
+
+pub fn is_envelope_source_param_value(node_param_idx: u32, value: f32) -> bool {
+    is_source_param(node_param_idx) && source_type_label(value.round().max(0.0) as usize) == "env"
 }
 
 fn sync_labels() -> Vec<String> {
@@ -928,6 +932,38 @@ unsafe fn clear_output_slot(out: *const *mut f32, slot: usize, nf: usize) {
     }
 }
 
+unsafe fn clear_output_frame(out: *const *mut f32, frame: usize) {
+    if out.is_null() {
+        return;
+    }
+    for slot in 0..NUM_OUTPUTS {
+        let out_slot = *out.add(slot);
+        if !out_slot.is_null() {
+            *out_slot.add(frame) = 0.0;
+        }
+    }
+}
+
+unsafe fn gate_timeline_has_activity(
+    gate_in: *const f32,
+    trigger_in: *const f32,
+    nf: usize,
+    prev_gate: f32,
+) -> bool {
+    if prev_gate > 0.5 {
+        return true;
+    }
+    if gate_in.is_null() || trigger_in.is_null() {
+        return false;
+    }
+    for i in 0..nf {
+        if (*gate_in.add(i)).clamp(0.0, 1.0) > 0.5 || (*trigger_in.add(i)).max(0.0) > 0.5 {
+            return true;
+        }
+    }
+    false
+}
+
 unsafe fn slot_source(s: *const f32, slot: usize) -> usize {
     let source = (*s.add(slot_source_param_idx(slot))).round() as usize;
     if source <= SOURCE_EXT4 {
@@ -964,7 +1000,7 @@ unsafe fn sampler_identity(s: *const f32) -> Option<(usize, usize)> {
 }
 
 fn sampler_voice_is_active(track_idx: usize, voice_idx: usize) -> bool {
-    if track_idx >= MAX_TRACKS || voice_idx >= 64 {
+    if track_idx >= MAX_SAMPLER_POOLS || voice_idx >= 64 {
         return false;
     }
     let mask = SAMPLER_ACTIVE_MASKS[track_idx].load(Ordering::Acquire);
@@ -978,7 +1014,7 @@ fn record_disabled_custom_skip(engine_id: usize, nf: usize) {
     PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
     DISABLED_CUSTOM_SKIPS.fetch_add(1, Ordering::Relaxed);
     DISABLED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
-    if engine_id < MAX_TRACKS {
+    if engine_id < MAX_INSTRUMENT_ENGINES {
         CUSTOM_ENGINE_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
         CUSTOM_ENGINE_DISABLED_SKIPS[engine_id].fetch_add(1, Ordering::Relaxed);
         CUSTOM_ENGINE_DISABLED_FRAMES[engine_id].fetch_add(nf as u64, Ordering::Relaxed);
@@ -992,7 +1028,7 @@ fn record_disabled_sampler_skip(track_idx: usize, nf: usize) {
     PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
     DISABLED_SAMPLER_SKIPS.fetch_add(1, Ordering::Relaxed);
     DISABLED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
-    if track_idx < MAX_TRACKS {
+    if track_idx < MAX_SAMPLER_POOLS {
         SAMPLER_TRACK_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
         SAMPLER_TRACK_DISABLED_SKIPS[track_idx].fetch_add(1, Ordering::Relaxed);
         SAMPLER_TRACK_DISABLED_FRAMES[track_idx].fetch_add(nf as u64, Ordering::Relaxed);
@@ -1021,13 +1057,13 @@ fn record_rendered_call(
     RENDERED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
 
     if let Some((engine_id, _)) = custom_identity {
-        if engine_id < MAX_TRACKS {
+        if engine_id < MAX_INSTRUMENT_ENGINES {
             CUSTOM_ENGINE_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
             CUSTOM_ENGINE_RENDERED_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
             CUSTOM_ENGINE_RENDERED_FRAMES[engine_id].fetch_add(nf as u64, Ordering::Relaxed);
         }
     } else if let Some((track_idx, _)) = sampler_identity {
-        if track_idx < MAX_TRACKS {
+        if track_idx < MAX_SAMPLER_POOLS {
             SAMPLER_TRACK_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
             SAMPLER_TRACK_RENDERED_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
             SAMPLER_TRACK_RENDERED_FRAMES[track_idx].fetch_add(nf as u64, Ordering::Relaxed);
@@ -1206,7 +1242,7 @@ unsafe extern "C" fn voice_modulator_process(
 
     let custom_identity = custom_engine_identity(s);
     if let Some((engine_id, voice_idx)) = custom_identity {
-        let enabled = crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id);
+        let enabled = crate::lisp_host::get_dgen_engine_enabled_voices(engine_id);
         if voice_idx >= enabled {
             record_disabled_custom_skip(engine_id, nf);
             clear_outputs(out, nf);
@@ -1214,13 +1250,6 @@ unsafe extern "C" fn voice_modulator_process(
         }
     }
     let sampler_identity = sampler_identity(s);
-    if let Some((track_idx, voice_idx)) = sampler_identity {
-        if !sampler_voice_is_active(track_idx, voice_idx) {
-            record_disabled_sampler_skip(track_idx, nf);
-            clear_outputs(out, nf);
-            return;
-        }
-    }
 
     let gate_in = *inp.add(0);
     let velocity_in = *inp.add(2);
@@ -1228,6 +1257,15 @@ unsafe extern "C" fn voice_modulator_process(
     let ext_inputs = [*inp.add(4), *inp.add(5), *inp.add(6), *inp.add(7)];
 
     let mut prev_gate = *s.add(IDX_PREV_GATE);
+    if let Some((track_idx, voice_idx)) = sampler_identity {
+        let sampler_active = sampler_voice_is_active(track_idx, voice_idx);
+        if !sampler_active && !gate_timeline_has_activity(gate_in, trigger_in, nf, prev_gate) {
+            record_disabled_sampler_skip(track_idx, nf);
+            clear_outputs(out, nf);
+            return;
+        }
+    }
+
     let mut last_reset_counter = *s.add(IDX_LAST_RESET_COUNTER);
     let sample_rate = (*s.add(IDX_SAMPLE_RATE)).max(1.0);
     let bpm = (*s.add(PARAM_BPM)).clamp(20.0, 400.0);
@@ -1269,10 +1307,19 @@ unsafe extern "C" fn voice_modulator_process(
         }
     }
 
+    let mut sampler_voice_started = sampler_identity.is_none() || prev_gate > 0.5;
     for i in 0..nf {
         let gate = (*gate_in.add(i)).clamp(0.0, 1.0);
         let velocity = (*velocity_in.add(i)).clamp(0.0, 1.0);
         let trigger = (*trigger_in.add(i)).max(0.0);
+        if !sampler_voice_started && gate <= 0.5 && trigger <= 0.5 {
+            clear_output_frame(out, i);
+            prev_gate = gate;
+            continue;
+        }
+        if sampler_identity.is_some() && (gate > 0.5 || trigger > 0.5) {
+            sampler_voice_started = true;
+        }
         let note_on = (gate > 0.5 && prev_gate <= 0.5) || trigger > 0.5;
 
         for (slot, source) in slot_sources.iter().copied().enumerate() {
@@ -1307,6 +1354,7 @@ pub fn voice_modulator_vtable() -> NodeVTable {
         init: Some(voice_modulator_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 
@@ -1316,6 +1364,7 @@ pub fn effect_modulator_vtable() -> NodeVTable {
         init: Some(effect_modulator_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 
@@ -1369,12 +1418,23 @@ mod tests {
         frames: usize,
         ext: [[f32; 64]; EXT_INPUT_COUNT],
     ) -> [[f32; 64]; NUM_OUTPUTS] {
-        assert!(frames <= 64);
-
         let gate = [1.0f32; 64];
-        let pitch = [440.0f32; 64];
         let velocity = [1.0f32; 64];
         let trigger = [0.0f32; 64];
+        render_voice_modulator_with_gate(state, frames, gate, velocity, trigger, ext)
+    }
+
+    fn render_voice_modulator_with_gate(
+        state: &mut [f32; STATE_SIZE],
+        frames: usize,
+        gate: [f32; 64],
+        velocity: [f32; 64],
+        trigger: [f32; 64],
+        ext: [[f32; 64]; EXT_INPUT_COUNT],
+    ) -> [[f32; 64]; NUM_OUTPUTS] {
+        assert!(frames <= 64);
+
+        let pitch = [440.0f32; 64];
         let inputs = [
             gate.as_ptr() as *mut f32,
             pitch.as_ptr() as *mut f32,
@@ -1613,7 +1673,7 @@ mod tests {
     #[test]
     fn custom_engine_disabled_voice_outputs_zero_without_advancing_modulators() {
         let engine_id = 63;
-        crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, 1);
+        crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, 1);
         let mut state = init_custom_engine_state(engine_id, 3);
         let before_lfo_phase = state[slot_state_idx(0, IDX_LFO_PHASE)];
         let before_rand_phase = state[slot_state_idx(2, IDX_RAND_PHASE)];
@@ -1626,11 +1686,11 @@ mod tests {
         assert_eq!(state[slot_state_idx(0, IDX_LFO_PHASE)], before_lfo_phase);
         assert_eq!(state[slot_state_idx(2, IDX_RAND_PHASE)], before_rand_phase);
 
-        crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, 4);
+        crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, 4);
         let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
 
         assert!(outputs[0].iter().any(|value| *value > 0.0));
-        crate::lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
+        crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
     }
 
     #[test]
@@ -1640,8 +1700,18 @@ mod tests {
         let mut state = init_sampler_voice_state(track_idx, 2);
         let before_lfo_phase = state[slot_state_idx(0, IDX_LFO_PHASE)];
         let before_rand_phase = state[slot_state_idx(2, IDX_RAND_PHASE)];
+        let gate = [0.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let trigger = [0.0f32; 64];
 
-        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+        let outputs = render_voice_modulator_with_gate(
+            &mut state,
+            64,
+            gate,
+            velocity,
+            trigger,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
 
         assert!(outputs
             .iter()
@@ -1654,5 +1724,97 @@ mod tests {
 
         assert!(outputs[0].iter().any(|value| *value > 0.0));
         set_sampler_active_mask(track_idx, 0);
+    }
+
+    #[test]
+    fn active_sampler_voice_starts_modulating_at_in_block_trigger_frame() {
+        let track_idx = 61;
+        set_sampler_active_mask(track_idx, 1u64 << 1);
+        let mut state = init_sampler_voice_state(track_idx, 1);
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        for slot in 1..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+        }
+        let mut gate = [0.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let mut trigger = [0.0f32; 64];
+        for sample in gate.iter_mut().skip(3) {
+            *sample = 1.0;
+        }
+        trigger[3] = 1.0;
+
+        let outputs = render_voice_modulator_with_gate(
+            &mut state,
+            8,
+            gate,
+            velocity,
+            trigger,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
+
+        assert_eq!(&outputs[0][..3], &[0.0, 0.0, 0.0]);
+        assert!(outputs[0][3] > 0.0);
+        set_sampler_active_mask(track_idx, 0);
+    }
+
+    #[test]
+    fn inactive_sampler_voice_with_in_block_gate_activity_does_not_skip_whole_block() {
+        let track_idx = 60;
+        set_sampler_active_mask(track_idx, 0);
+        let mut state = init_sampler_voice_state(track_idx, 0);
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        for slot in 1..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+        }
+        let mut gate = [0.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let mut trigger = [0.0f32; 64];
+        gate[2] = 1.0;
+        gate[3] = 1.0;
+        trigger[2] = 1.0;
+
+        let outputs = render_voice_modulator_with_gate(
+            &mut state,
+            6,
+            gate,
+            velocity,
+            trigger,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
+
+        assert_eq!(&outputs[0][..2], &[0.0, 0.0]);
+        assert!(outputs[0][2] > 0.0);
+        assert!(state[slot_state_idx(0, IDX_LFO_PHASE)] > 0.0);
+    }
+
+    #[test]
+    fn inactive_sampler_voice_with_previous_gate_renders_until_in_block_release() {
+        let track_idx = 59;
+        set_sampler_active_mask(track_idx, 0);
+        let mut state = init_sampler_voice_state(track_idx, 0);
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        for slot in 1..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+        }
+        state[IDX_PREV_GATE] = 1.0;
+        let mut gate = [0.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let trigger = [0.0f32; 64];
+        gate[0] = 1.0;
+        gate[1] = 1.0;
+        gate[2] = 1.0;
+
+        let outputs = render_voice_modulator_with_gate(
+            &mut state,
+            6,
+            gate,
+            velocity,
+            trigger,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
+
+        assert!(outputs[0][0] > 0.0);
+        assert!(outputs[0][2] > 0.0);
+        assert_eq!(state[IDX_PREV_GATE], 0.0);
     }
 }

@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use eseqlisp::Editor;
+
+const GENERATED_INSTRUMENT_UI_PATH: &str = ".metal-seq-generated/custom-instrument-ui.lisp";
+const GENERATED_MIDI_FX_UI_PATH: &str = ".metal-seq-generated/custom-midi-fx-ui.lisp";
+const GENERATED_AUDIO_FX_UI_PATH: &str = ".metal-seq-generated/custom-audio-fx-ui.lisp";
 
 pub(crate) fn lisp_string_literal(value: &str) -> String {
     format!(
@@ -450,6 +454,44 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     format!("{functions}\n(def custom-instrument-synth-ui (inst) {dispatch})\n")
 }
 
+pub(crate) fn custom_ui_source_paths() -> Vec<PathBuf> {
+    fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if path.join("dsp.lisp").exists() {
+                    let ui_path = path.join("ui.lisp");
+                    if ui_path.exists() {
+                        out.push(ui_path);
+                    }
+                }
+                collect(&path, out);
+            }
+        }
+    }
+
+    let mut paths = Vec::new();
+    for root in ["instruments", "midi-fx", "effects"] {
+        collect(Path::new(root), &mut paths);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+pub(crate) fn is_generated_custom_ui_source_path(path: &Path) -> bool {
+    path.ends_with(GENERATED_INSTRUMENT_UI_PATH)
+        || path.ends_with(GENERATED_MIDI_FX_UI_PATH)
+        || path.ends_with(GENERATED_AUDIO_FX_UI_PATH)
+}
+
 pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
     overlay: Option<(String, String, String)>,
 ) -> String {
@@ -520,7 +562,10 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
             if let Expression::List(items) = &expr {
                 if matches!(items.first(), Some(Expression::Symbol(head)) if head == "def-midi-fx-ui")
                 {
-                    body = items.get(1).map(transform_midi_fx_ui_expr);
+                    body = items
+                        .get(1)
+                        .map(|expr| namespace_local_helpers(expr, &helper_names, &helper_prefix))
+                        .map(|expr| transform_midi_fx_ui_expr(&expr));
                     continue;
                 }
             }
@@ -647,30 +692,57 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
     format!("{functions}\n(def custom-audio-fx-ui (fx) {dispatch})\n")
 }
 
-pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) {
+pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) -> bool {
+    let mut ok = true;
     let custom_ui_source =
         build_custom_instrument_ui_source_with_overlay(active_custom_ui_buffer_overlay(editor));
     if !custom_ui_source.is_empty() {
-        if let Err(err) = editor.runtime_mut().eval_str(&custom_ui_source) {
-            eprintln!("custom instrument UI load error: {err:?}");
-        }
+        ok &= reload_custom_ui_source(
+            editor,
+            GENERATED_INSTRUMENT_UI_PATH,
+            &custom_ui_source,
+            "custom instrument UI",
+        );
     }
     let custom_midi_fx_source = build_custom_midi_fx_ui_source_with_overlay(
         active_custom_midi_fx_ui_buffer_overlay(editor),
     );
     if !custom_midi_fx_source.is_empty() {
-        if let Err(err) = editor.runtime_mut().eval_str(&custom_midi_fx_source) {
-            eprintln!("custom MIDI FX UI load error: {err:?}");
-        }
+        ok &= reload_custom_ui_source(
+            editor,
+            GENERATED_MIDI_FX_UI_PATH,
+            &custom_midi_fx_source,
+            "custom MIDI FX UI",
+        );
     }
     let custom_audio_fx_source = build_custom_audio_fx_ui_source_with_overlay(
         active_custom_audio_fx_ui_buffer_overlay(editor),
     );
     if !custom_audio_fx_source.is_empty() {
-        if let Err(err) = editor.runtime_mut().eval_str(&custom_audio_fx_source) {
-            eprintln!("custom audio effect UI load error: {err:?}");
+        ok &= reload_custom_ui_source(
+            editor,
+            GENERATED_AUDIO_FX_UI_PATH,
+            &custom_audio_fx_source,
+            "custom audio effect UI",
+        );
+    }
+    ok
+}
+
+fn reload_custom_ui_source(editor: &mut Editor, path: &str, source: &str, label: &str) -> bool {
+    let report = editor.runtime_mut().eval_source_transactional(
+        Some(PathBuf::from(path)),
+        source,
+        Vec::new(),
+    );
+    let success = report.success;
+    if !success {
+        for diagnostic in &report.diagnostics {
+            eprintln!("{label} load error: {diagnostic}");
         }
     }
+    editor.process_lisp_reload_report(report);
+    success
 }
 
 #[cfg(test)]
@@ -678,8 +750,25 @@ mod tests {
     use super::{
         build_custom_audio_fx_ui_source_with_overlay,
         build_custom_instrument_ui_source_with_overlay, instrument_ui_dispatch_aliases,
+        reload_custom_ui_source, GENERATED_INSTRUMENT_UI_PATH,
     };
+    use eseqlisp::vm::Value;
     use std::collections::BTreeMap;
+
+    fn value_contains_string(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::String(value) | Value::Symbol(value) | Value::Keyword(value) => {
+                value.contains(needle)
+            }
+            Value::List(items) => items
+                .iter()
+                .any(|item| value_contains_string(&item.borrow(), needle)),
+            Value::Map(map) => map.iter().any(|(key, value)| {
+                key.contains(needle) || value_contains_string(&value.borrow(), needle)
+            }),
+            _ => false,
+        }
+    }
 
     #[test]
     fn instrument_ui_injection_namespaces_local_helpers() {
@@ -783,6 +872,54 @@ mod tests {
             source.contains(r#"(= (get fx :name) "agent-effect-draft-1/")"#),
             "{source}"
         );
+    }
+
+    #[test]
+    fn custom_ui_reload_rerenders_existing_effect_buffer_body() {
+        let mut editor =
+            eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        assert!(reload_custom_ui_source(
+            &mut editor,
+            GENERATED_INSTRUMENT_UI_PATH,
+            r#"(def custom-instrument-synth-ui (inst) (label "old custom ui"))"#,
+            "test custom instrument UI"
+        ));
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(effect-buffer "*custom-ui-hot-reload-test*"
+                      (custom-instrument-synth-ui (dict :name "test-instrument")))"#,
+            )
+            .expect("create test effect buffer");
+        editor.refresh_runtime_side_effects();
+
+        let buffer_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == "*custom-ui-hot-reload-test*")
+            .expect("effect buffer should exist");
+        let tree = editor.buffers[buffer_idx]
+            .widget_tree
+            .as_ref()
+            .expect("effect buffer should have initial widget tree");
+        assert!(value_contains_string(tree, "old custom ui"));
+
+        assert!(reload_custom_ui_source(
+            &mut editor,
+            GENERATED_INSTRUMENT_UI_PATH,
+            r#"(def custom-instrument-synth-ui (inst) (label "new custom ui"))"#,
+            "test custom instrument UI"
+        ));
+
+        let tree = editor.buffers[buffer_idx]
+            .widget_tree
+            .as_ref()
+            .expect("effect buffer should keep widget tree after reload");
+        assert!(
+            value_contains_string(tree, "new custom ui"),
+            "custom UI reload should rerender existing effect buffer"
+        );
+        assert!(!value_contains_string(tree, "old custom ui"));
     }
 }
 

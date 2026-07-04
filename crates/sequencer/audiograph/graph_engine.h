@@ -5,6 +5,8 @@
 
 extern _Atomic uint64_t g_param_push_count;
 extern _Atomic uint64_t g_param_push_fail_count;
+extern _Atomic uint64_t g_block_event_push_count;
+extern _Atomic uint64_t g_block_event_push_fail_count;
 
 // ===================== Runtime Graph Types =====================
 
@@ -93,6 +95,12 @@ typedef struct LiveGraph {
   } sched;
 
   ParamRing *params;
+  BlockEventRing *block_events;
+  GraphBlockEvent *block_event_scratch;
+  GraphBlockEvent *block_event_sort_scratch;
+  int block_event_scratch_capacity;
+  int block_event_scratch_count;
+  _Atomic uint64_t block_event_serial;
 
   int dac_node_id;
   int num_channels;
@@ -176,6 +184,7 @@ void engine_enable_graph_logging(int enable);
 
 // Enable/disable Mach time-constraint scheduling for workers (Apple only).
 void engine_enable_rt_time_constraint(int enable);
+bool push_block_event(LiveGraph *lg, GraphBlockEvent event);
 
 // ===================== Live Graph Operations =====================
 

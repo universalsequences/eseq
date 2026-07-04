@@ -43,6 +43,13 @@
       
       ;; Buffer/panel surfaces
       :buffer-bg        '(0.12 0.13 0.14)  ; Main rounded buffer surface
+      :buffer-tab-bar-bg '(0.14 0.14 0.15)
+      :buffer-tab-selected-bg '(0.28 0.28 0.30)
+      :buffer-tab-selected-border '(0.43 0.43 0.46)
+      :buffer-tab-fg '(0.52 0.52 0.55)
+      :buffer-tab-selected-fg '(0.92 0.92 0.94)
+      :buffer-tab-selected-highlight '(1.00 1.00 1.00 0.16)
+      :buffer-tab-selected-shadow '(0.00 0.00 0.00 0.22)
       
       ;; Status bar — Xcode-style dark gray bar with black borders
       :status-fg         '(0.58 0.58 0.60)   ; Muted text
@@ -72,7 +79,7 @@
       :fx-panel-header-bg '(0.21 0.21 0.22)
       :fx-panel-header-selected-bg '(0.32 0.32 0.63)
       :fx-panel-border   '(0.26 0.26 0.27)
-      :instrument-panel-bg '(0.17 0.17 0.18)
+      :instrument-panel-bg '(0.21 0.21 0.22)
       :instrument-control-bg '(0.04 0.04 0.045)
       :instrument-group-bg '(0.15 0.15 0.155)
       :instrument-group-selected-bg '(0.11 0.115 0.11)
@@ -92,6 +99,9 @@
       :button-ghost-fg   '(0.94 0.94 0.96)
       :button-danger-bg  '(1.00 0.23 0.19)
       :button-danger-fg  '(0.96 0.96 0.98)
+      :button-border     '(0.43 0.43 0.46 0.82)
+      :button-highlight  '(1.00 1.00 1.00 0.16)
+      :button-shadow     '(0.00 0.00 0.00 0.22)
       :dropdown-bg       '(0.22 0.23 0.25)
       :dropdown-fg       '(0.94 0.94 0.96)
       :dropdown-ring     '(0.00 0.48 0.95)

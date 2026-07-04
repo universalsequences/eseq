@@ -9,7 +9,7 @@ mod inner {
     use std::path::PathBuf;
     use std::ptr::NonNull;
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -43,9 +43,12 @@ mod inner {
     };
 
     use crate::audio::sample::get_registered_sample;
-    use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
+    use crate::backend::{
+        Backend, BackendError, BackendEvent, Color, RenderFrame, TiledRenderFrame,
+    };
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
+    use crate::live_audio;
     use crate::theme;
     use crate::vm::Value;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
@@ -617,6 +620,18 @@ vertex WidgetVaryings widget_vert(
             compile_widget_shader_source_with_metal(None, shader_src)
         }
 
+        #[test]
+        fn wavetable_shader_compiles_with_metal() {
+            let Some(device) = MTLCreateSystemDefaultDevice() else {
+                return; // headless CI without a Metal device
+            };
+            let src_ns = NSString::from_str(WAVETABLE_SHADER_SRC);
+            device
+                .newLibraryWithSource_options_error(&src_ns, None)
+                .map(|_| ())
+                .unwrap_or_else(|err| panic!("wavetable shader failed to compile: {err:?}"));
+        }
+
         fn prop_text_run(text: &str) -> widget_render::MetalProportionalTextPrimitive {
             widget_render::MetalProportionalTextPrimitive {
                 row: 2.0,
@@ -694,6 +709,12 @@ vertex WidgetVaryings widget_vert(
         }
 
         #[test]
+        fn editable_button_surface_shader_compiles_in_metal() {
+            compile_widget_shader_with_metal(include_str!("../../shaders/button_surface.metal"))
+                .unwrap();
+        }
+
+        #[test]
         fn generated_top_level_let_layer_shader_compiles_in_metal() {
             let output = compile_sdf_to_metal(&parse_one_expr(
                 "(let ((shape (- (length (vec2 x y)) 0.5)))
@@ -722,6 +743,161 @@ vertex WidgetVaryings widget_vert(
             compile_widget_shader_with_metal(&output.shader_source).unwrap();
         }
     }
+
+    const WAVETABLE_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct WavetableInstance {
+    packed_float2 ndc_min;
+    packed_float2 ndc_max;
+    float widget_px_w;
+    float widget_px_h;
+    uint frame_len;
+    uint set_base;
+    uint waves_in_set;
+    float wave_pos;
+    float warp;
+    float fold;
+    packed_float4 selected_color;
+    packed_float4 inactive_color;
+    packed_float4 bg_color;
+};
+
+struct WavetableVaryings {
+    float4 position [[position]];
+    float2 uv;
+    float widget_px_w [[flat]];
+    float widget_px_h [[flat]];
+    uint frame_len [[flat]];
+    uint set_base [[flat]];
+    uint waves_in_set [[flat]];
+    float wave_pos [[flat]];
+    float warp [[flat]];
+    float fold [[flat]];
+    float4 selected_color [[flat]];
+    float4 inactive_color [[flat]];
+    float4 bg_color [[flat]];
+};
+
+vertex WavetableVaryings wavetable_vert(
+    uint vid [[vertex_id]],
+    device const WavetableInstance* instances [[buffer(0)]])
+{
+    float2 corners[6] = {
+        float2(0, 0), float2(0, 1), float2(1, 0),
+        float2(1, 0), float2(0, 1), float2(1, 1)
+    };
+    float2 corner = corners[vid];
+    WavetableInstance inst = instances[0];
+    float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
+
+    WavetableVaryings out;
+    out.position = float4(ndc, 0.0, 1.0);
+    out.uv = corner; // uv.y is up: (0,0) = bottom-left of the widget
+    out.widget_px_w = inst.widget_px_w;
+    out.widget_px_h = inst.widget_px_h;
+    out.frame_len = inst.frame_len;
+    out.set_base = inst.set_base;
+    out.waves_in_set = inst.waves_in_set;
+    out.wave_pos = inst.wave_pos;
+    out.warp = inst.warp;
+    out.fold = inst.fold;
+    out.selected_color = inst.selected_color;
+    out.inactive_color = inst.inactive_color;
+    out.bg_color = inst.bg_color;
+    return out;
+}
+
+// Mobius phase bend — keep in sync with the wavetable dsp.lisp warp math.
+float wt_warp_phase(float p, float warp) {
+    float k = 1.0 + 6.0 * warp;
+    return (k * p) / (1.0 + (k - 1.0) * p);
+}
+
+// Triangle wavefolder — keep in sync with the wavetable dsp.lisp fold math.
+float wt_fold(float y, float fold) {
+    float g = 1.0 + 6.0 * fold;
+    float v = fmod(y * g + 1.0, 4.0);
+    if (v < 0.0) { v += 4.0; }
+    return 1.0 - fabs(v - 2.0);
+}
+
+float wt_sample(device const float* bank, uint base, uint frame_len,
+                float phase, float warp, float fold)
+{
+    float p = wt_warp_phase(clamp(phase, 0.0, 1.0), warp);
+    float pos = p * float(frame_len);
+    uint i0 = min(uint(pos), frame_len - 1);
+    uint i1 = (i0 + 1) % frame_len;
+    float y = mix(bank[base + i0], bank[base + i1], pos - float(i0));
+    return wt_fold(y, fold);
+}
+
+fragment float4 wavetable_frag(
+    WavetableVaryings in [[stage_in]],
+    device const float* bank [[buffer(1)]])
+{
+    const float PAD_X = 0.03;
+    const float PAD_Y = 0.10;
+
+    uint n = max(in.waves_in_set, 1u);
+    float plot_h = 1.0 - PAD_Y * 2.0;
+    float amp_half = plot_h / float(max(n, 2u)) * 0.85;
+    float plot_px_w = in.widget_px_w * (1.0 - PAD_X * 2.0);
+
+    float u = (in.uv.x - PAD_X) / (1.0 - PAD_X * 2.0);
+    bool in_plot = u >= 0.0 && u <= 1.0;
+    u = clamp(u, 0.0, 1.0);
+    float du = max(fwidth(u), 1e-5);
+
+    float4 col = in.bg_color;
+
+    if (in_plot && in.frame_len >= 2u) {
+        // ── inactive waves: wave 0 at the bottom, last at the top ──
+        float inactive_acc = 0.0;
+        for (uint w = 0; w < min(n, 64u); w++) {
+            float t = n > 1u ? float(w) / float(n - 1u) : 0.5;
+            float rowc = PAD_Y + plot_h * t;
+            uint base = (in.set_base + w) * in.frame_len;
+            float s0 = wt_sample(bank, base, in.frame_len, u, in.warp, in.fold);
+            float s1 = wt_sample(bank, base, in.frame_len, u + du, in.warp, in.fold);
+            float y0_px = (rowc + s0 * amp_half) * in.widget_px_h;
+            float dy_px = in.uv.y * in.widget_px_h - y0_px;
+            float slope = (s1 - s0) * amp_half * in.widget_px_h / (du * plot_px_w);
+            float d = fabs(dy_px) / sqrt(1.0 + slope * slope);
+            inactive_acc = max(inactive_acc, 1.0 - smoothstep(0.45, 1.35, d));
+        }
+        col.rgb = mix(col.rgb, in.inactive_color.rgb, inactive_acc * in.inactive_color.a);
+        col.a = max(col.a, inactive_acc * in.inactive_color.a);
+
+        // ── selected wave: morph-interpolated at the fractional position ──
+        float pos = clamp(in.wave_pos, 0.0, float(n - 1u));
+        uint w0 = uint(pos);
+        uint w1 = min(w0 + 1u, n - 1u);
+        float ft = pos - float(w0);
+        float t = n > 1u ? pos / float(n - 1u) : 0.5;
+        float rowc = PAD_Y + plot_h * t;
+        uint b0 = (in.set_base + w0) * in.frame_len;
+        uint b1 = (in.set_base + w1) * in.frame_len;
+        float s0 = mix(wt_sample(bank, b0, in.frame_len, u, in.warp, in.fold),
+                       wt_sample(bank, b1, in.frame_len, u, in.warp, in.fold), ft);
+        float s1 = mix(wt_sample(bank, b0, in.frame_len, u + du, in.warp, in.fold),
+                       wt_sample(bank, b1, in.frame_len, u + du, in.warp, in.fold), ft);
+        float y0_px = (rowc + s0 * amp_half) * in.widget_px_h;
+        float dy_px = in.uv.y * in.widget_px_h - y0_px;
+        float slope = (s1 - s0) * amp_half * in.widget_px_h / (du * plot_px_w);
+        float d = fabs(dy_px) / sqrt(1.0 + slope * slope);
+        // soft dark halo behind the selected line so it reads over the grays
+        float halo = 1.0 - smoothstep(1.2, 3.2, d);
+        col.rgb = mix(col.rgb, in.bg_color.rgb, halo * 0.65);
+        float line = 1.0 - smoothstep(0.85, 2.0, d);
+        col.rgb = mix(col.rgb, in.selected_color.rgb, line * in.selected_color.a);
+        col.a = max(col.a, line * in.selected_color.a);
+    }
+    return col;
+}
+"#;
 
     const WAVEFORM_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
@@ -965,6 +1141,273 @@ fragment float4 waveform_frag(
     if (alpha < 0.001) {
         discard_fragment();
     }
+    return float4(rgb, alpha);
+}
+"#;
+
+    const LIVE_SPECTROGRAM_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct LiveSpectrogramInstance {
+    float2 ndc_min;
+    float2 ndc_max;
+    float widget_px_w;
+    float widget_px_h;
+    uint bins;
+    uint time_slices;
+    uint write_head;
+    uint mode;
+    uint freq_scale;
+    float sample_rate;
+    float2 display_hz;
+    float2 display_hz_padding;
+    float4 min_color;
+    float4 mid_color;
+    float4 max_color;
+    float4 eq_line_color;
+    float4 eq_fill_color;
+    float4 background_color;
+};
+
+struct LiveSpectrogramVaryings {
+    float4 position [[position]];
+    float2 uv;
+    float widget_px_w [[flat]];
+    float widget_px_h [[flat]];
+    uint bins [[flat]];
+    uint time_slices [[flat]];
+    uint write_head [[flat]];
+    uint mode [[flat]];
+    uint freq_scale [[flat]];
+    float sample_rate [[flat]];
+    float min_hz [[flat]];
+    float max_hz [[flat]];
+    float4 min_color [[flat]];
+    float4 mid_color [[flat]];
+    float4 max_color [[flat]];
+    float4 eq_line_color [[flat]];
+    float4 eq_fill_color [[flat]];
+    float4 background_color [[flat]];
+};
+
+vertex LiveSpectrogramVaryings live_spectrogram_vert(
+    uint vid [[vertex_id]],
+    device const LiveSpectrogramInstance* instances [[buffer(0)]])
+{
+    float2 corners[6] = {
+        float2(0, 0), float2(0, 1), float2(1, 0),
+        float2(1, 0), float2(0, 1), float2(1, 1)
+    };
+    float2 corner = corners[vid];
+    LiveSpectrogramInstance inst = instances[0];
+    float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
+
+    LiveSpectrogramVaryings out;
+    out.position = float4(ndc, 0.0, 1.0);
+    out.uv = corner;
+    out.widget_px_w = inst.widget_px_w;
+    out.widget_px_h = inst.widget_px_h;
+    out.bins = inst.bins;
+    out.time_slices = inst.time_slices;
+    out.write_head = inst.write_head;
+    out.mode = inst.mode;
+    out.freq_scale = inst.freq_scale;
+    out.sample_rate = inst.sample_rate;
+    out.min_hz = inst.display_hz.x;
+    out.max_hz = inst.display_hz.y;
+    out.min_color = inst.min_color;
+    out.mid_color = inst.mid_color;
+    out.max_color = inst.max_color;
+    out.eq_line_color = inst.eq_line_color;
+    out.eq_fill_color = inst.eq_fill_color;
+    out.background_color = inst.background_color;
+    return out;
+}
+
+static inline float spectrogram_bin_for_uv(
+    float freq_t,
+    uint freq_scale,
+    uint bins,
+    float sample_rate,
+    float min_hz,
+    float max_hz)
+{
+    float max_bin = float(max(bins, 1u) - 1u);
+    if (freq_scale == 1u || sample_rate <= 1.0 || bins < 2u) {
+        return clamp(freq_t, 0.0, 1.0) * max_bin;
+    }
+    float nyquist = max(sample_rate * 0.5, 160.0);
+    float hi_hz = clamp(max_hz, 2.0, nyquist);
+    float lo_hz = clamp(min_hz, 1.0, hi_hz * 0.5);
+    float hz = lo_hz * exp2(log2(hi_hz / lo_hz) * clamp(freq_t, 0.0, 1.0));
+    return clamp(hz / nyquist, 0.0, 1.0) * max_bin;
+}
+
+static inline float sample_bin(device const float* data, uint bins, uint row, float bin) {
+    uint lo = uint(floor(clamp(bin, 0.0, float(bins - 1u))));
+    uint hi = min(lo + 1u, bins - 1u);
+    float t = fract(bin);
+    return mix(data[row * bins + lo], data[row * bins + hi], t);
+}
+
+static inline float sample_bin_cubic(device const float* data, uint bins, uint row, float bin) {
+    float max_bin = float(bins - 1u);
+    float x = clamp(bin, 0.0, max_bin);
+    int i1 = int(floor(x));
+    int i0 = max(i1 - 1, 0);
+    int i2 = min(i1 + 1, int(bins - 1u));
+    int i3 = min(i1 + 2, int(bins - 1u));
+    float t = x - float(i1);
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float p0 = data[row * bins + uint(i0)];
+    float p1 = data[row * bins + uint(i1)];
+    float p2 = data[row * bins + uint(i2)];
+    float p3 = data[row * bins + uint(i3)];
+    float value = 0.5 * (
+        2.0 * p1
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+    return clamp(value, 0.0, 1.0);
+}
+
+static inline float sample_bin_range(device const float* data, uint bins, uint row, float bin, float bin_width) {
+    float max_bin = float(bins - 1u);
+    float half_width = max(bin_width * 0.5, 0.5);
+    int lo = int(floor(clamp(bin - half_width, 0.0, max_bin)));
+    int hi = int(ceil(clamp(bin + half_width, 0.0, max_bin)));
+    int span = max(hi - lo + 1, 1);
+
+    if (span <= 1) {
+        return sample_bin(data, bins, row, bin);
+    }
+
+    float peak = 0.0;
+    float sum = 0.0;
+    int sample_count = 0;
+    if (span <= 64) {
+        for (int idx = lo; idx <= hi; idx++) {
+            float v = data[row * bins + uint(idx)];
+            peak = max(peak, v);
+            sum += v;
+            sample_count += 1;
+        }
+    } else {
+        for (int i = 0; i < 64; i++) {
+            int idx = lo + int(round(float(i) * float(span - 1) / 63.0));
+            float v = data[row * bins + uint(idx)];
+            peak = max(peak, v);
+            sum += v;
+            sample_count += 1;
+        }
+    }
+    float average = sum / float(max(sample_count, 1));
+    return max(peak, average);
+}
+
+static inline float spectrogram_display_value(float value) {
+    float v = clamp(value, 0.0, 1.0);
+    const float noise_floor = 0.025;
+    if (v <= noise_floor) {
+        return 0.0;
+    }
+    return pow((v - noise_floor) / (1.0 - noise_floor), 0.68);
+}
+
+static inline float eq_spectrum_display_value(float value) {
+    float v = clamp(value, 0.0, 1.0);
+    return pow(smoothstep(0.0, 1.0, v), 0.72);
+}
+
+static inline float sample_eq_spectrum_curve(
+    device const float* data,
+    uint bins,
+    float freq_t,
+    uint freq_scale,
+    float sample_rate,
+    float min_hz,
+    float max_hz,
+    float widget_px_w)
+{
+    constexpr int radius = 6;
+    float px = 1.0 / max(widget_px_w, 1.0);
+    float weighted = 0.0;
+    float peak = 0.0;
+    float total_weight = 0.0;
+    for (int i = -radius; i <= radius; i++) {
+        float offset_px = float(i);
+        float t = clamp(freq_t + offset_px * px, 0.0, 1.0);
+        float bin = spectrogram_bin_for_uv(t, freq_scale, bins, sample_rate, min_hz, max_hz);
+        float value = sample_bin_cubic(data, bins, 0u, bin);
+        float weight = exp(-0.5 * (offset_px * offset_px) / 6.25);
+        weighted += value * weight;
+        peak = max(peak, value);
+        total_weight += weight;
+    }
+    float averaged = weighted / max(total_weight, 0.0001);
+    return eq_spectrum_display_value(mix(averaged, peak, 0.18));
+}
+
+static inline float3 heat_color(float value, float3 low, float3 mid, float3 high) {
+    float v = clamp(value, 0.0, 1.0);
+    float3 lower = mix(low, mid, smoothstep(0.0, 0.55, v));
+    float3 upper = mix(mid, high, smoothstep(0.45, 1.0, v));
+    return v < 0.55 ? lower : upper;
+}
+
+fragment float4 live_spectrogram_frag(
+    LiveSpectrogramVaryings in [[stage_in]],
+    device const float* waterfall [[buffer(1)]],
+    device const float* smoothed [[buffer(2)]])
+{
+    if (in.bins < 2u || in.time_slices < 1u) {
+        discard_fragment();
+    }
+
+    float2 uv = clamp(in.uv, float2(0.0), float2(1.0));
+    float bin = spectrogram_bin_for_uv(
+        uv.y,
+        in.freq_scale,
+        in.bins,
+        in.sample_rate,
+        in.min_hz,
+        in.max_hz);
+    float border = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    float border_mask = 1.0 - smoothstep(0.0, max(fwidth(border) * 1.5, 0.002), border);
+
+    if (in.mode == 1u) {
+        float value = sample_eq_spectrum_curve(
+            smoothed,
+            in.bins,
+            uv.x,
+            in.freq_scale,
+            in.sample_rate,
+            in.min_hz,
+            in.max_hz,
+            in.widget_px_w);
+        float y = clamp(value, 0.0, 1.0);
+        float fill = smoothstep(-0.004, 0.010, y - uv.y);
+        float line_width = max(1.35 / max(in.widget_px_h, 1.0), 0.003);
+        float aa = max(fwidth(uv.y - y), line_width * 0.65);
+        float line = 1.0 - smoothstep(line_width, line_width + aa, abs(uv.y - y));
+        float3 rgb = in.background_color.rgb;
+        rgb = mix(rgb, in.eq_fill_color.rgb, fill * in.eq_fill_color.a);
+        rgb = mix(rgb, in.eq_line_color.rgb, line * in.eq_line_color.a);
+        rgb = mix(rgb, in.eq_line_color.rgb, border_mask * 0.45);
+        float alpha = max(max(fill * in.eq_fill_color.a, line * in.eq_line_color.a), border_mask * 0.35);
+        return float4(rgb, alpha);
+    }
+
+    float x = clamp(uv.x, 0.0, 0.999999);
+    uint time_offset = uint(floor(x * float(in.time_slices)));
+    uint row = (in.write_head + time_offset) % in.time_slices;
+    float value = spectrogram_display_value(sample_bin_range(waterfall, in.bins, row, bin, max(fwidth(bin), 1.0)));
+    float3 heat = heat_color(value, in.min_color.rgb, in.mid_color.rgb, in.max_color.rgb);
+    float3 rgb = mix(in.background_color.rgb, heat, smoothstep(0.02, 0.95, value));
+    rgb = mix(rgb, in.max_color.rgb, border_mask * 0.28);
+    float alpha = max(smoothstep(0.005, 0.12, value), border_mask * 0.30);
     return float4(rgb, alpha);
 }
 "#;
@@ -1364,6 +1807,47 @@ fragment float4 waveform_frag(
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    struct WavetableInstance {
+        ndc_min: [f32; 2],
+        ndc_max: [f32; 2],
+        widget_px_w: f32,
+        widget_px_h: f32,
+        frame_len: u32,
+        set_base: u32,
+        waves_in_set: u32,
+        wave_pos: f32,
+        warp: f32,
+        fold: f32,
+        selected_color: [f32; 4],
+        inactive_color: [f32; 4],
+        bg_color: [f32; 4],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct LiveSpectrogramInstance {
+        ndc_min: [f32; 2],
+        ndc_max: [f32; 2],
+        widget_px_w: f32,
+        widget_px_h: f32,
+        bins: u32,
+        time_slices: u32,
+        write_head: u32,
+        mode: u32,
+        freq_scale: u32,
+        sample_rate: f32,
+        display_hz: [f32; 2],
+        display_hz_padding: [f32; 2],
+        min_color: [f32; 4],
+        mid_color: [f32; 4],
+        max_color: [f32; 4],
+        eq_line_color: [f32; 4],
+        eq_fill_color: [f32; 4],
+        background_color: [f32; 4],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     struct PatchCableInstance {
         ndc_min: [f32; 2],
         ndc_max: [f32; 2],
@@ -1389,6 +1873,16 @@ fragment float4 waveform_frag(
     struct WaveformGpuResource {
         bucket_count: u32,
         buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    }
+
+    struct LiveSpectrogramGpuResource {
+        revision: u64,
+        bins: u32,
+        time_slices: u32,
+        write_head: u32,
+        sample_rate: f32,
+        waterfall_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+        smoothed_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     }
 
     /// Layout + colour context threaded into `rasterize_char`.
@@ -1675,8 +2169,22 @@ fragment float4 waveform_frag(
                 is_background.hash(hasher);
                 hash_widget_instance(widget_type, instance, hasher);
             }
+            widget_render::MetalPrimitive::Wavetable(wavetable) => {
+                9u8.hash(hasher);
+                hash_rect(wavetable.rect, hasher);
+                wavetable.bank_key.hash(hasher);
+                wavetable.set_base.hash(hasher);
+                wavetable.waves_in_set.hash(hasher);
+                hash_f32(wavetable.wave_pos, hasher);
+                hash_f32(wavetable.warp, hasher);
+                hash_f32(wavetable.fold, hasher);
+                hash_color(wavetable.selected_color, hasher);
+                hash_color(wavetable.inactive_color, hasher);
+                hash_color(wavetable.bg_color, hasher);
+            }
             widget_render::MetalPrimitive::PatchCable(_)
             | widget_render::MetalPrimitive::Waveform(_)
+            | widget_render::MetalPrimitive::LiveSpectrogram(_)
             | widget_render::MetalPrimitive::Image(_)
             | widget_render::MetalPrimitive::PushClipRect(_)
             | widget_render::MetalPrimitive::PopClipRect => {
@@ -1728,12 +2236,17 @@ fragment float4 waveform_frag(
         prop_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         // Per-widget-type GPU pipelines (hslider, vslider, toggle)
         widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        button_surface_override_modified: Option<SystemTime>,
         sdf_widget_pipeline_sources: HashMap<String, String>,
         sdf_widget_pipeline_registry_generation: u64,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        wavetable_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        live_spectrogram_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         image_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         patch_cable_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
+        wavetable_buffers: HashMap<String, Retained<ProtocolObject<dyn MTLBuffer>>>,
+        live_spectrogram_buffers: HashMap<String, LiveSpectrogramGpuResource>,
         image_textures: HashMap<PathBuf, ImageTextureResource>,
         image_decode_tx: mpsc::Sender<ImageDecodeJob>,
         image_decode_rx: mpsc::Receiver<ImageDecodeResult>,
@@ -1769,6 +2282,7 @@ fragment float4 waveform_frag(
         pending_move: Option<Event>,
         pending_magnify: VecDeque<(f64, (f32, f32))>,
         pending_scroll: VecDeque<((f32, f32), (f32, f32))>,
+        pending_file_drops: VecDeque<Vec<PathBuf>>,
         suppress_scroll_until: Option<Instant>,
         modifiers: KeyModifiers,
         pressed_mouse_button: Option<MouseButton>,
@@ -1848,12 +2362,17 @@ fragment float4 waveform_frag(
                 pipeline: None,
                 prop_pipeline: None,
                 widget_pipelines: HashMap::new(),
+                button_surface_override_modified: None,
                 sdf_widget_pipeline_sources: HashMap::new(),
                 sdf_widget_pipeline_registry_generation: 0,
                 waveform_pipeline: None,
+                wavetable_pipeline: None,
+                live_spectrogram_pipeline: None,
                 image_pipeline: None,
                 patch_cable_pipeline: None,
                 waveform_buffers: HashMap::new(),
+                wavetable_buffers: HashMap::new(),
+                live_spectrogram_buffers: HashMap::new(),
                 image_textures: HashMap::new(),
                 image_decode_tx,
                 image_decode_rx,
@@ -1887,6 +2406,7 @@ fragment float4 waveform_frag(
                 pending_move: None,
                 pending_magnify: VecDeque::new(),
                 pending_scroll: VecDeque::new(),
+                pending_file_drops: VecDeque::new(),
                 suppress_scroll_until: None,
                 modifiers: KeyModifiers::NONE,
                 pressed_mouse_button: None,
@@ -2716,6 +3236,32 @@ fragment float4 waveform_frag(
                     );
                 }
 
+                if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                    let wavetables = collect_wavetable_primitives(seg_prims);
+                    self.draw_wavetable_primitives(
+                        enc,
+                        &wavetable_pipeline,
+                        &wavetables,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                }
+
+                if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone() {
+                    let spectrograms = collect_live_spectrogram_primitives(seg_prims);
+                    self.draw_live_spectrogram_primitives(
+                        enc,
+                        &live_spectrogram_pipeline,
+                        &spectrograms,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                }
+
                 for (widget_type, instances) in &fg_runs {
                     let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                         continue;
@@ -2972,6 +3518,36 @@ fragment float4 waveform_frag(
                             vp_h,
                         );
                     }
+
+                    if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                        let wavetables =
+                            collect_wavetable_primitives(&offset_prims[segment_range.clone()]);
+                        self.draw_wavetable_primitives(
+                            enc,
+                            &wavetable_pipeline,
+                            &wavetables,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
+
+                    if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone()
+                    {
+                        let spectrograms = collect_live_spectrogram_primitives(
+                            &offset_prims[segment_range.clone()],
+                        );
+                        self.draw_live_spectrogram_primitives(
+                            enc,
+                            &live_spectrogram_pipeline,
+                            &spectrograms,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
                 }
 
                 for compiled in &groups {
@@ -3007,6 +3583,7 @@ fragment float4 waveform_frag(
             let icon = match cursor {
                 crate::widget_render::WidgetCursor::Default => CursorIcon::Default,
                 crate::widget_render::WidgetCursor::EwResize => CursorIcon::EwResize,
+                crate::widget_render::WidgetCursor::NsResize => CursorIcon::NsResize,
                 crate::widget_render::WidgetCursor::DragCopy => CursorIcon::Copy,
                 crate::widget_render::WidgetCursor::DragNotAllowed => CursorIcon::NotAllowed,
             };
@@ -3044,6 +3621,7 @@ fragment float4 waveform_frag(
             }
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.compile_pending_sdf_pipelines();
+            self.compile_pending_button_surface_override();
             self.drain_decoded_images(usize::MAX);
 
             let desc = MTLTextureDescriptor::new();
@@ -3262,6 +3840,32 @@ fragment float4 waveform_frag(
                     &enc,
                     &waveform_pipeline,
                     &waveform_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                let wavetable_primitives = collect_wavetable_primitives(&primitive_scene);
+                self.draw_wavetable_primitives(
+                    &enc,
+                    &wavetable_pipeline,
+                    &wavetable_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone() {
+                let spectrogram_primitives = collect_live_spectrogram_primitives(&primitive_scene);
+                self.draw_live_spectrogram_primitives(
+                    &enc,
+                    &live_spectrogram_pipeline,
+                    &spectrogram_primitives,
                     cell_w,
                     cell_h,
                     vp_w,
@@ -3612,6 +4216,155 @@ fragment float4 waveform_frag(
             self.sdf_widget_pipeline_registry_generation = generation;
         }
 
+        fn compile_widget_pipeline_source(
+            &self,
+            widget_type: &str,
+            vertex_src: Option<&str>,
+            fragment_src: &str,
+        ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, BackendError> {
+            let full_src = format!(
+                "{}{}{}",
+                WIDGET_SHADER_PREAMBLE,
+                vertex_src.unwrap_or(DEFAULT_WIDGET_VERTEX_SHADER),
+                fragment_src
+            );
+            let src_ns = NSString::from_str(&full_src);
+            let wlib = self
+                .device
+                .newLibraryWithSource_options_error(&src_ns, None)
+                .map_err(|err| {
+                    eprintln!("Metal widget shader compile failed for {widget_type}: {err:?}");
+                    BackendError::MetalError
+                })?;
+
+            let wvert = wlib
+                .newFunctionWithName(&NSString::from_str("widget_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let wfrag = wlib
+                .newFunctionWithName(&NSString::from_str("widget_frag"))
+                .ok_or(BackendError::MetalError)?;
+
+            let wdesc = MTLRenderPipelineDescriptor::new();
+            wdesc.setVertexFunction(Some(&wvert));
+            wdesc.setFragmentFunction(Some(&wfrag));
+            let wattach = unsafe { wdesc.colorAttachments().objectAtIndexedSubscript(0) };
+            wattach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            wattach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                wattach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                wattach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wattach.setRgbBlendOperation(MTLBlendOperation::Add);
+                wattach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                wattach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wattach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+
+            self.device
+                .newRenderPipelineStateWithDescriptor_error(&wdesc)
+                .map_err(|err| {
+                    eprintln!("Metal widget pipeline creation failed for {widget_type}: {err:?}");
+                    BackendError::MetalError
+                })
+        }
+
+        pub fn poll_editable_shader_overrides(&mut self) -> bool {
+            self.compile_pending_sdf_pipelines();
+            self.compile_pending_button_surface_override()
+        }
+
+        fn compile_pending_button_surface_override(&mut self) -> bool {
+            let path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders/button_surface.metal");
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if self.button_surface_override_modified.is_none() {
+                        eprintln!(
+                            "[button-shader-watch] override file not available path={} error={error}",
+                            path.display()
+                        );
+                    }
+                    return false;
+                }
+            };
+            let modified = match metadata.modified() {
+                Ok(modified) => modified,
+                Err(error) => {
+                    eprintln!(
+                        "[button-shader-watch] could not read mtime path={} error={error}",
+                        path.display()
+                    );
+                    return false;
+                }
+            };
+            if self.button_surface_override_modified == Some(modified) {
+                return false;
+            }
+            eprintln!(
+                "[button-shader-watch] edit detected path={} previous={:?} next={:?}",
+                path.display(),
+                self.button_surface_override_modified,
+                modified
+            );
+            let fragment_src = match fs::read_to_string(&path) {
+                Ok(fragment_src) => fragment_src,
+                Err(error) => {
+                    eprintln!(
+                        "[button-shader-watch] failed to read shader path={} error={error}",
+                        path.display()
+                    );
+                    return false;
+                }
+            };
+            eprintln!(
+                "[button-shader-watch] compiling button shader bytes={}",
+                fragment_src.len()
+            );
+            let button_pipeline = match self.compile_widget_pipeline_source(
+                "button",
+                None,
+                &fragment_src,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(_) => {
+                    self.button_surface_override_modified = Some(modified);
+                    eprintln!(
+                        "[button-shader-watch] reload failed; keeping previous button pipeline path={}",
+                        path.display()
+                    );
+                    return false;
+                }
+            };
+            let number_picker_pipeline = match self.compile_widget_pipeline_source(
+                "number-picker",
+                None,
+                &fragment_src,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(_) => {
+                    self.button_surface_override_modified = Some(modified);
+                    eprintln!(
+                        "[button-shader-watch] reload failed; keeping previous number-picker pipeline path={}",
+                        path.display()
+                    );
+                    return false;
+                }
+            };
+
+            self.widget_pipelines
+                .insert("button".to_string(), button_pipeline);
+            self.widget_pipelines
+                .insert("number-picker".to_string(), number_picker_pipeline);
+            self.button_surface_override_modified = Some(modified);
+            self.compiled_widget_runs.clear();
+            self.stats.note_widget_run_cache_clear();
+            eprintln!(
+                "[button-shader-watch] reload ok; swapped button and number-picker pipelines and cleared compiled widget runs"
+            );
+            true
+        }
+
         fn draw_waveform_primitives(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -3680,6 +4433,228 @@ fragment float4 waveform_frag(
                         0,
                     );
                     enc.setFragmentBuffer_offset_atIndex(Some(&waveform_buffer), 0, 1);
+                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+                }
+                self.stats.note_draw_command();
+            }
+        }
+
+        fn ensure_wavetable_buffer(
+            &mut self,
+            bank_key: &str,
+            data: &std::sync::Arc<Vec<f32>>,
+        ) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
+            if let Some(buffer) = self.wavetable_buffers.get(bank_key) {
+                return Some(buffer.clone());
+            }
+            let buffer = unsafe {
+                self.device.newBufferWithBytes_length_options(
+                    NonNull::new(data.as_ptr() as *mut _)?,
+                    std::mem::size_of_val(data.as_slice()),
+                    MTLResourceOptions(0),
+                )
+            }?;
+            self.wavetable_buffers
+                .insert(bank_key.to_string(), buffer.clone());
+            Some(buffer)
+        }
+
+        fn draw_wavetable_primitives(
+            &mut self,
+            enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+            pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+            primitives: &[widget_render::MetalWavetablePrimitive],
+            cell_w: f32,
+            cell_h: f32,
+            vp_w: f32,
+            vp_h: f32,
+        ) {
+            for primitive in primitives {
+                let expected = (primitive.set_base + primitive.waves_in_set) as usize
+                    * primitive.frame_len as usize;
+                if primitive.frame_len < 2
+                    || primitive.waves_in_set == 0
+                    || primitive.data.len() < expected
+                {
+                    continue;
+                }
+                let Some(bank_buffer) =
+                    self.ensure_wavetable_buffer(&primitive.bank_key, &primitive.data)
+                else {
+                    continue;
+                };
+                let ndc_min = [
+                    (primitive.rect.col * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - ((primitive.rect.row + primitive.rect.height) * cell_h / vp_h) * 2.0,
+                ];
+                let ndc_max = [
+                    ((primitive.rect.col + primitive.rect.width) * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - (primitive.rect.row * cell_h / vp_h) * 2.0,
+                ];
+                let instance = WavetableInstance {
+                    ndc_min,
+                    ndc_max,
+                    widget_px_w: primitive.rect.width * cell_w,
+                    widget_px_h: primitive.rect.height * cell_h,
+                    frame_len: primitive.frame_len,
+                    set_base: primitive.set_base,
+                    waves_in_set: primitive.waves_in_set,
+                    wave_pos: primitive.wave_pos,
+                    warp: primitive.warp,
+                    fold: primitive.fold,
+                    selected_color: primitive.selected_color.to_rgba(),
+                    inactive_color: primitive.inactive_color.to_rgba(),
+                    bg_color: primitive.bg_color.to_rgba(),
+                };
+                let Some(instance_upload) =
+                    self.upload_arena
+                        .upload_one(&self.device, &instance, &mut self.stats)
+                else {
+                    continue;
+                };
+                enc.setRenderPipelineState(pipeline);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(
+                        Some(&instance_upload.buffer),
+                        instance_upload.offset,
+                        0,
+                    );
+                    enc.setFragmentBuffer_offset_atIndex(Some(&bank_buffer), 0, 1);
+                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+                }
+                self.stats.note_draw_command();
+            }
+        }
+
+        fn ensure_live_spectrogram_buffers(
+            &mut self,
+            data_key: &str,
+        ) -> Option<&LiveSpectrogramGpuResource> {
+            let frame = live_audio::spectrogram_frame(data_key)?;
+            let needs_upload = self
+                .live_spectrogram_buffers
+                .get(data_key)
+                .map(|resource| {
+                    resource.revision != frame.revision
+                        || resource.bins != frame.bins
+                        || resource.time_slices != frame.time_slices
+                })
+                .unwrap_or(true);
+            if needs_upload {
+                let waterfall_buffer = unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        NonNull::new(frame.waterfall.as_ptr() as *mut _)?,
+                        std::mem::size_of_val(frame.waterfall.as_slice()),
+                        MTLResourceOptions(0),
+                    )
+                }?;
+                let smoothed_buffer = unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        NonNull::new(frame.smoothed.as_ptr() as *mut _)?,
+                        std::mem::size_of_val(frame.smoothed.as_slice()),
+                        MTLResourceOptions(0),
+                    )
+                }?;
+                self.live_spectrogram_buffers.insert(
+                    data_key.to_string(),
+                    LiveSpectrogramGpuResource {
+                        revision: frame.revision,
+                        bins: frame.bins,
+                        time_slices: frame.time_slices,
+                        write_head: frame.write_head,
+                        sample_rate: frame.sample_rate,
+                        waterfall_buffer,
+                        smoothed_buffer,
+                    },
+                );
+            } else if let Some(resource) = self.live_spectrogram_buffers.get_mut(data_key) {
+                resource.write_head = frame.write_head;
+                resource.sample_rate = frame.sample_rate;
+            }
+            self.live_spectrogram_buffers.get(data_key)
+        }
+
+        fn draw_live_spectrogram_primitives(
+            &mut self,
+            enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+            pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+            primitives: &[widget_render::MetalLiveSpectrogramPrimitive],
+            cell_w: f32,
+            cell_h: f32,
+            vp_w: f32,
+            vp_h: f32,
+        ) {
+            for primitive in primitives {
+                let Some((
+                    bins,
+                    time_slices,
+                    write_head,
+                    sample_rate,
+                    waterfall_buffer,
+                    smoothed_buffer,
+                )) = self
+                    .ensure_live_spectrogram_buffers(&primitive.data_key)
+                    .map(|resource| {
+                        (
+                            resource.bins,
+                            resource.time_slices,
+                            resource.write_head,
+                            resource.sample_rate,
+                            resource.waterfall_buffer.clone(),
+                            resource.smoothed_buffer.clone(),
+                        )
+                    })
+                else {
+                    continue;
+                };
+                if bins < 2 || time_slices == 0 {
+                    continue;
+                }
+
+                let ndc_min = [
+                    (primitive.rect.col * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - ((primitive.rect.row + primitive.rect.height) * cell_h / vp_h) * 2.0,
+                ];
+                let ndc_max = [
+                    ((primitive.rect.col + primitive.rect.width) * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - (primitive.rect.row * cell_h / vp_h) * 2.0,
+                ];
+                let instance = LiveSpectrogramInstance {
+                    ndc_min,
+                    ndc_max,
+                    widget_px_w: primitive.rect.width * cell_w,
+                    widget_px_h: primitive.rect.height * cell_h,
+                    bins,
+                    time_slices,
+                    write_head,
+                    mode: primitive.mode,
+                    freq_scale: primitive.freq_scale,
+                    sample_rate,
+                    display_hz: [primitive.min_hz, primitive.max_hz],
+                    display_hz_padding: [0.0, 0.0],
+                    min_color: primitive.min_color.to_rgba(),
+                    mid_color: primitive.mid_color.to_rgba(),
+                    max_color: primitive.max_color.to_rgba(),
+                    eq_line_color: primitive.eq_line_color.to_rgba(),
+                    eq_fill_color: primitive.eq_fill_color.to_rgba(),
+                    background_color: primitive.background_color.to_rgba(),
+                };
+                let Some(instance_upload) =
+                    self.upload_arena
+                        .upload_one(&self.device, &instance, &mut self.stats)
+                else {
+                    continue;
+                };
+
+                enc.setRenderPipelineState(pipeline);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(
+                        Some(&instance_upload.buffer),
+                        instance_upload.offset,
+                        0,
+                    );
+                    enc.setFragmentBuffer_offset_atIndex(Some(&waterfall_buffer), 0, 1);
+                    enc.setFragmentBuffer_offset_atIndex(Some(&smoothed_buffer), 0, 2);
                     enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
                 }
                 self.stats.note_draw_command();
@@ -3772,6 +4747,8 @@ fragment float4 waveform_frag(
         /// Render a tiled frame with per-tile scissor clipping.
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
+            self.compile_pending_sdf_pipelines();
+            self.compile_pending_button_surface_override();
             self.agent_instrument_stub_animation_visible = false;
             let render_time_seconds = self.elapsed_time_seconds();
             self.sync_window_theme();
@@ -3802,6 +4779,7 @@ fragment float4 waveform_frag(
             let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
             let to_rgba = |c: Color| [c.r, c.g, c.b, c.a];
             let has_multiple_tiles = tiled.tiles.len() > 1;
+            let tile_chrome_pipeline = self.widget_pipelines.get("tile-chrome").cloned();
             let mut mod_patch_ports = Vec::new();
             let mut global_overlay_prims = Vec::new();
 
@@ -3892,28 +4870,53 @@ fragment float4 waveform_frag(
                     .and_then(theme::named_color)
                     .or(tile.background_color)
                     .unwrap_or(theme::BG());
-                let mut tile_bg_verts = Vec::new();
                 enc.setScissorRect(tile_scissor);
-                push_rounded_rect_fill_px(
-                    &mut tile_bg_verts,
-                    frame_left_px,
-                    frame_top_px,
-                    frame_width_px,
-                    frame_height_px,
-                    tile.border_radius_px,
-                    tile_bg,
-                    vp_w,
-                    vp_h,
-                );
-                draw_vertices(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    &pipeline,
-                    &atlas_texture,
-                    &tile_bg_verts,
-                );
+                if let (Some(tile_chrome_pipeline), Some(instance)) = (
+                    tile_chrome_pipeline.as_ref(),
+                    tile_chrome_instance_px(
+                        frame_left_px,
+                        frame_top_px,
+                        frame_width_px,
+                        frame_height_px,
+                        tile.border_radius_px,
+                        0.0,
+                        tile_bg,
+                        Color::rgba(0.0, 0.0, 0.0, 0.0),
+                        vp_w,
+                        vp_h,
+                    ),
+                ) {
+                    draw_widget_instances(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        tile_chrome_pipeline,
+                        std::slice::from_ref(&instance),
+                    );
+                } else {
+                    let mut tile_bg_verts = Vec::new();
+                    push_rounded_rect_fill_px(
+                        &mut tile_bg_verts,
+                        frame_left_px,
+                        frame_top_px,
+                        frame_width_px,
+                        frame_height_px,
+                        tile.border_radius_px,
+                        tile_bg,
+                        vp_w,
+                        vp_h,
+                    );
+                    draw_vertices(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        &pipeline,
+                        &atlas_texture,
+                        &tile_bg_verts,
+                    );
+                }
 
                 enc.setScissorRect(content_scissor);
 
@@ -4096,7 +5099,6 @@ fragment float4 waveform_frag(
                         split_prim_segment_ranges(&offset_prims, content_scissor, cell_w, cell_h);
                     self.stats.note_widget_segments(segments.len());
 
-                    self.compile_pending_sdf_pipelines();
                     for (seg_scissor, seg_range) in &segments {
                         enc.setScissorRect(*seg_scissor);
                         metal_prep_time += if use_widget_run_cache {
@@ -4161,6 +5163,53 @@ fragment float4 waveform_frag(
                             self.note_agent_instrument_stub_animation_detected();
                         }
                         global_overlay_prims.extend(offset_overlay);
+                    }
+                }
+
+                if let Some(overlay) = tile.inspect_overlay {
+                    enc.setScissorRect(content_scissor);
+                    let text_scroll = tile.frame.text_scroll_top as f32;
+                    let overlay_x =
+                        (content_col + overlay.rect.col - tile.frame.widget_scroll_left) * cell_w;
+                    let overlay_y = (content_row + overlay.rect.row
+                        - text_scroll
+                        - tile.frame.widget_scroll_top)
+                        * cell_h;
+                    let overlay_w = overlay.rect.width * cell_w;
+                    let overlay_h = overlay.rect.height * cell_h;
+                    if overlay_w > 0.0 && overlay_h > 0.0 {
+                        let mut inspect_verts = Vec::new();
+                        push_rect_px(
+                            &mut inspect_verts,
+                            overlay_x,
+                            overlay_y,
+                            overlay_w,
+                            overlay_h,
+                            overlay.fill,
+                            vp_w,
+                            vp_h,
+                        );
+                        push_rounded_rect_border_px(
+                            &mut inspect_verts,
+                            overlay_x,
+                            overlay_y,
+                            overlay_w,
+                            overlay_h,
+                            1.5,
+                            3.0,
+                            overlay.border,
+                            vp_w,
+                            vp_h,
+                        );
+                        draw_vertices(
+                            &enc,
+                            &self.device,
+                            &mut self.upload_arena,
+                            &mut self.stats,
+                            &pipeline,
+                            &atlas_texture,
+                            &inspect_verts,
+                        );
                     }
                 }
 
@@ -4270,28 +5319,53 @@ fragment float4 waveform_frag(
                     } else {
                         tile_bg
                     };
-                    let mut bverts = Vec::new();
-                    push_rounded_rect_border_px(
-                        &mut bverts,
-                        frame_left_px,
-                        frame_top_px,
-                        frame_width_px,
-                        frame_height_px,
-                        tile.border_width_px,
-                        tile.border_radius_px,
-                        border_color,
-                        vp_w,
-                        vp_h,
-                    );
-                    draw_vertices(
-                        &enc,
-                        &self.device,
-                        &mut self.upload_arena,
-                        &mut self.stats,
-                        &pipeline,
-                        &atlas_texture,
-                        &bverts,
-                    );
+                    if let (Some(tile_chrome_pipeline), Some(instance)) = (
+                        tile_chrome_pipeline.as_ref(),
+                        tile_chrome_instance_px(
+                            frame_left_px,
+                            frame_top_px,
+                            frame_width_px,
+                            frame_height_px,
+                            tile.border_radius_px,
+                            tile.border_width_px,
+                            Color::rgba(0.0, 0.0, 0.0, 0.0),
+                            border_color,
+                            vp_w,
+                            vp_h,
+                        ),
+                    ) {
+                        draw_widget_instances(
+                            &enc,
+                            &self.device,
+                            &mut self.upload_arena,
+                            &mut self.stats,
+                            tile_chrome_pipeline,
+                            std::slice::from_ref(&instance),
+                        );
+                    } else {
+                        let mut bverts = Vec::new();
+                        push_rounded_rect_border_px(
+                            &mut bverts,
+                            frame_left_px,
+                            frame_top_px,
+                            frame_width_px,
+                            frame_height_px,
+                            tile.border_width_px,
+                            tile.border_radius_px,
+                            border_color,
+                            vp_w,
+                            vp_h,
+                        );
+                        draw_vertices(
+                            &enc,
+                            &self.device,
+                            &mut self.upload_arena,
+                            &mut self.stats,
+                            &pipeline,
+                            &atlas_texture,
+                            &bverts,
+                        );
+                    }
                 }
             }
 
@@ -4323,15 +5397,19 @@ fragment float4 waveform_frag(
                 let group_visual_top = group_top + group_inset_y / cell_h.max(1.0);
                 let group_visual_height_px = (group_height_px - group_inset_y * 2.0).max(1.0);
                 let group_visual_height = group_visual_height_px / cell_h.max(1.0);
-                let group_bg = theme::STATUS_BG();
-                let selected_tab_bg = Color::from_hex(0x48, 0x48, 0x4d);
-                push_rounded_instance_cells_with_normalized_radius(
+                let group_bg = theme::BUFFER_TAB_BAR_BG();
+                let selected_tab_bg = theme::BUFFER_TAB_SELECTED_BG();
+                push_tile_tab_instance_cells(
                     &mut tab_instances,
                     group_left,
                     group_visual_top,
                     group_width,
                     group_visual_height,
                     group_bg,
+                    Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    Color::rgba(1.0, 1.0, 1.0, 0.04),
+                    Color::rgba(0.0, 0.0, 0.0, 0.10),
+                    0.0,
                     0.95,
                     cell_w,
                     cell_h,
@@ -4348,13 +5426,17 @@ fragment float4 waveform_frag(
                         let selected_h = (group_visual_height
                             - selected_inset_px * 2.0 / cell_h.max(1.0))
                         .max(0.1);
-                        push_rounded_instance_cells_with_normalized_radius(
+                        push_tile_tab_instance_cells(
                             &mut tab_instances,
                             selected_x,
                             selected_y,
                             selected_w,
                             selected_h,
                             selected_tab_bg,
+                            theme::BUFFER_TAB_SELECTED_BORDER(),
+                            theme::BUFFER_TAB_SELECTED_HIGHLIGHT(),
+                            theme::BUFFER_TAB_SELECTED_SHADOW(),
+                            1.0,
                             0.95,
                             cell_w,
                             cell_h,
@@ -4363,15 +5445,15 @@ fragment float4 waveform_frag(
                         );
                     }
                     let fg = if tab.selected {
-                        theme::FG()
+                        theme::BUFFER_TAB_SELECTED_FG()
                     } else {
-                        theme::STATUS_FG()
+                        theme::BUFFER_TAB_FG()
                     };
                     tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
                         widget_render::MetalProportionalTextPrimitive {
-                            row: tab.rect.row + (tab.rect.height - 1.0) * 0.5,
-                            col: tab.rect.col,
-                            align_width: tab.rect.width.max(0.0),
+                            row: tab.label_rect.row + (tab.label_rect.height - 1.0) * 0.5,
+                            col: tab.label_rect.col,
+                            align_width: tab.label_rect.width.max(0.0),
                             h_align: 0.5,
                             text: tab.label.clone(),
                             font_size: 10.5,
@@ -4384,15 +5466,40 @@ fragment float4 waveform_frag(
                             },
                         },
                     ));
+                    if tab.close_visible
+                        && let Some(close_rect) = tab.close_rect
+                    {
+                        tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
+                            widget_render::MetalProportionalTextPrimitive {
+                                row: close_rect.row + (close_rect.height - 1.0) * 0.5 - 0.08,
+                                col: close_rect.col,
+                                align_width: close_rect.width.max(0.0),
+                                h_align: 0.5,
+                                text: "×".to_string(),
+                                font_size: 14.0,
+                                scale: 1.0,
+                                fg,
+                                bg: if tab.selected {
+                                    selected_tab_bg
+                                } else {
+                                    group_bg
+                                },
+                            },
+                        ));
+                    }
                 }
             }
-            if let Some(box_pipeline) = self.widget_pipelines.get("box") {
+            if let Some(tab_pipeline) = self
+                .widget_pipelines
+                .get("tile-tab")
+                .or_else(|| self.widget_pipelines.get("box"))
+            {
                 draw_widget_instances(
                     &enc,
                     &self.device,
                     &mut self.upload_arena,
                     &mut self.stats,
-                    box_pipeline,
+                    tab_pipeline,
                     tab_instances.as_slice(),
                 );
             }
@@ -5054,56 +6161,12 @@ fragment float4 waveform_frag(
             // Each widget gets its own fragment shader but shares the vertex
             // shader and SDF utilities from the preamble.
             for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources() {
-                let full_src = format!(
-                    "{}{}{}",
-                    WIDGET_SHADER_PREAMBLE,
-                    vertex_src.unwrap_or(DEFAULT_WIDGET_VERTEX_SHADER),
-                    fragment_src
-                );
-                let src_ns = NSString::from_str(&full_src);
-                let wlib = self
-                    .device
-                    .newLibraryWithSource_options_error(&src_ns, None)
-                    .map_err(|err| {
-                        eprintln!("Metal widget shader compile failed for {widget_type}: {err:?}");
-                        BackendError::MetalError
-                    })?;
-
-                let wvert = wlib
-                    .newFunctionWithName(&NSString::from_str("widget_vert"))
-                    .ok_or(BackendError::MetalError)?;
-                let wfrag = wlib
-                    .newFunctionWithName(&NSString::from_str("widget_frag"))
-                    .ok_or(BackendError::MetalError)?;
-
-                let wdesc = MTLRenderPipelineDescriptor::new();
-                wdesc.setVertexFunction(Some(&wvert));
-                wdesc.setFragmentFunction(Some(&wfrag));
-                let wattach = unsafe { wdesc.colorAttachments().objectAtIndexedSubscript(0) };
-                wattach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                wattach.setBlendingEnabled(true);
-                {
-                    use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
-                    wattach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                    wattach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                    wattach.setRgbBlendOperation(MTLBlendOperation::Add);
-                    wattach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                    wattach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                    wattach.setAlphaBlendOperation(MTLBlendOperation::Add);
-                }
-
-                let pipeline_state = self
-                    .device
-                    .newRenderPipelineStateWithDescriptor_error(&wdesc)
-                    .map_err(|err| {
-                        eprintln!(
-                            "Metal widget pipeline creation failed for {widget_type}: {err:?}"
-                        );
-                        BackendError::MetalError
-                    })?;
+                let pipeline_state =
+                    self.compile_widget_pipeline_source(widget_type, vertex_src, fragment_src)?;
                 self.widget_pipelines
                     .insert(widget_type.to_string(), pipeline_state);
             }
+            self.compile_pending_button_surface_override();
 
             let waveform_src = NSString::from_str(WAVEFORM_SHADER_SRC);
             let waveform_lib = self
@@ -5138,6 +6201,81 @@ fragment float4 waveform_frag(
                     .map_err(|_| BackendError::MetalError)?,
             );
 
+            let wavetable_src = NSString::from_str(WAVETABLE_SHADER_SRC);
+            let wavetable_lib = self
+                .device
+                .newLibraryWithSource_options_error(&wavetable_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+            let wavetable_vert = wavetable_lib
+                .newFunctionWithName(&NSString::from_str("wavetable_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let wavetable_frag = wavetable_lib
+                .newFunctionWithName(&NSString::from_str("wavetable_frag"))
+                .ok_or(BackendError::MetalError)?;
+            let wavetable_desc = MTLRenderPipelineDescriptor::new();
+            wavetable_desc.setVertexFunction(Some(&wavetable_vert));
+            wavetable_desc.setFragmentFunction(Some(&wavetable_frag));
+            let wavetable_attach = unsafe {
+                wavetable_desc
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
+            wavetable_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            wavetable_attach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                wavetable_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                wavetable_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wavetable_attach.setRgbBlendOperation(MTLBlendOperation::Add);
+                wavetable_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                wavetable_attach
+                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wavetable_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+            self.wavetable_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&wavetable_desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
+            let live_spectrogram_src = NSString::from_str(LIVE_SPECTROGRAM_SHADER_SRC);
+            let live_spectrogram_lib = self
+                .device
+                .newLibraryWithSource_options_error(&live_spectrogram_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+            let live_spectrogram_vert = live_spectrogram_lib
+                .newFunctionWithName(&NSString::from_str("live_spectrogram_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let live_spectrogram_frag = live_spectrogram_lib
+                .newFunctionWithName(&NSString::from_str("live_spectrogram_frag"))
+                .ok_or(BackendError::MetalError)?;
+            let live_spectrogram_desc = MTLRenderPipelineDescriptor::new();
+            live_spectrogram_desc.setVertexFunction(Some(&live_spectrogram_vert));
+            live_spectrogram_desc.setFragmentFunction(Some(&live_spectrogram_frag));
+            let live_spectrogram_attach = unsafe {
+                live_spectrogram_desc
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
+            live_spectrogram_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            live_spectrogram_attach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                live_spectrogram_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                live_spectrogram_attach
+                    .setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                live_spectrogram_attach.setRgbBlendOperation(MTLBlendOperation::Add);
+                live_spectrogram_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                live_spectrogram_attach
+                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                live_spectrogram_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+            self.live_spectrogram_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&live_spectrogram_desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
             Ok(())
         }
 
@@ -5160,6 +6298,13 @@ fragment float4 waveform_frag(
             let cols = (size.width as usize / cell_w).max(1);
             let rows = (size.height as usize / cell_h).max(1);
             (cols, rows)
+        }
+
+        fn poll_backend_event(&mut self, timeout: Duration) -> Option<BackendEvent> {
+            if let Some(paths) = self.pending_file_drops.pop_front() {
+                return Some(BackendEvent::FileDrop(paths));
+            }
+            self.poll_event(timeout).map(BackendEvent::Terminal)
         }
 
         fn poll_event(&mut self, timeout: Duration) -> Option<Event> {
@@ -5198,6 +6343,7 @@ fragment float4 waveform_frag(
                 .map(|a| (a.cell_w.max(1) as f64, a.cell_h.max(1) as f64))
                 .unwrap_or((8.0, 16.0));
             let wake_at = Instant::now() + timeout;
+            let mut dropped_paths = Vec::new();
             event_loop.pump_events(Some(timeout), |event, elwt| {
                 elwt.set_control_flow(if timeout.is_zero() {
                     ControlFlow::Poll
@@ -5230,6 +6376,9 @@ fragment float4 waveform_frag(
                     }
                     WindowEvent::RedrawRequested => {
                         pending.push_back(Event::Resize(0, 0));
+                    }
+                    WindowEvent::DroppedFile(path) => {
+                        dropped_paths.push(path);
                     }
                     WindowEvent::ModifiersChanged(mods) => {
                         *modifiers = winit_mods_to_crossterm(mods.state());
@@ -5345,6 +6494,9 @@ fragment float4 waveform_frag(
                     _ => {}
                 }
             });
+            if !dropped_paths.is_empty() {
+                self.pending_file_drops.push_back(dropped_paths);
+            }
             if let Some(ev) = self.pending.pop_front() {
                 if matches!(ev, Event::Mouse(_)) {
                     self.last_precise_mouse = Some(self.cursor_pos);
@@ -5368,6 +6520,7 @@ fragment float4 waveform_frag(
             self.drain_decoded_images(2);
 
             self.compile_pending_sdf_pipelines();
+            self.compile_pending_button_surface_override();
 
             let Some(pipeline) = self.pipeline.clone() else {
                 return Ok(());
@@ -5565,6 +6718,32 @@ fragment float4 waveform_frag(
                     &enc,
                     &waveform_pipeline,
                     &waveform_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                let wavetable_primitives = collect_wavetable_primitives(&primitive_scene);
+                self.draw_wavetable_primitives(
+                    &enc,
+                    &wavetable_pipeline,
+                    &wavetable_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone() {
+                let spectrogram_primitives = collect_live_spectrogram_primitives(&primitive_scene);
+                self.draw_live_spectrogram_primitives(
+                    &enc,
+                    &live_spectrogram_pipeline,
+                    &spectrogram_primitives,
                     cell_w,
                     cell_h,
                     vp_w,
@@ -6564,6 +7743,8 @@ fragment float4 waveform_frag(
                 widget_render::MetalPrimitive::PatchCable(_) => {}
                 widget_render::MetalPrimitive::Circle(_) => {}
                 widget_render::MetalPrimitive::Waveform(_) => {}
+                widget_render::MetalPrimitive::Wavetable(_) => {}
+                widget_render::MetalPrimitive::LiveSpectrogram(_) => {}
                 widget_render::MetalPrimitive::Image(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
                 widget_render::MetalPrimitive::PushClipRect(_)
@@ -6645,6 +7826,36 @@ fragment float4 waveform_frag(
             .filter_map(
                 |primitive| match widget_render::innermost_primitive(primitive) {
                     widget_render::MetalPrimitive::Waveform(waveform) => Some(waveform.clone()),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    fn collect_wavetable_primitives(
+        primitives: &[widget_render::MetalPrimitive],
+    ) -> Vec<widget_render::MetalWavetablePrimitive> {
+        primitives
+            .iter()
+            .filter_map(
+                |primitive| match widget_render::innermost_primitive(primitive) {
+                    widget_render::MetalPrimitive::Wavetable(wavetable) => Some(wavetable.clone()),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    fn collect_live_spectrogram_primitives(
+        primitives: &[widget_render::MetalPrimitive],
+    ) -> Vec<widget_render::MetalLiveSpectrogramPrimitive> {
+        primitives
+            .iter()
+            .filter_map(
+                |primitive| match widget_render::innermost_primitive(primitive) {
+                    widget_render::MetalPrimitive::LiveSpectrogram(spectrogram) => {
+                        Some(spectrogram.clone())
+                    }
                     _ => None,
                 },
             )
@@ -6752,6 +7963,8 @@ fragment float4 waveform_frag(
     struct ModPatchPort {
         direction: ModPatchPortDirection,
         track: usize,
+        dest_kind: String,
+        dest: usize,
         input: usize,
         active: bool,
         pending: bool,
@@ -6771,17 +7984,34 @@ fragment float4 waveform_frag(
         out: &mut Vec<ModPatchPort>,
     ) {
         if layout_node_bool_prop(node, "patch-port") {
-            if let (Some(direction), Some(track)) = (
-                mod_patch_port_direction(node),
-                layout_node_usize_prop(node, "track"),
-            ) {
+            if let Some(direction) = mod_patch_port_direction(node) {
+                let track = layout_node_usize_prop(node, "track");
+                let dest_kind =
+                    layout_node_string_prop(node, "dest-kind").unwrap_or_else(|| "track".into());
+                let dest = layout_node_usize_prop(node, "dest").or(track);
+                let Some(track_or_dest) = track.or(dest) else {
+                    for child in &node.children {
+                        collect_mod_patch_ports(
+                            child,
+                            col_off,
+                            row_off,
+                            cell_w,
+                            cell_h,
+                            visible_scissor,
+                            out,
+                        );
+                    }
+                    return;
+                };
                 let center_col = col_off + node.rect.col + node.rect.width * 0.5;
                 let center_row = row_off + node.rect.row + node.rect.height * 0.5;
                 let center_px = (center_col * cell_w, center_row * cell_h);
                 if center_px.0.is_finite() && center_px.1.is_finite() {
                     out.push(ModPatchPort {
                         direction,
-                        track,
+                        track: track.unwrap_or(track_or_dest),
+                        dest_kind,
+                        dest: dest.unwrap_or(track_or_dest),
                         input: layout_node_usize_prop(node, "input").unwrap_or(0),
                         active: layout_node_bool_prop(node, "active"),
                         pending: layout_node_bool_prop(node, "pending"),
@@ -6824,6 +8054,13 @@ fragment float4 waveform_frag(
             Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => {
                 Some(*value as usize)
             }
+            _ => None,
+        }
+    }
+
+    fn layout_node_string_prop(node: &LayoutNode, key: &str) -> Option<String> {
+        match node.props.get(key) {
+            Some(Value::String(value)) | Some(Value::Keyword(value)) => Some(value.clone()),
             _ => None,
         }
     }
@@ -7006,7 +8243,7 @@ fragment float4 waveform_frag(
             .filter(|port| {
                 port.direction == ModPatchPortDirection::In
                     && port.active
-                    && port.track != source_track
+                    && !(port.dest_kind == "track" && port.dest == source_track)
             })
             .min_by(|a, b| {
                 let da = squared_distance_px(a.center_px, cursor_px);
@@ -7706,6 +8943,44 @@ fragment float4 waveform_frag(
         }
     }
 
+    fn push_tile_tab_instance_cells(
+        instances: &mut Vec<WidgetInstance>,
+        col: f32,
+        row: f32,
+        width: f32,
+        height: f32,
+        fill: Color,
+        border: Color,
+        highlight: Color,
+        shadow: Color,
+        selected: f32,
+        normalized_radius: f32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        push_rounded_instance_cells_rgba(
+            instances,
+            col,
+            row,
+            width,
+            height,
+            fill.to_rgba(),
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+        );
+        if let Some(instance) = instances.last_mut() {
+            instance.value_t = selected;
+            instance.color_b = border.to_rgba();
+            instance.color_c = highlight.to_rgba();
+            instance.color_d = shadow.to_rgba();
+            instance.corner_radius = normalized_radius.clamp(0.001, 1.0);
+        }
+    }
+
     fn push_rounded_instance_cells_rgba(
         instances: &mut Vec<WidgetInstance>,
         col: f32,
@@ -7753,6 +9028,52 @@ fragment float4 waveform_frag(
             return 0.0;
         }
         ((radius_px * 2.0) / (height_cells * cell_h)).clamp(0.001, 0.5)
+    }
+
+    fn tile_chrome_instance_px(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius_px: f32,
+        border_width_px: f32,
+        fill: Color,
+        border: Color,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Option<WidgetInstance> {
+        if width <= 0.0 || height <= 0.0 || vp_w <= 0.0 || vp_h <= 0.0 {
+            return None;
+        }
+
+        let radius_px = radius_px.clamp(0.0, width.min(height) * 0.5);
+        let normalized_radius = if radius_px > 0.0 {
+            ((radius_px * 2.0) / height).clamp(0.001, 1.0)
+        } else {
+            0.0
+        };
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let x0 = ndc_x(x);
+        let x1 = ndc_x(x + width);
+        let y0 = ndc_y(y);
+        let y1 = ndc_y(y + height);
+
+        Some(WidgetInstance {
+            ndc_min: [x0.min(x1), y1.min(y0)],
+            ndc_max: [x0.max(x1), y1.max(y0)],
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: 0.0,
+            uniform_a: [border_width_px.max(0.0), 0.0, 0.0, 0.0],
+            uniform_b: [width, height, 0.0, 0.0],
+            color_a: fill.to_rgba(),
+            color_b: border.to_rgba(),
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: normalized_radius,
+            pixel_aspect: (width / height).max(0.0001),
+        })
     }
 
     fn draw_widget_instances(
@@ -8190,6 +9511,18 @@ fragment float4 waveform_frag(
                 }
                 widget_render::MetalPrimitive::Waveform(w)
             }
+            widget_render::MetalPrimitive::Wavetable(mut w) => {
+                if reaches_right(w.rect.col + w.rect.width) {
+                    w.rect.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::Wavetable(w)
+            }
+            widget_render::MetalPrimitive::LiveSpectrogram(mut s) => {
+                if reaches_right(s.rect.col + s.rect.width) {
+                    s.rect.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::LiveSpectrogram(s)
+            }
             widget_render::MetalPrimitive::Image(mut i) => {
                 if reaches_right(i.rect.col + i.rect.width) {
                     i.rect.width += extra_cols;
@@ -8301,6 +9634,16 @@ fragment float4 waveform_frag(
                 w.rect.col += col_off;
                 w.rect.row += row_off;
                 widget_render::MetalPrimitive::Waveform(w)
+            }
+            widget_render::MetalPrimitive::Wavetable(mut w) => {
+                w.rect.col += col_off;
+                w.rect.row += row_off;
+                widget_render::MetalPrimitive::Wavetable(w)
+            }
+            widget_render::MetalPrimitive::LiveSpectrogram(mut s) => {
+                s.rect.col += col_off;
+                s.rect.row += row_off;
+                widget_render::MetalPrimitive::LiveSpectrogram(s)
             }
             widget_render::MetalPrimitive::Image(mut i) => {
                 i.rect.col += col_off;
@@ -8477,8 +9820,10 @@ fragment float4 waveform_frag(
     mod render_dispatch_tests {
         use super::*;
         use crate::layout::LayoutNode;
+        use crate::live_audio::{SpectrogramFrame, clear_spectrogram_frames};
         use crate::vm::Value;
         use crate::widget_render::{MetalPrimitive, WidgetViewport};
+        use std::sync::Arc;
 
         fn prop_string(value: &str) -> Value {
             Value::String(value.to_string())
@@ -8510,6 +9855,288 @@ fragment float4 waveform_frag(
                 children: Vec::new(),
                 focusable: false,
             }
+        }
+
+        fn unwrap_backend<T>(result: Result<T, BackendError>, context: &str) -> T {
+            match result {
+                Ok(value) => value,
+                Err(_) => panic!("{context}"),
+            }
+        }
+
+        fn unwrap_option<T>(option: Option<T>, context: &str) -> T {
+            match option {
+                Some(value) => value,
+                None => panic!("{context}"),
+            }
+        }
+
+        fn publish_synthetic_spectrogram_frame(data_key: &str) {
+            let bins = 64usize;
+            let time_slices = 32usize;
+            let mut waterfall = vec![0.0f32; bins * time_slices];
+            for time in 0..time_slices {
+                for bin in 0..bins {
+                    let ridge =
+                        ((bin as f32 - (time as f32 * 1.7 + 8.0)).abs() / 8.0).clamp(0.0, 1.0);
+                    let floor = bin as f32 / bins as f32 * 0.22;
+                    waterfall[time * bins + bin] = (1.0 - ridge).max(floor);
+                }
+            }
+            let smoothed = (0..bins)
+                .map(|bin| {
+                    let x = bin as f32 / (bins - 1) as f32;
+                    (0.16 + (x * std::f32::consts::PI * 3.0).sin().abs() * 0.74).clamp(0.0, 1.0)
+                })
+                .collect::<Vec<_>>();
+            crate::live_audio::publish_spectrogram_frame(
+                data_key,
+                SpectrogramFrame {
+                    revision: 1,
+                    bins: bins as u32,
+                    time_slices: time_slices as u32,
+                    write_head: 9,
+                    sample_rate: 48_000.0,
+                    waterfall: Arc::new(waterfall),
+                    smoothed: Arc::new(smoothed),
+                },
+            );
+        }
+
+        fn publish_high_frequency_spectrogram_frame(data_key: &str) {
+            let bins = 1024usize;
+            let time_slices = 32usize;
+            let ridge_bin = 512usize;
+            let mut waterfall = vec![0.0f32; bins * time_slices];
+            for time in 0..time_slices {
+                waterfall[time * bins + ridge_bin] = 0.45;
+            }
+            let mut smoothed = vec![0.0f32; bins];
+            smoothed[ridge_bin] = 0.45;
+            crate::live_audio::publish_spectrogram_frame(
+                data_key,
+                SpectrogramFrame {
+                    revision: 1,
+                    bins: bins as u32,
+                    time_slices: time_slices as u32,
+                    write_head: 0,
+                    sample_rate: 48_000.0,
+                    waterfall: Arc::new(waterfall),
+                    smoothed: Arc::new(smoothed),
+                },
+            );
+        }
+
+        fn publish_low_level_eq_spectrogram_frame(data_key: &str) {
+            let bins = 256usize;
+            let time_slices = 32usize;
+            let waterfall = vec![0.0f32; bins * time_slices];
+            let smoothed = vec![0.024f32; bins];
+            crate::live_audio::publish_spectrogram_frame(
+                data_key,
+                SpectrogramFrame {
+                    revision: 1,
+                    bins: bins as u32,
+                    time_slices: time_slices as u32,
+                    write_head: 0,
+                    sample_rate: 48_000.0,
+                    waterfall: Arc::new(waterfall),
+                    smoothed: Arc::new(smoothed),
+                },
+            );
+        }
+
+        fn compile_live_spectrogram_pipeline(
+            backend: &MetalBackend,
+        ) -> Retained<ProtocolObject<dyn MTLRenderPipelineState>> {
+            let lib = match backend.device.newLibraryWithSource_options_error(
+                &NSString::from_str(LIVE_SPECTROGRAM_SHADER_SRC),
+                None,
+            ) {
+                Ok(lib) => lib,
+                Err(_) => panic!("compile live spectrogram shader"),
+            };
+            let vert = unwrap_option(
+                lib.newFunctionWithName(&NSString::from_str("live_spectrogram_vert")),
+                "live spectrogram vertex function",
+            );
+            let frag = unwrap_option(
+                lib.newFunctionWithName(&NSString::from_str("live_spectrogram_frag")),
+                "live spectrogram fragment function",
+            );
+            let desc = MTLRenderPipelineDescriptor::new();
+            desc.setVertexFunction(Some(&vert));
+            desc.setFragmentFunction(Some(&frag));
+            let attach = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+            attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            attach.setBlendingEnabled(true);
+            attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+            attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+            attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            match backend
+                .device
+                .newRenderPipelineStateWithDescriptor_error(&desc)
+            {
+                Ok(pipeline) => pipeline,
+                Err(_) => panic!("create live spectrogram pipeline"),
+            }
+        }
+
+        fn render_live_spectrogram_pixels_with_frame(
+            mode: u32,
+            publish_frame: fn(&str),
+        ) -> Vec<u8> {
+            let width = 360usize;
+            let height = 220usize;
+            let mut backend = unwrap_backend(
+                MetalBackend::new_capture(width as u32, height as u32),
+                "capture backend",
+            );
+            let pipeline = compile_live_spectrogram_pipeline(&backend);
+            let props = if mode == 1 {
+                HashMap::from([("mode".to_string(), Value::Keyword("eq".to_string()))])
+            } else {
+                HashMap::new()
+            };
+            let request = widget_render::spectrogram::request_from_props(&props);
+            publish_frame(&request.data_key);
+
+            let desc = MTLTextureDescriptor::new();
+            desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            unsafe {
+                desc.setWidth(width);
+                desc.setHeight(height);
+            }
+            desc.setStorageMode(MTLStorageMode::Shared);
+            desc.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+            let texture = unwrap_option(
+                backend.device.newTextureWithDescriptor(&desc),
+                "offscreen live spectrogram texture",
+            );
+
+            let render_desc = MTLRenderPassDescriptor::new();
+            let attach = unsafe { render_desc.colorAttachments().objectAtIndexedSubscript(0) };
+            attach.setTexture(Some(&texture));
+            attach.setLoadAction(MTLLoadAction::Clear);
+            attach.setClearColor(MTLClearColor {
+                red: theme::BG().r as f64,
+                green: theme::BG().g as f64,
+                blue: theme::BG().b as f64,
+                alpha: 1.0,
+            });
+            attach.setStoreAction(MTLStoreAction::Store);
+
+            let command_buffer =
+                unwrap_option(backend.command_queue.commandBuffer(), "command buffer");
+            let encoder = unwrap_option(
+                command_buffer.renderCommandEncoderWithDescriptor(&render_desc),
+                "render command encoder",
+            );
+            encoder.setScissorRect(MTLScissorRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            });
+            backend.upload_arena.begin_frame(&mut backend.stats);
+            let primitive = widget_render::MetalLiveSpectrogramPrimitive {
+                rect: Rect {
+                    col: 1.0,
+                    row: 1.0,
+                    width: 34.0,
+                    height: 9.0,
+                },
+                data_key: request.data_key,
+                mode,
+                freq_scale: 0,
+                min_hz: 80.0,
+                max_hz: 16_000.0,
+                min_color: Color::rgba(0.04, 0.04, 0.10, 1.0),
+                mid_color: Color::rgba(0.12, 0.68, 0.86, 1.0),
+                max_color: Color::rgba(1.00, 0.74, 0.30, 1.0),
+                eq_line_color: Color::rgba(0.78, 0.98, 1.0, 1.0),
+                eq_fill_color: Color::rgba(0.18, 0.78, 0.86, 0.26),
+                background_color: theme::BG(),
+            };
+            backend.draw_live_spectrogram_primitives(
+                &encoder,
+                &pipeline,
+                &[primitive],
+                8.0,
+                16.0,
+                width as f32,
+                height as f32,
+            );
+            encoder.endEncoding();
+            command_buffer.commit();
+            backend.upload_arena.finish_frame(command_buffer.clone());
+            command_buffer.waitUntilCompleted();
+
+            let bytes_per_row = width * 4;
+            let mut bgra = vec![0u8; bytes_per_row * height];
+            unsafe {
+                texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                    NonNull::new(bgra.as_mut_ptr().cast()).unwrap(),
+                    bytes_per_row,
+                    MTLRegion {
+                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                        size: MTLSize {
+                            width,
+                            height,
+                            depth: 1,
+                        },
+                    },
+                    0,
+                );
+            }
+            bgra
+        }
+
+        fn render_live_spectrogram_pixels(mode: u32) -> Vec<u8> {
+            render_live_spectrogram_pixels_with_frame(mode, publish_synthetic_spectrogram_frame)
+        }
+
+        fn assert_pixels_have_non_background_values(bgra: &[u8]) {
+            let background = &bgra[0..4];
+            let changed = bgra
+                .chunks_exact(4)
+                .filter(|pixel| {
+                    pixel[0].abs_diff(background[0]) as u32
+                        + pixel[1].abs_diff(background[1]) as u32
+                        + pixel[2].abs_diff(background[2]) as u32
+                        > 18
+                })
+                .count();
+            assert!(
+                changed > 500,
+                "expected rendered spectrogram to change pixels, changed={changed}"
+            );
+        }
+
+        fn changed_pixels_in_rect(
+            bgra: &[u8],
+            width: usize,
+            x0: usize,
+            y0: usize,
+            x1: usize,
+            y1: usize,
+        ) -> usize {
+            let background = &bgra[0..4];
+            let mut changed = 0usize;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let offset = (y * width + x) * 4;
+                    let pixel = &bgra[offset..offset + 4];
+                    let delta = pixel[0].abs_diff(background[0]) as u32
+                        + pixel[1].abs_diff(background[1]) as u32
+                        + pixel[2].abs_diff(background[2]) as u32;
+                    if delta > 18 {
+                        changed += 1;
+                    }
+                }
+            }
+            changed
         }
 
         fn rect_contains(outer: Rect, inner: Rect) -> bool {
@@ -8890,6 +10517,52 @@ fragment float4 waveform_frag(
                 base,
                 test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
             );
+        }
+
+        #[test]
+        fn live_spectrogram_waterfall_capture_is_nonblank() {
+            clear_spectrogram_frames();
+            let pixels = render_live_spectrogram_pixels(0);
+            assert_pixels_have_non_background_values(&pixels);
+            clear_spectrogram_frames();
+        }
+
+        #[test]
+        fn live_spectrogram_eq_capture_is_nonblank() {
+            clear_spectrogram_frames();
+            let pixels = render_live_spectrogram_pixels(1);
+            assert_pixels_have_non_background_values(&pixels);
+            clear_spectrogram_frames();
+        }
+
+        #[test]
+        fn live_spectrogram_eq_renders_low_level_energy() {
+            clear_spectrogram_frames();
+            let pixels = render_live_spectrogram_pixels_with_frame(
+                1,
+                publish_low_level_eq_spectrogram_frame,
+            );
+            let changed = changed_pixels_in_rect(&pixels, 360, 20, 145, 270, 160);
+            assert!(
+                changed > 150,
+                "expected low-level EQ spectrum to remain visible, changed={changed}"
+            );
+            clear_spectrogram_frames();
+        }
+
+        #[test]
+        fn live_spectrogram_waterfall_renders_narrow_high_frequency_energy() {
+            clear_spectrogram_frames();
+            let pixels = render_live_spectrogram_pixels_with_frame(
+                0,
+                publish_high_frequency_spectrogram_frame,
+            );
+            let changed = changed_pixels_in_rect(&pixels, 360, 20, 20, 270, 52);
+            assert!(
+                changed > 150,
+                "expected narrow high-frequency ridge to render in the top band, changed={changed}"
+            );
+            clear_spectrogram_frames();
         }
     }
 }

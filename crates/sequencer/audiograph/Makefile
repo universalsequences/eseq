@@ -8,15 +8,15 @@ TARGET = audiograph
 DYLIB_TARGET = libaudiograph.dylib
 
 # Source files for the modular build
-SOURCES = main.c graph_nodes.c graph_engine.c graph_api.c graph_edit.c ready_queue.c hot_swap.c
+SOURCES = main.c graph_nodes.c graph_engine.c graph_api.c graph_edit.c ready_queue.c hot_swap.c wrapper.c
 OBJECTS = $(SOURCES:.c=.o)
 
 # Library source files (exclude main.c)
-LIB_SOURCES = graph_nodes.c graph_engine.c graph_api.c graph_edit.c ready_queue.c hot_swap.c
+LIB_SOURCES = graph_nodes.c graph_engine.c graph_api.c graph_edit.c ready_queue.c hot_swap.c wrapper.c
 LIB_OBJECTS = $(LIB_SOURCES:.c=.o)
 
 # Common object files needed by test binaries
-TEST_OBJS = graph_engine.o graph_nodes.o graph_api.o graph_edit.o ready_queue.o hot_swap.o
+TEST_OBJS = graph_engine.o graph_nodes.o graph_api.o graph_edit.o ready_queue.o hot_swap.o wrapper.o
 
 # Header dependencies
 HEADERS = graph_types.h mpmc_queue.h graph_nodes.h graph_engine.h graph_api.h graph_edit.h hot_swap.h
@@ -71,7 +71,7 @@ profile: $(TARGET)
 	instruments -t "Time Profiler" ./$(TARGET)
 
 # Test targets
-test: tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_validation tests/test_watchlist_capacity_growth tests/test_watchlist_initial_capacity tests/test_watchlist_upstream_processing tests/test_mpmc_queue tests/test_live_graph_partial_connections tests/test_disconnect tests/test_graph_edit_queue tests/test_queue_api tests/test_capacity_growth tests/test_custom_engine_growth tests/test_simple_teardown tests/test_orphan_comprehensive tests/test_auto_sum tests/test_sum_slot_overwrite tests/test_ordered_sum_topology tests/test_sum_behavior tests/test_sum_high_fanin tests/test_dependency_rebuild_sum tests/test_param_update_bounds tests/test_hot_swap tests/test_multi_port_routing tests/test_complex_topology tests/test_4_node_topology tests/test_4_node_fuzz tests/test_param_updates tests/test_stereo tests/test_patch_disconnect_orphan tests/test_indegree_unique_pred tests/test_deadlock_disconnect tests/test_scheduler_queue_saturation tests/test_buffer_api tests/test_cycle_prevention tests/test_write_node_state
+test: tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_validation tests/test_watchlist_capacity_growth tests/test_watchlist_initial_capacity tests/test_watchlist_upstream_processing tests/test_mpmc_queue tests/test_live_graph_partial_connections tests/test_disconnect tests/test_graph_edit_queue tests/test_queue_api tests/test_capacity_growth tests/test_custom_engine_growth tests/test_simple_teardown tests/test_orphan_comprehensive tests/test_auto_sum tests/test_sum_slot_overwrite tests/test_ordered_sum_topology tests/test_sum_behavior tests/test_sum_high_fanin tests/test_dependency_rebuild_sum tests/test_param_update_bounds tests/test_hot_swap tests/test_multi_port_routing tests/test_complex_topology tests/test_4_node_topology tests/test_4_node_fuzz tests/test_param_updates tests/test_stereo tests/test_patch_disconnect_orphan tests/test_indegree_unique_pred tests/test_deadlock_disconnect tests/test_scheduler_queue_saturation tests/test_buffer_api tests/test_cycle_prevention tests/test_write_node_state tests/test_block_events
 	./tests/test_watchlist
 	./tests/test_watchlist_advanced
 	./tests/test_watchlist_validation
@@ -108,6 +108,7 @@ test: tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_va
 	./tests/test_buffer_api
 	./tests/test_cycle_prevention
 	./tests/test_write_node_state
+	./tests/test_block_events
 
 # Build MPMC queue unit tests
 tests/test_mpmc_queue: tests/test_mpmc_queue.c $(HEADERS) $(TEST_OBJS)
@@ -116,6 +117,9 @@ tests/test_mpmc_queue: tests/test_mpmc_queue.c $(HEADERS) $(TEST_OBJS)
 # Build bulk node-state write test (GE_WRITE_NODE_STATE command)
 tests/test_write_node_state: tests/test_write_node_state.c $(HEADERS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -I. -o tests/test_write_node_state tests/test_write_node_state.c $(TEST_OBJS)
+
+tests/test_block_events: tests/test_block_events.c $(HEADERS) $(TEST_OBJS)
+	$(CC) $(CFLAGS) -I. -o tests/test_block_events tests/test_block_events.c $(TEST_OBJS)
 
 # Build live graph partial connections test (orphaned nodes test)
 tests/test_live_graph_partial_connections: tests/test_live_graph_partial_connections.c $(HEADERS) $(TEST_OBJS)

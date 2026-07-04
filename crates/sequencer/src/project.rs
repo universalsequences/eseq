@@ -1,13 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::effects::EffectSlotSnapshot;
+use crate::effects::{EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    PatternSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
+    ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
     TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
@@ -33,6 +35,26 @@ pub struct ProjectFile {
     #[serde(default)]
     pub scratch: ProjectScratchState,
     pub patterns: Vec<ProjectPattern>,
+    #[serde(default)]
+    pub groups: Vec<ProjectTrackGroup>,
+}
+
+/// A track group: lightweight metadata folding a set of tracks into one mixer
+/// unit backed by an auto-created bus. It references tracks by index and owns a
+/// backing bus by id; it does not own track data. See
+/// `docs/track-groups-spec.md`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectTrackGroup {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub color: [f32; 3],
+    #[serde(default)]
+    pub collapsed: bool,
+    /// Ordered member track indices.
+    pub members: Vec<usize>,
+    /// Backing `ProjectBusChannel` this group routes to.
+    pub bus_id: u64,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -184,6 +206,16 @@ pub enum ProjectTrack {
         #[serde(default)]
         collapsed: bool,
     },
+    Rack {
+        #[serde(default)]
+        routing: ProjectRackRouting,
+        #[serde(default)]
+        slots: Vec<ProjectRackTrackSlot>,
+        #[serde(default)]
+        color: Option<TrackColor>,
+        #[serde(default)]
+        collapsed: bool,
+    },
 }
 
 impl ProjectTrack {
@@ -191,7 +223,8 @@ impl ProjectTrack {
         match self {
             Self::Sampler { color, .. }
             | Self::Custom { color, .. }
-            | Self::Modulator { color, .. } => color.map(TrackColor::clamped),
+            | Self::Modulator { color, .. }
+            | Self::Rack { color, .. } => color.map(TrackColor::clamped),
         }
     }
 
@@ -199,9 +232,21 @@ impl ProjectTrack {
         match self {
             Self::Sampler { collapsed, .. }
             | Self::Custom { collapsed, .. }
-            | Self::Modulator { collapsed, .. } => *collapsed,
+            | Self::Modulator { collapsed, .. }
+            | Self::Rack { collapsed, .. } => *collapsed,
         }
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackTrackSlot {
+    pub instrument_type: ProjectInstrumentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument_name: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -268,14 +313,26 @@ pub struct ProjectPattern {
     pub instrument_run_modes: Vec<ProjectCustomInstrumentRunMode>,
     pub sample_paths: Vec<Option<String>>,
     pub sample_names: Vec<String>,
+    #[serde(default)]
+    pub rack_tracks: Vec<Option<ProjectRackTrackPattern>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectModConnection {
     pub source_track: usize,
-    pub dest_track: usize,
+    #[serde(default)]
+    pub destination: Option<ProjectModDestination>,
+    #[serde(default)]
+    pub dest_track: Option<usize>,
     #[serde(default)]
     pub dest_input: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id")]
+pub enum ProjectModDestination {
+    Track(usize),
+    Bus(u64),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -318,6 +375,10 @@ pub struct ProjectTrackParams {
     pub accum_mode: u32,
     #[serde(default)]
     pub fts_scale: usize,
+    #[serde(default)]
+    pub mute_group: u8,
+    #[serde(default = "default_true")]
+    pub global_transpose: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -340,12 +401,13 @@ pub struct ProjectTrackSend {
     pub amount: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ProjectEffectSlot {
     pub num_params: u32,
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
     pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    pub tensor_params: Vec<TensorParamSnapshot>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
     /// Effect-specific instance data that isn't a numeric param. Currently just
@@ -353,7 +415,7 @@ pub struct ProjectEffectSlot {
     pub ir: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ProjectTrackSoundState {
     pub loaded_preset: Option<String>,
     pub dirty: bool,
@@ -365,11 +427,66 @@ pub enum ProjectInstrumentType {
     Sampler,
     Custom,
     Modulator,
+    Rack,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRackRouting {
+    #[default]
+    Broadcast,
+    ByPitch,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackTrackPattern {
+    #[serde(default)]
+    pub routing: ProjectRackRouting,
+    #[serde(default)]
+    pub slots: Vec<ProjectRackSlotPattern>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackSlotPattern {
+    pub instrument_type: ProjectInstrumentType,
+    #[serde(default)]
+    pub instrument_run_mode: ProjectCustomInstrumentRunMode,
+    #[serde(default)]
+    pub instrument_base_note_offset: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pad_note: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choke_group: Option<u8>,
+    #[serde(default = "default_rack_slot_gain")]
+    pub gain: f32,
+    #[serde(default)]
+    pub pan: f32,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
+    pub solo: bool,
+    #[serde(default = "default_max_polyphony")]
+    pub max_polyphony: usize,
+    #[serde(default)]
+    pub param_plocks: Vec<Vec<Option<f32>>>,
+    #[serde(default)]
+    pub instrument_slot: ProjectEffectSlot,
+    #[serde(default)]
+    pub track_sound_state: ProjectTrackSoundState,
+    #[serde(default)]
+    pub sample_path: Option<String>,
+    #[serde(default)]
+    pub sample_name: Option<String>,
+}
+
+fn default_rack_slot_gain() -> f32 {
+    1.0
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectCustomInstrumentRunMode {
+    #[default]
     Instrument,
     FreePatch,
 }
@@ -486,6 +603,12 @@ impl ProjectPattern {
                 .collect(),
             sample_paths,
             sample_names,
+            rack_tracks: snapshot
+                .rack_tracks
+                .iter()
+                .cloned()
+                .map(|rack| rack.map(ProjectRackTrackPattern::from))
+                .collect(),
         }
     }
 }
@@ -520,6 +643,8 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
+            mute_group: value.mute_group.min(8),
+            global_transpose: value.global_transpose,
         }
     }
 }
@@ -554,6 +679,8 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
+            mute_group: value.mute_group.min(8),
+            global_transpose: value.global_transpose,
         }
     }
 }
@@ -621,6 +748,7 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             defaults: value.defaults.clone(),
             plocks: value.plocks.clone(),
             plock_param_ids: value.plock_param_ids.clone(),
+            tensor_params: value.tensor_params.clone(),
             param_node_indices: value.param_node_indices.clone(),
             param_node_spans: value.param_node_spans.clone(),
             ir: value.ir.clone(),
@@ -645,8 +773,10 @@ impl ProjectEffectSlot {
             defaults: self.defaults,
             plocks: self.plocks,
             plock_param_ids: self.plock_param_ids,
+            tensor_params: self.tensor_params,
             param_node_indices: self.param_node_indices,
             param_node_spans: self.param_node_spans,
+            transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: self.ir,
         }
     }
@@ -677,6 +807,7 @@ impl From<InstrumentType> for ProjectInstrumentType {
             InstrumentType::Sampler => Self::Sampler,
             InstrumentType::Custom => Self::Custom,
             InstrumentType::Modulator => Self::Modulator,
+            InstrumentType::Rack => Self::Rack,
         }
     }
 }
@@ -687,6 +818,7 @@ impl From<ProjectInstrumentType> for InstrumentType {
             ProjectInstrumentType::Sampler => InstrumentType::Sampler,
             ProjectInstrumentType::Custom => InstrumentType::Custom,
             ProjectInstrumentType::Modulator => InstrumentType::Modulator,
+            ProjectInstrumentType::Rack => InstrumentType::Rack,
         }
     }
 }
@@ -709,11 +841,111 @@ impl From<ProjectCustomInstrumentRunMode> for CustomInstrumentRunMode {
     }
 }
 
+impl From<RackRouting> for ProjectRackRouting {
+    fn from(value: RackRouting) -> Self {
+        match value {
+            RackRouting::Broadcast => Self::Broadcast,
+            RackRouting::ByPitch => Self::ByPitch,
+        }
+    }
+}
+
+impl From<ProjectRackRouting> for RackRouting {
+    fn from(value: ProjectRackRouting) -> Self {
+        match value {
+            ProjectRackRouting::Broadcast => RackRouting::Broadcast,
+            ProjectRackRouting::ByPitch => RackRouting::ByPitch,
+        }
+    }
+}
+
+impl From<RackTrackSnapshot> for ProjectRackTrackPattern {
+    fn from(value: RackTrackSnapshot) -> Self {
+        Self {
+            routing: ProjectRackRouting::from(value.routing),
+            slots: value
+                .slots
+                .into_iter()
+                .map(ProjectRackSlotPattern::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<ProjectRackTrackPattern> for RackTrackSnapshot {
+    fn from(value: ProjectRackTrackPattern) -> Self {
+        Self {
+            routing: RackRouting::from(value.routing),
+            slots: value
+                .slots
+                .into_iter()
+                .map(RackSlotSnapshot::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
+    fn from(value: RackSlotSnapshot) -> Self {
+        let (sample_path, sample_name) = value
+            .sample_id
+            .map(|(_, name, _)| (None, Some(name)))
+            .unwrap_or((None, None));
+        Self {
+            instrument_type: ProjectInstrumentType::from(value.instrument_type),
+            instrument_run_mode: ProjectCustomInstrumentRunMode::from(value.instrument_run_mode),
+            instrument_base_note_offset: value.instrument_base_note_offset,
+            pad_note: value.pad_note,
+            choke_group: value.choke_group,
+            gain: value.gain,
+            pan: value.pan,
+            mute: value.mute,
+            solo: value.solo,
+            max_polyphony: value.max_polyphony,
+            param_plocks: value.param_plocks.rows,
+            instrument_slot: ProjectEffectSlot::from(&value.instrument_slot),
+            track_sound_state: ProjectTrackSoundState::from(value.track_sound_state),
+            sample_path,
+            sample_name,
+        }
+    }
+}
+
+impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
+    fn from(value: ProjectRackSlotPattern) -> Self {
+        let sample_id = value
+            .sample_name
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| (-1, name, 44_100));
+        Self {
+            instrument_type: InstrumentType::from(value.instrument_type),
+            instrument_run_mode: CustomInstrumentRunMode::from(value.instrument_run_mode),
+            instrument_base_note_offset: value.instrument_base_note_offset,
+            pad_note: value.pad_note,
+            choke_group: value.choke_group,
+            gain: value.gain,
+            pan: value.pan.clamp(-1.0, 1.0),
+            mute: value.mute,
+            solo: value.solo,
+            max_polyphony: value.max_polyphony.clamp(1, crate::voice::MAX_VOICES),
+            param_plocks: RackSlotParamPlocks::from_rows(value.param_plocks),
+            instrument_slot: value.instrument_slot.into_snapshot_with_node_ids(0, 0),
+            track_sound_state: value.track_sound_state.into_track_sound_state(None),
+            sample_id,
+        }
+    }
+}
+
 impl From<ModConnection> for ProjectModConnection {
     fn from(value: ModConnection) -> Self {
+        let destination = match value.destination {
+            ModDestination::Track(track) => ProjectModDestination::Track(track),
+            ModDestination::Bus(bus) => ProjectModDestination::Bus(bus.0),
+        };
         Self {
             source_track: value.source_track,
-            dest_track: value.dest_track,
+            destination: Some(destination),
+            dest_track: None,
             dest_input: value.dest_input,
         }
     }
@@ -721,9 +953,14 @@ impl From<ModConnection> for ProjectModConnection {
 
 impl From<ProjectModConnection> for ModConnection {
     fn from(value: ProjectModConnection) -> Self {
+        let destination = match value.destination {
+            Some(ProjectModDestination::Track(track)) => ModDestination::Track(track),
+            Some(ProjectModDestination::Bus(bus)) => ModDestination::Bus(BusId(bus)),
+            None => ModDestination::Track(value.dest_track.unwrap_or(0)),
+        };
         Self {
             source_track: value.source_track,
-            dest_track: value.dest_track,
+            destination,
             dest_input: value.dest_input,
         }
     }
@@ -734,6 +971,21 @@ pub fn ensure_projects_dir() -> std::io::Result<()> {
 }
 
 pub fn list_project_names() -> std::io::Result<Vec<String>> {
+    let mut items: Vec<String> = list_project_entries()?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    items.sort();
+    Ok(items)
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectListEntry {
+    pub name: String,
+    pub modified_at: Option<SystemTime>,
+}
+
+pub fn list_project_entries() -> std::io::Result<Vec<ProjectListEntry>> {
     let dir = projects_dir();
     if !dir.exists() {
         return Ok(Vec::new());
@@ -746,10 +998,17 @@ pub fn list_project_names() -> std::io::Result<Vec<String>> {
             continue;
         }
         if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-            items.push(stem.to_string());
+            let modified_at = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            items.push(ProjectListEntry {
+                name: stem.to_string(),
+                modified_at,
+            });
         }
     }
-    items.sort();
+    items.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(items)
 }
 
@@ -961,6 +1220,10 @@ fn default_max_polyphony() -> usize {
     6
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_track_volume() -> f32 {
     crate::mixer_volume::default_fader()
 }
@@ -1083,11 +1346,29 @@ struct SparseEffectSlotPlock {
 }
 
 #[derive(Serialize, Deserialize)]
+struct SparseTensorParamPlock {
+    step: usize,
+    value: Vec<f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SparseProjectTensorParam {
+    name: String,
+    shape: Vec<usize>,
+    cell_offset: usize,
+    default: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    plocks_sparse: Vec<SparseTensorParamPlock>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct SparseProjectEffectSlot {
     num_params: u32,
     defaults: Vec<f32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     plocks_sparse: Vec<SparseEffectSlotPlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tensor_params: Vec<SparseProjectTensorParam>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     param_node_indices: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1103,6 +1384,8 @@ struct DenseProjectEffectSlot {
     plocks: Vec<Vec<Option<f32>>>,
     #[serde(default)]
     plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    #[serde(default)]
+    tensor_params: Vec<SparseProjectTensorParam>,
     param_node_indices: Vec<u32>,
     #[serde(default)]
     param_node_spans: Vec<u32>,
@@ -1116,6 +1399,43 @@ enum ProjectEffectSlotRepr {
     Sparse(SparseProjectEffectSlot),
     Dense(DenseProjectEffectSlot),
     Empty(()),
+}
+
+fn sparse_tensor_param_from_snapshot(tensor: &TensorParamSnapshot) -> SparseProjectTensorParam {
+    let plocks_sparse = tensor
+        .plocks
+        .iter()
+        .enumerate()
+        .filter_map(|(step, value)| {
+            value.as_ref().map(|value| SparseTensorParamPlock {
+                step,
+                value: value.clone(),
+            })
+        })
+        .collect();
+    SparseProjectTensorParam {
+        name: tensor.name.clone(),
+        shape: tensor.shape.clone(),
+        cell_offset: tensor.cell_offset,
+        default: tensor.default.clone(),
+        plocks_sparse,
+    }
+}
+
+fn tensor_snapshot_from_sparse(tensor: SparseProjectTensorParam) -> TensorParamSnapshot {
+    let mut plocks = vec![None; MAX_STEPS];
+    for entry in tensor.plocks_sparse {
+        if entry.step < MAX_STEPS {
+            plocks[entry.step] = Some(entry.value);
+        }
+    }
+    TensorParamSnapshot {
+        name: tensor.name,
+        shape: tensor.shape,
+        cell_offset: tensor.cell_offset,
+        default: tensor.default,
+        plocks,
+    }
 }
 
 impl Serialize for ProjectEffectSlot {
@@ -1143,11 +1463,17 @@ impl Serialize for ProjectEffectSlot {
                 })
             })
             .collect::<Vec<_>>();
+        let tensor_params = self
+            .tensor_params
+            .iter()
+            .map(sparse_tensor_param_from_snapshot)
+            .collect::<Vec<_>>();
 
         if self.num_params == 0
             && self.defaults.is_empty()
             && self.param_node_indices.is_empty()
             && plocks_sparse.is_empty()
+            && tensor_params.is_empty()
             && self.ir.is_none()
         {
             return Option::<()>::None.serialize(serializer);
@@ -1157,6 +1483,7 @@ impl Serialize for ProjectEffectSlot {
             num_params: self.num_params,
             defaults: self.defaults.clone(),
             plocks_sparse,
+            tensor_params,
             param_node_indices: self.param_node_indices.clone(),
             param_node_spans: self.param_node_spans.clone(),
             ir: self.ir.clone(),
@@ -1186,6 +1513,11 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                     defaults: slot.defaults,
                     plocks,
                     plock_param_ids,
+                    tensor_params: slot
+                        .tensor_params
+                        .into_iter()
+                        .map(tensor_snapshot_from_sparse)
+                        .collect(),
                     param_node_indices: slot.param_node_indices,
                     param_node_spans: slot.param_node_spans,
                     ir: slot.ir,
@@ -1196,6 +1528,11 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 defaults: slot.defaults,
                 plocks: slot.plocks,
                 plock_param_ids: slot.plock_param_ids,
+                tensor_params: slot
+                    .tensor_params
+                    .into_iter()
+                    .map(tensor_snapshot_from_sparse)
+                    .collect(),
                 param_node_indices: slot.param_node_indices,
                 param_node_spans: slot.param_node_spans,
                 ir: slot.ir,
@@ -1205,6 +1542,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 defaults: Vec::new(),
                 plocks: vec![Vec::new(); MAX_STEPS],
                 plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                tensor_params: Vec::new(),
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
                 ir: None,
@@ -1273,6 +1611,7 @@ mod tests {
                 replace: 0.3,
             },
             buses: default_project_buses(),
+            groups: Vec::new(),
             tracks: vec![
                 ProjectTrack::Custom {
                     instrument_name: "prophet-5".to_string(),
@@ -1325,6 +1664,8 @@ mod tests {
                         accum_limit: 24.0,
                         accum_mode: 2,
                         fts_scale: 0,
+                        mute_group: 3,
+                        global_transpose: true,
                     },
                     ProjectTrackParams {
                         gate: false,
@@ -1350,6 +1691,8 @@ mod tests {
                         accum_limit: 48.0,
                         accum_mode: 0,
                         fts_scale: 0,
+                        mute_group: 0,
+                        global_transpose: true,
                     },
                 ],
                 effect_slots: vec![vec![], vec![]],
@@ -1362,6 +1705,7 @@ mod tests {
                         plock_param_ids: vec![vec![None, None]; 256],
                         param_node_indices: vec![0, 1],
                         param_node_spans: vec![1, 1],
+                        tensor_params: Vec::new(),
                         ir: None,
                     },
                     ProjectEffectSlot {
@@ -1371,6 +1715,7 @@ mod tests {
                         plock_param_ids: vec![vec![]; 256],
                         param_node_indices: vec![],
                         param_node_spans: vec![],
+                        tensor_params: Vec::new(),
                         ir: None,
                     },
                 ],
@@ -1414,7 +1759,8 @@ mod tests {
                 ],
                 mod_connections: vec![ProjectModConnection {
                     source_track: 0,
-                    dest_track: 1,
+                    destination: Some(ProjectModDestination::Track(1)),
+                    dest_track: None,
                     dest_input: 2,
                 }],
                 neural_networks: {
@@ -1453,11 +1799,14 @@ mod tests {
                     node_intrinsics: vec![crate::graph::ProjectGraphNodeIntrinsicOverride {
                         group: "nrn".to_string(),
                         instance: 1,
-                        resolution: Some(Timebase::Eighth as u8),
+                        resolution: Some(vec![Timebase::Eighth as u8]),
                         delay_steps: Some(3),
                         quantize: Some(crate::graph::ProjectGraphQuantizeOverride::Off),
                         route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),
                         seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
+                        seed_on_reset: None,
+                        duration: None,
+                        swing: None,
                     }],
                     node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
                         group: "nrn".to_string(),
@@ -1474,9 +1823,12 @@ mod tests {
                     }],
                     reset_every_beats: None,
                     max_poly: None,
+                    max_poly_selection: None,
+                    node_count: Some(12),
                 }],
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
+                rack_tracks: vec![None, None],
             }],
         }
     }
@@ -1525,11 +1877,13 @@ mod tests {
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);
         assert_eq!(restored.patterns[0].track_params[0].accum_mode, 2);
+        assert_eq!(restored.patterns[0].track_params[0].mute_group, 3);
         assert_eq!(
             restored.patterns[0].mod_connections,
             vec![ProjectModConnection {
                 source_track: 0,
-                dest_track: 1,
+                destination: Some(ProjectModDestination::Track(1)),
+                dest_track: None,
                 dest_input: 2,
             }]
         );
@@ -1576,6 +1930,7 @@ mod tests {
         assert_eq!(graph.node_params[0].value, 0.75);
         assert_eq!(graph.edge_params[0].group, "nrn->nrn");
         assert_eq!(graph.edge_params[0].value, 0.5);
+        assert_eq!(graph.node_count, Some(12));
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);
         assert_eq!(restored.buses.len(), 3);
@@ -1588,6 +1943,20 @@ mod tests {
             restored.patterns[0].track_params[0].sends[0].destination,
             crate::sequencer::DEFAULT_BUS_B_ID
         );
+    }
+
+    #[test]
+    fn graph_overrides_missing_node_count_loads_as_manifest_default() {
+        let json = r#"{
+            "sequencer_id": 7,
+            "sequencer_name": "legacy",
+            "node_intrinsics": [],
+            "node_params": [],
+            "edge_params": []
+        }"#;
+        let overrides: ProjectGraphOverrides =
+            serde_json::from_str(json).expect("deserialize legacy graph overrides");
+        assert_eq!(overrides.node_count, None);
     }
 
     #[test]
@@ -1721,6 +2090,7 @@ mod tests {
 
         let project: ProjectFile = serde_json::from_str(json).expect("deserialize legacy project");
 
+        assert_eq!(project.patterns[0].track_params[0].mute_group, 0);
         assert!(project.patterns[0].instrument_run_modes.is_empty());
     }
 
@@ -1732,6 +2102,23 @@ mod tests {
         assert!(json.contains("\"plocks_sparse\""));
         assert!(json.contains("\"step\":0"));
         assert!(!json.contains("\"plocks\":[[null"));
+    }
+
+    #[test]
+    fn project_mod_connection_roundtrip_preserves_bus_destination() {
+        let connection = ModConnection {
+            source_track: 2,
+            destination: ModDestination::Bus(BusId(77)),
+            dest_input: 3,
+        };
+
+        let saved = ProjectModConnection::from(connection);
+        assert_eq!(
+            saved.destination,
+            Some(ProjectModDestination::Bus(77)),
+            "project route should store an explicit bus destination"
+        );
+        assert_eq!(ModConnection::from(saved), connection);
     }
 
     #[test]
@@ -1753,6 +2140,197 @@ mod tests {
     }
 
     #[test]
+    fn rack_track_serializes_and_deserializes_broadcast_slots() {
+        let json = r#"
+        {
+            "version": 1,
+            "name": "rack",
+            "bpm": 120,
+            "current_pattern": 0,
+            "reverb": {"size":0.5,"brightness":0.5,"replace":0.0},
+            "tracks": [{
+                "kind": "rack",
+                "routing": "broadcast",
+                "slots": [
+                    {"instrument_type":"custom","instrument_name":"emulations/prophet-5"},
+                    {"instrument_type":"sampler","sample_path":"samples/kick.wav","sample_name":"kick"}
+                ]
+            }],
+            "custom_effects": [[]],
+            "patterns": [{
+                "track_bits": [[0,0,0,0]],
+                "step_data": [[[0,0,0,0,0,0,0,0,0,0]]],
+                "track_params": [{
+                    "gate": true,
+                    "attack_ms": 0.0,
+                    "release_ms": 0.0,
+                    "swing": 50.0,
+                    "num_steps": 16,
+                    "volume": 1.0,
+                    "send": 0.0,
+                    "polyphonic": true,
+                    "max_polyphony": 4,
+                    "timebase": 2
+                }],
+                "effect_slots": [[]],
+                "instrument_slots": [{"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]}],
+                "instrument_base_note_offsets": [0.0],
+                "track_sound_states": [{"loaded_preset":null,"dirty":false}],
+                "chord_snapshots": [[]],
+                "timebase_plock_snapshots": [[]],
+                "instrument_types": ["custom"],
+                "sample_paths": [null],
+                "sample_names": [""],
+                "rack_tracks": [{
+                    "routing": "broadcast",
+                    "slots": [{
+                        "instrument_type": "custom",
+                        "instrument_run_mode": "instrument",
+                        "instrument_base_note_offset": 12.0,
+                        "gain": 0.75,
+                        "pan": -0.25,
+                        "max_polyphony": 3,
+                        "instrument_slot": {"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]},
+                        "track_sound_state": {"loaded_preset":"wide","dirty":true}
+                    }]
+                }]
+            }]
+        }
+        "#;
+
+        let project: ProjectFile = serde_json::from_str(json).unwrap();
+        match &project.tracks[0] {
+            ProjectTrack::Rack { routing, slots, .. } => {
+                assert_eq!(*routing, ProjectRackRouting::Broadcast);
+                assert_eq!(slots.len(), 2);
+                assert_eq!(
+                    slots[0].instrument_name.as_deref(),
+                    Some("emulations/prophet-5")
+                );
+                assert_eq!(slots[1].sample_name.as_deref(), Some("kick"));
+            }
+            _ => panic!("expected rack track"),
+        }
+        let rack = project.patterns[0].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(rack.routing, ProjectRackRouting::Broadcast);
+        assert_eq!(rack.slots[0].instrument_base_note_offset, 12.0);
+        assert_eq!(rack.slots[0].gain, 0.75);
+        assert_eq!(rack.slots[0].pan, -0.25);
+        assert_eq!(rack.slots[0].max_polyphony, 3);
+        assert_eq!(
+            rack.slots[0].track_sound_state.loaded_preset.as_deref(),
+            Some("wide")
+        );
+        assert!(rack.slots[0].track_sound_state.dirty);
+    }
+
+    #[test]
+    fn rack_track_serializes_and_deserializes_by_pitch_pad_metadata() {
+        let json = r#"
+        {
+            "version": 1,
+            "name": "drum-rack",
+            "bpm": 120,
+            "current_pattern": 0,
+            "reverb": {"size":0.5,"brightness":0.5,"replace":0.0},
+            "tracks": [{
+                "kind": "rack",
+                "routing": "by_pitch",
+                "slots": [
+                    {"instrument_type":"sampler","sample_path":"samples/kick.wav","sample_name":"kick"},
+                    {"instrument_type":"custom","instrument_name":"emulations/digitone"}
+                ]
+            }],
+            "custom_effects": [[]],
+            "patterns": [{
+                "track_bits": [[0,0,0,0]],
+                "step_data": [[[0,0,0,0,0,0,0,0,0,0]]],
+                "track_params": [{
+                    "gate": true,
+                    "attack_ms": 0.0,
+                    "release_ms": 0.0,
+                    "swing": 50.0,
+                    "num_steps": 16,
+                    "volume": 1.0,
+                    "send": 0.0,
+                    "polyphonic": true,
+                    "max_polyphony": 4,
+                    "timebase": 2
+                }],
+                "effect_slots": [[]],
+                "instrument_slots": [{"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]}],
+                "instrument_base_note_offsets": [0.0],
+                "track_sound_states": [{"loaded_preset":null,"dirty":false}],
+                "chord_snapshots": [[]],
+                "timebase_plock_snapshots": [[]],
+                "instrument_types": ["rack"],
+                "sample_paths": [null],
+                "sample_names": [""],
+                "rack_tracks": [{
+                    "routing": "by_pitch",
+                    "slots": [{
+                        "instrument_type": "sampler",
+                        "instrument_run_mode": "instrument",
+                        "instrument_base_note_offset": 0.0,
+                        "pad_note": 0,
+                        "choke_group": 1,
+                        "gain": 0.9,
+                        "pan": 0.1,
+                        "max_polyphony": 1,
+                        "instrument_slot": {"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]},
+                        "sample_name": "kick"
+                    }, {
+                        "instrument_type": "custom",
+                        "instrument_run_mode": "instrument",
+                        "instrument_base_note_offset": 7.0,
+                        "pad_note": 2,
+                        "choke_group": 1,
+                        "gain": 0.75,
+                        "pan": -0.25,
+                        "max_polyphony": 2,
+                        "instrument_slot": {"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]},
+                        "track_sound_state": {"loaded_preset":"digitone","dirty":true}
+                    }]
+                }]
+            }]
+        }
+        "#;
+
+        let project: ProjectFile = serde_json::from_str(json).unwrap();
+        match &project.tracks[0] {
+            ProjectTrack::Rack { routing, slots, .. } => {
+                assert_eq!(*routing, ProjectRackRouting::ByPitch);
+                assert_eq!(slots.len(), 2);
+                assert_eq!(slots[0].sample_name.as_deref(), Some("kick"));
+                assert_eq!(
+                    slots[1].instrument_name.as_deref(),
+                    Some("emulations/digitone")
+                );
+            }
+            _ => panic!("expected rack track"),
+        }
+        let rack = project.patterns[0].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(rack.routing, ProjectRackRouting::ByPitch);
+        assert_eq!(rack.slots[0].pad_note, Some(0));
+        assert_eq!(rack.slots[0].choke_group, Some(1));
+        assert_eq!(rack.slots[0].max_polyphony, 1);
+        assert_eq!(rack.slots[1].pad_note, Some(2));
+        assert_eq!(rack.slots[1].choke_group, Some(1));
+        assert_eq!(rack.slots[1].instrument_base_note_offset, 7.0);
+
+        let serialized = serde_json::to_string(&project).unwrap();
+        assert!(serialized.contains("\"routing\":\"by_pitch\""));
+        assert!(serialized.contains("\"pad_note\":0"));
+        assert!(serialized.contains("\"choke_group\":1"));
+
+        let restored: ProjectFile = serde_json::from_str(&serialized).unwrap();
+        let restored_rack = restored.patterns[0].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(restored_rack.routing, ProjectRackRouting::ByPitch);
+        assert_eq!(restored_rack.slots[0].pad_note, Some(0));
+        assert_eq!(restored_rack.slots[1].pad_note, Some(2));
+    }
+
+    #[test]
     fn effect_slot_persists_ir_reference() {
         let slot = ProjectEffectSlot {
             num_params: 2,
@@ -1761,11 +2339,51 @@ mod tests {
             plock_param_ids: vec![Vec::new(); MAX_STEPS],
             param_node_indices: vec![10, 11],
             param_node_spans: vec![1, 1],
+            tensor_params: Vec::new(),
             ir: Some("lexicon-300-rich-plate".to_string()),
         };
         let json = serde_json::to_string(&slot).expect("serialize slot with ir");
         assert!(json.contains("\"ir\":\"lexicon-300-rich-plate\""), "{json}");
         let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip slot with ir");
         assert_eq!(back.ir.as_deref(), Some("lexicon-300-rich-plate"));
+    }
+
+    #[test]
+    fn effect_slot_roundtrips_tensor_defaults_and_sparse_whole_matrix_plocks() {
+        let mut tensor_plocks = vec![None; MAX_STEPS];
+        tensor_plocks[11] = Some(vec![0.0, 0.25, 0.75, 1.0]);
+        let slot = ProjectEffectSlot {
+            num_params: 0,
+            defaults: Vec::new(),
+            plocks: vec![Vec::new(); MAX_STEPS],
+            plock_param_ids: vec![Vec::new(); MAX_STEPS],
+            param_node_indices: Vec::new(),
+            param_node_spans: Vec::new(),
+            tensor_params: vec![TensorParamSnapshot {
+                name: "strike_mask".to_string(),
+                shape: vec![2, 2],
+                cell_offset: 64,
+                default: vec![0.1, 0.2, 0.3, 0.4],
+                plocks: tensor_plocks,
+            }],
+            ir: None,
+        };
+
+        let json = serde_json::to_string(&slot).expect("serialize tensor slot");
+
+        assert!(json.contains("\"tensor_params\""), "{json}");
+        assert!(json.contains("\"plocks_sparse\""), "{json}");
+        let back: ProjectEffectSlot =
+            serde_json::from_str(&json).expect("roundtrip slot with tensor params");
+        assert_eq!(back.tensor_params.len(), 1);
+        assert_eq!(back.tensor_params[0].name, "strike_mask");
+        assert_eq!(back.tensor_params[0].shape, vec![2, 2]);
+        assert_eq!(back.tensor_params[0].cell_offset, 64);
+        assert_eq!(back.tensor_params[0].default, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(
+            back.tensor_params[0].plocks[11],
+            Some(vec![0.0, 0.25, 0.75, 1.0])
+        );
+        assert!(back.tensor_params[0].plocks[10].is_none());
     }
 }

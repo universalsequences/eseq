@@ -10,6 +10,8 @@ use crate::reverb;
 use crate::sequencer::{BusId, KeyboardTrigger, SequencerState};
 use crate::ui::{AudioBuses, BusGateRuntimeState, BusNodeIds};
 
+const INITIAL_GRAPH_CAPACITY: i32 = 256;
+
 pub struct Engine {
     pub state: Arc<SequencerState>,
     pub lg_ptr: LiveGraphPtr,
@@ -139,7 +141,12 @@ fn init_engine_parts(
 
     let label = CString::new("sequencer").unwrap();
     let lg = unsafe {
-        audiograph::create_live_graph(64, block_size as i32, label.as_ptr(), channels as i32)
+        audiograph::create_live_graph(
+            INITIAL_GRAPH_CAPACITY,
+            block_size as i32,
+            label.as_ptr(),
+            channels as i32,
+        )
     };
     if lg.is_null() {
         return Err("Failed to create live graph".into());
@@ -211,6 +218,22 @@ fn init_engine_parts(
         }
     }
 
+    let mix_mod_in_clip_ids = std::array::from_fn(|input| {
+        let name = CString::new(format!("mix_mod_in{}_clip", input + 1)).unwrap();
+        unsafe {
+            audiograph::add_node(
+                lg,
+                crate::track_modulator::mod_in_clip_vtable(),
+                crate::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
+                name.as_ptr(),
+                1,
+                1,
+                std::ptr::null(),
+                0,
+            )
+        }
+    });
+
     let mut default_bus_nodes = vec![BusNodeIds {
         id: BusId::MIX,
         left_id: bus_l_id,
@@ -218,6 +241,7 @@ fn init_engine_parts(
         merge_id: mix_merge_id,
         gate_id: mix_gate_id,
         volume_id: mix_volume_id,
+        mod_in_clip_ids: mix_mod_in_clip_ids,
     }];
     for (id, label) in [(BusId::DEFAULT_A, "bus_A"), (BusId::DEFAULT_B, "bus_B")] {
         let left_name = CString::new(format!("{label}_L")).unwrap();
@@ -285,6 +309,21 @@ fn init_engine_parts(
             merge_id,
             gate_id,
             volume_id,
+            mod_in_clip_ids: std::array::from_fn(|input| {
+                let name = CString::new(format!("{label}_mod_in{}_clip", input + 1)).unwrap();
+                unsafe {
+                    audiograph::add_node(
+                        lg,
+                        crate::track_modulator::mod_in_clip_vtable(),
+                        crate::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
+                        name.as_ptr(),
+                        1,
+                        1,
+                        std::ptr::null(),
+                        0,
+                    )
+                }
+            }),
         });
     }
     let bus_gate_runtime = Arc::new(Mutex::new(
@@ -293,7 +332,7 @@ fn init_engine_parts(
             .map(|nodes| BusGateRuntimeState {
                 id: nodes.id,
                 gate_id: nodes.gate_id,
-                sequence: crate::ui::BusGateSequence::default(),
+                sequence: crate::sequencer::BusGateSequence::default(),
                 effect_slots: crate::ui::BusChannelState::default_effect_slots(),
             })
             .collect(),
@@ -316,16 +355,18 @@ fn init_engine_parts(
             reverb::reverb_vtable(),
             reverb::REVERB_STATE_SIZE * std::mem::size_of::<f32>(),
             reverb_node_name.as_ptr(),
-            1,
-            2, // 1 mono input, 2 stereo outputs
+            2,
+            2,
             std::ptr::null(),
             0,
         )
     };
 
-    // Wire: reverb_bus → reverb_node → bus_L / bus_R
+    // The global send remains mono; feed both reverb inputs so the native
+    // stereo node preserves its two-input contract.
     unsafe {
         audiograph::graph_connect(lg, reverb_bus_id, 0, reverb_node_id, 0);
+        audiograph::graph_connect(lg, reverb_bus_id, 0, reverb_node_id, 1);
         audiograph::graph_connect(lg, reverb_node_id, 0, bus_l_id, 0);
         audiograph::graph_connect(lg, reverb_node_id, 1, bus_r_id, 0);
     }

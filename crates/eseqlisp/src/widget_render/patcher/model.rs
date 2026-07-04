@@ -262,6 +262,16 @@ pub struct MacroPatch {
     pub params: Vec<String>,
     pub outputs: Vec<String>,
     pub patch: Patch,
+    pub origin: MacroOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacroOrigin {
+    Local,
+    Library {
+        source_path: String,
+        layout_path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

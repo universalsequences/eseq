@@ -11,7 +11,7 @@ use crate::vm::{Value, format_lisp_value};
 
 fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabSpec>, String> {
     let Value::List(entries) = value else {
-        return Err(":tabs expects a list of (label buffer-name) pairs".to_string());
+        return Err(":tabs expects a list of (label buffer-name ...) entries".to_string());
     };
     let mut tabs = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -31,10 +31,27 @@ fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabS
         }) else {
             return Err(":tabs entry buffer name must be a string".to_string());
         };
-        if parts.len() != 2 {
-            return Err(":tabs entries must contain exactly label and buffer name".to_string());
+        let mut on_close = None;
+        let mut option_index = 2;
+        while option_index < parts.len() {
+            let key = parts[option_index].borrow();
+            let Value::Keyword(keyword) = &*key else {
+                return Err(":tabs entry options must be keyword/value pairs".to_string());
+            };
+            let Some(value) = parts.get(option_index + 1) else {
+                return Err(format!(":tabs entry option :{keyword} is missing a value"));
+            };
+            match keyword.as_str() {
+                "on-close" => on_close = Some(value.borrow().clone()),
+                _ => return Err(format!("unknown :tabs entry option :{keyword}")),
+            }
+            option_index += 2;
         }
-        tabs.push(LayoutTabSpec { label, buffer_name });
+        tabs.push(LayoutTabSpec {
+            label,
+            buffer_name,
+            on_close,
+        });
     }
     if tabs.is_empty() {
         return Err(":tabs cannot be empty".to_string());
@@ -388,6 +405,87 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                 return Err("set-buffer-text expects a string".to_string());
             };
             ctx.set_buffer_text(text.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "set-buffer-text-for",
+        "(set-buffer-text-for name text)",
+        "Replace a named buffer's contents, creating a scratch buffer when needed.",
+        |args, ctx| {
+            let (Some(Value::String(name)), Some(Value::String(text))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("set-buffer-text-for expects (buffer-name text)".to_string());
+            };
+            ctx.set_buffer_text_for(name.clone(), text.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "append-buffer-text-for",
+        "(append-buffer-text-for name text separator)",
+        "Append text to a named buffer, creating a scratch buffer when needed. The separator is inserted only when the target buffer is non-empty.",
+        |args, ctx| {
+            let (Some(Value::String(name)), Some(Value::String(text))) = (args.first(), args.get(1))
+            else {
+                return Err("append-buffer-text-for expects (buffer-name text [separator])".to_string());
+            };
+            let separator = match args.get(2) {
+                Some(Value::String(separator)) => separator.clone(),
+                None => String::new(),
+                _ => {
+                    return Err(
+                        "append-buffer-text-for separator must be a string when provided"
+                            .to_string(),
+                    );
+                }
+            };
+            ctx.append_buffer_text_for(name.clone(), text.clone(), separator);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "append-buffer-lines-for",
+        "(append-buffer-lines-for name lines)",
+        "Append lines to a named buffer, creating a scratch buffer when needed. A blank line separates appended groups when the target buffer is non-empty.",
+        |args, ctx| {
+            let (Some(Value::String(name)), Some(Value::List(items))) = (args.first(), args.get(1))
+            else {
+                return Err("append-buffer-lines-for expects (buffer-name lines)".to_string());
+            };
+            let lines = items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::String(s) => s.clone(),
+                    other => format_lisp_value(other),
+                })
+                .collect();
+            ctx.append_buffer_lines_for(name.clone(), lines);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "remove-buffer-lines-for",
+        "(remove-buffer-lines-for name lines)",
+        "Remove exact line matches from a named buffer. Blank separators are normalized after removal.",
+        |args, ctx| {
+            let (Some(Value::String(name)), Some(Value::List(items))) = (args.first(), args.get(1))
+            else {
+                return Err("remove-buffer-lines-for expects (buffer-name lines)".to_string());
+            };
+            let lines = items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::String(s) => s.clone(),
+                    other => format_lisp_value(other),
+                })
+                .collect();
+            ctx.remove_buffer_lines_for(name.clone(), lines);
             Ok(Value::Bool(true))
         },
     );
@@ -987,6 +1085,19 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             };
             let tabs = parse_layout_tabs(tabs_value, current)?;
             ctx.set_window_tabs_for(current.clone(), tabs);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "clear-window-tabs-for",
+        "(clear-window-tabs-for current-name)",
+        "Clear the tab bar on a tile already showing current-name. No-ops if no tile is showing it.",
+        |args, ctx| {
+            let Some(Value::String(current)) = args.first() else {
+                return Err("clear-window-tabs-for expects a buffer name string".to_string());
+            };
+            ctx.clear_window_tabs_for(current.clone());
             Ok(Value::Bool(true))
         },
     );

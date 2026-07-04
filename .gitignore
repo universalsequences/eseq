@@ -19,6 +19,7 @@ crates/sequencer/sample-assets/
 crates/sequencer/samples.db
 crates/sequencer/recordings/
 crates/sequencer/instruments-backup/
+/.eseq/
 crates/eseqlisp/profiles/
 
 # Build/profiling artifacts.

@@ -12,11 +12,13 @@ use super::lisp::{
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
-    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, InputPresentation, MacroPatch,
-    MacroSignature, NodeKind, NodeSource, OperatorPortShape, ParamNodeInfo, Patch, PatchConnection,
-    PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId, SourceOwner,
-    SourceScopeId, refresh_patch_inline_inputs,
+    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, InputPresentation, MacroOrigin,
+    MacroPatch, MacroSignature, NodeKind, NodeSource, OperatorPortShape, ParamNodeInfo, Patch,
+    PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId,
+    SourceOwner, SourceScopeId, refresh_patch_inline_inputs,
 };
+
+const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
 
 pub(super) struct Projector {
     patch: Patch,
@@ -113,6 +115,7 @@ impl Projector {
             "def" => self.project_def(items, expr, source_expr),
             "defmacro" => self.project_defmacro(items, expr, source_expr),
             "param" => self.project_param(items, expr, source_expr),
+            "use-defmacro" => {}
             "make-history" => self.project_make_history(items, expr, source_expr),
             "write-history" => {
                 let _ = self.project_write_history(items, expr, source_expr);
@@ -408,6 +411,7 @@ impl Projector {
             params: param_names,
             outputs: outputs.clone(),
             patch,
+            origin: MacroOrigin::Local,
         });
         self.macro_signatures.insert(
             name.to_string(),
@@ -458,6 +462,38 @@ impl Projector {
         }
         let is_tuple_return = tuple_return_items(expr).is_some();
         for (idx, value) in return_values.into_iter().enumerate() {
+            if matches!(value, Expression::Symbol(name) if name == MISSING_INPUT_SENTINEL) {
+                let out_id_base = if idx == 0 {
+                    "out".to_string()
+                } else {
+                    format!("out{}", idx + 1)
+                };
+                let id = self.unique_id(&out_id_base);
+                self.patch.nodes.push(PatchNode {
+                    id,
+                    op: "out".to_string(),
+                    kind: NodeKind::Out,
+                    label: format!("out {}", idx + 1),
+                    args: vec![
+                        ArgValue::ConnectedExpr,
+                        ArgValue::Literal((idx + 1).to_string()),
+                    ],
+                    outputs: Vec::new(),
+                    position: (0.0, 0.0),
+                    width: None,
+                    param: None,
+                    inline_inputs: Vec::new(),
+                    diagnostic: None,
+                    source: Some(NodeSource {
+                        owner: SourceOwner::TopLevelForm {
+                            form_id: form_id.clone(),
+                        },
+                        expr: None,
+                        call_shape: None,
+                    }),
+                });
+                continue;
+            }
             let value_expr = if is_tuple_return {
                 self.child_expr(&source_expr, idx + 1)
             } else {
@@ -749,7 +785,11 @@ impl Projector {
             };
             match arg {
                 Expression::Symbol(name) => {
-                    if let Some((from_node, from_output)) = self.symbol_sources.get(name).cloned() {
+                    if name == MISSING_INPUT_SENTINEL {
+                        arg_slots[idx] = Some(ArgValue::ConnectedExpr);
+                    } else if let Some((from_node, from_output)) =
+                        self.symbol_sources.get(name).cloned()
+                    {
                         self.flush_pending_constant_args(
                             &mut node,
                             &mut arg_slots,

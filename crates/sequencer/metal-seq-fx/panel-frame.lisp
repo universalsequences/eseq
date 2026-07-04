@@ -2,11 +2,10 @@
 (def fx-panel-body (debug-name children)
   (box
     (v-stack :gap 0 
-      (box :width 1 :height fx-panel-body-top-spacer-height)
       children)
     :debug-name debug-name
     :on-click (lambda (info) (fx-clear-selected-effect))
-    :padding fx-panel-body-padding
+    :padding 0 
     :flex 1
     :v-align :start
     :h-align :start))
@@ -48,7 +47,7 @@
       (list "audio-effect" "effect-instance"))))
 
 (def fx-panel-header (title params fx)
-  (box :width :fill :height fx-panel-header-height :padding 0 :v-align :center :h-align :start
+  (box :width :fill :height 1 :padding 0 :v-align :center :h-align :start
     :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
     :drag-type "effect-instance"
     :drag-payload (fx-effect-drag-payload fx title)
@@ -70,8 +69,9 @@
       (if (fx-has-modulators? fx)
         (effect-mods-toggle-button fx)
         (box))
+      (box :width :fill)
       (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
-        (box :width 4 :height 1.0 :align :center
+        (button "edit" :background-color :black :width 4 :height 0.75 :align :center :font-size 10
           :on-click (lambda (info)
             (do
               (fx-clear-selected-effect)
@@ -79,7 +79,7 @@
                 (if (get fx :bus-fx)
                   (dict :name title :slot (get fx :slot-idx) :bus (get fx :bus-idx))
                   (dict :name title :slot (get fx :slot-idx))))))
-          (label "edit" :font-size 8 :color :dim :bg :transparent))
+	  )
         (box)))))
 
 (def fx-clear-selected-effect ()

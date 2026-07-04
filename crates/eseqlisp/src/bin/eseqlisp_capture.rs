@@ -75,6 +75,9 @@ fn run() -> Result<(), String> {
         editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SUPER));
     }
     let frame = build_render_frame(&mut editor, cols, rows);
+    if args.synthetic_spectrogram {
+        publish_synthetic_spectrograms(&frame);
+    }
     backend
         .render_frame_to_png(&frame, args.width, args.height, &args.out)
         .map_err(|_| "failed to render capture PNG".to_string())?;
@@ -121,6 +124,7 @@ struct CaptureArgs {
     touchpad_scroll: Option<(f32, f32)>,
     click: Option<(f32, f32)>,
     super_y: bool,
+    synthetic_spectrogram: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -140,6 +144,7 @@ impl CaptureArgs {
             touchpad_scroll: None,
             click: None,
             super_y: false,
+            synthetic_spectrogram: false,
         };
 
         while let Some(arg) = args.next() {
@@ -172,6 +177,7 @@ impl CaptureArgs {
                     parsed.click = Some((col, row));
                 }
                 "--super-y" => parsed.super_y = true,
+                "--synthetic-spectrogram" => parsed.synthetic_spectrogram = true,
                 "--out" => parsed.out = std::path::PathBuf::from(next_value(&mut args, "--out")?),
                 "-h" | "--help" => return Err(Self::usage()),
                 other => return Err(format!("unknown argument {other}\n{}", Self::usage())),
@@ -199,8 +205,55 @@ impl CaptureArgs {
     }
 
     fn usage() -> String {
-        "usage: eseqlisp_capture (--source LISP | --source-file PATH) [--width PX] [--height PX] [--patcher-zoom ZOOM] [--patcher-fit] [--touchpad-scroll DX DY] [--click COL ROW] [--super-y] --out PATH"
+        "usage: eseqlisp_capture (--source LISP | --source-file PATH) [--width PX] [--height PX] [--patcher-zoom ZOOM] [--patcher-fit] [--touchpad-scroll DX DY] [--click COL ROW] [--super-y] [--synthetic-spectrogram] --out PATH"
             .to_string()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn publish_synthetic_spectrograms(frame: &eseqlisp::backend::RenderFrame) {
+    use eseqlisp::live_audio::{SpectrogramFrame, publish_spectrogram_frame};
+    use eseqlisp::widget_render::spectrogram;
+    use std::sync::Arc;
+
+    let Some(layout) = frame.widget_layout.as_ref() else {
+        return;
+    };
+    for request in spectrogram::collect_spectrogram_requests(layout) {
+        let bins = (request.fft_size / 16).clamp(64, 512);
+        let time_slices = request.time_slices.clamp(16, 256);
+        let mut waterfall = vec![0.0f32; bins * time_slices];
+        for time in 0..time_slices {
+            for bin in 0..bins {
+                let x = bin as f32 / (bins - 1) as f32;
+                let sweep = (time as f32 / time_slices as f32) * 0.24;
+                let low_ridge = ((x - 0.18 - sweep).abs() / 0.07).clamp(0.0, 1.0);
+                let high_ridge = ((x - 0.74).abs() / 0.13).clamp(0.0, 1.0);
+                waterfall[time * bins + bin] =
+                    (0.12 + (1.0 - low_ridge) * 0.56 + (1.0 - high_ridge) * 0.26).clamp(0.0, 1.0);
+            }
+        }
+        let smoothed = (0..bins)
+            .map(|bin| {
+                let x = bin as f32 / (bins - 1) as f32;
+                let low = (1.0 - ((x - 0.24).abs() / 0.22).clamp(0.0, 1.0)) * 0.70;
+                let mid = (1.0 - ((x - 0.56).abs() / 0.18).clamp(0.0, 1.0)) * 0.45;
+                let high = (1.0 - ((x - 0.82).abs() / 0.10).clamp(0.0, 1.0)) * 0.36;
+                (0.10 + low + mid + high).clamp(0.0, 1.0)
+            })
+            .collect::<Vec<_>>();
+        publish_spectrogram_frame(
+            request.data_key,
+            SpectrogramFrame {
+                revision: 1,
+                bins: bins as u32,
+                time_slices: time_slices as u32,
+                write_head: (time_slices / 3) as u32,
+                sample_rate: 48_000.0,
+                waterfall: Arc::new(waterfall),
+                smoothed: Arc::new(smoothed),
+            },
+        );
     }
 }
 

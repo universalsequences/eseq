@@ -16,7 +16,7 @@ exact same path neural config takes through the three parallel structs.
 
 Goal: declare controls inline in the sequencer file; read them in `:tick`; persist per-pattern.
 
-- **lisp_effect.rs**: `(param name :kind ... :default ... :min ... :max ...)` declaration
+- **lisp_host.rs**: `(param name :kind ... :default ... :min ... :max ...)` declaration
   parser (model `midi-fx-param`). New `SequencerParamDescriptor { name, kind, default, ui_hint }`
   + `SequencerParamKind ∈ Float{min,max} | Int{min,max} | Enum{options} | String | Track |
   Timebase | Vector{len} | Matrix{rows,cols}`. Read in `:tick` via a **context-backed**
@@ -42,7 +42,7 @@ Goal: surface generator state to visualizations (the inverse of param).
 - **state.rs**: `sequencer_visualization: Mutex<SequencerVisualizationSnapshot>` (mirror
   `neural_visualization`) + accessors. Snapshot = `HashMap<generator, HashMap<var, StateValue>>`
   with fixed-shape vectors/matrices/rings.
-- **lisp_effect.rs**: extend `state-set!` to support non-scalar shapes (`(state-set! name idx
+- **lisp_host.rs**: extend `state-set!` to support non-scalar shapes (`(state-set! name idx
   v)` for vectors); add `(seq-state name var)` reactive UI read (generalize the existing
   `SEQ.neural-energy-matrix` reference).
 - **generator.rs**: on the once-per-block publish path (mirror the `set_neural_visualization`

@@ -1,4 +1,4 @@
-use crate::lisp_effect::{
+use crate::lisp_host::{
     render_effect_source_for_test, render_instrument_source_for_test,
     render_loaded_effect_for_test, render_loaded_instrument_for_test, CompileResult,
     EffectRenderOptions, EffectRenderReport, InstrumentRenderOptions, InstrumentRenderReport,

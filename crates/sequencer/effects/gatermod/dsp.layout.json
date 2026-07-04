@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "Left": {
+        "x": 11.42327,
+        "y": 21.066847
+      },
+      "Right": {
+        "x": 74.46,
+        "y": 21.353207
+      },
+      "gater": {
+        "x": 105.441414,
+        "y": 4.117988
+      },
+      "history1": {
+        "x": 120.66812,
+        "y": 7.0883317
+      },
+      "input_l": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "input_r": {
+        "x": 74.46,
+        "y": 4.0
+      },
+      "mix#0": {
+        "x": 4.0,
+        "y": 10.6825,
+        "width": 27.349998
+      },
+      "mix#1": {
+        "x": 74.46,
+        "y": 10.6825
+      },
+      "mix-amt": {
+        "x": 27.05,
+        "y": 4.0
+      },
+      "mix1": {
+        "x": 108.43807,
+        "y": 9.6922865
+      },
+      "mul1": {
+        "x": 20.90737,
+        "y": 7.6001306
+      },
+      "mul2": {
+        "x": 82.688896,
+        "y": 6.541775
+      }
+    },
+    "cables": {
+      "input_l:0->mix#0:0": {
+        "segmented": true,
+        "y": 8.13125
+      },
+      "input_r:0->mix#1:0": {
+        "segmented": true,
+        "y": 6.8912506
+      },
+      "mix#0:0->Left:0": {
+        "segmented": true,
+        "y": 14.813749
+      },
+      "mix#1:0->Right:0": {
+        "segmented": true,
+        "y": 13.57375
+      },
+      "mix-amt:0->mix#0:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "mix-amt:0->mix#1:2": {
+        "segmented": true,
+        "y": 5.93
+      }
+    },
+    "inputPresentation": {
+      "history1:0": "cable",
+      "mix#0:1": "cable",
+      "mix#1:1": "cable",
+      "mix1:0": "cable",
+      "mix1:1": "cable",
+      "mul1:0": "cable",
+      "mul1:1": "cable",
+      "mul2:0": "cable",
+      "mul2:1": "cable"
+    }
+  },
+  "macros": {}
+}

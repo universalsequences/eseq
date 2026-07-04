@@ -1950,6 +1950,40 @@ mod tests {
     }
 
     #[test]
+    fn tree_key_navigation_clamps_stale_cursor_after_items_shrink() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = scroll_with_flat_selected_tree(510.0, &["a", "b", "c", "d", "e", "f"], "");
+        let first_layout = engine.layout(&first).unwrap();
+        let first_tree_node = first_layout.children.first().expect("tree child");
+
+        for _ in 0..5 {
+            let _ = crate::widget_render::tree::TREE_WIDGET.key_event(
+                first_tree_node,
+                WidgetKeyEvent {
+                    code: KeyCode::Down,
+                    modifiers: KeyModifiers::empty(),
+                },
+            );
+        }
+
+        let second = scroll_with_flat_selected_tree(510.0, &["a", "b", "c"], "");
+        let second_layout = engine.layout(&second).unwrap();
+        let second_tree_node = second_layout.children.first().expect("tree child");
+        let event = crate::widget_render::tree::TREE_WIDGET.key_event(
+            second_tree_node,
+            WidgetKeyEvent {
+                code: KeyCode::Up,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        assert!(
+            matches!(event, Some(crate::widget_render::WidgetEvent::Custom(_))),
+            "stale cursor should clamp to the shorter visible row set before handling Up"
+        );
+    }
+
+    #[test]
     fn natural_width_simple_vstack_fits_viewport() {
         // A v-stack with children narrower than the 80-col viewport.
         let tree = vstack(1.0, 1.0, vec![label("hello", Some(10.0)), hslider()]);

@@ -27,8 +27,8 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{
-    SplitDir, TileBufferTab, TileId, TileLeaf, TileNode, split_ratio_for_point, tile_body_rect,
-    tile_tab_layouts,
+    SplitDir, TileBufferTab, TileId, TileLeaf, TileNode, TileSplit, split_ratio_for_point,
+    tile_body_rect, tile_tab_layouts,
 };
 use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
@@ -36,6 +36,13 @@ use commands::key_str;
 use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
+
+fn tile_resize_cursor(dir: SplitDir) -> WidgetCursor {
+    match dir {
+        SplitDir::Vertical => WidgetCursor::EwResize,
+        SplitDir::Horizontal => WidgetCursor::NsResize,
+    }
+}
 
 struct EditorSubtreeReplacement {
     buffer_idx: usize,
@@ -145,6 +152,101 @@ fn format_lisp_reload_report(report: &ReloadReport) -> String {
         lines.extend(report.diagnostics.iter().cloned());
     }
     lines.join("\n")
+}
+
+fn is_inspect_mode_toggle_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+fn inspect_node_source_buffer_id(node: &crate::layout::LayoutNode) -> Option<BufferId> {
+    match node.props.get(crate::vm::SOURCE_BUFFER_ID_PROP) {
+        Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => {
+            Some(*value as BufferId)
+        }
+        _ => None,
+    }
+}
+
+fn inspect_node_source_module_path(node: &crate::layout::LayoutNode) -> Option<PathBuf> {
+    match node.props.get(crate::vm::SOURCE_MODULE_PATH_PROP) {
+        Some(Value::String(path)) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => None,
+    }
+}
+
+fn inspect_node_source_symbol(node: &crate::layout::LayoutNode) -> Option<String> {
+    match node.props.get(crate::vm::SOURCE_SYMBOL_PROP) {
+        Some(Value::String(symbol)) if !symbol.is_empty() => Some(symbol.clone()),
+        _ => None,
+    }
+}
+
+fn inspect_node_source_number(node: &crate::layout::LayoutNode, key: &str) -> Option<usize> {
+    match node.props.get(key) {
+        Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => Some(*value as usize),
+        _ => None,
+    }
+}
+
+fn inspect_node_source_span(node: &crate::layout::LayoutNode) -> Option<(usize, usize)> {
+    let start = inspect_node_source_number(node, crate::vm::SOURCE_START_BYTE_PROP)?;
+    let end = inspect_node_source_number(node, crate::vm::SOURCE_END_BYTE_PROP)?;
+    (end >= start).then_some((start, end))
+}
+
+fn inspect_node_source_revision(node: &crate::layout::LayoutNode) -> Option<u64> {
+    match node.props.get(crate::vm::SOURCE_REVISION_PROP) {
+        Some(Value::String(value)) => value.parse::<u64>().ok(),
+        Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
+fn inspect_node_prop_string(node: &crate::layout::LayoutNode, key: &str) -> Option<String> {
+    match node.props.get(key) {
+        Some(Value::String(value) | Value::Keyword(value)) if !value.is_empty() => {
+            Some(value.clone())
+        }
+        Some(Value::Number(value)) if value.is_finite() => Some(value.to_string()),
+        Some(Value::Bool(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn inspect_node_debug_label(node: &crate::layout::LayoutNode) -> String {
+    let detail = node
+        .props
+        .get("debug-name")
+        .and_then(|value| match value {
+            Value::String(value) | Value::Keyword(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .or(node.stable_key.as_deref());
+    match detail {
+        Some(detail) => format!("{} {detail}", node.widget_type),
+        None => node.widget_type.clone(),
+    }
+}
+
+fn inspect_node_has_source_identity(node: &crate::layout::LayoutNode) -> bool {
+    inspect_node_source_span(node).is_some()
+        || inspect_node_prop_string(node, "debug-name").is_some()
+        || inspect_node_prop_string(node, "key").is_some()
+        || node.stable_key.is_some()
+        || inspect_node_source_symbol(node).is_some()
+}
+
+fn inspect_debug_log(message: impl AsRef<str>) {
+    eprintln!("[inspect] {}", message.as_ref());
+}
+
+fn format_cursor_for_log(cursor: (usize, usize)) -> String {
+    format!("{}:{}", cursor.0 + 1, cursor.1 + 1)
 }
 
 fn widget_only_scratch_buffer_should_show_ui(buffer: &Buffer) -> bool {
@@ -387,9 +489,16 @@ pub struct Editor {
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
     active_tab_mouse_capture: Option<TileId>,
+    hovered_tile_tab: Option<(TileId, usize)>,
     pointer_drag_started_on_slider: bool,
     last_slider_drag_widget_id: Option<u64>,
     last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
+    inspect_mode: bool,
+    inspect_hover_tile_id: Option<TileId>,
+    inspect_hover_widget_id: Option<u64>,
+    inspect_hover_status: Option<String>,
+    inspect_hover_rect: Option<crate::layout::Rect>,
+    inspect_source_tile_id: Option<TileId>,
     #[cfg(test)]
     test_clipboard: Option<String>,
 }
@@ -515,9 +624,16 @@ impl Editor {
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
             active_tab_mouse_capture: None,
+            hovered_tile_tab: None,
             pointer_drag_started_on_slider: false,
             last_slider_drag_widget_id: None,
             last_layout_refresh_timings: Vec::new(),
+            inspect_mode: false,
+            inspect_hover_tile_id: None,
+            inspect_hover_widget_id: None,
+            inspect_hover_status: None,
+            inspect_hover_rect: None,
+            inspect_source_tile_id: None,
             #[cfg(test)]
             test_clipboard: None,
         };
@@ -815,6 +931,56 @@ impl Editor {
         }
     }
 
+    fn split_root_right_with_buffer(&mut self, new_buffer_idx: usize) -> TileId {
+        self.save_current_widget_tree();
+        let split_id = self.alloc_tile_id();
+        let new_tile_id = self.alloc_tile_id();
+        let existing_root = std::mem::replace(
+            &mut self.tile_root,
+            TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx)),
+        );
+        self.tile_root = TileNode::Split(TileSplit {
+            id: split_id,
+            dir: SplitDir::Vertical,
+            ratio: 0.72,
+            gap: 0.0,
+            a: Box::new(existing_root),
+            b: Box::new(TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx))),
+        });
+        self.switch_active_tile(new_tile_id);
+        new_tile_id
+    }
+
+    fn replace_tile_buffer_and_activate(&mut self, tile_id: TileId, buffer_idx: usize) -> bool {
+        if self.tile_root.find_leaf(tile_id).is_none() {
+            return false;
+        }
+        let was_active = self.active_tile == tile_id;
+        self.save_current_widget_tree();
+        {
+            let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) else {
+                return false;
+            };
+            leaf.buffer_idx = buffer_idx;
+            leaf.selected_tab = leaf
+                .tabs
+                .iter()
+                .position(|tab| tab.buffer_idx == buffer_idx);
+            Self::invalidate_leaf_for_buffer_switch(leaf);
+        }
+        if was_active {
+            self.record_buffer_access_by_idx(buffer_idx);
+            self.sync_runtime_context();
+            self.completion = None;
+            self.clear_mark();
+            self.restore_buffer_widget_tree();
+            self.mark_needs_redraw();
+        } else {
+            self.switch_active_tile(tile_id);
+        }
+        true
+    }
+
     /// Delete the active tile (close window, not buffer).
     /// Returns true if successful. Cannot delete the last tile.
     pub fn delete_active_tile(&mut self) -> bool {
@@ -948,6 +1114,7 @@ impl Editor {
                         resolved_tabs.push(TileBufferTab {
                             label: tab.label,
                             buffer_idx,
+                            on_close: tab.on_close,
                         });
                     }
                     if !resolved_tabs.is_empty()
@@ -1294,6 +1461,22 @@ impl Editor {
             return;
         }
 
+        if self.handle_tiled_inspect_mouse_precise(mouse, precise_col, precise_row, border_inset) {
+            return;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Moved)
+            && self.update_tile_resize_hover_cursor(precise_col, precise_row, border_inset)
+        {
+            if self.hovered_tile_tab.take().is_some() {
+                self.mark_needs_redraw();
+            }
+            return;
+        }
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            let _ = self.update_tile_tab_hover(precise_col, precise_row);
+        }
+
         if let Some(tile_id) = self.active_tab_mouse_capture
             && matches!(
                 mouse.kind,
@@ -1456,6 +1639,15 @@ impl Editor {
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && let Some((tile_id, tab_index)) =
+                self.tile_tab_close_hit_at_screen(precise_col, precise_row)
+        {
+            self.tile_root.clear_focus_except(tile_id);
+            let _ = self.invoke_tile_tab_close(tile_id, tab_index);
+            return;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some((tile_id, tab_index)) =
                 self.tile_tab_hit_at_screen(precise_col, precise_row)
         {
             self.tile_root.clear_focus_except(tile_id);
@@ -1472,6 +1664,7 @@ impl Editor {
         };
         if let Some(tile_id) = target_tile {
             if matches!(mouse.kind, MouseEventKind::Moved) && tile_id != self.active_tile {
+                self.widget_cursor = WidgetCursor::Default;
                 if let Some((content_col, content_row, _, _)) =
                     self.tile_content_area(tile_id, border_inset)
                 {
@@ -1540,7 +1733,76 @@ impl Editor {
                     event_row,
                 );
             });
+        } else if matches!(mouse.kind, MouseEventKind::Moved) {
+            self.widget_cursor = WidgetCursor::Default;
         }
+    }
+
+    fn handle_tiled_inspect_mouse_precise(
+        &mut self,
+        mouse: MouseEvent,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) -> bool {
+        if !self.inspect_mode {
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left) => {}
+            MouseEventKind::Down(MouseButton::Right) | MouseEventKind::Up(MouseButton::Right) => {
+                self.toggle_inspect_mode();
+                return true;
+            }
+            _ => return false,
+        }
+        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+            if self.inspect_hover_tile_id.take().is_some()
+                || self.inspect_hover_widget_id.take().is_some()
+            {
+                self.inspect_hover_status = None;
+                self.inspect_hover_rect = None;
+                self.show_sticky_message("Inspect mode: no widget");
+                self.mark_needs_redraw();
+            }
+            return true;
+        };
+        let Some((content_col, content_row, _, _)) = self.tile_content_area(tile_id, border_inset)
+        else {
+            return true;
+        };
+        let (event_col, event_row) = self
+            .tile_content_precise_event_position(
+                tile_id,
+                border_inset,
+                content_col,
+                content_row,
+                precise_col,
+                precise_row,
+            )
+            .unwrap_or((precise_col, precise_row));
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                self.update_widget_inspect_hover(
+                    tile_id,
+                    content_col,
+                    content_row,
+                    event_col,
+                    event_row,
+                );
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_widget_inspect_click(
+                    tile_id,
+                    content_col,
+                    content_row,
+                    event_col,
+                    event_row,
+                );
+            }
+            _ => {}
+        }
+        true
     }
 
     pub fn handle_tiled_touchpad_magnify(
@@ -1703,6 +1965,10 @@ impl Editor {
         Some(
             leaf.show_status
                 || buffer.view_mode != ViewMode::UiOnly
+                || (self.inspect_mode && self.inspect_hover_tile_id == Some(tile_id))
+                || (self.inspect_mode
+                    && self.inspect_hover_tile_id.is_none()
+                    && tile_id == self.active_tile)
                 || (tile_id == self.active_tile && self.active_status_input_is_pending()),
         )
     }
@@ -1723,6 +1989,15 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> Option<(TileId, usize)> {
+        self.tile_tab_hit_at_screen_with_layout(precise_col, precise_row)
+            .map(|(tile_id, index, _)| (tile_id, index))
+    }
+
+    fn tile_tab_hit_at_screen_with_layout(
+        &self,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<(TileId, usize, crate::tile::TileTabLayout)> {
         self.cached_tile_rects
             .iter()
             .rev()
@@ -1736,8 +2011,68 @@ impl Editor {
                             && precise_row >= tab.rect.row
                             && precise_row < tab.rect.row + tab.rect.height
                     })
-                    .map(|tab| (*tile_id, tab.index))
+                    .map(|tab| (*tile_id, tab.index, tab))
             })
+    }
+
+    fn tile_tab_close_hit_at_screen(
+        &self,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<(TileId, usize)> {
+        self.tile_tab_hit_at_screen_with_layout(precise_col, precise_row)
+            .and_then(|(tile_id, tab_index, tab)| {
+                let close_rect = tab.close_rect?;
+                let leaf = self.tile_root.find_leaf(tile_id)?;
+                leaf.tabs.get(tab_index)?.on_close.as_ref()?;
+                (precise_col >= close_rect.col
+                    && precise_col < close_rect.col + close_rect.width
+                    && precise_row >= close_rect.row
+                    && precise_row < close_rect.row + close_rect.height)
+                    .then_some((tile_id, tab_index))
+            })
+    }
+
+    fn update_tile_tab_hover(&mut self, precise_col: f32, precise_row: f32) -> bool {
+        let hovered = self
+            .tile_tab_hit_at_screen(precise_col, precise_row)
+            .and_then(|(tile_id, tab_index)| {
+                let leaf = self.tile_root.find_leaf(tile_id)?;
+                leaf.tabs
+                    .get(tab_index)?
+                    .on_close
+                    .as_ref()
+                    .map(|_| (tile_id, tab_index))
+            });
+        if self.hovered_tile_tab == hovered {
+            return false;
+        }
+        self.hovered_tile_tab = hovered;
+        self.mark_needs_redraw();
+        true
+    }
+
+    pub(crate) fn hovered_tab_for_tile(&self, tile_id: TileId) -> Option<usize> {
+        self.hovered_tile_tab
+            .and_then(|(hovered_tile_id, tab_index)| {
+                (hovered_tile_id == tile_id).then_some(tab_index)
+            })
+    }
+
+    fn invoke_tile_tab_close(&mut self, tile_id: TileId, tab_index: usize) -> bool {
+        let Some((callback, buffer_name)) = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
+            let tab = leaf.tabs.get(tab_index)?;
+            let callback = tab.on_close.clone()?;
+            let buffer_name = self.buffers.get(tab.buffer_idx)?.name.clone();
+            Some((callback, buffer_name))
+        }) else {
+            return false;
+        };
+
+        self.apply_widget_output(Some(crate::widget_render::EventOutput {
+            callback,
+            args: vec![Value::String(buffer_name), Value::Number(tab_index as f64)],
+        }))
     }
 
     fn invalidate_leaf_for_buffer_switch(leaf: &mut TileLeaf) {
@@ -1897,6 +2232,7 @@ impl Editor {
             dir: hit.dir,
             area: hit.area,
         });
+        self.widget_cursor = tile_resize_cursor(hit.dir);
         self.update_tile_split_ratio(hit.split_id, hit.dir, hit.area, precise_col, precise_row);
         true
     }
@@ -1913,6 +2249,7 @@ impl Editor {
 
         match mouse.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
+                self.widget_cursor = tile_resize_cursor(drag.dir);
                 self.update_tile_split_ratio(
                     drag.split_id,
                     drag.dir,
@@ -1932,10 +2269,45 @@ impl Editor {
                 );
                 self.active_tile_resize_drag = None;
                 self.last_mouse_precise = None;
+                self.widget_cursor = WidgetCursor::Default;
                 true
             }
             _ => true,
         }
+    }
+
+    fn update_tile_resize_hover_cursor(
+        &mut self,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) -> bool {
+        let Some(hit) = self.tile_resize_hit_at_screen(precise_col, precise_row, border_inset)
+        else {
+            return false;
+        };
+        self.widget_cursor = tile_resize_cursor(hit.dir);
+        true
+    }
+
+    fn tile_resize_hit_at_screen(
+        &self,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) -> Option<crate::tile::SplitDividerHit> {
+        let root_area = self.tile_root_rect()?;
+        let tolerance = if border_inset == 0 { 0.5 } else { 1.0 };
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        self.tile_root.hit_test_split_divider(
+            root_area,
+            precise_col,
+            precise_row,
+            tolerance,
+            TILE_GAP_PX_PER_UNIT,
+            cell_w,
+            cell_h,
+        )
     }
 
     fn update_tile_split_ratio(
@@ -2731,6 +3103,22 @@ impl Editor {
         self.runtime.current_layout.clone()
     }
 
+    pub fn visible_widget_layouts(&self) -> Vec<Arc<crate::layout::LayoutNode>> {
+        let active_buffer_idx = self.active_buffer_idx();
+        self.tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter_map(|tile_id| self.tile_root.find_leaf(tile_id))
+            .filter_map(|leaf| {
+                if leaf.buffer_idx == active_buffer_idx {
+                    self.runtime.current_layout.clone()
+                } else {
+                    leaf.cached_layout.clone()
+                }
+            })
+            .collect()
+    }
+
     pub fn active_buffer_has_ui(&self) -> bool {
         self.active_buffer().widget_tree.is_some()
             || self.runtime.current_widget_tree().is_some()
@@ -3022,6 +3410,36 @@ impl Editor {
         Ok(id)
     }
 
+    fn upsert_inactive_file_buffer_with_mode(
+        &mut self,
+        path: PathBuf,
+        mode: BufferMode,
+    ) -> Result<BufferId, EditorError> {
+        if let Some(existing) = self
+            .buffers
+            .iter()
+            .find(|buffer| buffer.path.as_ref() == Some(&path))
+            .map(|buffer| buffer.id)
+        {
+            return Ok(existing);
+        }
+
+        let text = std::fs::read_to_string(&path)?;
+        let name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let id = self.alloc_buffer_id();
+        let mut buffer = Buffer::new(id, &name);
+        buffer.set_text(&text);
+        buffer.set_path(path);
+        buffer.set_mode(mode);
+        buffer.dirty = false;
+        self.buffers.push(buffer);
+        self.track_new_buffer(id, false);
+        Ok(id)
+    }
+
     pub fn open_or_create_file_buffer(
         &mut self,
         path: impl Into<PathBuf>,
@@ -3163,6 +3581,7 @@ impl Editor {
             resolved_tabs.push(TileBufferTab {
                 label: tab.label,
                 buffer_idx,
+                on_close: tab.on_close,
             });
         }
         if !resolved_tabs
@@ -3284,6 +3703,396 @@ impl Editor {
         }
     }
 
+    pub fn inspect_mode_enabled(&self) -> bool {
+        self.inspect_mode
+    }
+
+    pub fn toggle_inspect_mode(&mut self) {
+        self.inspect_mode = !self.inspect_mode;
+        self.inspect_hover_tile_id = None;
+        self.inspect_hover_widget_id = None;
+        self.inspect_hover_status = None;
+        self.inspect_hover_rect = None;
+        if self.inspect_mode {
+            self.show_sticky_message("Inspect mode: hover widgets, click to open source");
+        } else {
+            self.show_transient_message("Inspect mode off");
+        }
+        self.widget_cursor = WidgetCursor::Default;
+        self.active_leaf_mut().active_widget_gesture = None;
+        crate::widget_render::set_drop_hover_target(None);
+        self.mark_needs_redraw();
+    }
+
+    fn exit_inspect_mode(&mut self) {
+        if !self.inspect_mode {
+            return;
+        }
+        self.inspect_mode = false;
+        self.inspect_hover_tile_id = None;
+        self.inspect_hover_widget_id = None;
+        self.inspect_hover_status = None;
+        self.inspect_hover_rect = None;
+        self.widget_cursor = WidgetCursor::Default;
+        self.active_leaf_mut().active_widget_gesture = None;
+        crate::widget_render::set_drop_hover_target(None);
+        self.show_transient_message("Inspect mode off");
+    }
+
+    fn update_widget_inspect_hover(
+        &mut self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some(node) = self.inspect_widget_node_at_tile(
+            tile_id,
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+        ) else {
+            if self.inspect_hover_widget_id.take().is_some()
+                || self.inspect_hover_tile_id.take().is_some()
+            {
+                self.inspect_hover_status = None;
+                self.inspect_hover_rect = None;
+                self.show_transient_message("Inspect mode: no widget");
+                self.mark_needs_redraw();
+            }
+            return false;
+        };
+        if self.inspect_hover_tile_id == Some(tile_id)
+            && self.inspect_hover_widget_id == Some(node.widget_id)
+        {
+            if self.inspect_hover_rect != Some(node.rect) {
+                self.inspect_hover_rect = Some(node.rect);
+                self.mark_needs_redraw();
+            }
+            return true;
+        }
+        self.inspect_hover_tile_id = Some(tile_id);
+        self.inspect_hover_widget_id = Some(node.widget_id);
+        self.inspect_hover_rect = Some(node.rect);
+        let status = self.inspect_status_for_node(&node);
+        self.inspect_hover_status = Some(status.clone());
+        self.mark_needs_redraw();
+        true
+    }
+
+    fn handle_widget_inspect_click(
+        &mut self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some(node) = self.inspect_widget_node_at_tile(
+            tile_id,
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+        ) else {
+            self.show_sticky_message("Inspect mode: no widget source at pointer");
+            return true;
+        };
+        self.inspect_hover_tile_id = Some(tile_id);
+        self.inspect_hover_widget_id = Some(node.widget_id);
+        self.inspect_hover_rect = Some(node.rect);
+        match self.open_source_for_inspected_node(&node) {
+            Ok(true) => {
+                self.inspect_mode = false;
+                self.inspect_hover_tile_id = None;
+                self.inspect_hover_widget_id = None;
+                self.inspect_hover_rect = None;
+                true
+            }
+            Ok(false) => {
+                self.show_sticky_message(format!(
+                    "Inspect mode: {} has no source metadata",
+                    inspect_node_debug_label(&node)
+                ));
+                true
+            }
+            Err(error) => {
+                self.show_sticky_message(format!("Inspect mode: {error:?}"));
+                true
+            }
+        }
+    }
+
+    pub(crate) fn tile_inspect_status_message(&self, tile_id: TileId) -> Option<&str> {
+        (self.inspect_mode && self.inspect_hover_tile_id == Some(tile_id))
+            .then_some(self.inspect_hover_status.as_deref())
+            .flatten()
+    }
+
+    pub(crate) fn tile_inspect_overlay_rect(&self, tile_id: TileId) -> Option<crate::layout::Rect> {
+        if !self.inspect_mode || self.inspect_hover_tile_id != Some(tile_id) {
+            return None;
+        }
+        let rect = self.inspect_hover_rect?;
+        (rect.row.is_finite()
+            && rect.col.is_finite()
+            && rect.width.is_finite()
+            && rect.height.is_finite()
+            && rect.width > 0.0
+            && rect.height > 0.0)
+            .then_some(rect)
+    }
+
+    fn inspect_widget_node_at_tile(
+        &self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<crate::layout::LayoutNode> {
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        let buffer = self.buffers.get(leaf.buffer_idx)?;
+        if buffer.view_mode == ViewMode::TextOnly {
+            return None;
+        }
+        let (local_col, local_row) =
+            crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)?;
+        let layout = if tile_id == self.active_tile {
+            self.runtime.current_layout.as_ref()
+        } else {
+            leaf.cached_layout.as_ref()
+        }?;
+        let layout_col = local_col + leaf.widget_scroll_left;
+        let layout_row = local_row + leaf.widget_scroll_top + buffer.scroll_top as f32;
+        inspect_hit_test_layout(layout, layout_row, layout_col).cloned()
+    }
+
+    fn inspect_status_for_node(&self, node: &crate::layout::LayoutNode) -> String {
+        let source = inspect_node_source_module_path(node)
+            .map(|path| path.display().to_string())
+            .or_else(|| {
+                inspect_node_source_buffer_id(node).and_then(|id| {
+                    self.buffers
+                        .iter()
+                        .find(|buffer| buffer.id == id)
+                        .map(|buffer| buffer.name.clone())
+                })
+            })
+            .unwrap_or_else(|| "source unavailable".to_string());
+        let definition = inspect_node_source_symbol(node)
+            .map(|symbol| format!(" def {symbol}"))
+            .unwrap_or_default();
+        format!(
+            "Inspect: {} @ {:.1},{:.1} {:.1}x{:.1} -> {}{}",
+            inspect_node_debug_label(node),
+            node.rect.col,
+            node.rect.row,
+            node.rect.width,
+            node.rect.height,
+            source,
+            definition
+        )
+    }
+
+    fn open_source_for_inspected_node(
+        &mut self,
+        node: &crate::layout::LayoutNode,
+    ) -> Result<bool, EditorError> {
+        inspect_debug_log(format!(
+            "click widget={} stable_key={:?} debug_name={:?} source_buffer_id={:?} source_module={:?} source_symbol={:?} source_span={:?} source_revision={:?}",
+            node.widget_type,
+            node.stable_key,
+            inspect_node_prop_string(node, "debug-name"),
+            inspect_node_source_buffer_id(node),
+            inspect_node_source_module_path(node),
+            inspect_node_source_symbol(node),
+            inspect_node_source_span(node),
+            inspect_node_source_revision(node)
+        ));
+        let source_module_path = inspect_node_source_module_path(node);
+        let source_buffer_id = if let Some(path) = source_module_path.clone() {
+            inspect_debug_log(format!("opening source module path {}", path.display()));
+            Some(self.upsert_inactive_file_buffer_with_mode(path, BufferMode::ESeqLisp)?)
+        } else if let Some(id) = inspect_node_source_buffer_id(node) {
+            inspect_debug_log(format!("using source buffer id {id} from widget metadata"));
+            Some(id)
+        } else {
+            inspect_debug_log("no source buffer or source module metadata; cannot open source");
+            None
+        };
+        let Some(mut source_buffer_id) = source_buffer_id else {
+            return Ok(false);
+        };
+        let Some(mut source_buffer_idx) = self.buffer_idx_for_id(source_buffer_id) else {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} was not found in editor buffers"
+            ));
+            return Ok(false);
+        };
+        let mut opened_stale_snapshot = false;
+        if let (Some(path), Some(revision), Some(_span)) = (
+            source_module_path.as_deref(),
+            inspect_node_source_revision(node),
+            inspect_node_source_span(node),
+        ) {
+            if let Some(snapshot_text) = self.runtime.evaluated_source_text(path, revision) {
+                let current_text = self.buffers[source_buffer_idx].text();
+                if current_text != snapshot_text {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| format!("*inspect source: {name} @ {revision:x}*"))
+                        .unwrap_or_else(|| format!("*inspect source @ {revision:x}*"));
+                    let snapshot_buffer_id = self.upsert_read_only_scratch_buffer_with_mode(
+                        &name,
+                        &snapshot_text,
+                        BufferMode::ESeqLisp,
+                    );
+                    if let Some(idx) = self.buffer_idx_for_id(snapshot_buffer_id) {
+                        inspect_debug_log(format!(
+                            "rendered source revision is stale in visible file; opening evaluated read-only snapshot {name}"
+                        ));
+                        source_buffer_id = snapshot_buffer_id;
+                        source_buffer_idx = idx;
+                        opened_stale_snapshot = true;
+                    }
+                }
+            } else {
+                inspect_debug_log(format!(
+                    "source revision {revision} has no evaluated snapshot; using current buffer text"
+                ));
+            }
+        }
+        self.buffers[source_buffer_idx].view_mode = ViewMode::TextOnly;
+
+        if let Some(tile_id) = self.visible_tile_for_buffer_id(source_buffer_id) {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} already visible in tile {tile_id:?}; switching"
+            ));
+            self.switch_active_tile(tile_id);
+            self.inspect_source_tile_id = Some(tile_id);
+        } else if let Some(tile_id) = self
+            .inspect_source_tile_id
+            .filter(|tile_id| self.tile_root.find_leaf(*tile_id).is_some())
+        {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} not visible; reusing inspect source tile {tile_id:?}"
+            ));
+            self.replace_tile_buffer_and_activate(tile_id, source_buffer_idx);
+        } else {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} not visible; splitting root to the right"
+            ));
+            let source_tile = self.split_root_right_with_buffer(source_buffer_idx);
+            self.inspect_source_tile_id = Some(source_tile);
+            inspect_debug_log(format!(
+                "new root-right source tile {source_tile:?}; switching"
+            ));
+        }
+        let source_span = inspect_node_source_span(node);
+        let source_symbol = inspect_node_source_symbol(node);
+        let source_text = self.active_buffer().text();
+        let resolved_span_cursor = source_span.and_then(|(start, end)| {
+            if end > source_text.len()
+                || !source_text.is_char_boundary(start)
+                || !source_text.is_char_boundary(end)
+            {
+                inspect_debug_log(format!(
+                    "source span {start}..{end} is outside the opened source snapshot ({} bytes)",
+                    source_text.len()
+                ));
+                None
+            } else {
+                Some(offset_to_position(&source_text, start))
+            }
+        });
+        let (resolved_widget_form, resolved_definition) = if resolved_span_cursor.is_some() {
+            (None, None)
+        } else {
+            inspect_debug_log("legacy fallback: no usable parser source span metadata");
+            let widget_form = find_widget_form_in_text(&source_text, node).or_else(|| {
+                source_symbol.as_deref().and_then(|symbol| {
+                    find_unique_widget_form_in_definition(&source_text, symbol, node)
+                })
+            });
+            let definition = source_symbol
+                .as_deref()
+                .and_then(|symbol| find_definition_in_text(&source_text, symbol));
+            (widget_form, definition)
+        };
+        let resolved_cursor = resolved_span_cursor
+            .or(resolved_widget_form)
+            .or(resolved_definition);
+        if let Some(cursor) = resolved_cursor {
+            if source_span.is_some() && resolved_span_cursor.is_some() {
+                inspect_debug_log(format!(
+                    "resolved parser source span at {}",
+                    format_cursor_for_log(cursor)
+                ));
+            }
+            if let Some(widget_cursor) = resolved_widget_form {
+                inspect_debug_log(format!(
+                    "resolved exact widget form at {}",
+                    format_cursor_for_log(widget_cursor)
+                ));
+            } else if let (Some(symbol), Some(def_cursor)) =
+                (source_symbol.as_deref(), resolved_definition)
+            {
+                inspect_debug_log(format!(
+                    "falling back to producer definition {symbol} at {}",
+                    format_cursor_for_log(def_cursor)
+                ));
+            }
+            self.active_buffer_mut().cursor = cursor;
+            self.sync_text_horizontal_scroll_to_viewport();
+        } else {
+            inspect_debug_log(
+                "source opened without exact cursor; no source span, widget form, or definition match",
+            );
+        }
+        let destination_buffer = self.active_buffer();
+        inspect_debug_log(format!(
+            "opened buffer={} path={} cursor={}",
+            destination_buffer.name,
+            destination_buffer
+                .path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<scratch>".to_string()),
+            format_cursor_for_log(destination_buffer.cursor)
+        ));
+        self.sync_runtime_context();
+        let destination = match (
+            resolved_span_cursor,
+            resolved_widget_form,
+            source_symbol.as_deref(),
+            resolved_definition,
+            opened_stale_snapshot,
+        ) {
+            (Some(_), _, _, _, true) => {
+                format!(
+                    "stale source snapshot for {}",
+                    inspect_node_debug_label(node)
+                )
+            }
+            (Some(_), _, _, _, false) => format!("source span {}", inspect_node_debug_label(node)),
+            (None, Some(_), _, _, _) => format!("widget form {}", inspect_node_debug_label(node)),
+            (None, None, Some(symbol), Some(_), _) => format!("definition {symbol}"),
+            (None, None, Some(symbol), None, _) => {
+                format!("source for {symbol} (definition not found)")
+            }
+            (None, None, None, _, _) => "source (exact location metadata unavailable)".to_string(),
+        };
+        self.show_sticky_message(format!(
+            "Inspect: opened {destination} for {}",
+            inspect_node_debug_label(node)
+        ));
+        Ok(true)
+    }
+
     pub fn handle_host_event(&mut self, event: HostEvent) {
         let message = match event {
             HostEvent::Status(msg) => msg,
@@ -3392,6 +4201,11 @@ impl Editor {
             self.finish_typing_undo_group();
         }
 
+        if self.inspect_mode && key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
+            self.exit_inspect_mode();
+            return;
+        }
+
         if self.handle_save_prompt_key(key) {
             return;
         }
@@ -3413,6 +4227,11 @@ impl Editor {
         }
 
         if self.handle_patcher_source_tab(key) {
+            return;
+        }
+
+        if is_inspect_mode_toggle_key(key) {
+            self.toggle_inspect_mode();
             return;
         }
 
@@ -4122,6 +4941,37 @@ impl Editor {
         let view_mode = self.active_buffer().view_mode;
         let widgets_visible = view_mode != ViewMode::TextOnly;
         let text_visible = view_mode != ViewMode::UiOnly;
+
+        if self.inspect_mode && widgets_visible {
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    self.update_widget_inspect_hover(
+                        self.active_tile,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    );
+                    return;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.handle_widget_inspect_click(
+                        self.active_tile,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    );
+                    return;
+                }
+                MouseEventKind::Down(MouseButton::Right)
+                | MouseEventKind::Up(MouseButton::Right) => {
+                    self.toggle_inspect_mode();
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -5590,6 +6440,8 @@ impl Editor {
     }
 
     pub fn refresh_runtime_side_effects(&mut self) {
+        let scene_trace = std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1");
+        let trace_started = std::time::Instant::now();
         self.last_layout_refresh_timings.clear();
         self.lisp_bindings = self.default_lisp_bindings.clone();
         self.lisp_bindings.extend(self.runtime.lisp_bindings());
@@ -5704,6 +6556,70 @@ impl Editor {
             self.active_buffer_mut().set_text(&text);
         }
 
+        for (name, text) in self.runtime.take_pending_set_text_for() {
+            let buffer_idx = self.ensure_scratch_buffer_named(&name);
+            self.buffers[buffer_idx].set_text(&text);
+            if self.active_buffer_idx() == buffer_idx {
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+
+        for (name, text, separator) in self.runtime.take_pending_append_text_for() {
+            let buffer_idx = self.ensure_scratch_buffer_named(&name);
+            let mut next_text = self.buffers[buffer_idx].text();
+            if !next_text.trim().is_empty() {
+                next_text.push_str(&separator);
+            }
+            next_text.push_str(&text);
+            self.buffers[buffer_idx].set_text(&next_text);
+            if self.active_buffer_idx() == buffer_idx {
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+
+        for (name, lines) in self.runtime.take_pending_append_lines_for() {
+            let buffer_idx = self.ensure_scratch_buffer_named(&name);
+            let mut next_text = self.buffers[buffer_idx].text();
+            if !next_text.trim().is_empty() {
+                next_text.push_str("\n\n");
+            }
+            next_text.push_str(&lines.join("\n"));
+            self.buffers[buffer_idx].set_text(&next_text);
+            if self.active_buffer_idx() == buffer_idx {
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+
+        for (name, lines) in self.runtime.take_pending_remove_lines_for() {
+            let Some(buffer_idx) = self.buffers.iter().position(|b| b.name == name) else {
+                continue;
+            };
+            if lines.is_empty() {
+                continue;
+            }
+            let mut previous_blank = true;
+            let mut kept = Vec::new();
+            for line in self.buffers[buffer_idx].lines.iter() {
+                if lines.iter().any(|target| target == line) {
+                    continue;
+                }
+                let blank = line.trim().is_empty();
+                if blank && previous_blank {
+                    continue;
+                }
+                kept.push(line.clone());
+                previous_blank = blank;
+            }
+            while kept.last().is_some_and(|line| line.trim().is_empty()) {
+                kept.pop();
+            }
+            let next_text = kept.join("\n");
+            self.buffers[buffer_idx].set_text(&next_text);
+            if self.active_buffer_idx() == buffer_idx {
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+
         if let Some(lines) = self.runtime.take_pending_set_lines() {
             let buffer = self.active_buffer_mut();
             buffer.lines = if lines.is_empty() {
@@ -5753,8 +6669,19 @@ impl Editor {
             }
         }
 
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] pre-widget-trees={:.3}ms",
+                trace_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let widget_trees_started = std::time::Instant::now();
         let mut inactive_buffers_to_refresh: HashMap<usize, Option<Vec<u64>>> = HashMap::new();
         let mut active_subtree_replacements = Vec::<EditorSubtreeReplacement>::new();
+        let mut inactive_subtree_batches: HashMap<
+            usize,
+            (Option<BufferId>, Vec<(u64, Value, Vec<ReactiveFieldKey>)>),
+        > = HashMap::new();
         self.sync_active_buffer_widget_snapshot_from_runtime();
         for pending in self.runtime.take_pending_buffer_widget_trees() {
             match pending {
@@ -5868,6 +6795,7 @@ impl Editor {
                     subtree_root_id,
                     tree,
                     reactive_dependencies,
+                    ..
                 } => {
                     let buffer_idx = match target {
                         EffectTarget::BufferId(Some(id)) => {
@@ -5910,56 +6838,138 @@ impl Editor {
                         });
                         continue;
                     }
-                    let replaced = {
-                        let buffer = &mut self.buffers[buffer_idx];
-                        let replaced = buffer.replace_widget_subtree(
-                            subtree_root_id,
-                            tree.deep_clone(),
-                            source_buffer_id,
-                            reactive_dependencies.clone(),
-                        );
-                        if replaced {
-                            buffer.view_mode = ViewMode::UiOnly;
-                        }
-                        replaced
-                    };
-                    if replaced {
-                        inactive_buffers_to_refresh
-                            .entry(buffer_idx)
-                            .or_insert_with(|| Some(Vec::new()))
-                            .as_mut()
-                            .map(|roots| roots.push(subtree_root_id));
-                    }
-                    self.trace_ui_tree_event_with(
-                        &buffer_name,
-                        if replaced {
-                            "applied-subtree"
-                        } else {
-                            "missed-subtree"
-                        },
-                        || {
-                            format!(
-                                "root={subtree_root_id} after={}",
-                                debug_widget_tree_summary(
-                                    self.buffers[buffer_idx].widget_tree.as_ref()
-                                )
-                            )
-                        },
-                    );
+                    // Pending subtree trees are freshly built by
+                    // annotate_widget_tree_stable_ids, so they can be adopted
+                    // without another deep clone. Batch them per buffer so the
+                    // snapshot merge/re-index runs once per buffer instead of
+                    // once per subtree.
+                    inactive_subtree_batches
+                        .entry(buffer_idx)
+                        .or_insert_with(|| (source_buffer_id, Vec::new()))
+                        .1
+                        .push((subtree_root_id, tree, reactive_dependencies));
                 }
             }
         }
+        for (buffer_idx, (source_buffer_id, replacements)) in inactive_subtree_batches {
+            let buffer_name = self.buffers[buffer_idx].name.clone();
+            let batch_applied = {
+                let buffer = &mut self.buffers[buffer_idx];
+                buffer.replace_widget_subtrees(&replacements, source_buffer_id)
+            };
+            if batch_applied {
+                self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
+                if let Some(roots) = inactive_buffers_to_refresh
+                    .entry(buffer_idx)
+                    .or_insert_with(|| Some(Vec::new()))
+                    .as_mut()
+                {
+                    roots.extend(replacements.iter().map(|(root_id, _, _)| *root_id));
+                }
+                self.trace_ui_tree_event_with(&buffer_name, "applied-subtree", || {
+                    format!(
+                        "roots={:?} after={}",
+                        replacements
+                            .iter()
+                            .map(|(root_id, _, _)| *root_id)
+                            .collect::<Vec<_>>(),
+                        debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref())
+                    )
+                });
+                continue;
+            }
+            // The batch merge is all-or-nothing; fall back to applying each
+            // subtree individually so valid roots still land when one is stale.
+            for (subtree_root_id, tree, reactive_dependencies) in replacements {
+                let replaced = {
+                    let buffer = &mut self.buffers[buffer_idx];
+                    let replaced = buffer.replace_widget_subtree(
+                        subtree_root_id,
+                        tree,
+                        source_buffer_id,
+                        reactive_dependencies,
+                    );
+                    if replaced {
+                        buffer.view_mode = ViewMode::UiOnly;
+                    }
+                    replaced
+                };
+                if replaced {
+                    inactive_buffers_to_refresh
+                        .entry(buffer_idx)
+                        .or_insert_with(|| Some(Vec::new()))
+                        .as_mut()
+                        .map(|roots| roots.push(subtree_root_id));
+                }
+                self.trace_ui_tree_event_with(
+                    &buffer_name,
+                    if replaced {
+                        "applied-subtree"
+                    } else {
+                        "missed-subtree"
+                    },
+                    || {
+                        format!(
+                            "root={subtree_root_id} after={}",
+                            debug_widget_tree_summary(
+                                self.buffers[buffer_idx].widget_tree.as_ref()
+                            )
+                        )
+                    },
+                );
+            }
+        }
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] pending-loop={:.3}ms",
+                widget_trees_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let flush_started = std::time::Instant::now();
         self.flush_active_subtree_replacements(&mut active_subtree_replacements);
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] active-flush={:.3}ms",
+                flush_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let inactive_started = std::time::Instant::now();
         for (buffer_idx, subtree_roots) in inactive_buffers_to_refresh {
             match subtree_roots {
                 Some(subtree_roots) => {
+                    let per_buffer = std::time::Instant::now();
+                    let root_count = subtree_roots.len();
                     self.refresh_inactive_tile_layouts_for_buffer_subtrees(
                         buffer_idx,
                         &subtree_roots,
                     );
+                    if scene_trace {
+                        eprintln!(
+                            "[side-effects-trace] inactive-subtrees buffer={} roots={} {:.3}ms",
+                            self.buffers[buffer_idx].name,
+                            root_count,
+                            per_buffer.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
                 }
-                None => self.refresh_inactive_tile_layouts_for_buffer(buffer_idx),
+                None => {
+                    let per_buffer = std::time::Instant::now();
+                    self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+                    if scene_trace {
+                        eprintln!(
+                            "[side-effects-trace] inactive-full buffer={} {:.3}ms",
+                            self.buffers[buffer_idx].name,
+                            per_buffer.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                }
             }
+        }
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] inactive-refresh-total={:.3}ms",
+                inactive_started.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         // Process set-buffer-mode-for (after buffer creation so targets exist)
@@ -6074,6 +7084,17 @@ impl Editor {
                             Some(format!("Could not update tabs for '{current}': {error}"));
                     }
                 }
+                crate::runtime::TileOp::ClearWindowTabsFor { current } => {
+                    if let Some(buffer_idx) = self.buffers.iter().position(|b| b.name == current) {
+                        if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(buffer_idx) {
+                            leaf.tabs.clear();
+                            leaf.selected_tab = None;
+                            leaf.cached_inactive_frame = None;
+                            leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
+                            self.mark_needs_redraw();
+                        }
+                    }
+                }
             }
         }
 
@@ -6109,6 +7130,12 @@ impl Editor {
         }
 
         self.sync_layout_to_active_leaf();
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] total={:.3}ms",
+                trace_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
     }
 
     /// Choose which buffer to display in a newly split tile.
@@ -6731,6 +7758,378 @@ fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
     }
 
     None
+}
+
+fn inspect_hit_test_layout(
+    node: &crate::layout::LayoutNode,
+    row: f32,
+    col: f32,
+) -> Option<&crate::layout::LayoutNode> {
+    if !rect_contains_point(node.rect, row, col) {
+        return None;
+    }
+    let deepest = node
+        .children
+        .iter()
+        .rev()
+        .find_map(|child| inspect_hit_test_layout(child, row, col));
+    match deepest {
+        Some(hit) if inspect_node_has_source_identity(hit) => Some(hit),
+        Some(_) if inspect_node_has_source_identity(node) => Some(node),
+        Some(hit) => Some(hit),
+        None => Some(node),
+    }
+}
+
+fn rect_contains_point(rect: Rect, row: f32, col: f32) -> bool {
+    row >= rect.row
+        && row < rect.row + rect.height
+        && col >= rect.col
+        && col < rect.col + rect.width
+}
+
+fn find_widget_form_in_text(
+    text: &str,
+    node: &crate::layout::LayoutNode,
+) -> Option<(usize, usize)> {
+    let mut identities = Vec::new();
+    if let Some(debug_name) = inspect_node_prop_string(node, "debug-name") {
+        identities.push(("debug-name".to_string(), debug_name));
+    }
+    if let Some(key) = inspect_node_prop_string(node, "key").or_else(|| node.stable_key.clone()) {
+        identities.push(("key".to_string(), key));
+    }
+    if identities.is_empty() {
+        return None;
+    }
+
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => {
+                in_comment = true;
+                idx += 1;
+            }
+            '"' => {
+                in_string = true;
+                idx += 1;
+            }
+            '(' => {
+                let form_start = idx;
+                idx += 1;
+                let mut cursor = skip_ws_and_comments(text, idx);
+                let head_start = cursor;
+                cursor = advance_symbol(text, cursor);
+                if cursor == head_start || &text[head_start..cursor] != node.widget_type {
+                    continue;
+                }
+                let Some(form_end) = find_matching_list_end(text, form_start) else {
+                    continue;
+                };
+                if widget_form_matches_identities(&text[form_start..form_end], &identities) {
+                    return Some(offset_to_position(text, form_start));
+                }
+                idx = form_end;
+            }
+            _ => idx += 1,
+        }
+    }
+
+    None
+}
+
+fn find_unique_widget_form_in_definition(
+    text: &str,
+    symbol: &str,
+    node: &crate::layout::LayoutNode,
+) -> Option<(usize, usize)> {
+    let (definition_start, definition_end) = find_definition_bounds_in_text(text, symbol)?;
+    let mut matches =
+        widget_form_positions_in_range(text, definition_start, definition_end, &node.widget_type);
+    if matches.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
+}
+
+fn find_definition_bounds_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let targets = ["def", "defmacro", "defwidget", "defmode"];
+
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => {
+                in_comment = true;
+                idx += 1;
+            }
+            '"' => {
+                in_string = true;
+                idx += 1;
+            }
+            '(' => {
+                let form_start = idx;
+                depth += 1;
+                idx += 1;
+                if depth != 1 {
+                    continue;
+                }
+                let mut cursor = skip_ws_and_comments(text, idx);
+                let head_start = cursor;
+                cursor = advance_symbol(text, cursor);
+                if cursor == head_start || !targets.contains(&&text[head_start..cursor]) {
+                    continue;
+                }
+                cursor = skip_ws_and_comments(text, cursor);
+                let name_start = if text[cursor..].starts_with('(') {
+                    skip_ws_and_comments(text, cursor + 1)
+                } else {
+                    cursor
+                };
+                let name_end = advance_symbol(text, name_start);
+                if name_end == name_start || &text[name_start..name_end] != symbol {
+                    continue;
+                }
+                if let Some(form_end) = find_matching_list_end(text, form_start) {
+                    return Some((form_start, form_end));
+                }
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                idx += 1;
+            }
+            _ => idx += 1,
+        }
+    }
+
+    None
+}
+
+fn widget_form_positions_in_range(
+    text: &str,
+    start: usize,
+    end: usize,
+    widget_type: &str,
+) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut idx = start;
+    let mut positions = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    while idx < end && idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => {
+                in_comment = true;
+                idx += 1;
+            }
+            '"' => {
+                in_string = true;
+                idx += 1;
+            }
+            '(' => {
+                let form_start = idx;
+                idx += 1;
+                let mut cursor = skip_ws_and_comments(text, idx);
+                let head_start = cursor;
+                cursor = advance_symbol(text, cursor);
+                if cursor != head_start && &text[head_start..cursor] == widget_type {
+                    positions.push(offset_to_position(text, form_start));
+                }
+            }
+            _ => idx += 1,
+        }
+    }
+
+    positions
+}
+
+fn find_matching_list_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut idx = start;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => in_comment = true,
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx + 1);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn widget_form_matches_identities(form: &str, identities: &[(String, String)]) -> bool {
+    let Ok(tokens) = crate::parser::Parser::new(form.to_string()).parse() else {
+        return false;
+    };
+    let mut ast = crate::parser::ASTParser::new(tokens);
+    let Ok(expressions) = ast.parse() else {
+        return false;
+    };
+    let Some(crate::parser::Expression::List(items)) = expressions.first() else {
+        return false;
+    };
+
+    identities.iter().any(|(key, expected)| {
+        items.windows(2).any(|pair| {
+            matches!(&pair[0], crate::parser::Expression::Keyword(candidate) if candidate == key)
+                && (expression_matches_source_identity(&pair[1], expected)
+                    || expression_may_generate_source_identity(&pair[1], expected))
+        })
+    })
+}
+
+fn expression_matches_source_identity(expr: &crate::parser::Expression, expected: &str) -> bool {
+    match expr {
+        crate::parser::Expression::String(value)
+        | crate::parser::Expression::Symbol(value)
+        | crate::parser::Expression::QuoteSymbol(value) => value == expected,
+        crate::parser::Expression::Keyword(value) => {
+            expected == value || expected == format!(":{value}")
+        }
+        crate::parser::Expression::Number(value) => expected
+            .parse::<f64>()
+            .is_ok_and(|expected| (expected - value).abs() < f64::EPSILON),
+        crate::parser::Expression::QuoteList(_)
+        | crate::parser::Expression::List(_)
+        | crate::parser::Expression::Quasiquote(_)
+        | crate::parser::Expression::Unquote(_) => false,
+    }
+}
+
+fn expression_may_generate_source_identity(
+    expr: &crate::parser::Expression,
+    expected: &str,
+) -> bool {
+    let crate::parser::Expression::List(items) = expr else {
+        return false;
+    };
+    let Some(crate::parser::Expression::Symbol(head)) = items.first() else {
+        return false;
+    };
+    if head != "str" {
+        return false;
+    }
+
+    let fragments = items[1..]
+        .iter()
+        .filter_map(|item| match item {
+            crate::parser::Expression::String(value) if !value.is_empty() => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    !fragments.is_empty() && string_contains_fragments_in_order(expected, &fragments)
+}
+
+fn string_contains_fragments_in_order(value: &str, fragments: &[&str]) -> bool {
+    let mut search_start = 0usize;
+    for fragment in fragments {
+        let Some(relative_idx) = value[search_start..].find(fragment) else {
+            return false;
+        };
+        search_start += relative_idx + fragment.len();
+    }
+    true
 }
 
 fn skip_ws_and_comments(text: &str, mut idx: usize) -> usize {

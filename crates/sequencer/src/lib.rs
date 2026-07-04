@@ -46,6 +46,7 @@ mod accumulator;
 pub mod agent;
 pub mod analysis;
 pub mod audio;
+pub mod audio_tap;
 pub mod audiograph;
 #[allow(dead_code)]
 mod compressor;
@@ -54,11 +55,15 @@ pub mod crash;
 #[allow(dead_code)]
 mod delay;
 #[allow(dead_code)]
+mod dimension;
+#[allow(dead_code)]
 mod dj_mixer;
 #[allow(dead_code)]
 mod dynamics;
 #[allow(dead_code)]
 pub mod effects;
+#[allow(dead_code)]
+mod eq8;
 #[allow(dead_code)]
 mod filter;
 #[allow(dead_code)]
@@ -68,21 +73,28 @@ pub mod graph;
 #[allow(dead_code)]
 mod limiter;
 #[allow(dead_code)]
-pub mod lisp_effect;
+pub mod lisp_host;
 pub mod mixer_volume;
 pub mod neural;
+#[allow(dead_code)]
+mod ott;
 pub mod paths;
+pub mod process;
 pub mod project;
 pub mod recorder;
 #[allow(dead_code)]
 pub mod reverb;
 pub mod sample_db;
+pub mod sample_import;
 pub mod sampler;
 mod scale;
 mod scheduled_event;
 mod scheduler;
 #[allow(dead_code)]
 pub mod sequencer;
+#[allow(dead_code)]
+mod space_echo;
+pub mod spring;
 #[allow(dead_code)]
 pub mod stereo_panner;
 #[allow(dead_code)]
@@ -97,5 +109,6 @@ pub mod ui;
 mod voice;
 #[allow(dead_code)]
 pub mod voice_modulator;
+pub mod warp_grid;
 
 pub mod engine;
