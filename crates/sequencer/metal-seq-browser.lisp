@@ -202,7 +202,7 @@
             (set! sbrowser-auditioned-sample path)
             (host-command "add-track-layer-rack" (dict :path path))))
         (set! sbrowser-tab "samples")
-        (status "Add layer rack")))))
+        (status "Add instrument rack")))))
 
 ;; ── SDF widgets ──
 
@@ -386,9 +386,11 @@
 
 (def sbrowser-select-audio-effect (item)
   (let ((kind (get item :kind)) (label (get item :label)))
-    (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect"))
-      (status (str label))
-      (status "Open a section or choose an effect"))))
+    (if (= kind "header")
+      false
+      (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect"))
+        (status (str label))
+        (status "Choose an effect")))))
 
 (def sbrowser-enter-new-effect-editor ()
   (set! sbrowser-editor-name "")
@@ -396,19 +398,21 @@
 
 (def sbrowser-activate-audio-effect (item)
   (let ((kind (get item :kind)) (name (get item :name)))
-    (if (= kind "builtin-audio-effect")
-      (do
-        (if (seq-has-selected-bus?)
-          (host-command "add-builtin-bus-effect" (dict :bus selected-bus :name name))
-          (host-command "add-builtin-effect" (dict :name name)))
-        (status (str "Add built-in effect: " name)))
-      (if (= kind "custom-audio-effect")
+    (if (= kind "header")
+      false
+      (if (= kind "builtin-audio-effect")
         (do
           (if (seq-has-selected-bus?)
-            (host-command "add-bus-effect" (dict :bus selected-bus :name name))
-            (host-command "add-effect" (dict :name name)))
-          (status (str "Add effect: " name)))
-        (status "Open a section or choose an effect")))))
+            (host-command "add-builtin-bus-effect" (dict :bus selected-bus :name name))
+            (host-command "add-builtin-effect" (dict :name name)))
+          (status (str "Add built-in effect: " name)))
+        (if (= kind "custom-audio-effect")
+          (do
+            (if (seq-has-selected-bus?)
+              (host-command "add-bus-effect" (dict :bus selected-bus :name name))
+              (host-command "add-effect" (dict :name name)))
+            (status (str "Add effect: " name)))
+          (status "Choose an effect"))))))
 
 (def sbrowser-select-midi-effect (item)
   (let ((kind (get item :kind)) (label (get item :label)))
@@ -523,28 +527,47 @@
   (set! sbrowser-editor-name "")
   (host-command "enter-new-instrument-editor" (dict)))
 
+(def sbrowser-add-builtin-instrument-track (name)
+  (if (= name "sampler")
+    (sbrowser-add-sampler-track)
+    (if (= name "modulator")
+      (sbrowser-add-modulator-track)
+      (if (= name "rack")
+        (sbrowser-add-rack-track)
+        (if (= name "layer-rack")
+          (sbrowser-add-layer-rack-track)
+          (status "Choose an instrument"))))))
+
 (def sbrowser-select-create-item (item)
-  (if (= (get item :kind) "sampler")
-    (sbrowser-enter-create-sampler-mode)
-    (if (= (get item :kind) "new-instrument")
-      (sbrowser-enter-new-instrument-editor)
-      (if (= (get item :kind) "instrument")
-        (sbrowser-add-instrument-track (get item :name))
-        (status "Open a folder or choose an instrument")))))
+  (let ((kind (get item :kind)))
+    (if (= kind "header")
+      false
+      (if (= kind "builtin-instrument")
+        (sbrowser-add-builtin-instrument-track (get item :name))
+        (if (= kind "sampler")
+          (sbrowser-enter-create-sampler-mode)
+          (if (= kind "new-instrument")
+            (sbrowser-enter-new-instrument-editor)
+            (if (= kind "instrument")
+              (sbrowser-add-instrument-track (get item :name))
+              (status "Choose an instrument"))))))))
 
 (def sbrowser-focus-create-item (item)
-  (if (= (get item :kind) "instrument")
-    (status (str (get item :label)))
-    (if (= (get item :kind) "folder")
-      (status (str "Folder: " (get item :label)))
-      (status "Open a folder or choose an instrument"))))
+  (let ((kind (get item :kind)))
+    (if (= kind "header")
+      false
+      (if (or (= kind "instrument") (= kind "builtin-instrument"))
+        (status (str (get item :label)))
+        (if (= kind "folder")
+          (status (str "Folder: " (get item :label)))
+          (status "Choose an instrument"))))))
 
 (def sbrowser-drop-instrument-on-folder (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((name (get payload :name))
           (folder (get target :folder)))
-      (if (and name folder)
+      (if (and (= (get payload :kind) "instrument") name folder)
         (do
           (host-command "move-saved-instrument" (dict :name name :folder folder))
           (status (str "Move instrument to " (get target :label))))
@@ -562,41 +585,6 @@
         :font-size 12
         (mag-glass)))))
 
-(def sbrowser-create-toolbar ()
-  (box :width :fill :padding 0.25
-    (h-stack :width :fill :gap 0.5 :align :center
-      (button "Sampler"
-        :variant :secondary
-        :icon :sampler
-        :flex 1
-        :height 1.3
-        :font-size 10.5
-        :on-click |x y r| (sbrowser-add-sampler-track)
-        :color :white)
-      (button "Mod"
-        :variant :secondary
-        :icon :waveform
-        :flex 1
-        :height 1.3
-        :font-size 10.5
-        :on-click |x y r| (sbrowser-add-modulator-track)
-        :color :white)
-      (button "Rack"
-        :variant :secondary
-        :icon :sampler
-        :flex 1
-        :height 1.3
-        :font-size 10.5
-        :on-click |x y r| (sbrowser-add-rack-track)
-        :color :white))))
-
-(def sbrowser-library-label ()
-  (box :width :fill :padding 0.25
-    (label "Library"
-      :font-size 10
-      :color :gray
-      :bg :transparent)))
-
 (def sbrowser-loading-instrument? ()
   (not (= sbrowser-loading-instrument-name "")))
 
@@ -611,9 +599,7 @@
 (def sbrowser-create-picker ()
   (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
     (sbrowser-create-search-bar)
-    (sbrowser-create-toolbar)
     (sbrowser-instrument-loading-row)
-    (sbrowser-library-label)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "create-picker-scroll" :width :fill :flex 1
         (tree
@@ -650,7 +636,7 @@
 (def sbrowser-samples-panel ()
   (let ((browser (seq-sample-browser sbrowser-filter sbrowser-selected-tags)))
     (let ((tags (get browser :tags))
-          (items (get browser :items)))
+        (items (get browser :items)))
       (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
         (box :key "sample-rack-actions" :width :fill :padding 0.15
           (h-stack :width :fill :gap 0.35 :align :center
@@ -669,7 +655,9 @@
               :flex 1
               :font-size 9.5
               :on-click |x y r| (sbrowser-add-layer-rack-track)
-              :color :white)))
+              :color :white)
+            ))
+        
         (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
           (v-stack :width :fill :gap 0.35
             (if (> (len sbrowser-selected-tags) 0)
@@ -706,9 +694,7 @@
 
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1
-    (sbrowser-create-toolbar)
     (sbrowser-instrument-loading-row)
-    (sbrowser-library-label)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "instruments-tab-scroll" :width :fill :flex 1
         (tree
@@ -740,7 +726,6 @@
   (let ((items (seq-audio-effect-tree sbrowser-filter)))
     (v-stack :key "audio-fx-tab-panel" :width :fill :gap 0.5 :flex 1
       (sbrowser-audio-fx-toolbar)
-      (sbrowser-library-label)
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (if (= (len items) 0)
           (sbrowser-empty-message "No audio effects found.")

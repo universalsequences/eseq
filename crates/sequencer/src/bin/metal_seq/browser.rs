@@ -30,6 +30,35 @@ pub(crate) struct InstrumentTreeNode {
     children: Vec<InstrumentTreeNode>,
 }
 
+struct BuiltinInstrumentDescriptor {
+    label: &'static str,
+    name: &'static str,
+    icon: &'static str,
+}
+
+const BUILTIN_INSTRUMENTS: &[BuiltinInstrumentDescriptor] = &[
+    BuiltinInstrumentDescriptor {
+        label: "Sampler",
+        name: "sampler",
+        icon: "sampler",
+    },
+    BuiltinInstrumentDescriptor {
+        label: "Modulator",
+        name: "modulator",
+        icon: "waveform",
+    },
+    BuiltinInstrumentDescriptor {
+        label: "Drum Rack",
+        name: "rack",
+        icon: "sampler",
+    },
+    BuiltinInstrumentDescriptor {
+        label: "Instrument Rack",
+        name: "layer-rack",
+        icon: "sampler",
+    },
+];
+
 pub(crate) fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNode> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -538,6 +567,58 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
     )
 }
 
+fn tree_header(label: &'static str) -> Value {
+    map_value([
+        ("label", Value::String(label.to_string())),
+        ("kind", Value::String("header".to_string())),
+        ("draggable", Value::Bool(false)),
+        ("drop-target", Value::Bool(false)),
+    ])
+}
+
+fn builtin_instrument_matches(item: &BuiltinInstrumentDescriptor, query_lower: &str) -> bool {
+    query_lower.is_empty()
+        || item.label.to_lowercase().contains(query_lower)
+        || item.name.contains(query_lower)
+}
+
+fn builtin_instrument_leaf(item: &BuiltinInstrumentDescriptor) -> Value {
+    map_value([
+        ("label", Value::String(item.label.to_string())),
+        ("name", Value::String(item.name.to_string())),
+        ("kind", Value::String("builtin-instrument".to_string())),
+        ("icon", Value::Keyword(item.icon.to_string())),
+        ("draggable", Value::Bool(false)),
+        ("drop-target", Value::Bool(false)),
+    ])
+}
+
+fn builtin_instrument_values(query_lower: &str) -> Vec<Value> {
+    BUILTIN_INSTRUMENTS
+        .iter()
+        .filter(|item| builtin_instrument_matches(item, query_lower))
+        .map(builtin_instrument_leaf)
+        .collect()
+}
+
+fn list_items(value: Value) -> Vec<Value> {
+    match value {
+        Value::List(items) => items
+            .into_iter()
+            .map(|item| item.borrow().clone())
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    }
+}
+
+fn append_tree_section(items: &mut Vec<Value>, label: &'static str, mut children: Vec<Value>) {
+    if children.is_empty() {
+        return;
+    }
+    items.push(tree_header(label));
+    items.append(&mut children);
+}
+
 fn filter_instrument_tree_nodes(
     items: &[InstrumentTreeNode],
     query_lower: &str,
@@ -571,9 +652,20 @@ pub(crate) fn build_instrument_tree_value(query: &str) -> Value {
     let query_lower = query.trim().to_lowercase();
     let root = std::path::Path::new("instruments");
     let top = build_instrument_tree_nodes(root, root);
-    let top = filter_instrument_tree_nodes(&top, &query_lower);
+    let custom = list_items(instrument_tree_nodes_to_value(
+        &filter_instrument_tree_nodes(&top, &query_lower),
+    ));
+    let builtin = builtin_instrument_values(&query_lower);
 
-    instrument_tree_nodes_to_value(&top)
+    let mut items = Vec::new();
+    if query_lower.is_empty() {
+        append_tree_section(&mut items, "Built-in", builtin);
+        append_tree_section(&mut items, "Library", custom);
+    } else {
+        items.extend(builtin);
+        items.extend(custom);
+    }
+    list_value(items)
 }
 
 pub(crate) fn filter_sample_tree_nodes(
@@ -709,18 +801,6 @@ fn effect_leaf(label: String, kind: &'static str) -> Value {
     ])
 }
 
-fn effect_section(label: &'static str, children: Vec<Value>) -> Option<Value> {
-    if children.is_empty() {
-        None
-    } else {
-        Some(map_value([
-            ("label", Value::String(label.to_string())),
-            ("kind", Value::String("section".to_string())),
-            ("children", list_value(children)),
-        ]))
-    }
-}
-
 fn filter_effect_names(names: Vec<String>, query_lower: &str) -> Vec<String> {
     if query_lower.is_empty() {
         names
@@ -732,8 +812,34 @@ fn filter_effect_names(names: Vec<String>, query_lower: &str) -> Vec<String> {
     }
 }
 
-pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
+fn build_audio_effect_tree_from_names(
+    query: &str,
+    builtin_names: Vec<String>,
+    custom_names: Vec<String>,
+) -> Value {
     let query_lower = query.trim().to_lowercase();
+    let builtin: Vec<Value> = filter_effect_names(builtin_names, &query_lower)
+        .into_iter()
+        .map(|name| effect_leaf(name, "builtin-audio-effect"))
+        .collect();
+
+    let custom: Vec<Value> = filter_effect_names(custom_names, &query_lower)
+        .into_iter()
+        .map(|name| effect_leaf(name, "custom-audio-effect"))
+        .collect();
+
+    let mut items = Vec::new();
+    if query_lower.is_empty() {
+        append_tree_section(&mut items, "Built-in", builtin);
+        append_tree_section(&mut items, "Custom", custom);
+    } else {
+        items.extend(builtin);
+        items.extend(custom);
+    }
+    list_value(items)
+}
+
+pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
     let mut builtin_names: Vec<String> =
         sequencer::effects::EffectDescriptor::builtin_insert_names()
             .iter()
@@ -741,25 +847,11 @@ pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
             .collect();
     // dgenlisp-backed builtins (DSP body is dgenlisp, but added via the builtin path)
     builtin_names.push(sequencer::conv_reverb::NAME.to_string());
-    let builtin: Vec<Value> = filter_effect_names(builtin_names, &query_lower)
-        .into_iter()
-        .map(|name| effect_leaf(name, "builtin-audio-effect"))
-        .collect();
-
-    let custom: Vec<Value> =
-        filter_effect_names(sequencer::lisp_host::list_saved_effects(), &query_lower)
-            .into_iter()
-            .map(|name| effect_leaf(name, "custom-audio-effect"))
-            .collect();
-
-    let mut sections = Vec::new();
-    if let Some(section) = effect_section("Built-in", builtin) {
-        sections.push(section);
-    }
-    if let Some(section) = effect_section("Custom", custom) {
-        sections.push(section);
-    }
-    list_value(sections)
+    build_audio_effect_tree_from_names(
+        query,
+        builtin_names,
+        sequencer::lisp_host::list_saved_effects(),
+    )
 }
 
 pub(crate) fn build_midi_effect_tree(query: &str) -> Value {
@@ -883,6 +975,31 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    fn top_level_tree_labels(value: &Value) -> Vec<String> {
+        let Value::List(items) = value else {
+            panic!("tree should be a list");
+        };
+        items
+            .iter()
+            .filter_map(|item| {
+                let item = item.borrow();
+                let Value::Map(map) = &*item else {
+                    return None;
+                };
+                map.get("label").and_then(|label| match &*label.borrow() {
+                    Value::String(label) => Some(label.clone()),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn audio_effect_tree_omits_empty_custom_header() {
+        let tree = build_audio_effect_tree_from_names("", vec!["EQ8".to_string()], Vec::new());
+        assert_eq!(top_level_tree_labels(&tree), vec!["Built-in", "EQ8"]);
     }
 
     #[test]

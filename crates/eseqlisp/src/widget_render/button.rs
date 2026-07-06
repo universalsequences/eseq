@@ -110,6 +110,7 @@ fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
         Some(Value::Keyword(value)) | Some(Value::String(value)) => match value.as_str() {
             "plus" | "new" => Some(0.0),
             "sampler" => Some(1.0),
+            "waveform" => Some(2.0),
             _ => None,
         },
         _ => None,
@@ -167,32 +168,37 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float d = 1.0;
     if (in.value_t < 0.5) {
         // plus
-        float2 bar_v = abs(p) - float2(0.07, 0.36);
+        float2 bar_v = abs(p) - float2(0.09, 0.38);
         float dv = length(max(bar_v, 0.0)) + min(max(bar_v.x, bar_v.y), 0.0);
-        float2 bar_h = abs(p) - float2(0.36, 0.07);
+        float2 bar_h = abs(p) - float2(0.38, 0.09);
         float dh = length(max(bar_h, 0.0)) + min(max(bar_h.x, bar_h.y), 0.0);
         d = min(dv, dh);
-    } else {
-        // sampler: stroked SP/MPC-style pad sampler glyph
-        p *= 1.24;
-        float2 body_q = abs(p) - float2(0.46, 0.34);
-        float body_base = length(max(body_q, 0.0)) + min(max(body_q.x, body_q.y), 0.0) - 0.13;
-        float body = abs(body_base) - 0.055;
-        float2 screen_q = abs(p - float2(-0.16, -0.18)) - float2(0.17, 0.05);
-        float screen_base = length(max(screen_q, 0.0)) + min(max(screen_q.x, screen_q.y), 0.0) - 0.04;
-        float screen = abs(screen_base) - 0.035;
+    } else if (in.value_t < 1.5) {
+        // sampler: compact Ableton-style device outline with heavier strokes
+        p *= 1.08;
+        float2 body_q = abs(p) - float2(0.50, 0.35);
+        float body_base = length(max(body_q, 0.0)) + min(max(body_q.x, body_q.y), 0.0) - 0.08;
+        float body = abs(body_base) - 0.075;
+        float2 screen_q = abs(p - float2(-0.18, -0.17)) - float2(0.17, 0.045);
+        float screen_base = length(max(screen_q, 0.0)) + min(max(screen_q.x, screen_q.y), 0.0) - 0.03;
+        float screen = abs(screen_base) - 0.052;
         float pad = 1.0;
         for (int ix = 0; ix < 2; ix++) {
             for (int iy = 0; iy < 2; iy++) {
-                float2 center = float2(0.07 + float(ix) * 0.20, -0.06 + float(iy) * 0.19);
-                float2 q = abs(p - center) - float2(0.065, 0.06);
-                float pd_base = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 0.045;
-                float pd = abs(pd_base) - 0.028;
+                float2 center = float2(0.08 + float(ix) * 0.20, -0.05 + float(iy) * 0.18);
+                float2 q = abs(p - center) - float2(0.065, 0.055);
+                float pd_base = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 0.03;
+                float pd = abs(pd_base) - 0.045;
                 pad = min(pad, pd);
             }
         }
-        float knob = abs(length(p - float2(-0.31, 0.16)) - 0.055) - 0.03;
+        float knob = abs(length(p - float2(-0.32, 0.16)) - 0.055) - 0.045;
         d = min(min(body, screen), min(pad, knob));
+    } else {
+        // waveform: a single stroked oscillator curve
+        float x = clamp(p.x, -0.55 * aspect, 0.55 * aspect);
+        float y = 0.28 * sin((x / max(aspect, 0.001) + 0.55) * 10.0);
+        d = length(float2(p.x - x, p.y - y)) - 0.085;
     }
 
     float edge = max(fwidth(d), 0.001) * 1.2;

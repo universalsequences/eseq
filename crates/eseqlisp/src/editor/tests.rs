@@ -3653,6 +3653,93 @@ fn tree_click_cursor_and_activate_have_separate_callbacks() {
 }
 
 #[test]
+fn tree_header_rows_are_not_selectable_or_keyboard_targets() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def selected (state ""))
+                (def highlighted (state ""))
+                (def activated (state ""))
+                (effect
+                  (tree
+                    :focusable true
+                    :row-height 1.0
+                    :items '(
+                      (:label "Built-in" :kind "header")
+                      (:label "Sampler" :kind "builtin-instrument")
+                      (:label "Library" :kind "header")
+                      (:label "digitone" :kind "instrument"))
+                    :on-select (lambda (item) (set! selected (get item :label)))
+                    :on-cursor-change (lambda (item) (set! highlighted (get item :label)))
+                    :on-activate (lambda (item) (set! activated (get item :label)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+    let layout = editor.widget_layout().expect("tree layout");
+    assert_eq!(layout.widget_type, "tree");
+    let col = layout.rect.col + 1.0;
+    let row_y = |row: f32| layout.rect.row + row + 0.5;
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), col as u16, row_y(1.0) as u16),
+        0,
+        0,
+        40,
+        10,
+        col,
+        row_y(1.0),
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String("Sampler".to_string())
+    );
+
+    editor
+        .runtime
+        .eval_str(r#"(set! selected "")"#)
+        .expect("reset selected");
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), col as u16, row_y(0.0) as u16),
+        0,
+        0,
+        40,
+        10,
+        col,
+        row_y(0.0),
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String(String::new()),
+        "clicking a header must not invoke on-select"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime.eval_str("highlighted").unwrap().unwrap(),
+        Value::String("digitone".to_string()),
+        "keyboard navigation should skip header rows"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime.eval_str("highlighted").unwrap().unwrap(),
+        Value::String("Sampler".to_string()),
+        "reverse keyboard navigation should skip header rows"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime.eval_str("activated").unwrap().unwrap(),
+        Value::String("Sampler".to_string())
+    );
+}
+
+#[test]
 fn tree_double_click_activates_leaf() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

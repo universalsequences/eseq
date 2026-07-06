@@ -66,8 +66,12 @@ struct TreeRow {
     depth: usize,
     label: String,
     detail: Option<String>,
+    icon: Option<f32>,
     has_children: bool,
     expanded: bool,
+    is_header: bool,
+    draggable: bool,
+    drop_target: bool,
     path: Vec<usize>,
     item_value: Value,
 }
@@ -106,6 +110,33 @@ fn get_item_field(item: &Value, key: &str) -> Option<Value> {
     }
 }
 
+fn item_string_field(item: &Value, key: &str) -> Option<String> {
+    match get_item_field(item, key) {
+        Some(Value::String(value)) | Some(Value::Keyword(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn item_bool_field(item: &Value, key: &str, default: bool) -> bool {
+    match get_item_field(item, key) {
+        Some(Value::Bool(value)) => value,
+        _ => default,
+    }
+}
+
+fn item_icon_value(item: &Value) -> Option<f32> {
+    match item_string_field(item, "icon")?.as_str() {
+        "plus" | "new" => Some(0.0),
+        "sampler" => Some(1.0),
+        "waveform" => Some(2.0),
+        _ => None,
+    }
+}
+
+fn item_is_header(item: &Value) -> bool {
+    matches!(item_string_field(item, "kind").as_deref(), Some("header"))
+}
+
 /// Walk nested items, producing a flat list of visible rows.
 /// When `expand_all` is true, all folder nodes are treated as expanded regardless
 /// of the `expanded` set — used when a search filter is active so every matching
@@ -131,6 +162,7 @@ fn flatten_items(
         };
         let children = get_item_field(&item, "children");
         let has_children = matches!(&children, Some(Value::List(l)) if !l.is_empty());
+        let is_header = item_is_header(&item);
         let detail = match get_item_field(&item, "detail") {
             Some(Value::String(s)) if !s.is_empty() => Some(s),
             Some(other) => {
@@ -148,8 +180,12 @@ fn flatten_items(
             depth,
             label,
             detail,
+            icon: item_icon_value(&item),
             has_children,
             expanded: is_expanded,
+            is_header,
+            draggable: item_bool_field(&item, "draggable", !is_header),
+            drop_target: item_bool_field(&item, "drop-target", !is_header),
             path: path.clone(),
             item_value: item.clone(),
         });
@@ -419,8 +455,10 @@ fn sync_state_with_external_selection(
         let mut rows = Vec::new();
         flatten_items(items, 0, &[], &state.expanded, expand_all, &mut rows);
         if let Some(row_idx) = rows.iter().position(|row| row.path == path) {
-            state.external_selected_row = Some(row_idx);
-            state.cursor_row = row_idx;
+            if row_is_interactive(&rows[row_idx]) {
+                state.external_selected_row = Some(row_idx);
+                state.cursor_row = row_idx;
+            }
         }
     }
     state.synced_selection = Some(selection_key);
@@ -430,19 +468,56 @@ fn sync_state_with_external_selection(
     }
 }
 
-fn normalize_state_for_visible_rows(
-    widget_id: u64,
-    state: &mut TreeState,
-    visible_row_count: usize,
-) {
-    if visible_row_count == 0 {
+fn row_is_interactive(row: &TreeRow) -> bool {
+    !row.is_header
+}
+
+fn first_interactive_row(rows: &[TreeRow]) -> Option<usize> {
+    rows.iter().position(row_is_interactive)
+}
+
+fn next_interactive_row(rows: &[TreeRow], current: usize) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .skip(current.saturating_add(1))
+        .find_map(|(idx, row)| row_is_interactive(row).then_some(idx))
+}
+
+fn previous_interactive_row(rows: &[TreeRow], current: usize) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .take(current)
+        .rev()
+        .find_map(|(idx, row)| row_is_interactive(row).then_some(idx))
+}
+
+fn nearest_interactive_row(rows: &[TreeRow], current: usize) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    if let Some(row) = rows.get(current)
+        && row_is_interactive(row)
+    {
+        return Some(current);
+    }
+    next_interactive_row(rows, current)
+        .or_else(|| previous_interactive_row(rows, current))
+        .or_else(|| first_interactive_row(rows))
+}
+
+fn normalize_state_for_visible_rows(widget_id: u64, state: &mut TreeState, rows: &[TreeRow]) {
+    if rows.is_empty() {
         return;
     }
 
     let original_state = state.clone();
-    state.cursor_row = state.cursor_row.min(visible_row_count - 1);
-    if matches!(state.external_selected_row, Some(row) if row >= visible_row_count) {
+    state.cursor_row = state.cursor_row.min(rows.len() - 1);
+    if matches!(state.external_selected_row, Some(row) if row >= rows.len() || !row_is_interactive(&rows[row]))
+    {
         state.external_selected_row = None;
+    }
+    if let Some(row) = nearest_interactive_row(rows, state.cursor_row) {
+        state.cursor_row = row;
     }
 
     if *state != original_state {
@@ -465,7 +540,7 @@ pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f
     if rows.is_empty() {
         return None;
     }
-    normalize_state_for_visible_rows(widget_key, &mut state, rows.len());
+    normalize_state_for_visible_rows(widget_key, &mut state, &rows);
     let selection_key = state.synced_selection.clone()?;
     let selected_row = if state.cursor_view_active {
         state.cursor_row
@@ -547,6 +622,7 @@ pub(crate) fn tree_drop_info(
     let row_relative = local_row - node.rect.row + scroll_offset;
     let target = if row_relative >= 0.0 {
         rows.get((row_relative / rh).floor() as usize)
+            .filter(|row| row.drop_target)
             .map(|row| item_to_map(&row.item_value))
             .unwrap_or(Value::Nil)
     } else {
@@ -778,6 +854,9 @@ impl WidgetDefinition for TreeWidget {
         }
 
         let row = &rows[row_idx];
+        if !row_is_interactive(row) {
+            return MouseEventOutcome::Consume;
+        }
 
         if row.has_children {
             toggle_expand(&mut state, &row.path);
@@ -814,7 +893,7 @@ impl WidgetDefinition for TreeWidget {
         let row_relative = local_row - node.rect.row + scroll_offset;
         let row_idx = (row_relative / rh).floor() as usize;
         let row = rows.get(row_idx)?;
-        if row.has_children {
+        if row.has_children || !row.draggable {
             return None;
         }
         Some(make_drag_value(&drag_type, &row.item_value))
@@ -828,14 +907,17 @@ impl WidgetDefinition for TreeWidget {
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
-        normalize_state_for_visible_rows(widget_key, &mut state, rows.len());
-        if rows.is_empty() {
+        normalize_state_for_visible_rows(widget_key, &mut state, &rows);
+        if first_interactive_row(&rows).is_none() {
             return None;
         }
 
         match key.code {
             KeyCode::Up => {
-                state.cursor_row = state.cursor_row.saturating_sub(1);
+                let Some(row_idx) = previous_interactive_row(&rows, state.cursor_row) else {
+                    return None;
+                };
+                state.cursor_row = row_idx;
                 state.cursor_view_active = true;
                 let row = rows[state.cursor_row].clone();
                 set_tree_state(widget_key, state);
@@ -845,7 +927,10 @@ impl WidgetDefinition for TreeWidget {
                 )))
             }
             KeyCode::Down => {
-                state.cursor_row = (state.cursor_row + 1).min(rows.len() - 1);
+                let Some(row_idx) = next_interactive_row(&rows, state.cursor_row) else {
+                    return None;
+                };
+                state.cursor_row = row_idx;
                 state.cursor_view_active = true;
                 let row = rows[state.cursor_row].clone();
                 set_tree_state(widget_key, state);
@@ -867,7 +952,10 @@ impl WidgetDefinition for TreeWidget {
                     )))
                 } else if row.has_children && row.expanded {
                     // Move to first child
-                    state.cursor_row = (state.cursor_row + 1).min(rows.len() - 1);
+                    let Some(row_idx) = next_interactive_row(&rows, state.cursor_row) else {
+                        return None;
+                    };
+                    state.cursor_row = row_idx;
                     state.cursor_view_active = true;
                     let row = rows[state.cursor_row].clone();
                     set_tree_state(widget_key, state);
@@ -960,7 +1048,7 @@ impl WidgetDefinition for TreeWidget {
         let row_relative = local_row - node.rect.row + scroll_offset;
         let row_idx = (row_relative / rh).floor() as usize;
         let row = rows.get(row_idx)?;
-        if row.has_children {
+        if row.has_children || !row_is_interactive(row) {
             return None;
         }
         state.cursor_row = row_idx;
@@ -1035,7 +1123,7 @@ impl WidgetDefinition for TreeWidget {
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
-        normalize_state_for_visible_rows(widget_key, &mut state, rows.len());
+        normalize_state_for_visible_rows(widget_key, &mut state, &rows);
 
         // Update the last-known expanded state for measure() to use
         update_last_known_expanded(widget_key, &state.expanded);
@@ -1079,12 +1167,14 @@ impl WidgetDefinition for TreeWidget {
 
             // Row background — only draw the alternate stripe. The other rows
             // are left as the underlying panel background.
-            let is_selected = if state.cursor_view_active {
+            let is_interactive = row_is_interactive(row);
+            let raw_selected = if state.cursor_view_active {
                 state.cursor_row == i
             } else {
                 state.external_selected_row == Some(i)
             };
-            let show_bg = is_selected || i % 2 == 1;
+            let is_selected = is_interactive && raw_selected;
+            let show_bg = is_interactive && (is_selected || i % 2 == 1);
             if show_bg {
                 let bg = if is_selected { selected_bg } else { bg_alt };
                 let row_inset = 0.15; // horizontal inset for rounded rect
@@ -1158,14 +1248,64 @@ impl WidgetDefinition for TreeWidget {
             // Label text (transparent bg — row Rect already handles background)
             // Offset down slightly to vertically center text in the row
             let text_y = y + (rh - 1.0) * 0.5;
-            let label_x = x + 2.2;
-            let fg = if row.has_children { folder_fg } else { file_fg };
+            let icon_height = rh.min(1.0);
+            let cell_aspect = if _viewport.cell_w > 0.0 {
+                _viewport.cell_h / _viewport.cell_w
+            } else {
+                1.0
+            };
+            let icon_width = (icon_height * cell_aspect).max(icon_height);
+            let icon_col = x + 1.55;
+            let label_x = if row.is_header {
+                x + 0.8
+            } else if row.icon.is_some() {
+                icon_col + icon_width + 0.55
+            } else {
+                x + 2.2
+            };
+            let fg = if row.is_header {
+                theme::FG_MUTED()
+            } else if row.has_children {
+                folder_fg
+            } else {
+                file_fg
+            };
             let transparent = Color {
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
                 a: 0.0,
             };
+            if let Some(icon) = row.icon {
+                let icon_rect = Rect {
+                    row: y + (rh - icon_height) * 0.5 - 0.08,
+                    col: icon_col,
+                    width: icon_width + 0.12,
+                    height: icon_height + 0.12,
+                };
+                let (ndc_min, ndc_max) = ndc_bounds(icon_rect, _viewport);
+                let px_w = icon_rect.width * _viewport.cell_w;
+                let px_h = icon_rect.height * _viewport.cell_h;
+                prims.push(MetalPrimitive::WidgetInstance {
+                    widget_type: "button-icon".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: icon,
+                        orientation: 0.0,
+                        itime: _viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
+                        color_a: [file_fg.r, file_fg.g, file_fg.b, file_fg.a],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: false,
+                });
+            }
             let detail_layout = row.detail.as_ref().map(|detail| {
                 let detail_width =
                     (detail.chars().count() as f32 * DETAIL_APPROX_CHAR_WIDTH).max(1.0);
@@ -1187,7 +1327,11 @@ impl WidgetDefinition for TreeWidget {
                     align_width: 0.0,
                     h_align: 0.0,
                     text: label_text,
-                    font_size,
+                    font_size: if row.is_header {
+                        (font_size * 0.82).min(10.0)
+                    } else {
+                        font_size
+                    },
                     scale: 1.0,
                     fg,
                     bg: transparent,

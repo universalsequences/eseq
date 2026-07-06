@@ -10148,6 +10148,38 @@ mod tests {
             .find_map(|child| find_layout_text_containing(child, needle))
     }
 
+    fn top_level_tree_field_strings(value: &Value, field: &str) -> Vec<Option<String>> {
+        let Value::List(items) = value else {
+            panic!("tree should be a list: {value:?}");
+        };
+        items
+            .iter()
+            .map(|item| {
+                let item = item.borrow();
+                let Value::Map(map) = &*item else {
+                    return None;
+                };
+                value_map_string(map, field)
+            })
+            .collect()
+    }
+
+    fn tree_contains_kind(value: &Value, expected_kind: &str) -> bool {
+        match value {
+            Value::Map(map) => {
+                if value_map_string(map, "kind").as_deref() == Some(expected_kind) {
+                    return true;
+                }
+                map.get("children")
+                    .is_some_and(|children| tree_contains_kind(&children.borrow(), expected_kind))
+            }
+            Value::List(items) => items
+                .iter()
+                .any(|item| tree_contains_kind(&item.borrow(), expected_kind)),
+            _ => false,
+        }
+    }
+
     #[test]
     fn metal_seq_browser_instrument_tab_builds_instrument_tree() {
         let editor = browser_editor_on_instrument_tab();
@@ -10164,6 +10196,48 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_instrument_tree_starts_with_builtin_rows() {
+        let tree = build_instrument_tree_value("");
+        let labels = top_level_tree_field_strings(&tree, "label");
+        let kinds = top_level_tree_field_strings(&tree, "kind");
+        let names = top_level_tree_field_strings(&tree, "name");
+
+        assert_eq!(
+            &labels[..5],
+            &[
+                Some("Built-in".to_string()),
+                Some("Sampler".to_string()),
+                Some("Modulator".to_string()),
+                Some("Drum Rack".to_string()),
+                Some("Instrument Rack".to_string()),
+            ]
+        );
+        assert_eq!(kinds[0].as_deref(), Some("header"));
+        assert_eq!(kinds[1].as_deref(), Some("builtin-instrument"));
+        assert_eq!(kinds[2].as_deref(), Some("builtin-instrument"));
+        assert_eq!(kinds[3].as_deref(), Some("builtin-instrument"));
+        assert_eq!(kinds[4].as_deref(), Some("builtin-instrument"));
+        assert_eq!(names[3].as_deref(), Some("rack"));
+        assert_eq!(names[4].as_deref(), Some("layer-rack"));
+    }
+
+    #[test]
+    fn metal_seq_instrument_tree_search_filters_builtins_without_headers() {
+        let tree = build_instrument_tree_value("samp");
+        let labels = top_level_tree_field_strings(&tree, "label");
+        let kinds = top_level_tree_field_strings(&tree, "kind");
+
+        assert_eq!(
+            labels.first().and_then(|label| label.as_deref()),
+            Some("Sampler")
+        );
+        assert!(
+            kinds.iter().all(|kind| kind.as_deref() != Some("header")),
+            "search results should not include section headers: {tree:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_audio_effect_tree_excludes_new_effect_action() {
         let tree = build_audio_effect_tree("+ New Effect");
         assert!(
@@ -10173,6 +10247,48 @@ mod tests {
         assert!(
             !value_contains_string(&tree, "+ New Effect"),
             "effect creation should be a sidebar button, not a tree label"
+        );
+    }
+
+    #[test]
+    fn metal_seq_audio_effect_tree_is_flattened() {
+        let tree = build_audio_effect_tree("");
+        let labels = top_level_tree_field_strings(&tree, "label");
+        let kinds = top_level_tree_field_strings(&tree, "kind");
+
+        assert_eq!(
+            labels.first().and_then(|label| label.as_deref()),
+            Some("Built-in")
+        );
+        assert_eq!(
+            kinds.first().and_then(|kind| kind.as_deref()),
+            Some("header")
+        );
+        assert!(
+            !tree_contains_kind(&tree, "section"),
+            "audio effect tree should not contain collapsible section nodes: {tree:?}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_audio_effect_tree_search_has_no_headers_or_sections() {
+        let tree = build_audio_effect_tree("filter");
+        let labels = top_level_tree_field_strings(&tree, "label");
+        let kinds = top_level_tree_field_strings(&tree, "kind");
+
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.as_deref() == Some("Filter")),
+            "search should include matching built-in effects: {tree:?}"
+        );
+        assert!(
+            kinds.iter().all(|kind| kind.as_deref() != Some("header")),
+            "search results should not include headers: {tree:?}"
+        );
+        assert!(
+            !tree_contains_kind(&tree, "section"),
+            "search results should not include section nodes: {tree:?}"
         );
     }
 
@@ -11567,6 +11683,60 @@ mod tests {
                 .eval_str("sbrowser-tab")
                 .expect("read browser tab"),
             Some(Value::String("presets".to_string()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_builtin_instrument_rows_queue_rack_tracks() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-create-item
+                    (dict :kind "builtin-instrument" :name "rack" :label "Drum Rack"))"#,
+            )
+            .expect("select drum rack");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-rack");
+                assert!(
+                    matches!(payload, Value::Map(map) if map.is_empty()),
+                    "drum rack payload should be an empty dict: {payload:?}"
+                );
+            }
+            other => panic!("expected add-track-rack host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor.runtime_mut().take_status_message(),
+            Some("Add drum rack".to_string())
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-create-item
+                    (dict :kind "builtin-instrument" :name "layer-rack" :label "Instrument Rack"))"#,
+            )
+            .expect("select instrument rack");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-layer-rack");
+                assert!(
+                    matches!(payload, Value::Map(map) if map.is_empty()),
+                    "instrument rack payload should be an empty dict: {payload:?}"
+                );
+            }
+            other => panic!("expected add-track-layer-rack host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor.runtime_mut().take_status_message(),
+            Some("Add instrument rack".to_string())
         );
     }
 
