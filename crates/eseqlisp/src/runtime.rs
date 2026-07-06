@@ -11,8 +11,9 @@ use crate::buffer::{BufferTextStyle, CommittedBufferUiSnapshot};
 use crate::host::{BufferId, HostCommand};
 use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{
-    LayoutEngine, LayoutNode, TextMeasurer, reuse_layout_failure_reason, reuse_layout_node,
-    reuse_layout_node_for_subtree_path_result, same_layout_geometry, subtree_root_paths,
+    LayoutEngine, LayoutNode, TextMeasurer, relayout_subtree_path_result,
+    reuse_layout_failure_reason, reuse_layout_node, reuse_layout_node_for_subtree_path_result,
+    same_layout_geometry, subtree_root_paths,
 };
 use crate::reactive::ReactiveRegistry;
 use crate::vm::{
@@ -2964,13 +2965,44 @@ impl Runtime {
             };
             let child_layout = layout_node_at_path(layout.as_ref(), child_path)
                 .ok_or_else(|| format!("missing-layout-path:{subtree_root_id}"))?;
-            let updated = reuse_layout_node_for_subtree_path_result(
+            let updated = match reuse_layout_node_for_subtree_path_result(
                 layout.as_ref(),
                 tree,
                 child_path,
                 &mut dirty_widget_ids,
-            )
-            .map_err(|reason| format!("subtree:{subtree_root_id}:{reason}"))?;
+            ) {
+                Ok(updated) => updated,
+                Err(reuse_reason) => {
+                    let engine = if let Some(measurer) = self.text_measurer.as_deref() {
+                        LayoutEngine::with_text_measurer_exact(
+                            self.layout_cols,
+                            self.layout_rows,
+                            self.layout_aspect,
+                            measurer,
+                            self.layout_cell_w,
+                            self.layout_cell_h,
+                        )
+                    } else {
+                        LayoutEngine::new_exact(
+                            self.layout_cols,
+                            self.layout_rows,
+                            self.layout_aspect,
+                        )
+                    };
+                    relayout_subtree_path_result(
+                        layout.as_ref(),
+                        tree,
+                        child_path,
+                        &mut dirty_widget_ids,
+                        &engine,
+                    )
+                    .map_err(|relayout_reason| {
+                        format!(
+                            "subtree:{subtree_root_id}:{reuse_reason}; partial-relayout:{relayout_reason}"
+                        )
+                    })?
+                }
+            };
             let updated_child = layout_node_at_path(&updated, child_path)
                 .ok_or_else(|| format!("missing-updated-layout-path:{subtree_root_id}"))?;
             self.reactive_registry

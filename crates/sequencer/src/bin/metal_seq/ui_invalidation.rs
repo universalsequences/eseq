@@ -354,6 +354,15 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
             },
         ) => track == old_track,
         (
+            UiInvalidation::PianoRoll {
+                track,
+                change: PianoRollInvalidation::Items,
+            },
+            UiInvalidation::PianoRoll {
+                track: old_track, ..
+            },
+        ) => track == old_track,
+        (
             UiInvalidation::TrackFx {
                 track,
                 change: TrackFxInvalidation::Topology,
@@ -439,5 +448,43 @@ mod tests {
             step: 4,
             change: StepInvalidation::Active,
         }));
+    }
+
+    #[test]
+    fn piano_roll_item_invalidation_supersedes_selection_for_same_track() {
+        let queue = UiInvalidationQueue::new();
+        queue.push(UiInvalidation::PianoRoll {
+            track: 1,
+            change: PianoRollInvalidation::Selection,
+        });
+        queue.push(UiInvalidation::PianoRoll {
+            track: 1,
+            change: PianoRollInvalidation::Items,
+        });
+
+        assert_eq!(
+            queue.drain(),
+            vec![UiInvalidation::PianoRoll {
+                track: 1,
+                change: PianoRollInvalidation::Items,
+            }]
+        );
+
+        queue.push(UiInvalidation::PianoRoll {
+            track: 1,
+            change: PianoRollInvalidation::Items,
+        });
+        queue.push(UiInvalidation::PianoRoll {
+            track: 1,
+            change: PianoRollInvalidation::Selection,
+        });
+
+        assert_eq!(
+            queue.drain(),
+            vec![UiInvalidation::PianoRoll {
+                track: 1,
+                change: PianoRollInvalidation::Items,
+            }]
+        );
     }
 }

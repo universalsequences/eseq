@@ -271,6 +271,15 @@ fn pattern_length_shortcut(key: &crossterm::event::KeyEvent) -> Option<PatternLe
     }
 }
 
+fn is_trigger_recording_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Char(','), KeyModifiers::SUPER)
+    )
+}
+
 fn is_plain_tab_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -739,6 +748,16 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         return false;
     }
 
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && is_trigger_recording_shortcut(key)
+    {
+        let _ = editor.runtime_mut().eval_str("(seq-toggle-record)");
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+        return true;
+    }
+
     if number_picker_pending_edit_key(key) && current_step_param_number_picker_is_editing(editor) {
         return false;
     }
@@ -929,10 +948,9 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 if patcher_handles_plain_tab(editor) {
                     return false;
                 }
-                let _ = if let Some(callable) =
-                    editor
-                        .runtime_mut()
-                        .global_value("seq-toggle-current-track-expanded-main")
+                let _ = if let Some(callable) = editor
+                    .runtime_mut()
+                    .global_value("seq-toggle-current-track-expanded-main")
                 {
                     editor.runtime_mut().invoke(callable, vec![])
                 } else {
@@ -1425,6 +1443,56 @@ mod live_keyboard_tests {
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(Mutex::new(None)),
         )
+    }
+
+    #[test]
+    fn command_comma_toggles_trigger_recording_without_claiming_plain_comma() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*source*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def record-toggle-count (state 0))
+                (def seq-toggle-record ()
+                  (set! record-toggle-count (+ record-toggle-count 1)))
+                "#,
+            )
+            .expect("install record toggle hook");
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char(','), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
     }
 
     #[test]

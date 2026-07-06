@@ -79,7 +79,7 @@
 (defstate seq-patcher-source-buffer "")
 (defstate seq-registered-step-tabs '())
 
-(def lower-fx-layout-height 11.5)
+(def lower-fx-layout-height piano-roll-default-pane-height)
 
 (def seq-step-tab-label (tab)
   (nth tab 0))
@@ -418,24 +418,22 @@
 
 (bind-key "C-c s" "seq-script-picker")
 
-(def seq-step-and-track-panel-layout-spec (lower-buffer)
-  (if (= lower-buffer "*piano-roll*")
-    (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
-    (list :cols :gap 1
-      0.78 (seq-main-step-tile-layout-spec)
-      0.22 (list :rows :gap 1
-        0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)
-        0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)))))
+(def seq-step-and-track-panel-layout-spec ()
+  (list :cols :gap 1
+    0.78 (seq-main-step-tile-layout-spec)
+    0.22 (list :rows :gap 1
+      0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)
+      0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))))
 
 (def seq-samples-sidebar-layout-spec ()
   (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42))
 
-(def seq-main-and-mixer-layout-spec (lower-buffer)
+(def seq-main-and-mixer-layout-spec ()
   (if mixer-panel-visible
     (list :rows :gap 1
-      0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
+      0.55 (seq-step-and-track-panel-layout-spec)
       0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 14 :max-height 14))
-    (seq-step-and-track-panel-layout-spec lower-buffer)))
+    (seq-step-and-track-panel-layout-spec)))
 
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (list :rows :gap 1
@@ -443,8 +441,8 @@
     0.95 (if samples-sidebar-visible
       (list :cols :gap 1
         0.2 (seq-samples-sidebar-layout-spec)
-        0.8 (seq-main-and-mixer-layout-spec lower-buffer))
-      (seq-main-and-mixer-layout-spec lower-buffer))
+        0.8 (seq-main-and-mixer-layout-spec))
+      (seq-main-and-mixer-layout-spec))
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
 (def seq-patcher-bottom-bar-layout-spec ()
@@ -491,7 +489,7 @@
 (def seq-apply-piano-roll-layout ()
   (do
     (set! lower-panel-buffer "*piano-roll*")
-    (seq-apply-lower-panel-layout "*piano-roll*" 1.0 13 50)))
+    (seq-apply-lower-panel-layout "*piano-roll*" 0.33 lower-fx-layout-height 50)))
 
 (def seq-apply-instrument-patcher-layout (patcher-buffer)
   (do
@@ -563,42 +561,45 @@
       (set-window-buffer step-panel-buffer)
       (seq-apply-fx-layout))
     (do
-      (set-window-buffer "*fx*")
+      (if (= (current-buffer-name) "*piano-roll*")
+        (set-window-buffer "*fx*")
+        (set-window-buffer-for "*piano-roll*" "*fx*"))
       (seq-apply-fx-layout))))
 
-(def seq-open-piano-roll-bottom ()
+(def seq-open-piano-roll-bottom-for-track (track)
   (do
     (if (= step-panel-buffer "*piano-roll*")
       (set! step-panel-buffer (seq-current-step-buffer))
       nil)
-    (set-window-buffer "*piano-roll*")
+    (if (= (current-buffer-name) "*fx*")
+      (set-window-buffer "*piano-roll*")
+      (set-window-buffer-for "*fx*" "*piano-roll*"))
+    (piano-roll-request-fit-for-track track)
     (seq-apply-piano-roll-layout)))
 
+(def seq-open-piano-roll-bottom ()
+  (seq-open-piano-roll-bottom-for-track SEQ.current-track))
+
 (def seq-open-piano-roll-main ()
-  (do
-    (if (= lower-panel-buffer "*piano-roll*")
-      (set! lower-panel-buffer "*fx*")
-      nil)
-    (set! remembered-step-panel-buffer (seq-current-step-buffer))
-    (set! step-panel-buffer "*piano-roll*")
-    (set-window-buffer "*piano-roll*")
-    (seq-apply-fx-layout)))
+  (seq-open-piano-roll-bottom))
 
 (def seq-open-piano-roll-preferred ()
-  (if (= piano-roll-placement :main)
-    (seq-open-piano-roll-main)
-    (seq-open-piano-roll-bottom)))
+  (seq-open-piano-roll-bottom))
 
 (def seq-show-sequencer-main ()
-  (do
-    (set! remembered-step-panel-buffer "*sequencer*")
-    (if (= step-panel-buffer "*piano-roll*")
-      nil
-      (set! step-panel-buffer "*sequencer*"))
-    (set-window-buffer "*sequencer*")
-    (if (= lower-panel-buffer "*piano-roll*")
-      (seq-apply-piano-roll-layout)
-      (seq-apply-fx-layout))))
+  (if (and (= (current-buffer-name) "*sequencer*")
+        (= seq-layout-mode :lower-panel)
+        (= step-panel-buffer "*sequencer*"))
+    nil
+    (do
+      (set! remembered-step-panel-buffer "*sequencer*")
+      (if (= step-panel-buffer "*piano-roll*")
+        nil
+        (set! step-panel-buffer "*sequencer*"))
+      (set-window-buffer "*sequencer*")
+      (if (= lower-panel-buffer "*piano-roll*")
+        (seq-apply-piano-roll-layout)
+        (seq-apply-fx-layout)))))
 
 (def seq-toggle-current-track-expanded-main ()
   (do
@@ -606,28 +607,21 @@
     (seqv-toggle-current-track-expanded)))
 
 (def seq-toggle-piano-roll-main ()
-  (if (= step-panel-buffer "*piano-roll*")
-    (seq-close-piano-roll)
-    (seq-open-piano-roll-main)))
+  (seq-toggle-main-or-piano-roll))
 
 (def seq-toggle-piano-roll-placement ()
-  (if (= piano-roll-placement :main)
-    (do
-      (set! piano-roll-placement :bottom)
-      (if (seq-piano-roll-open?)
-        (seq-open-piano-roll-bottom)
-        nil))
-    (do
-      (set! piano-roll-placement :main)
-      (if (seq-piano-roll-open?)
-        (seq-open-piano-roll-main)
-        nil))))
+  (do
+    (set! piano-roll-placement :bottom)
+    (if (= step-panel-buffer "*piano-roll*")
+      (seq-open-piano-roll-bottom)
+      nil)))
 
 (def seq-toggle-fx-piano-roll ()
   (if (= (current-buffer-name) "*fx*")
     (do
       (set-window-buffer "*piano-roll*")
       (set! lower-panel-buffer "*piano-roll*")
+      (piano-roll-request-fit)
       (seq-apply-piano-roll-layout))
     (if (= (current-buffer-name) "*piano-roll*")
       (do
@@ -638,6 +632,7 @@
         (do
           (set-window-buffer-for "*fx*" "*piano-roll*")
           (set! lower-panel-buffer "*piano-roll*")
+          (piano-roll-request-fit)
           (seq-apply-piano-roll-layout))
         (do
           (set-window-buffer-for "*piano-roll*" "*fx*")
@@ -652,7 +647,7 @@
     (host-command "toggle-instrument-patcher-source" (dict))
     (if (seq-piano-roll-open?)
       (seq-close-piano-roll)
-      (seq-open-piano-roll-preferred))))
+      (seq-open-piano-roll-bottom))))
 
 (def seq-show-fx-lower-panel ()
   (if (= lower-panel-buffer "*piano-roll*")

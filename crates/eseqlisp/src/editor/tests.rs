@@ -8499,7 +8499,16 @@ fn timeline_scroll_content_vertical_wheel_emits_lane_scroll_action() {
                 (effect
                   (timeline
                     :height 8
-                    :lanes (list (dict :id 0 :label "L0"))
+                    :lane-height 1
+                    :lanes (list
+                      (dict :id 0 :label "L0") (dict :id 1 :label "L1")
+                      (dict :id 2 :label "L2") (dict :id 3 :label "L3")
+                      (dict :id 4 :label "L4") (dict :id 5 :label "L5")
+                      (dict :id 6 :label "L6") (dict :id 7 :label "L7")
+                      (dict :id 8 :label "L8") (dict :id 9 :label "L9")
+                      (dict :id 10 :label "L10") (dict :id 11 :label "L11")
+                      (dict :id 12 :label "L12") (dict :id 13 :label "L13")
+                      (dict :id 14 :label "L14") (dict :id 15 :label "L15"))
                     :items (list (dict :id 10 :lane 0 :start 4 :end 8))
                     :view-start 0
                     :view-duration 16

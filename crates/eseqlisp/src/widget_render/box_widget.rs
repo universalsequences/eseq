@@ -290,6 +290,25 @@ impl WidgetDefinition for BoxWidget {
             } else {
                 get_prop_num(node, "width").map(f64_to_f32)
             };
+        let fixed_height =
+            if prop_is_keyword(node, "height", "fill") && constraints.max_height.is_finite() {
+                Some(constraints.max_height)
+            } else {
+                get_prop_num(node, "height").map(f64_to_f32)
+            };
+        let aspect_height = fixed_width.and_then(|width| {
+            get_prop_num(node, "aspect")
+                .map(f64_to_f32)
+                .filter(|value| *value > 0.0)
+                .map(|pixel_aspect| {
+                    let cell_pixel_aspect = if ctx.cell_h > 0.0 {
+                        ctx.cell_w / ctx.cell_h
+                    } else {
+                        1.0
+                    };
+                    width / pixel_aspect * cell_pixel_aspect
+                })
+        });
         let child_constraints = if let Some(width) = fixed_width {
             let mut constrained = constraints;
             constrained.max_width = (width - padding * 2.0).max(0.0);
@@ -298,34 +317,38 @@ impl WidgetDefinition for BoxWidget {
         } else {
             shrink_constraints_xy(constraints, padding, pad_y)
         };
-        let child_size = children
-            .first()
-            .and_then(|child| measure_child(child, child_constraints));
+        let child_size =
+            if fixed_width.is_some() && (fixed_height.is_some() || aspect_height.is_some()) {
+                None
+            } else {
+                children
+                    .first()
+                    .and_then(|child| measure_child(child, child_constraints))
+            };
         let width = fixed_width.unwrap_or_else(|| {
             child_size
                 .map(|size| size.width + padding * 2.0)
                 .unwrap_or(padding * 2.0)
         });
-        let height =
-            if prop_is_keyword(node, "height", "fill") && constraints.max_height.is_finite() {
-                constraints.max_height
-            } else if let Some(height) = get_prop_num(node, "height").map(f64_to_f32) {
-                height
-            } else if let Some(pixel_aspect) = get_prop_num(node, "aspect")
-                .map(f64_to_f32)
-                .filter(|value| *value > 0.0)
-            {
-                let cell_pixel_aspect = if ctx.cell_h > 0.0 {
-                    ctx.cell_w / ctx.cell_h
-                } else {
-                    1.0
-                };
-                width / pixel_aspect * cell_pixel_aspect
+        let height = if let Some(height) = fixed_height {
+            height
+        } else if let Some(height) = aspect_height {
+            height
+        } else if let Some(pixel_aspect) = get_prop_num(node, "aspect")
+            .map(f64_to_f32)
+            .filter(|value| *value > 0.0)
+        {
+            let cell_pixel_aspect = if ctx.cell_h > 0.0 {
+                ctx.cell_w / ctx.cell_h
             } else {
-                child_size
-                    .map(|size| size.height + pad_y * 2.0)
-                    .unwrap_or(pad_y * 2.0)
+                1.0
             };
+            width / pixel_aspect * cell_pixel_aspect
+        } else {
+            child_size
+                .map(|size| size.height + pad_y * 2.0)
+                .unwrap_or(pad_y * 2.0)
+        };
         Some(Size { width, height })
     }
 

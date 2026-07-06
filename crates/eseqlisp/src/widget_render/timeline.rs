@@ -83,6 +83,7 @@ struct TimelineView {
     sidebar_style: SidebarStyle,
     lane_scroll: f64,
     lane_height: Option<f32>,
+    scroll_viewport_height: Option<f32>,
     snap: f64,
     resize_snap: f64,
     resize_snap_to_grid: bool,
@@ -1007,7 +1008,7 @@ impl TimelineView {
     fn from_props(props: &HashMap<String, Value>, rect: Rect) -> Self {
         let view_duration = get_num(props, "view-duration", 16.0).max(0.0001);
         let view_start = get_num(props, "view-start", 0.0).max(0.0);
-        Self {
+        let mut view = Self {
             rect,
             header_height: get_num(props, "header-height", 1.0).max(0.0) as f32,
             sidebar_width: get_num(props, "sidebar-width", 0.0).max(0.0) as f32,
@@ -1035,6 +1036,10 @@ impl TimelineView {
                 .get("lane-height")
                 .and_then(as_number)
                 .map(|height| height.max(0.2) as f32),
+            scroll_viewport_height: props
+                .get("scroll-viewport-height")
+                .and_then(as_number)
+                .map(|height| height.max(0.0) as f32),
             snap: get_num(props, "snap", 0.0).max(0.0),
             resize_snap: get_num(props, "resize-snap", get_num(props, "snap", 0.0)).max(0.0),
             resize_snap_to_grid: matches!(
@@ -1079,7 +1084,9 @@ impl TimelineView {
             items: get_items(props),
             selection: get_selection(props),
             selection_rect: get_selection_rect(props),
-        }
+        };
+        view.lane_scroll = view.clamp_lane_scroll(view.lane_scroll);
+        view
     }
 
     fn content_rect(&self) -> Rect {
@@ -1162,6 +1169,24 @@ impl TimelineView {
             .min(lane_count)
             .max(1);
         (content.height / visible_lanes as f32).max(0.2)
+    }
+
+    fn max_lane_scroll(&self) -> f64 {
+        let content = self.content_rect();
+        let scroll_content_height = self
+            .scroll_viewport_height
+            .map(|height| (height - self.header_height).max(0.0))
+            .unwrap_or(content.height);
+        if scroll_content_height <= 0.0 || self.lanes.is_empty() {
+            return 0.0;
+        }
+        let lane_height = self.lane_height().max(0.2) as f64;
+        let visible_lanes = (scroll_content_height as f64 / lane_height).max(1.0);
+        (self.lanes.len() as f64 - visible_lanes).max(0.0)
+    }
+
+    fn clamp_lane_scroll(&self, lane_scroll: f64) -> f64 {
+        lane_scroll.max(0.0).min(self.max_lane_scroll())
     }
 
     fn anchor_lane_at_row(&self, local_row: f32) -> f64 {
@@ -1811,16 +1836,20 @@ impl TimelineView {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)?;
                 let next_view_start = (self.view_start + start_time - current_time).max(0.0);
+                let next_lane_scroll =
+                    self.clamp_lane_scroll(self.lane_scroll + start_lane - current_lane as f64);
                 Some(action_map(vec![
                     ("type", keyword(":scroll-view")),
                     (
                         "delta-time",
                         Value::Number(next_view_start - self.view_start),
                     ),
+                    ("view-start", Value::Number(next_view_start)),
                     (
                         "delta-lanes",
-                        Value::Number(start_lane - current_lane as f64),
+                        Value::Number(next_lane_scroll - self.lane_scroll),
                     ),
+                    ("lane-scroll", Value::Number(next_lane_scroll)),
                 ]))
             }
             Some(Value::Keyword(kind)) if kind == "scrub" => Some(action_map(vec![
@@ -1879,7 +1908,7 @@ impl TimelineView {
                     MouseEventKind::ScrollDown => lane_step,
                     _ => unreachable!(),
                 };
-                let next_lane_scroll = (self.lane_scroll + delta_lanes).max(0.0);
+                let next_lane_scroll = self.clamp_lane_scroll(self.lane_scroll + delta_lanes);
                 if (next_lane_scroll - self.lane_scroll).abs() < f64::EPSILON {
                     return None;
                 }
@@ -1890,6 +1919,7 @@ impl TimelineView {
                         "delta-lanes",
                         Value::Number(next_lane_scroll - self.lane_scroll),
                     ),
+                    ("lane-scroll", Value::Number(next_lane_scroll)),
                 ]))
             }
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
@@ -1913,6 +1943,7 @@ impl TimelineView {
                         "delta-time",
                         Value::Number(next_view_start - self.view_start),
                     ),
+                    ("view-start", Value::Number(next_view_start)),
                     ("delta-lanes", Value::Number(0.0)),
                 ]))
             }
@@ -1994,7 +2025,7 @@ impl TimelineView {
         };
 
         let next_view_start = (self.view_start + delta_time).max(0.0);
-        let next_lane_scroll = (self.lane_scroll + delta_lanes).max(0.0);
+        let next_lane_scroll = self.clamp_lane_scroll(self.lane_scroll + delta_lanes);
         let applied_time = next_view_start - self.view_start;
         let applied_lanes = next_lane_scroll - self.lane_scroll;
         if applied_time.abs() < f64::EPSILON && applied_lanes.abs() < f64::EPSILON {
@@ -2003,7 +2034,9 @@ impl TimelineView {
         Some(action_map(vec![
             ("type", keyword(":scroll-view")),
             ("delta-time", Value::Number(applied_time)),
+            ("view-start", Value::Number(next_view_start)),
             ("delta-lanes", Value::Number(applied_lanes)),
+            ("lane-scroll", Value::Number(next_lane_scroll)),
         ]))
     }
 
@@ -2470,6 +2503,19 @@ mod tests {
             entries
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value))))
+                .collect(),
+        )
+    }
+
+    fn lanes_value(count: usize) -> Value {
+        list_value_raw(
+            (0..count)
+                .map(|index| {
+                    map_value_raw(vec![
+                        ("id", number_value(index as f64)),
+                        ("label", Value::String(format!("L{index}"))),
+                    ])
+                })
                 .collect(),
         )
     }
@@ -3904,6 +3950,7 @@ mod tests {
             ("sidebar-width".to_string(), number_value(4.0)),
             ("lane-scroll".to_string(), number_value(10.0)),
             ("lane-height".to_string(), number_value(2.0)),
+            ("lanes".to_string(), lanes_value(24)),
         ]);
         let view = TimelineView::from_props(
             &props,
@@ -3942,6 +3989,7 @@ mod tests {
             ("sidebar-width".to_string(), number_value(4.0)),
             ("lane-scroll".to_string(), number_value(10.0)),
             ("lane-height".to_string(), number_value(2.0)),
+            ("lanes".to_string(), lanes_value(24)),
         ]);
         let view = TimelineView::from_props(
             &props,
@@ -3971,6 +4019,7 @@ mod tests {
             ("sidebar-width".to_string(), number_value(4.0)),
             ("lane-scroll".to_string(), number_value(10.0)),
             ("lane-height".to_string(), number_value(2.0)),
+            ("lanes".to_string(), lanes_value(24)),
         ]);
         let view = TimelineView::from_props(
             &props,
@@ -4004,6 +4053,7 @@ mod tests {
             ("sidebar-width".to_string(), number_value(4.0)),
             ("lane-scroll".to_string(), number_value(10.0)),
             ("lane-height".to_string(), number_value(2.0)),
+            ("lanes".to_string(), lanes_value(24)),
         ]);
         let view = TimelineView::from_props(
             &props,
@@ -4143,13 +4193,8 @@ mod tests {
             ("view-start".to_string(), number_value(4.0)),
             ("view-duration".to_string(), number_value(16.0)),
             ("lane-scroll".to_string(), number_value(8.0)),
-            (
-                "lanes".to_string(),
-                list_value_raw(vec![map_value_raw(vec![
-                    ("id", number_value(0.0)),
-                    ("label", Value::String("L0".to_string())),
-                ])]),
-            ),
+            ("lane-height".to_string(), number_value(1.0)),
+            ("lanes".to_string(), lanes_value(24)),
         ]);
         let view = TimelineView::from_props(
             &props,
@@ -4201,15 +4246,8 @@ mod tests {
             ("view-start".to_string(), number_value(0.0)),
             ("view-duration".to_string(), number_value(16.0)),
             ("lane-scroll".to_string(), number_value(0.25)),
-            (
-                "lanes".to_string(),
-                list_value_raw(vec![
-                    map_value_raw(vec![("id", number_value(0.0))]),
-                    map_value_raw(vec![("id", number_value(1.0))]),
-                    map_value_raw(vec![("id", number_value(2.0))]),
-                    map_value_raw(vec![("id", number_value(3.0))]),
-                ]),
-            ),
+            ("lane-height".to_string(), number_value(2.0)),
+            ("lanes".to_string(), lanes_value(8)),
         ]);
         let view = TimelineView::from_props(
             &props,
@@ -4274,18 +4312,84 @@ mod tests {
     }
 
     #[test]
+    fn lane_scroll_prop_clamps_to_last_full_view() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(1.0)),
+            ("lane-scroll".to_string(), number_value(42.0)),
+            ("lane-height".to_string(), number_value(1.0)),
+            ("lanes".to_string(), lanes_value(16)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        assert_eq!(view.lane_scroll, 9.0);
+    }
+
+    #[test]
+    fn content_scroll_down_at_lane_bottom_emits_no_action() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(1.0)),
+            ("lane-scroll".to_string(), number_value(9.0)),
+            ("lane-height".to_string(), number_value(1.0)),
+            ("lanes".to_string(), lanes_value(16)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        assert!(
+            view.handle_scroll(MouseEventKind::ScrollDown, 10.0, 2.0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lane_scroll_clamps_to_scroll_viewport_height_when_content_is_taller() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(2.0)),
+            ("lane-scroll".to_string(), number_value(96.0)),
+            ("lane-height".to_string(), number_value(0.5)),
+            ("scroll-viewport-height".to_string(), number_value(11.5)),
+            ("lanes".to_string(), lanes_value(97)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 35.0,
+            },
+        );
+        assert_eq!(view.lane_scroll, 78.0);
+    }
+
+    #[test]
     fn content_scroll_down_emits_lane_scroll_action() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
             ("view-start".to_string(), number_value(0.0)),
             ("view-duration".to_string(), number_value(16.0)),
-            (
-                "lanes".to_string(),
-                list_value_raw(vec![map_value_raw(vec![
-                    ("id", number_value(0.0)),
-                    ("label", Value::String("L0".to_string())),
-                ])]),
-            ),
+            ("lane-height".to_string(), number_value(1.0)),
+            ("lanes".to_string(), lanes_value(16)),
         ]);
         let view = TimelineView::from_props(
             &props,
@@ -4312,6 +4416,10 @@ mod tests {
         );
         assert_eq!(
             map.get("delta-lanes").map(|value| value.borrow().clone()),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            map.get("lane-scroll").map(|value| value.borrow().clone()),
             Some(Value::Number(1.0))
         );
     }

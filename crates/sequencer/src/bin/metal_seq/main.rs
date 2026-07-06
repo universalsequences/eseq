@@ -1167,6 +1167,36 @@ fn step_param_slider_value(param: StepParam, value: f32) -> f64 {
     }
 }
 
+fn sync_track_step_param_list_bindings(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    current_track_idx: usize,
+) -> bool {
+    let mut dirty = false;
+    for param in [
+        StepParam::Velocity,
+        StepParam::Duration,
+        StepParam::AuxA,
+        StepParam::Transpose,
+        StepParam::Pan,
+        StepParam::Sync,
+        StepParam::Delay,
+    ] {
+        let Some((current_field, track_field, _)) = step_param_fields(param) else {
+            continue;
+        };
+        let value = build_param_list(state, track, param);
+        dirty |= rt
+            .set_reactive_list_index("SEQ", track_field, track, value.clone())
+            .effects_dirty;
+        if track == current_track_idx {
+            dirty |= rt.set_reactive("SEQ", current_field, value).effects_dirty;
+        }
+    }
+    dirty
+}
+
 fn sync_single_step_param_binding(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1205,6 +1235,180 @@ fn sync_single_step_param_binding(
             dirty |= sync_expanded_step_param_slot(rt, state, viewport, mode, slot);
         }
     }
+    dirty
+}
+
+fn sync_single_track_step_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    track: usize,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    plock_mask: &[u64; MAX_STEPS / 64],
+) -> bool {
+    const WORDS: usize = MAX_STEPS / 64;
+    if track >= app.tracks.len() {
+        return false;
+    }
+
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let pattern_bits = state.pattern.patterns[track].load_bits();
+    let selected = selected_steps.lock().unwrap();
+    let mut active_mask = [0u64; WORDS];
+    let mut duration_mask = [0u64; WORDS];
+    let mut plocked_mask = [0u64; WORDS];
+    let mut selected_mask = [0u64; WORDS];
+    let mut max_reach = f64::NEG_INFINITY;
+    for step in 0..MAX_STEPS {
+        let word = step / 64;
+        let bit = 1u64 << (step % 64);
+        let visible = step < num_steps;
+        let is_active = pattern_bits[word] & bit != 0;
+        if is_active {
+            let duration = state.pattern.step_data[track]
+                .get(step, StepParam::Duration)
+                .max(0.0) as f64;
+            let reach = step as f64 + duration;
+            if reach > max_reach {
+                max_reach = reach;
+            }
+        }
+        if visible {
+            if is_active {
+                active_mask[word] |= bit;
+            }
+            if max_reach > step as f64 {
+                duration_mask[word] |= bit;
+            }
+            if plock_mask[word] & bit != 0 {
+                plocked_mask[word] |= bit;
+            }
+            if track == current_track_idx && selected.contains(&step) {
+                selected_mask[word] |= bit;
+            }
+        }
+    }
+
+    let mut rev = String::with_capacity(WORDS * 4 * 16 + 3);
+    for mask in [&active_mask, &duration_mask, &plocked_mask, &selected_mask] {
+        for word in mask.iter() {
+            use std::fmt::Write as _;
+            let _ = write!(rev, "{word:016x}");
+        }
+    }
+    let rev_result = rt.set_reactive(
+        "SEQ",
+        &track_step_binding_rev_field(track),
+        Value::String(rev),
+    );
+    let mut dirty = rev_result.effects_dirty;
+    if !rev_result.changed {
+        return dirty;
+    }
+
+    for step in 0..MAX_STEPS {
+        let word = step / 64;
+        let bit = 1u64 << (step % 64);
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_active_field(track, step),
+                Value::Bool(active_mask[word] & bit != 0),
+            )
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_duration_field(track, step),
+                Value::Bool(duration_mask[word] & bit != 0),
+            )
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_plocked_field(track, step),
+                Value::Bool(plocked_mask[word] & bit != 0),
+            )
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_selected_field(track, step),
+                Value::Bool(selected_mask[word] & bit != 0),
+            )
+            .effects_dirty;
+    }
+    dirty
+}
+
+fn sync_single_track_sequencer_state(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    track: usize,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+) -> bool {
+    if track >= app.tracks.len() {
+        return false;
+    }
+
+    let mut dirty = false;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-steps", track, build_steps_value(state, track))
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index(
+            "SEQ",
+            "track-duration-spans",
+            track,
+            build_track_duration_spans_value(state, track),
+        )
+        .effects_dirty;
+
+    let plock_mask = track_step_plock_mask(state, track, &app.graph.effect_descriptors);
+    let step_has_plocks = build_step_has_plocks_from_mask(&plock_mask);
+    dirty |= rt
+        .set_reactive_list_index(
+            "SEQ",
+            "track-step-has-plocks",
+            track,
+            step_has_plocks.clone(),
+        )
+        .effects_dirty;
+    dirty |= sync_track_step_param_list_bindings(rt, state, track, current_track_idx);
+
+    if track == current_track_idx {
+        dirty |= rt
+            .set_reactive("SEQ", "steps", build_steps_value(state, track))
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "step-has-plocks", step_has_plocks)
+            .effects_dirty;
+    }
+
+    dirty |= sync_single_track_step_binding_fields(
+        rt,
+        state,
+        app,
+        track,
+        current_track_idx,
+        selected_steps,
+        &plock_mask,
+    );
+    dirty |= sync_expanded_step_viewports_for_track(
+        rt,
+        state,
+        app,
+        selected_steps,
+        current_track_idx,
+        expanded_step_projection,
+        track,
+    );
     dirty
 }
 
@@ -2247,10 +2451,21 @@ fn apply_ui_invalidations(
                     }
                 }
             },
-            UiInvalidation::PianoRoll { track, .. } => {
+            UiInvalidation::PianoRoll { track, change } => {
                 if track == current_track_idx {
                     sync_piano_roll_state(rt, state, track, piano_roll_selection);
                     needs_reactive_cycle = true;
+                }
+                if matches!(change, PianoRollInvalidation::Items) {
+                    needs_reactive_cycle |= sync_single_track_sequencer_state(
+                        rt,
+                        state,
+                        app,
+                        track,
+                        current_track_idx,
+                        selected_steps,
+                        expanded_step_projection,
+                    );
                 }
             }
             UiInvalidation::Transport(_) => {
@@ -11282,6 +11497,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let ct = current_track_for_app(&mut app, &current_track).unwrap_or(track);
                         let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+                        let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
                         let selected_neural_snapshot =
                             selected_neural_neurons.lock().unwrap().clone();
                         let rt = editor.runtime_mut();
@@ -11291,6 +11507,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         set_current_track_reactive(rt, app.tracks.len(), ct);
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                         sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
+                        if sequencer_visible {
+                            let _ = sync_all_expanded_step_viewports(
+                                rt,
+                                &state,
+                                &app,
+                                &selected_steps,
+                                ct,
+                                &expanded_step_projection,
+                            );
+                        }
+                        sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                         sync_step_param_lists(rt, &state, ct);
                         sync_track_mixer_state(rt, &app, &state);
                         sync_track_peak_fields(rt, &cached_track_peak_levels);
@@ -11372,6 +11599,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let mut sync_names_pattern_elapsed = Duration::ZERO;
                                 let mut sync_current_steps_elapsed = Duration::ZERO;
                                 let mut sync_sequencer_elapsed = Duration::ZERO;
+                                let mut sync_expanded_elapsed = Duration::ZERO;
+                                let mut sync_piano_elapsed = Duration::ZERO;
                                 let mut sync_step_params_elapsed = Duration::ZERO;
                                 let mut sync_mixer_elapsed = Duration::ZERO;
                                 let mut sync_fx_lists_elapsed = Duration::ZERO;
@@ -11422,6 +11651,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     restored_defaults_elapsed = started.elapsed();
                                     let ct = current_track.load(Ordering::Relaxed);
                                     let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+                                    let sequencer_visible =
+                                        editor_has_visible_buffer(&editor, "*sequencer*");
                                     let rt = editor.runtime_mut();
                                     let started = Instant::now();
                                     sync_shared_track_collapsed(&track_collapsed, &app);
@@ -11440,6 +11671,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &selected_steps,
                                     );
                                     sync_sequencer_elapsed = started.elapsed();
+                                    let started = Instant::now();
+                                    if sequencer_visible {
+                                        let _ = sync_all_expanded_step_viewports(
+                                            rt,
+                                            &state,
+                                            &app,
+                                            &selected_steps,
+                                            ct,
+                                            &expanded_step_projection,
+                                        );
+                                    }
+                                    sync_expanded_elapsed = started.elapsed();
+                                    let started = Instant::now();
+                                    sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
+                                    sync_piano_elapsed = started.elapsed();
                                     let started = Instant::now();
                                     sync_step_param_lists(rt, &state, ct);
                                     sync_step_params_elapsed = started.elapsed();
@@ -11538,7 +11784,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 if profile_switch {
                                     eprintln!(
-                                        "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms effects={:.2}ms midi_effects={:.2}ms instrument_panel={:.2}ms accumulators={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
+                                        "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms expanded_step_viewports={:.2}ms piano={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms effects={:.2}ms midi_effects={:.2}ms instrument_panel={:.2}ms accumulators={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
                                         idx,
                                         pattern_changed,
                                         duration_ms(profile_total_started.elapsed()),
@@ -11549,6 +11795,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         duration_ms(sync_names_pattern_elapsed),
                                         duration_ms(sync_current_steps_elapsed),
                                         duration_ms(sync_sequencer_elapsed),
+                                        duration_ms(sync_expanded_elapsed),
+                                        duration_ms(sync_piano_elapsed),
                                         duration_ms(sync_step_params_elapsed),
                                         duration_ms(sync_mixer_elapsed),
                                         duration_ms(sync_fx_lists_elapsed),
@@ -15580,6 +15828,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut sync_playhead_elapsed = Duration::ZERO;
                 let sync_current_steps_elapsed;
                 let sync_sequencer_elapsed;
+                let sync_expanded_elapsed;
                 let sync_piano_elapsed;
                 let sync_step_params_elapsed;
                 let sync_mixer_elapsed;
@@ -15610,6 +15859,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let started = Instant::now();
                 sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
                 sync_sequencer_elapsed = started.elapsed();
+                let started = Instant::now();
+                if sequencer_visible {
+                    let _ = sync_all_expanded_step_viewports(
+                        rt,
+                        &state,
+                        &app,
+                        &selected_steps,
+                        ct,
+                        &expanded_step_projection,
+                    );
+                }
+                sync_expanded_elapsed = started.elapsed();
                 let started = Instant::now();
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_piano_elapsed = started.elapsed();
@@ -15658,7 +15919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_plocks_sidebar_elapsed = started.elapsed();
                 if profile_switch {
                     eprintln!(
-                        "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms piano={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
+                        "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms expanded_step_viewports={:.2}ms piano={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
                         duration_ms(profile_total_started.elapsed()),
                         old_pattern_epoch,
                         epoch,
@@ -15666,6 +15927,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         duration_ms(sync_playhead_elapsed),
                         duration_ms(sync_current_steps_elapsed),
                         duration_ms(sync_sequencer_elapsed),
+                        duration_ms(sync_expanded_elapsed),
                         duration_ms(sync_piano_elapsed),
                         duration_ms(sync_step_params_elapsed),
                         duration_ms(sync_mixer_elapsed),

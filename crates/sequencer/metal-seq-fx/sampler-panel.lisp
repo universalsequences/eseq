@@ -117,18 +117,18 @@
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
       (button (if (fx-param-on? p) "ON" "OFF")
         :width 3.2 :height 1.5 :padding 0 :font-size 10
-        :background-color (if (fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+        :background-color (if (fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
         :color (if (fx-param-on? p) :black :dim)
         :on-click |x y r| (fx-set-instrument-value p (if (fx-param-on? p) 0 1))))))
 
 (def sampler-param-dropdown (p key)
   (subtree :key key
-    (v-stack :align :center :gap 0.2
+    (v-stack :align :center :gap 0.5
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
       (dropdown :value (get p :text-value)
         :options (get p :options)
         
-        :bg-color '(rgba 0.1 0.1 0.1 1) ;:instrument-control-bg
+        :bg-color '(rgba 0.1 0.1 0.1 0.3) ;:instrument-control-bg
         ;:text-color accent
        ; :chevron-color :accent
         ;:badge-color (rgba 0.16 0.17 0.20 1.0)
@@ -142,7 +142,7 @@
     (label "gate" :font-size 10 :color :dim :bg :transparent)
     (button (if SEQ.tp-gate "ON" "OFF")
       :width 3.2 :height 1.5 :padding 0 :font-size 10
-      :background-color (if SEQ.tp-gate (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+      :background-color (if SEQ.tp-gate (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
       :color (if SEQ.tp-gate :black :dim)
       :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1))))))
 

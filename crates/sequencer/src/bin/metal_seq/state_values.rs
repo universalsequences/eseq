@@ -180,7 +180,7 @@ pub(crate) fn build_all_track_timebase_labels_value(
     build_track_timebase_labels_value(state, app.tracks.len(), current_track_idx, selected_step)
 }
 
-fn build_track_duration_spans_value(state: &Arc<SequencerState>, track: usize) -> Value {
+pub(crate) fn build_track_duration_spans_value(state: &Arc<SequencerState>, track: usize) -> Value {
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
@@ -1019,16 +1019,7 @@ pub(crate) fn build_all_track_step_has_plocks_from_masks(
 ) -> Value {
     let tracks: Vec<Rc<RefCell<Value>>> = plock_masks
         .iter()
-        .map(|mask| {
-            let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
-                .map(|step| {
-                    Rc::new(RefCell::new(Value::Bool(
-                        mask[step / 64] & (1u64 << (step % 64)) != 0,
-                    )))
-                })
-                .collect();
-            Rc::new(RefCell::new(Value::List(items)))
-        })
+        .map(|mask| Rc::new(RefCell::new(build_step_has_plocks_from_mask(mask))))
         .collect();
     Value::List(tracks)
 }
@@ -8261,6 +8252,10 @@ pub(crate) fn build_step_has_plocks(
     descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
 ) -> Value {
     let mask = track_step_plock_mask(state, track, descriptors);
+    build_step_has_plocks_from_mask(&mask)
+}
+
+pub(crate) fn build_step_has_plocks_from_mask(mask: &[u64; MAX_STEPS / 64]) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|step| {
             Rc::new(RefCell::new(Value::Bool(
@@ -17798,7 +17793,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_piano_roll_placement_preference_controls_next_tab() {
+    fn metal_seq_piano_roll_shortcuts_are_lower_panel_only() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
         assert_eq!(
@@ -17820,37 +17815,42 @@ mod tests {
         editor
             .runtime_mut()
             .eval_str("(seq-toggle-piano-roll-placement)")
-            .expect("switch placement preference to main");
+            .expect("placement toggle should be bottom-only");
         assert_eq!(
             editor
                 .runtime_mut()
                 .eval_str("piano-roll-placement")
                 .unwrap(),
-            Some(Value::Keyword("main".to_string()))
+            Some(Value::Keyword("bottom".to_string()))
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
-            "changing placement while closed must not open or move piano roll"
+            "placement toggle while closed must not open or move piano roll"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string())),
+            "placement toggle while closed should leave the FX lower pane visible"
         );
 
         editor
             .runtime_mut()
             .eval_str("(seq-toggle-main-or-piano-roll)")
-            .expect("open piano roll in preferred main panel");
+            .expect("open piano roll in lower panel");
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
-            Some(Value::String("*piano-roll*".to_string()))
+            Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
-            Some(Value::String("*fx*".to_string()))
+            Some(Value::String("*piano-roll*".to_string()))
         );
 
         editor
             .runtime_mut()
             .eval_str("(seq-toggle-piano-roll-placement)")
-            .expect("switch placement preference to bottom and move open piano roll");
+            .expect("placement toggle while open should keep lower placement");
         assert_eq!(
             editor
                 .runtime_mut()
@@ -17866,10 +17866,23 @@ mod tests {
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string()))
         );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-main-or-piano-roll)")
+            .expect("close lower piano roll");
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string()))
+        );
     }
 
     #[test]
-    fn metal_seq_bottom_piano_roll_layout_expands_track_panel_over_step_panel() {
+    fn metal_seq_bottom_piano_roll_layout_preserves_main_sequencer_panel() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
         editor
@@ -17880,13 +17893,24 @@ mod tests {
 
         let tile_buffers = collect_tile_buffer_names(&editor);
         assert!(
+            tile_buffers.contains(&"*sequencer*".to_string()),
+            "bottom piano roll layout should keep the sequencer panel visible: {tile_buffers:?}"
+        );
+        assert!(
+            tile_buffers.contains(&"*step*".to_string()),
+            "bottom piano roll layout should keep the step context panel visible: {tile_buffers:?}"
+        );
+        assert!(
             tile_buffers.contains(&"*track*".to_string()),
             "bottom piano roll layout should keep the track parameters panel visible: {tile_buffers:?}"
         );
         assert!(
-            !tile_buffers.contains(&"*metal*".to_string())
-                && !tile_buffers.contains(&"*sequencer*".to_string()),
-            "bottom piano roll layout should replace the step panel with the expanded track panel: {tile_buffers:?}"
+            tile_buffers.contains(&"*piano-roll*".to_string()),
+            "bottom piano roll layout should replace the FX lower pane with piano roll: {tile_buffers:?}"
+        );
+        assert!(
+            !tile_buffers.contains(&"*fx*".to_string()),
+            "bottom piano roll layout should not keep the FX buffer in the lower pane: {tile_buffers:?}"
         );
 
         let track_count = tile_buffers
@@ -17900,11 +17924,53 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_selecting_different_track_closes_lower_piano_roll() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-open-piano-roll-bottom)")
+            .expect("open lower piano roll");
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string()))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-select-track-for-edit 0)")
+            .expect("select already-current track");
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string())),
+            "selecting the already-current track should keep piano roll open"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-select-track-for-edit 1)")
+            .expect("select a different track");
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string())),
+            "selecting a different track should restore the FX lower pane"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string())),
+            "selecting a different track should leave the main sequencer panel visible"
+        );
+    }
+
+    #[test]
     fn metal_seq_main_layout_splits_step_and_track_sidebar() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let spec = editor
             .runtime_mut()
-            .eval_str(r#"(seq-step-and-track-panel-layout-spec "*fx*")"#)
+            .eval_str("(seq-step-and-track-panel-layout-spec)")
             .expect("build step/track layout spec")
             .expect("layout spec value");
 
@@ -19574,6 +19640,95 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_track_name_double_click_opens_lower_piano_roll_only() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 20);
+        let layout = editor
+            .widget_layout()
+            .expect("sequencer layout should build");
+
+        let track_name_hit = find_layout_node_by_stable_key(&layout, "seqv-select-0")
+            .expect("track name hit target should exist");
+        let open_piano_roll = track_name_hit
+            .props
+            .get("on-double-click")
+            .cloned()
+            .expect("track name hit target should expose piano-roll double-click");
+
+        for key in [
+            "sequencer-track-0",
+            "seqv-color-badge-0",
+            "seqv-arm-0",
+            "seqv-mute-0",
+            "seqv-solo-0",
+            "seqv-track-name-label-0",
+            "seqv-track-volume-control-0",
+            "seqv-expand-0",
+            "seqv-step-cell-0-0",
+        ] {
+            let node = find_layout_node_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("expected sequencer node {key}"));
+            assert!(
+                !node.props.contains_key("on-double-click"),
+                "{key} should not open the piano roll on double-click"
+            );
+        }
+
+        editor
+            .runtime_mut()
+            .invoke(
+                open_piano_roll.clone(),
+                vec![map_value([(
+                    "phase",
+                    Value::String("double-click".to_string()),
+                )])],
+            )
+            .expect("invoke track name double-click");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string())),
+            "track-name double-click should not replace the main sequencer panel"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string())),
+            "track-name double-click should swap the FX lower pane to piano roll"
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(
+                open_piano_roll,
+                vec![map_value([(
+                    "phase",
+                    Value::String("double-click".to_string()),
+                )])],
+            )
+            .expect("invoke track name double-click while piano roll is open");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string())),
+            "second track-name double-click should keep the main sequencer panel"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string())),
+            "second track-name double-click on the current track should restore FX"
+        );
+    }
+
+    #[test]
     fn metal_seq_collapsed_tracks_render_compact_mixer_strip_and_hide_sequencer_row() {
         struct TestTextMeasurer;
         impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
@@ -19957,6 +20112,247 @@ mod tests {
             "expanded selected row should stay in view, row={:?} scroll_top={scroll_top}",
             row.rect
         );
+    }
+
+    #[test]
+    fn metal_seq_plain_tab_on_visible_sequencer_keeps_tile_tree_stable() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 10, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 44);
+        let initial_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let initial_layout = initial_frame
+            .widget_layout
+            .as_ref()
+            .expect("initial sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(initial_layout, "seqv-expanded-step-slider-"),
+            0,
+            "fixture should start with compact sequencer rows"
+        );
+
+        let tile_ids_before = editor.tile_root.leaf_ids();
+        let active_tile_before = editor.active_tile;
+        let state = Arc::new(SequencerState::new(10, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should be handled by the sequencer shortcut path"
+        );
+
+        assert_eq!(
+            editor.tile_root.leaf_ids(),
+            tile_ids_before,
+            "plain Tab on an already-visible sequencer must not rebuild the whole tile tree"
+        );
+        assert_eq!(
+            editor.active_tile, active_tile_before,
+            "plain Tab should keep focus in the existing sequencer tile"
+        );
+
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let expanded_layout = expanded_frame
+            .widget_layout
+            .as_ref()
+            .expect("expanded sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(expanded_layout, "seqv-expanded-step-slider-"),
+            PAGE_SIZE,
+            "plain Tab should still expand the current track row"
+        );
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    fn metal_seq_plain_tab_expand_current_track_perf_10_tracks() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        #[derive(Clone)]
+        struct Sample {
+            command_ms: f64,
+            reactive_ms: f64,
+            side_effects_ms: f64,
+            frame_ms: f64,
+            total_ms: f64,
+            tile_ids_changed: bool,
+            trace: Option<eseqlisp::runtime::UiInvalidationTrace>,
+        }
+
+        fn percentile(sorted: &[f64], pct: f64) -> f64 {
+            let index = ((sorted.len().saturating_sub(1) as f64) * pct).round() as usize;
+            sorted[index.min(sorted.len().saturating_sub(1))]
+        }
+
+        fn summarize(label: &str, values: &[f64]) {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let min = sorted.first().copied().unwrap_or(0.0);
+            let median = percentile(&sorted, 0.50);
+            let p95 = percentile(&sorted, 0.95);
+            let max = sorted.last().copied().unwrap_or(0.0);
+            println!(
+                "{label:>12}: min={min:7.3}ms median={median:7.3}ms p95={p95:7.3}ms max={max:7.3}ms"
+            );
+        }
+
+        let track_count = 10;
+        let step_count = 16;
+        let warmup_iterations = 3;
+        let measured_iterations = 10;
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, track_count, step_count);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 44);
+        let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+
+        let state = Arc::new(SequencerState::new(track_count, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+
+        let mut samples = Vec::with_capacity(measured_iterations);
+        for iteration in 1..=(warmup_iterations + measured_iterations) {
+            let tile_ids_before = editor.tile_root.leaf_ids();
+            let total_start = std::time::Instant::now();
+
+            let command_start = std::time::Instant::now();
+            assert!(
+                handle_metal_command_shortcut(
+                    &mut editor,
+                    &tab,
+                    &state,
+                    &current_track,
+                    &selected_steps,
+                    &step_clipboard,
+                ),
+                "plain Tab should be handled by the sequencer shortcut path"
+            );
+            let command_ms = command_start.elapsed().as_secs_f64() * 1000.0;
+
+            let reactive_start = std::time::Instant::now();
+            editor.runtime_mut().run_reactive_cycle();
+            let reactive_ms = reactive_start.elapsed().as_secs_f64() * 1000.0;
+
+            let side_effects_start = std::time::Instant::now();
+            editor.refresh_runtime_side_effects();
+            let side_effects_ms = side_effects_start.elapsed().as_secs_f64() * 1000.0;
+
+            let frame_start = std::time::Instant::now();
+            let frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+            let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+            let layout = frame
+                .widget_layout
+                .as_ref()
+                .expect("plain Tab expand/collapse should keep sequencer layout renderable");
+            assert!(
+                count_stable_key_prefix(layout, "seqv-expanded-step-slider-") == 0
+                    || count_stable_key_prefix(layout, "seqv-expanded-step-slider-") == PAGE_SIZE,
+                "plain Tab should collapse to zero sliders or expand exactly one page of sliders"
+            );
+
+            if iteration > warmup_iterations {
+                samples.push(Sample {
+                    command_ms,
+                    reactive_ms,
+                    side_effects_ms,
+                    frame_ms,
+                    total_ms: total_start.elapsed().as_secs_f64() * 1000.0,
+                    tile_ids_changed: tile_ids_before != editor.tile_root.leaf_ids(),
+                    trace: editor.runtime().last_ui_invalidation_trace(),
+                });
+            }
+        }
+
+        println!(
+            "plain Tab current-track expand perf: {track_count} tracks, {step_count} steps, {} measured iterations after {} warmups",
+            measured_iterations, warmup_iterations
+        );
+        summarize(
+            "command",
+            &samples
+                .iter()
+                .map(|sample| sample.command_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "reactive",
+            &samples
+                .iter()
+                .map(|sample| sample.reactive_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "side-effects",
+            &samples
+                .iter()
+                .map(|sample| sample.side_effects_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "frame",
+            &samples
+                .iter()
+                .map(|sample| sample.frame_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "total",
+            &samples
+                .iter()
+                .map(|sample| sample.total_ms)
+                .collect::<Vec<_>>(),
+        );
+
+        let tile_rebuilds = samples
+            .iter()
+            .filter(|sample| sample.tile_ids_changed)
+            .count();
+        println!(
+            "tile-tree rebuilds in measured samples: {tile_rebuilds}/{}",
+            samples.len()
+        );
+        for (idx, sample) in samples.iter().enumerate() {
+            if let Some(trace) = sample.trace.as_ref() {
+                println!(
+                    "sample {idx:02}: tile_changed={} relayout={:?} relayout_ms={:.3} failure={:?}",
+                    sample.tile_ids_changed,
+                    trace.relayout_mode,
+                    trace.relayout_duration.as_secs_f64() * 1000.0,
+                    trace.relayout_failure_reason,
+                );
+            }
+        }
     }
 
     #[test]
@@ -32556,6 +32952,11 @@ mod tests {
             "piano roll duration resize should use the same alignment helper as note moves"
         );
         assert_eq!(
+            layout.props.get("zoom-max-duration"),
+            Some(&Value::Number(256.0)),
+            "piano roll should be able to zoom out to the full supported pattern length"
+        );
+        assert_eq!(
             layout.props.get("min-duration"),
             Some(&Value::Number(0.03125)),
             "piano roll duration resize should not be clamped to the visible grid"
@@ -32564,6 +32965,39 @@ mod tests {
             layout.props.get("create-duration"),
             Some(&Value::Number(1.0)),
             "piano roll should default new notes to one step"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(piano-roll-request-fit-for-track 0)")
+            .expect("fit empty piano roll");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-lane-scroll")
+                .expect("read empty piano roll lane scroll"),
+            Some(Value::Number(39.0)),
+            "empty piano roll should center C4 at the default lower-pane height"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(piano-roll-max-lane-scroll)")
+                .expect("read default piano roll max lane scroll"),
+            Some(Value::Number(78.0)),
+            "default lower-pane height should allow scrolling below C4"
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(piano-roll-action (dict :type :scroll-view :lane-scroll 78 :delta-lanes 0))",
+            )
+            .expect("scroll piano roll to low lanes");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-lane-scroll")
+                .expect("read low piano roll lane scroll"),
+            Some(Value::Number(78.0))
         );
         editor
             .runtime_mut()
@@ -32649,6 +33083,227 @@ mod tests {
                 .eval_str("piano-roll-view-start")
                 .expect("read piano roll view start"),
             Some(Value::Number(12.0))
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "piano-roll-items",
+            test_list(vec![
+                map_value([
+                    ("id", Value::Number(1.0)),
+                    ("lane", Value::Number(20.0)),
+                    ("start", Value::Number(2.0)),
+                    ("end", Value::Number(4.0)),
+                ]),
+                map_value([
+                    ("id", Value::Number(2.0)),
+                    ("lane", Value::Number(60.0)),
+                    ("start", Value::Number(14.0)),
+                    ("end", Value::Number(16.0)),
+                ]),
+            ]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(set! piano-roll-lane-height 0.5)")
+            .expect("restore default piano roll lane height");
+        editor
+            .runtime_mut()
+            .eval_str("(piano-roll-request-fit-for-track 0)")
+            .expect("fit piano roll to notes");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-view-start")
+                .expect("read fitted piano roll view start"),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-view-duration")
+                .expect("read fitted piano roll view duration"),
+            Some(Value::Number(16.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-lane-scroll")
+                .expect("read fitted piano roll lane scroll"),
+            Some(Value::Number(31.0))
+        );
+    }
+
+    #[test]
+    fn sync_piano_roll_state_applies_pending_track_fit_after_items_update() {
+        let src =
+            std::fs::read_to_string("metal-seq-piano-roll.lisp").expect("read piano roll lisp");
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("playhead", Value::Number(0.0)),
+                ("current-track", Value::Number(0.0)),
+                ("track-colors", test_track_colors()),
+                ("tp-num-steps", Value::Number(16.0)),
+                ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-items", Value::List(vec![])),
+                ("piano-roll-selection", Value::List(vec![])),
+            ],
+            true,
+        );
+        runtime.register_native("seq-piano-roll-action", |_args, _ctx| Ok(Value::Bool(true)));
+        runtime.eval_str(&src).expect("load piano roll lisp");
+        runtime
+            .eval_str("(piano-roll-request-fit-for-track 1)")
+            .expect("request fit for future current track");
+        assert_eq!(
+            runtime
+                .eval_str("piano-roll-fit-pending")
+                .expect("read pending fit"),
+            Some(Value::Bool(true)),
+            "fit should stay pending until SEQ.current-track matches the requested track"
+        );
+
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let track = 1;
+        let step = 12;
+        state.pattern.chord_data[track].add_note_with_duration(step, 0.0, 1.0);
+        state.pattern.patterns[track].set_step_active(step, true);
+        runtime.set_reactive("SEQ", "current-track", Value::Number(track as f64));
+
+        sync_piano_roll_state(&mut runtime, &state, track, &selection);
+
+        assert_eq!(
+            runtime
+                .eval_str("piano-roll-fit-pending")
+                .expect("read pending fit after sync"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("piano-roll-view-start")
+                .expect("read fitted view start after sync"),
+            Some(Value::Number(11.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("piano-roll-view-duration")
+                .expect("read fitted view duration after sync"),
+            Some(Value::Number(4.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("piano-roll-lane-scroll")
+                .expect("read fitted lane scroll after sync"),
+            Some(Value::Number(39.0))
+        );
+    }
+
+    #[test]
+    fn piano_roll_item_edit_syncs_sequencer_track_reactive_state() {
+        let app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::empty_custom_slot(),
+        );
+        let state = app.state.clone();
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], true);
+
+        sync_single_track_sequencer_state(
+            &mut runtime,
+            &state,
+            &app,
+            0,
+            0,
+            &selected_steps,
+            &expanded_step_projection,
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.steps 4)")
+                .expect("read initial current-track step"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth (nth SEQ.track-steps 0) 4)")
+                .expect("read initial sequencer track step"),
+            Some(Value::Bool(false))
+        );
+
+        let piano_roll_selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let action = map_value([
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("lane", Value::Number(50.0)),
+            ("start", Value::Number(4.0)),
+            ("end", Value::Number(5.5)),
+        ]);
+        assert!(piano_roll_action_mutates_pattern(&action));
+        apply_piano_roll_action(&state, 0, &piano_roll_selection, &move_state, &action)
+            .expect("create piano roll note");
+
+        sync_single_track_sequencer_state(
+            &mut runtime,
+            &state,
+            &app,
+            0,
+            0,
+            &selected_steps,
+            &expanded_step_projection,
+        );
+
+        let expected_transpose = state.pattern.step_data[0].get(4, StepParam::Transpose) as f64;
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.steps 4)")
+                .expect("read current-track step after piano roll edit"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth (nth SEQ.track-steps 0) 4)")
+                .expect("read sequencer track step after piano roll edit"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.transposes 4)")
+                .expect("read current-track transpose after piano roll edit"),
+            Some(Value::Number(expected_transpose))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth (nth SEQ.track-transposes 0) 4)")
+                .expect("read sequencer track transpose after piano roll edit"),
+            Some(Value::Number(expected_transpose))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.durations 4)")
+                .expect("read current-track duration after piano roll edit"),
+            Some(Value::Number(1.5))
+        );
+
+        let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
+            panic!("expected SEQ namespace");
+        };
+        assert_eq!(
+            seq.get(&track_step_active_field(0, 4))
+                .expect("active binding")
+                .borrow()
+                .clone(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            seq.get(&track_step_duration_field(0, 4))
+                .expect("duration binding")
+                .borrow()
+                .clone(),
+            Value::Bool(true)
         );
     }
 

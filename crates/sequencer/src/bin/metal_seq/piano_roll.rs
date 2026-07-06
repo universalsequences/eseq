@@ -331,6 +331,22 @@ pub(crate) fn sync_piano_roll_state(
         "piano-roll-selection",
         build_piano_roll_selection_value(selected),
     );
+    apply_pending_piano_roll_fit(rt);
+}
+
+fn apply_pending_piano_roll_fit(rt: &mut Runtime) {
+    if !matches!(
+        rt.global_value("piano-roll-fit-pending"),
+        Some(Value::Bool(true))
+    ) {
+        return;
+    }
+    let Some(callback) = rt.global_value("piano-roll-apply-pending-fit") else {
+        return;
+    };
+    if let Err(error) = rt.invoke(callback, vec![]) {
+        eprintln!("piano-roll pending fit failed: {error:?}");
+    }
 }
 
 fn value_as_number(value: Option<&Value>) -> Option<f64> {

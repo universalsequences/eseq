@@ -1488,13 +1488,18 @@ pub(crate) fn init_runtime(
             &piano_clipboard,
             action,
         )?;
-        if piano_roll_action_mutates_pattern(action) {
+        let mutates_pattern = piano_roll_action_mutates_pattern(action);
+        if mutates_pattern {
             st.publish_scheduler_snapshot();
             *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         }
         ui_inv.push(UiInvalidation::PianoRoll {
             track,
-            change: PianoRollInvalidation::Items,
+            change: if mutates_pattern {
+                PianoRollInvalidation::Items
+            } else {
+                PianoRollInvalidation::Selection
+            },
         });
         ctx.set_status(status.clone());
         Ok(Value::String(status))

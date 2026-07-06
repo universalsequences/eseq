@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::vm::{Value, format_lisp_value};
 use crate::widget_render;
@@ -191,6 +191,206 @@ impl<'a> LayoutEngine<'a> {
         let mut next_widget_id = widget_id_offset.wrapping_add(1);
         assign_widget_ids(&mut layout, &mut next_widget_id);
         Some(layout)
+    }
+
+    fn layout_replacement_subtree(
+        &self,
+        existing: &LayoutNode,
+        tree: &Value,
+        rect: Rect,
+        inherited_font_size: f32,
+        layout_ctx: LayoutCtx,
+        dirty_widget_ids: &mut Vec<u64>,
+        next_widget_id: &mut u64,
+    ) -> Result<LayoutNode, String> {
+        validate_replacement_root_identity(existing, tree)?;
+        let mut layout = self.build_layout_node(tree, rect, inherited_font_size, layout_ctx);
+        preserve_layout_internal_props(&existing.props, &mut layout.props);
+        let mut reusable_widget_ids = HashMap::new();
+        collect_stable_widget_ids(existing, &mut reusable_widget_ids);
+        let mut used_widget_ids = HashSet::new();
+        assign_replacement_widget_ids(
+            &mut layout,
+            existing.widget_id,
+            &reusable_widget_ids,
+            &mut used_widget_ids,
+            next_widget_id,
+        );
+        collect_layout_widget_ids(&layout, dirty_widget_ids);
+        Ok(layout)
+    }
+
+    fn relayout_node_at_path(
+        &self,
+        existing: &LayoutNode,
+        tree: &Value,
+        rect: Rect,
+        inherited_font_size: f32,
+        layout_ctx: LayoutCtx,
+        child_path: &[usize],
+        dirty_widget_ids: &mut Vec<u64>,
+        next_widget_id: &mut u64,
+        trace_path: &mut Vec<String>,
+    ) -> Result<LayoutNode, String> {
+        if child_path.is_empty() {
+            return self.layout_replacement_subtree(
+                existing,
+                tree,
+                rect,
+                inherited_font_size,
+                layout_ctx,
+                dirty_widget_ids,
+                next_widget_id,
+            );
+        }
+
+        let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
+        if widget_type != existing.widget_type {
+            return Err(format!(
+                "widget-type:{}->{}",
+                existing.widget_type, widget_type
+            ));
+        }
+        validate_replacement_root_identity(existing, tree)?;
+        if widget_type == "tree" {
+            return Err("tree-widget".to_string());
+        }
+
+        let mut new_props = collect_props(tree);
+        preserve_layout_internal_props(&existing.props, &mut new_props);
+        if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
+            return Err(format!("size-props:{widget_type}"));
+        }
+        if existing.props != new_props {
+            dirty_widget_ids.push(existing.widget_id);
+        }
+
+        let children_values = get_children(tree);
+        let Some(definition) = widget_render::widget_definition(&widget_type) else {
+            return Err(format!("non-container:{widget_type}"));
+        };
+        let font_size = get_prop_num(tree, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(inherited_font_size);
+        let target_child_idx = child_path[0];
+        if target_child_idx >= existing.children.len() {
+            return Err(format!(
+                "missing-layout-child:{widget_type}[{target_child_idx}]"
+            ));
+        }
+        let child_indices = children_values
+            .iter()
+            .enumerate()
+            .map(|(idx, child)| (child as *const Value as usize, idx))
+            .collect::<HashMap<_, _>>();
+
+        let mut build_idx = 0usize;
+        let mut visited_target_child = false;
+        let mut failure = None::<String>;
+        let children = definition.layout_children(
+            tree,
+            rect,
+            &children_values,
+            self.aspect,
+            layout_ctx,
+            &mut |child, child_constraints| {
+                let child_ptr = child as *const Value as usize;
+                if let Some(idx) = child_indices.get(&child_ptr).copied()
+                    && idx != target_child_idx
+                    && get_prop_num(child, "flex").is_none_or(|flex| flex <= 0.0)
+                    && let Some(existing_child) = existing.children.get(idx)
+                {
+                    return Some(Size {
+                        width: existing_child.rect.width,
+                        height: existing_child.rect.height,
+                    });
+                }
+                self.measure(child, child_constraints, font_size)
+            },
+            &mut |child, child_rect, child_layout_ctx| {
+                let idx = build_idx;
+                build_idx += 1;
+                let Some(existing_child) = existing.children.get(idx) else {
+                    failure
+                        .get_or_insert_with(|| format!("extra-layout-child:{widget_type}[{idx}]"));
+                    return self.build_layout_node(child, child_rect, font_size, child_layout_ctx);
+                };
+                if idx == target_child_idx {
+                    visited_target_child = true;
+                    trace_path.push(format!("{widget_type}[{idx}]"));
+                    let result = self.relayout_node_at_path(
+                        existing_child,
+                        child,
+                        child_rect,
+                        font_size,
+                        child_layout_ctx,
+                        &child_path[1..],
+                        dirty_widget_ids,
+                        next_widget_id,
+                        trace_path,
+                    );
+                    trace_path.pop();
+                    match result {
+                        Ok(node) => node,
+                        Err(reason) => {
+                            failure.get_or_insert(reason);
+                            self.build_layout_node(child, child_rect, font_size, child_layout_ctx)
+                        }
+                    }
+                } else {
+                    match translate_reused_layout(existing_child, child_rect, dirty_widget_ids) {
+                        Ok(node) => node,
+                        Err(reason) => {
+                            match self.layout_replacement_subtree(
+                                existing_child,
+                                child,
+                                child_rect,
+                                font_size,
+                                child_layout_ctx,
+                                dirty_widget_ids,
+                                next_widget_id,
+                            ) {
+                                Ok(node) => node,
+                                Err(replacement_reason) => {
+                                    failure.get_or_insert(format!(
+                                        "{reason}; sibling-relayout:{replacement_reason}"
+                                    ));
+                                    self.build_layout_node(
+                                        child,
+                                        child_rect,
+                                        font_size,
+                                        child_layout_ctx,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        );
+
+        if let Some(reason) = failure {
+            return Err(reason);
+        }
+        if !visited_target_child {
+            return Err(format!(
+                "target-child-not-laid-out:{widget_type}[{target_child_idx}]"
+            ));
+        }
+
+        let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
+        Ok(LayoutNode {
+            widget_id: existing.widget_id,
+            stable_widget_id: existing.stable_widget_id,
+            subtree_root_id: existing.subtree_root_id,
+            parent_subtree_root_id: existing.parent_subtree_root_id,
+            stable_key: existing.stable_key.clone(),
+            widget_type,
+            rect,
+            props: new_props,
+            children,
+            focusable,
+        })
     }
 
     /// Measure the natural (unconstrained) content width of a widget tree.
@@ -622,6 +822,163 @@ pub fn reuse_layout_node_for_subtree_path_result(
     )
 }
 
+pub fn relayout_subtree_path_result(
+    existing: &LayoutNode,
+    tree: &Value,
+    child_path: &[usize],
+    dirty_widget_ids: &mut Vec<u64>,
+    engine: &LayoutEngine<'_>,
+) -> Result<LayoutNode, String> {
+    let mut trace_path = Vec::new();
+    let mut next_widget_id = max_layout_widget_id(existing).wrapping_add(1);
+    engine.relayout_node_at_path(
+        existing,
+        tree,
+        existing.rect,
+        DEFAULT_FONT_SIZE,
+        LayoutCtx::default(),
+        child_path,
+        dirty_widget_ids,
+        &mut next_widget_id,
+        &mut trace_path,
+    )
+}
+
+fn validate_replacement_root_identity(existing: &LayoutNode, tree: &Value) -> Result<(), String> {
+    let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
+    if widget_type != existing.widget_type {
+        return Err(format!(
+            "widget-type:{}->{}",
+            existing.widget_type, widget_type
+        ));
+    }
+    let new_stable_widget_id = get_stable_widget_id(tree);
+    let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
+    let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
+    let new_stable_key = get_stable_widget_key(tree);
+    let is_explicit_subtree_root =
+        existing.subtree_root_id.is_some() && existing.subtree_root_id == new_subtree_root_id;
+    let identity_mismatch = if is_explicit_subtree_root {
+        existing.subtree_root_id != new_subtree_root_id || existing.stable_key != new_stable_key
+    } else {
+        existing.stable_widget_id != new_stable_widget_id
+            || existing.subtree_root_id != new_subtree_root_id
+            || existing.parent_subtree_root_id != new_parent_subtree_root_id
+            || existing.stable_key != new_stable_key
+    };
+    if identity_mismatch {
+        return Err(format!("stable-identity:{widget_type}"));
+    }
+    Ok(())
+}
+
+fn collect_stable_widget_ids(node: &LayoutNode, out: &mut HashMap<u64, u64>) {
+    if let Some(stable_widget_id) = node.stable_widget_id {
+        out.entry(stable_widget_id).or_insert(node.widget_id);
+    }
+    for child in &node.children {
+        collect_stable_widget_ids(child, out);
+    }
+}
+
+fn collect_layout_widget_ids(node: &LayoutNode, out: &mut Vec<u64>) {
+    out.push(node.widget_id);
+    for child in &node.children {
+        collect_layout_widget_ids(child, out);
+    }
+}
+
+fn max_layout_widget_id(node: &LayoutNode) -> u64 {
+    node.children
+        .iter()
+        .map(max_layout_widget_id)
+        .fold(node.widget_id, u64::max)
+}
+
+fn next_unused_widget_id(next_widget_id: &mut u64, used_widget_ids: &HashSet<u64>) -> u64 {
+    while used_widget_ids.contains(next_widget_id) {
+        *next_widget_id = next_widget_id.wrapping_add(1);
+    }
+    let widget_id = *next_widget_id;
+    *next_widget_id = next_widget_id.wrapping_add(1);
+    widget_id
+}
+
+fn assign_replacement_widget_ids(
+    node: &mut LayoutNode,
+    root_widget_id: u64,
+    reusable_widget_ids: &HashMap<u64, u64>,
+    used_widget_ids: &mut HashSet<u64>,
+    next_widget_id: &mut u64,
+) {
+    node.widget_id = root_widget_id;
+    used_widget_ids.insert(root_widget_id);
+    for child in &mut node.children {
+        assign_replacement_child_widget_ids(
+            child,
+            reusable_widget_ids,
+            used_widget_ids,
+            next_widget_id,
+        );
+    }
+}
+
+fn assign_replacement_child_widget_ids(
+    node: &mut LayoutNode,
+    reusable_widget_ids: &HashMap<u64, u64>,
+    used_widget_ids: &mut HashSet<u64>,
+    next_widget_id: &mut u64,
+) {
+    let reusable = node
+        .stable_widget_id
+        .and_then(|stable_widget_id| reusable_widget_ids.get(&stable_widget_id).copied())
+        .filter(|widget_id| !used_widget_ids.contains(widget_id));
+    node.widget_id =
+        reusable.unwrap_or_else(|| next_unused_widget_id(next_widget_id, used_widget_ids));
+    used_widget_ids.insert(node.widget_id);
+    for child in &mut node.children {
+        assign_replacement_child_widget_ids(
+            child,
+            reusable_widget_ids,
+            used_widget_ids,
+            next_widget_id,
+        );
+    }
+}
+
+fn translate_reused_layout(
+    existing: &LayoutNode,
+    rect: Rect,
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<LayoutNode, String> {
+    if (existing.rect.width - rect.width).abs() > 0.000_1
+        || (existing.rect.height - rect.height).abs() > 0.000_1
+    {
+        return Err(format!("sibling-size:{}", existing.widget_type));
+    }
+    let delta_row = rect.row - existing.rect.row;
+    let delta_col = rect.col - existing.rect.col;
+    let mut translated = existing.clone();
+    if delta_row.abs() > 0.000_1 || delta_col.abs() > 0.000_1 {
+        translate_layout_node(&mut translated, delta_row, delta_col, dirty_widget_ids);
+    }
+    Ok(translated)
+}
+
+fn translate_layout_node(
+    node: &mut LayoutNode,
+    delta_row: f32,
+    delta_col: f32,
+    dirty_widget_ids: &mut Vec<u64>,
+) {
+    node.rect.row += delta_row;
+    node.rect.col += delta_col;
+    dirty_widget_ids.push(node.widget_id);
+    for child in &mut node.children {
+        translate_layout_node(child, delta_row, delta_col, dirty_widget_ids);
+    }
+}
+
 fn find_subtree_path(node: &LayoutNode, subtree_root_id: u64, path: &mut Vec<usize>) -> Option<()> {
     if node.subtree_root_id == Some(subtree_root_id) {
         return Some(());
@@ -988,40 +1345,57 @@ pub(crate) fn get_map(v: &Value) -> Option<HashMap<String, Value>> {
 }
 
 pub(crate) fn get_widget_type(v: &Value) -> Option<String> {
-    let map = get_map(v)?;
-    match map.get("type") {
-        Some(Value::Keyword(widget_type)) => Some(widget_type.clone()),
-        Some(Value::String(widget_type)) => Some(widget_type.clone()),
-        _ => None,
+    let Value::Map(map) = v else {
+        return None;
+    };
+    match map.get("type").map(|value| value.borrow()) {
+        Some(value) => match &*value {
+            Value::Keyword(widget_type) | Value::String(widget_type) => Some(widget_type.clone()),
+            _ => None,
+        },
+        None => None,
     }
 }
 
 pub(crate) fn get_children(v: &Value) -> Vec<Value> {
-    let Some(map) = get_map(v) else {
+    let Value::Map(map) = v else {
         return vec![];
     };
 
-    match map.get("children") {
-        Some(Value::List(children)) => children
-            .iter()
-            .map(|child| child.borrow().clone())
-            .collect(),
-        _ => vec![],
+    match map.get("children").map(|value| value.borrow()) {
+        Some(value) => match &*value {
+            Value::List(children) => children
+                .iter()
+                .map(|child| child.borrow().clone())
+                .collect(),
+            _ => vec![],
+        },
+        None => vec![],
     }
 }
 
 pub(crate) fn get_prop_num(v: &Value, key: &str) -> Option<f64> {
-    let map = get_map(v)?;
-    match map.get(key) {
-        Some(Value::Number(n)) => Some(*n),
+    let Value::Map(map) = v else {
+        return None;
+    };
+    match map.get(key).map(|value| value.borrow()) {
+        Some(value) => match &*value {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        },
         _ => None,
     }
 }
 
 pub(crate) fn get_prop_str(v: &Value, key: &str) -> Option<String> {
-    let map = get_map(v)?;
-    match map.get(key) {
-        Some(Value::String(s)) => Some(s.clone()),
+    let Value::Map(map) = v else {
+        return None;
+    };
+    match map.get(key).map(|value| value.borrow()) {
+        Some(value) => match &*value {
+            Value::String(s) => Some(s.clone()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1051,9 +1425,14 @@ pub(crate) fn get_stable_widget_id(v: &Value) -> Option<u64> {
 }
 
 pub(crate) fn get_prop_keyword(v: &Value, key: &str) -> Option<String> {
-    let map = get_map(v)?;
-    match map.get(key) {
-        Some(Value::Keyword(s)) => Some(s.clone()),
+    let Value::Map(map) = v else {
+        return None;
+    };
+    match map.get(key).map(|value| value.borrow()) {
+        Some(value) => match &*value {
+            Value::Keyword(s) => Some(s.clone()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1063,9 +1442,14 @@ pub(crate) fn prop_is_keyword(v: &Value, key: &str, expected: &str) -> bool {
 }
 
 pub(crate) fn get_prop_u64(v: &Value, key: &str) -> Option<u64> {
-    let map = get_map(v)?;
-    match map.get(key) {
-        Some(Value::Number(n)) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
+    let Value::Map(map) = v else {
+        return None;
+    };
+    match map.get(key).map(|value| value.borrow()) {
+        Some(value) => match &*value {
+            Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1208,6 +1592,63 @@ mod tests {
         );
 
         assert_eq!(subtree_root_paths(&layout).get(&11), Some(&vec![0]));
+    }
+
+    #[test]
+    fn relayout_subtree_path_rebuilds_changed_child_and_translates_stable_siblings() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = build_widget(
+            "v-stack",
+            vec![
+                kw("width"),
+                kw("fill"),
+                kw("gap"),
+                num(1.0),
+                keyed_box(1.0, 1.0, "one"),
+                keyed_box(2.0, 2.0, "two"),
+                keyed_box(3.0, 1.0, "three"),
+            ],
+        );
+        let layout = engine.layout(&first).expect("initial layout");
+
+        let second = build_widget(
+            "v-stack",
+            vec![
+                kw("width"),
+                kw("fill"),
+                kw("gap"),
+                num(1.0),
+                keyed_box(1.0, 4.0, "one"),
+                keyed_box(2.0, 2.0, "two"),
+                keyed_box(3.0, 1.0, "three"),
+            ],
+        );
+        let mut dirty_widget_ids = Vec::new();
+        let updated =
+            relayout_subtree_path_result(&layout, &second, &[0], &mut dirty_widget_ids, &engine)
+                .expect("partial relayout should handle a size-changing child");
+
+        assert_f32_approx(updated.children[0].rect.height, 4.0);
+        assert_eq!(
+            updated.children[1].widget_id, layout.children[1].widget_id,
+            "unchanged sibling widget ids should be preserved"
+        );
+        assert_eq!(
+            updated.children[2].widget_id, layout.children[2].widget_id,
+            "later unchanged sibling widget ids should be preserved"
+        );
+        assert_f32_approx(
+            updated.children[1].rect.row,
+            layout.children[1].rect.row + 3.0,
+        );
+        assert_f32_approx(
+            updated.children[2].children[0].rect.row,
+            layout.children[2].children[0].rect.row + 3.0,
+        );
+        assert!(
+            dirty_widget_ids.contains(&layout.children[1].widget_id),
+            "translated siblings need to be reported dirty"
+        );
     }
 
     /// Build a label widget: (label "text" :width w)

@@ -6,6 +6,7 @@
     :font-size 9.5 :label-font-size 9.5
     :text-color :fg :label-color :dim
     :width 6.4 :height 3.2 :knob-size 2.0
+	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
     :on-change (lambda (v) (fx-set-effect-value fx p v))))
 
 (def builtin-fx-dynamics-number-knob (fx label-text p decimals)
@@ -15,6 +16,7 @@
     :font-size 9.5 :label-font-size 9.5
     :text-color :fg :label-color :dim
     :width 6.8 :height 3.2 :knob-size 2.0
+	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
     :on-change (lambda (v) (fx-set-effect-value fx p v))))
 
 (def builtin-fx-dynamics-option (fx label-text p width)
@@ -28,27 +30,37 @@
 (def builtin-fx-dynamics-ui (fx)
   (let ((params (get fx :params)))
     (let ((amount-p (builtin-fx-param params "amount"))
-          (attack-p (builtin-fx-param params "attack"))
-          (release-p (builtin-fx-param params "release"))
-          (low-cut-p (builtin-fx-param params "low cut"))
-          (drive-p (builtin-fx-param params "drive"))
-          (output-p (builtin-fx-param params "output"))
-          (mix-p (builtin-fx-param params "mix"))
-          (knee-p (builtin-fx-param params "knee"))
-          (input-p (builtin-fx-param params "input")))
+        (attack-p (builtin-fx-param params "attack"))
+        (release-p (builtin-fx-param params "release"))
+        (low-cut-p (builtin-fx-param params "low cut"))
+        (drive-p (builtin-fx-param params "drive"))
+        (output-p (builtin-fx-param params "output"))
+        (mix-p (builtin-fx-param params "mix"))
+        (knee-p (builtin-fx-param params "knee"))
+        (input-p (builtin-fx-param params "input")))
       (if (and amount-p attack-p release-p low-cut-p drive-p output-p mix-p)
-        (v-stack :gap 0.34
-          (h-stack :gap 0.45 :align :center
+        (v-stack :gap 0.34 :padding 0.1
+          (h-stack :padding 0.5 :gap 0.45 :align :center
             (builtin-fx-dynamics-option fx "atk" attack-p 5.5)
             (builtin-fx-dynamics-option fx "rel" release-p 5.9))
-          (h-stack :gap 0.5 :align :center
-            (if input-p (builtin-fx-dynamics-number-knob fx "in" input-p 1) (box :width 0 :height 0))
-            (builtin-fx-dynamics-percent-knob fx "amt" amount-p)
-            (builtin-fx-dynamics-number-knob fx "low" low-cut-p 0)
-            (if knee-p (builtin-fx-dynamics-number-knob fx "knee" knee-p 1) (box :width 0 :height 0))
-            (builtin-fx-dynamics-percent-knob fx "drive" drive-p)
-            (builtin-fx-dynamics-number-knob fx "out" output-p 1)
-            (builtin-fx-dynamics-percent-knob fx "mix" mix-p)))
+          (box 
+            :padding 1
+            :corner-radius 16 :background-color :black
+            (v-stack :gap 0.34
+              (h-stack :gap 0.5 :align :center
+                (if input-p (builtin-fx-dynamics-number-knob fx "in" input-p 1) (box :width 0 :height 0))
+                (builtin-fx-dynamics-percent-knob fx "amt" amount-p)
+                (builtin-fx-dynamics-number-knob fx "low" low-cut-p 0)
+                (if knee-p (builtin-fx-dynamics-number-knob fx "knee" knee-p 1) (box :width 0 :height 0))
+                )
+              (h-stack :gap 0.5 :align :center
+                (builtin-fx-dynamics-percent-knob fx "drive" drive-p)
+                (builtin-fx-dynamics-number-knob fx "out" output-p 1)
+                (builtin-fx-dynamics-percent-knob fx "mix" mix-p)
+                )
+              )
+            )
+          )
         (fx-param-grid params fx)))))
 
 (def builtin-fx-compressor-ui (fx)

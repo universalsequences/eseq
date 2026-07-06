@@ -162,23 +162,31 @@ impl WidgetDefinition for GridWidget {
         _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
-        let measured_children = children
-            .iter()
-            .filter_map(|child| measure_child(child, constraints))
-            .collect::<Vec<_>>();
-        let widest_child = measured_children
-            .iter()
-            .map(|size| size.width)
-            .fold(0.0_f32, f32::max)
-            .max(1.0);
-        let tallest_child = measured_children
-            .iter()
-            .map(|size| size.height)
-            .fold(0.0_f32, f32::max)
-            .max(1.0);
-        let col_width = get_prop_num(node, "col-width")
-            .map(f64_to_f32)
-            .unwrap_or(widest_child);
+        let explicit_col_width = get_prop_num(node, "col-width").map(f64_to_f32);
+        let explicit_row_height = get_prop_num(node, "row-height").map(f64_to_f32);
+        let measured_children = if explicit_col_width.is_none() || explicit_row_height.is_none() {
+            children
+                .iter()
+                .filter_map(|child| measure_child(child, constraints))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let widest_child = || {
+            measured_children
+                .iter()
+                .map(|size| size.width)
+                .fold(0.0_f32, f32::max)
+                .max(1.0)
+        };
+        let tallest_child = || {
+            measured_children
+                .iter()
+                .map(|size| size.height)
+                .fold(0.0_f32, f32::max)
+                .max(1.0)
+        };
+        let col_width = explicit_col_width.unwrap_or_else(widest_child);
         let cols = explicit_cols(node).unwrap_or_else(|| {
             if col_width <= 0.0 {
                 1.0
@@ -187,9 +195,7 @@ impl WidgetDefinition for GridWidget {
             }
         });
         let cols_int = cols as usize;
-        let row_height = get_prop_num(node, "row-height")
-            .map(f64_to_f32)
-            .unwrap_or(tallest_child);
+        let row_height = explicit_row_height.unwrap_or_else(tallest_child);
         let rows = ((children.len() + cols_int - 1) / cols_int) as f32;
         Some(Size {
             width: cols * col_width,
@@ -210,30 +216,45 @@ impl WidgetDefinition for GridWidget {
         let fallback = resolve_align(node, "align", Align::Start);
         let h_align = resolve_align(node, "h-align", fallback);
         let v_align = resolve_align(node, "v-align", fallback);
-        let measured_children = children
-            .iter()
-            .filter_map(|child| measure_child(child, constraints_for_slot(area.width, area.height)))
-            .collect::<Vec<_>>();
-        let widest_child = measured_children
-            .iter()
-            .map(|size| size.width)
-            .fold(0.0_f32, f32::max)
-            .max(1.0);
-        let col_width = get_prop_num(node, "col-width")
-            .map(f64_to_f32)
-            .unwrap_or(widest_child);
+        let explicit_col_width = get_prop_num(node, "col-width").map(f64_to_f32);
+        let width_measurements = if explicit_col_width.is_none() {
+            children
+                .iter()
+                .map(|child| measure_child(child, constraints_for_slot(area.width, area.height)))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let widest_child = || {
+            width_measurements
+                .iter()
+                .filter_map(|size| *size)
+                .map(|size| size.width)
+                .fold(0.0_f32, f32::max)
+                .max(1.0)
+        };
+        let col_width = explicit_col_width.unwrap_or_else(widest_child);
         let cols = layout_cols(node, area.width, col_width);
         let cols_int = cols as usize;
         let measure_constraints = constraints_for_slot(col_width, area.height);
-        let tallest_child = children
-            .iter()
-            .filter_map(|child| measure_child(child, measure_constraints))
-            .map(|size| size.height)
-            .fold(0.0_f32, f32::max)
-            .max(1.0);
-        let row_height = get_prop_num(node, "row-height")
-            .map(f64_to_f32)
-            .unwrap_or(tallest_child);
+        let explicit_row_height = get_prop_num(node, "row-height").map(f64_to_f32);
+        let slot_measurements = if explicit_row_height.is_none() {
+            children
+                .iter()
+                .map(|child| measure_child(child, measure_constraints))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let tallest_child = || {
+            slot_measurements
+                .iter()
+                .filter_map(|size| *size)
+                .map(|size| size.height)
+                .fold(0.0_f32, f32::max)
+                .max(1.0)
+        };
+        let row_height = explicit_row_height.unwrap_or_else(tallest_child);
         let slot_constraints = constraints_for_slot(col_width, row_height);
 
         children
@@ -242,10 +263,19 @@ impl WidgetDefinition for GridWidget {
             .map(|(idx, child)| {
                 let row = (idx / cols_int) as f32;
                 let col = (idx % cols_int) as f32;
-                let size = measure_child(child, slot_constraints).unwrap_or(Size {
-                    width: col_width,
-                    height: row_height,
-                });
+                let size = if h_align == Align::Stretch && v_align == Align::Stretch {
+                    Size {
+                        width: col_width,
+                        height: row_height,
+                    }
+                } else if let Some(Some(size)) = slot_measurements.get(idx) {
+                    *size
+                } else {
+                    measure_child(child, slot_constraints).unwrap_or(Size {
+                        width: col_width,
+                        height: row_height,
+                    })
+                };
                 let child_width = if h_align == Align::Stretch {
                     col_width
                 } else {
