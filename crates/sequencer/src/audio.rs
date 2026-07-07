@@ -91,7 +91,13 @@ unsafe fn push_graph_block_event(
     push_block_event(lg, event)
 }
 
-unsafe fn dispatch_voice_modulator_transport(lg: *mut LiveGraph, modulator_id: u64, bpm: f32) {
+#[derive(Clone, Copy, Debug)]
+struct HostTransportClock {
+    bar_phase: f32,
+    bar_phase_increment: f32,
+}
+
+unsafe fn dispatch_voice_modulator_bpm(lg: *mut LiveGraph, modulator_id: u64, bpm: f32) {
     if modulator_id == 0 {
         return;
     }
@@ -101,6 +107,32 @@ unsafe fn dispatch_voice_modulator_transport(lg: *mut LiveGraph, modulator_id: u
             idx: crate::voice_modulator::PARAM_BPM as u64,
             logical_id: modulator_id,
             fvalue: bpm.clamp(20.0, 400.0),
+        },
+    );
+}
+
+unsafe fn dispatch_voice_modulator_transport_clock(
+    lg: *mut LiveGraph,
+    modulator_id: u64,
+    clock: HostTransportClock,
+) {
+    if modulator_id == 0 {
+        return;
+    }
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::voice_modulator::PARAM_TRANSPORT_BAR_PHASE as u64,
+            logical_id: modulator_id,
+            fvalue: clock.bar_phase,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::voice_modulator::PARAM_TRANSPORT_BAR_PHASE_INC as u64,
+            logical_id: modulator_id,
+            fvalue: clock.bar_phase_increment,
         },
     );
 }
@@ -1057,7 +1089,7 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     data.last_topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
     data.last_playing = false;
     data.host_clock_was_playing = false;
-    data.host_clock_play_start_sample = 0;
+    data.host_clock_play_start_sample = data.rendered_samples.load(Ordering::Acquire);
     data.free_patch_transport_routes = [FreePatchTransportRouteState::default(); MAX_TRACKS];
     data.last_pattern = u32::MAX;
 
@@ -3358,7 +3390,10 @@ fn sync_bus_gate_params(data: &mut AudioCallbackData, block_start_sample: u64) {
     }
 }
 
-fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, block_start_sample: u64) {
+fn compute_host_transport_clock(
+    data: &mut AudioCallbackData,
+    block_start_sample: u64,
+) -> HostTransportClock {
     let playing = data.state.transport.playing.load(Ordering::Relaxed);
     if playing && !data.host_clock_was_playing {
         data.host_clock_play_start_sample = block_start_sample;
@@ -3368,18 +3403,19 @@ fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, block_start_s
     }
     data.host_clock_was_playing = playing;
 
-    let (phase, increment) = if playing {
-        let bpm = data.state.transport.bpm.load(Ordering::Relaxed).max(1) as f64;
-        let samples_per_bar = data.sample_rate * 240.0 / bpm;
-        let elapsed_samples = block_start_sample.saturating_sub(data.host_clock_play_start_sample);
-        (
-            (elapsed_samples as f64 / samples_per_bar).fract() as f32,
-            (1.0 / samples_per_bar) as f32,
-        )
-    } else {
-        (0.0, 0.0)
-    };
+    let bpm = data.state.transport.bpm.load(Ordering::Relaxed).max(1) as f64;
+    let samples_per_bar = data.sample_rate * 240.0 / bpm;
+    let elapsed_samples = block_start_sample.saturating_sub(data.host_clock_play_start_sample);
+    let bar_phase = (elapsed_samples as f64 / samples_per_bar).fract() as f32;
+    let bar_phase_increment = (1.0 / samples_per_bar) as f32;
 
+    HostTransportClock {
+        bar_phase,
+        bar_phase_increment,
+    }
+}
+
+fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, clock: HostTransportClock) {
     for engine_id in 0..data.state.runtime.engine_voice_counts.len() {
         let voice_count =
             data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
@@ -3395,7 +3431,7 @@ fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, block_start_s
                     ParamMsg {
                         idx: gatepitch::PARAM_CLOCK_PHASE,
                         logical_id: lid,
-                        fvalue: phase,
+                        fvalue: clock.bar_phase,
                     },
                 );
                 params_push_wrapper(
@@ -3403,8 +3439,72 @@ fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, block_start_s
                     ParamMsg {
                         idx: gatepitch::PARAM_CLOCK_INC,
                         logical_id: lid,
-                        fvalue: increment,
+                        fvalue: clock.bar_phase_increment,
                     },
+                );
+            }
+        }
+    }
+
+    for pool_id in 0..data.state.runtime.voice_counts.len() {
+        let voice_count = data.state.runtime.voice_counts[pool_id].load(Ordering::Acquire) as usize;
+        for voice_idx in 0..voice_count.min(MAX_VOICES) {
+            let gatepitch_id = data.state.runtime.sampler_gatepitch_node_ids[pool_id][voice_idx]
+                .load(Ordering::Acquire);
+            if gatepitch_id == 0 {
+                continue;
+            }
+            unsafe {
+                params_push_wrapper(
+                    data.lg.0,
+                    ParamMsg {
+                        idx: gatepitch::PARAM_CLOCK_PHASE,
+                        logical_id: gatepitch_id as u64,
+                        fvalue: clock.bar_phase,
+                    },
+                );
+                params_push_wrapper(
+                    data.lg.0,
+                    ParamMsg {
+                        idx: gatepitch::PARAM_CLOCK_INC,
+                        logical_id: gatepitch_id as u64,
+                        fvalue: clock.bar_phase_increment,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn sync_effect_modulator_transport_clock_params(
+    data: &mut AudioCallbackData,
+    clock: HostTransportClock,
+) {
+    for chain in &data.state.pattern.effect_chains {
+        for slot in chain {
+            let modulator_id = slot.modulator_node_id.load(Ordering::Relaxed);
+            if modulator_id == 0 {
+                continue;
+            }
+            unsafe {
+                dispatch_voice_modulator_transport_clock(data.lg.0, modulator_id as u64, clock);
+            }
+        }
+    }
+
+    let Ok(gates) = data.bus_gate_runtime.try_lock() else {
+        return;
+    };
+    for gate in gates.iter() {
+        for slot in &gate.effect_slots {
+            if slot.modulator_node_id == 0 {
+                continue;
+            }
+            unsafe {
+                dispatch_voice_modulator_transport_clock(
+                    data.lg.0,
+                    slot.modulator_node_id as u64,
+                    clock,
                 );
             }
         }
@@ -5302,8 +5402,10 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
+    let host_transport_clock = compute_host_transport_clock(data, block_start_sample);
     sync_bus_gate_params(data, block_start_sample);
-    sync_instrument_host_clock_params(data, block_start_sample);
+    sync_instrument_host_clock_params(data, host_transport_clock);
+    sync_effect_modulator_transport_clock_params(data, host_transport_clock);
     sync_dj_mixer_transport_phase(data, block_start_sample);
 
     // Sync voice pools against current runtime bindings. Project loads can
@@ -5622,7 +5724,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let logical_id = node.load(Ordering::Relaxed);
                 if logical_id != 0 {
                     unsafe {
-                        dispatch_voice_modulator_transport(data.lg.0, logical_id as u64, bpm_f);
+                        dispatch_voice_modulator_bpm(data.lg.0, logical_id as u64, bpm_f);
                     }
                 }
             }
@@ -5631,11 +5733,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             for voice in pool.voices.iter().take(pool.num_voices) {
                 if voice.modulator_id > 0 {
                     unsafe {
-                        dispatch_voice_modulator_transport(
-                            data.lg.0,
-                            voice.modulator_id as u64,
-                            bpm_f,
-                        );
+                        dispatch_voice_modulator_bpm(data.lg.0, voice.modulator_id as u64, bpm_f);
                     }
                 }
                 if voice.logical_id != 0 {

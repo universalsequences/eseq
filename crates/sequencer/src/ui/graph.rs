@@ -4213,6 +4213,28 @@ impl GraphController<'_> {
                         port,
                     );
                 }
+                if !crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    gp_id,
+                    crate::gatepitch::PARAM_CLOCK_PHASE as i32,
+                    mod_id,
+                    crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
+                ) {
+                    return Err(format!(
+                        "build_sampler_voices: failed to connect transport clock for voice {v}"
+                    ));
+                }
+                if !crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    gp_id,
+                    crate::gatepitch::PARAM_CLOCK_INC as i32,
+                    mod_id,
+                    crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
+                ) {
+                    return Err(format!(
+                        "build_sampler_voices: failed to connect transport clock increment for voice {v}"
+                    ));
+                }
                 for port in 0..crate::voice_modulator::NUM_OUTPUTS {
                     crate::audiograph::graph_connect(
                         self.app.graph.lg.0,
@@ -4560,6 +4582,26 @@ impl GraphController<'_> {
                 3,
                 &format!(
                     "ensure_custom_engine_runtime engine {} voice {}",
+                    engine_id, v
+                ),
+            )?;
+            self.graph_connect_checked(
+                gp_id,
+                crate::gatepitch::PARAM_CLOCK_PHASE as i32,
+                mod_id,
+                crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
+                &format!(
+                    "ensure_custom_engine_runtime engine {} voice {} transport clock",
+                    engine_id, v
+                ),
+            )?;
+            self.graph_connect_checked(
+                gp_id,
+                crate::gatepitch::PARAM_CLOCK_INC as i32,
+                mod_id,
+                crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
+                &format!(
+                    "ensure_custom_engine_runtime engine {} voice {} transport clock increment",
                     engine_id, v
                 ),
             )?;

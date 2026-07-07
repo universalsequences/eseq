@@ -15,7 +15,7 @@ const PARAM_TIMELINE_BASE: usize = 7;
 // event timeline: [count, event(frame, kind, pitch, velocity) * MAX_STEPS].
 pub const GATEPITCH_STATE_SIZE: usize =
     PARAM_TIMELINE_BASE + GATEPITCH_TIMELINE_CAPACITY * TIMELINE_EVENT_WIDTH;
-pub const OUTPUT_COUNT: usize = 5;
+pub const OUTPUT_COUNT: usize = 6;
 pub const PARAM_GATE: u64 = 0;
 pub const PARAM_PITCH: u64 = 1;
 pub const PARAM_VELOCITY: u64 = 2;
@@ -103,6 +103,7 @@ unsafe extern "C" fn gatepitch_process(
     let out2 = *out.add(2); // velocity output
     let out3 = *out.add(3); // trigger output
     let out4 = *out.add(4); // clock output
+    let out5 = *out.add(5); // per-sample clock increment
     for i in 0..nf {
         let mut trigger = 0.0;
         while event_index < event_count {
@@ -127,6 +128,7 @@ unsafe extern "C" fn gatepitch_process(
         *out2.add(i) = velocity;
         *out3.add(i) = trigger;
         *out4.add(i) = clock_phase;
+        *out5.add(i) = clock_inc;
         clock_phase += clock_inc;
         if clock_phase >= 1.0 {
             clock_phase -= clock_phase.floor();
@@ -182,12 +184,14 @@ mod tests {
         let mut velocity = [0.0; 4];
         let mut trigger = [0.0; 4];
         let mut clock = [0.0; 4];
+        let mut clock_inc = [0.0; 4];
         let outputs = [
             gate.as_mut_ptr(),
             pitch.as_mut_ptr(),
             velocity.as_mut_ptr(),
             trigger.as_mut_ptr(),
             clock.as_mut_ptr(),
+            clock_inc.as_mut_ptr(),
         ];
 
         unsafe {
@@ -201,6 +205,7 @@ mod tests {
         }
 
         assert_eq!(clock, [0.75, 0.875, 0.0, 0.125]);
+        assert_eq!(clock_inc, [0.125; 4]);
         assert_eq!(state[PARAM_CLOCK_PHASE as usize], 0.25);
     }
 
@@ -223,12 +228,14 @@ mod tests {
         let mut velocity = [0.0; 8];
         let mut trigger = [0.0; 8];
         let mut clock = [0.0; 8];
+        let mut clock_inc = [0.0; 8];
         let outputs = [
             gate.as_mut_ptr(),
             pitch.as_mut_ptr(),
             velocity.as_mut_ptr(),
             trigger.as_mut_ptr(),
             clock.as_mut_ptr(),
+            clock_inc.as_mut_ptr(),
         ];
 
         unsafe {
@@ -265,12 +272,14 @@ mod tests {
         let mut velocity = [0.0; 4];
         let mut trigger = [0.0; 4];
         let mut clock = [0.0; 4];
+        let mut clock_inc = [0.0; 4];
         let outputs = [
             gate.as_mut_ptr(),
             pitch.as_mut_ptr(),
             velocity.as_mut_ptr(),
             trigger.as_mut_ptr(),
             clock.as_mut_ptr(),
+            clock_inc.as_mut_ptr(),
         ];
 
         unsafe {

@@ -7,7 +7,14 @@ use crate::sequencer::{MAX_INSTRUMENT_ENGINES, MAX_SAMPLER_POOLS};
 
 pub const SLOT_COUNT: usize = 4;
 pub const NUM_OUTPUTS: usize = SLOT_COUNT;
-pub const INPUT_COUNT: usize = 8;
+pub const INPUT_GATE: usize = 0;
+pub const INPUT_PITCH: usize = 1;
+pub const INPUT_VELOCITY: usize = 2;
+pub const INPUT_TRIGGER: usize = 3;
+pub const INPUT_EXT_BASE: usize = 4;
+pub const INPUT_TRANSPORT_BAR_PHASE: usize = 8;
+pub const INPUT_TRANSPORT_BAR_PHASE_INC: usize = 9;
+pub const INPUT_COUNT: usize = 10;
 pub const EXT_INPUT_COUNT: usize = 4;
 
 /// Sentinel base for modulation-source param indices: any `node_param_idx`
@@ -42,6 +49,8 @@ const IDX_CUSTOM_ENGINE_ID: usize = IDX_SAMPLE_RATE + 1;
 const IDX_CUSTOM_VOICE_IDX: usize = IDX_CUSTOM_ENGINE_ID + 1;
 const IDX_SAMPLER_TRACK_IDX: usize = IDX_CUSTOM_VOICE_IDX + 1;
 const IDX_SAMPLER_VOICE_IDX: usize = IDX_SAMPLER_TRACK_IDX + 1;
+const IDX_TRANSPORT_CLOCK_SOURCE: usize = IDX_SAMPLER_VOICE_IDX + 1;
+const IDX_EVENT_SLICE_START: usize = IDX_TRANSPORT_CLOCK_SOURCE + 1;
 
 pub const PARAM_SLOT_BASE: usize = 64;
 pub const PARAM_SLOT_STRIDE: usize = 18;
@@ -65,10 +74,14 @@ pub const PARAM_DRIFT_SYNC: usize = 16;
 pub const PARAM_DRIFT_DIV: usize = 17;
 
 pub const PARAM_BPM: usize = PARAM_SLOT_BASE + PARAM_SLOT_STRIDE * SLOT_COUNT;
-pub const PARAM_RESET_COUNTER: usize = PARAM_BPM + 1;
+pub const PARAM_TRANSPORT_BAR_PHASE: usize = PARAM_BPM + 1;
+pub const PARAM_TRANSPORT_BAR_PHASE_INC: usize = PARAM_TRANSPORT_BAR_PHASE + 1;
+pub const PARAM_RESET_COUNTER: usize = PARAM_TRANSPORT_BAR_PHASE_INC + 1;
 
 pub const STATE_SIZE: usize = PARAM_RESET_COUNTER + 1;
 const UNBOUND_CUSTOM_ENGINE: f32 = -1.0;
+const TRANSPORT_CLOCK_SOURCE_PARAMS: f32 = 0.0;
+const TRANSPORT_CLOCK_SOURCE_INPUT: f32 = 1.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +90,7 @@ pub struct VoiceModulatorInitialState {
     pub custom_voice_idx: u32,
     pub sampler_track_idx: u32,
     pub sampler_voice_idx: u32,
+    pub transport_clock_source: u32,
 }
 
 pub fn custom_engine_initial_state(
@@ -88,6 +102,7 @@ pub fn custom_engine_initial_state(
         custom_voice_idx: custom_voice_idx as u32,
         sampler_track_idx: u32::MAX,
         sampler_voice_idx: u32::MAX,
+        transport_clock_source: TRANSPORT_CLOCK_SOURCE_INPUT as u32,
     }
 }
 
@@ -100,6 +115,7 @@ pub fn sampler_voice_initial_state(
         custom_voice_idx: u32::MAX,
         sampler_track_idx: sampler_track_idx as u32,
         sampler_voice_idx: sampler_voice_idx as u32,
+        transport_clock_source: TRANSPORT_CLOCK_SOURCE_INPUT as u32,
     }
 }
 
@@ -511,6 +527,23 @@ fn synced_rate_hz(div_idx: usize, bpm: f32) -> f32 {
     (bpm.max(20.0) / 60.0) / beats.max(0.0001)
 }
 
+fn normalize_phase(value: f32) -> f32 {
+    if value.is_finite() {
+        value - value.floor()
+    } else {
+        0.0
+    }
+}
+
+fn transport_bar_phase_for_frame(base_phase: f32, phase_inc: f32, frame: usize) -> f32 {
+    normalize_phase(base_phase + phase_inc * frame as f32)
+}
+
+fn synced_phase_from_bar_phase(div_idx: usize, bar_phase: f32) -> f32 {
+    let beats = SyncDivision::from_index(div_idx).to_beats() as f32;
+    normalize_phase(normalize_phase(bar_phase) * 4.0 / beats.max(0.0001))
+}
+
 fn sync_division_index(division: SyncDivision) -> f32 {
     SyncDivision::ALL
         .iter()
@@ -533,6 +566,8 @@ where
     F: FnMut(usize) -> f32,
 {
     *s.add(PARAM_BPM) = 120.0;
+    *s.add(PARAM_TRANSPORT_BAR_PHASE) = 0.0;
+    *s.add(PARAM_TRANSPORT_BAR_PHASE_INC) = 0.0;
     *s.add(PARAM_RESET_COUNTER) = 0.0;
 
     for slot in 0..SLOT_COUNT {
@@ -852,12 +887,19 @@ unsafe fn init_identity(s: *mut f32, initial_state: *const c_void) {
     *s.add(IDX_CUSTOM_VOICE_IDX) = UNBOUND_CUSTOM_ENGINE;
     *s.add(IDX_SAMPLER_TRACK_IDX) = UNBOUND_CUSTOM_ENGINE;
     *s.add(IDX_SAMPLER_VOICE_IDX) = UNBOUND_CUSTOM_ENGINE;
+    *s.add(IDX_TRANSPORT_CLOCK_SOURCE) = TRANSPORT_CLOCK_SOURCE_PARAMS;
+    *s.add(IDX_EVENT_SLICE_START) = 0.0;
 
     if initial_state.is_null() {
         return;
     }
 
     let initial = &*(initial_state as *const VoiceModulatorInitialState);
+    *s.add(IDX_TRANSPORT_CLOCK_SOURCE) = if initial.transport_clock_source != 0 {
+        TRANSPORT_CLOCK_SOURCE_INPUT
+    } else {
+        TRANSPORT_CLOCK_SOURCE_PARAMS
+    };
     if initial.custom_engine_id != u32::MAX && initial.custom_voice_idx != u32::MAX {
         *s.add(IDX_CUSTOM_ENGINE_ID) = initial.custom_engine_id as f32;
         *s.add(IDX_CUSTOM_VOICE_IDX) = initial.custom_voice_idx as f32;
@@ -902,6 +944,16 @@ unsafe extern "C" fn effect_modulator_init(
     *s.add(IDX_SAMPLE_RATE) = sample_rate as f32;
     init_identity(s, initial_state);
     init_effect_param_defaults(s);
+}
+
+unsafe extern "C" fn voice_modulator_begin_event_slice(
+    state: *mut c_void,
+    _block_serial: u64,
+    slice_start: c_int,
+    _slice_nframes: c_int,
+) {
+    let s = state as *mut f32;
+    *s.add(IDX_EVENT_SLICE_START) = slice_start.max(0) as f32;
 }
 
 unsafe fn clear_outputs(out: *const *mut f32, nf: usize) {
@@ -1084,6 +1136,8 @@ unsafe fn render_slot(
     note_on: bool,
     sample_rate: f32,
     bpm: f32,
+    transport_bar_phase: f32,
+    transport_clock_advancing: bool,
 ) -> f32 {
     if source == SOURCE_OFF {
         return 0.0;
@@ -1106,18 +1160,26 @@ unsafe fn render_slot(
     let out = match source {
         SOURCE_LFO => {
             let mut phase = *s.add(slot_state_idx(slot, IDX_LFO_PHASE));
-            if note_on && *s.add(slot_param_idx(slot, PARAM_LFO_RETRIGGER)) > 0.5 {
-                phase = 0.0;
-            }
-            let rate = if *s.add(slot_param_idx(slot, PARAM_LFO_SYNC)) > 0.5 {
-                synced_rate_hz(
+            let sync = *s.add(slot_param_idx(slot, PARAM_LFO_SYNC)) > 0.5;
+            if sync && transport_clock_advancing {
+                phase = synced_phase_from_bar_phase(
                     (*s.add(slot_param_idx(slot, PARAM_LFO_DIV))).round() as usize,
-                    bpm,
-                )
+                    transport_bar_phase,
+                );
             } else {
-                (*s.add(slot_param_idx(slot, PARAM_LFO_RATE_HZ))).clamp(0.01, 20.0)
-            };
-            phase = (phase + rate / sample_rate).fract();
+                if note_on && *s.add(slot_param_idx(slot, PARAM_LFO_RETRIGGER)) > 0.5 {
+                    phase = 0.0;
+                }
+                let rate = if sync {
+                    synced_rate_hz(
+                        (*s.add(slot_param_idx(slot, PARAM_LFO_DIV))).round() as usize,
+                        bpm,
+                    )
+                } else {
+                    (*s.add(slot_param_idx(slot, PARAM_LFO_RATE_HZ))).clamp(0.01, 20.0)
+                };
+                phase = normalize_phase(phase + rate / sample_rate);
+            }
             *s.add(slot_state_idx(slot, IDX_LFO_PHASE)) = phase;
             let shape = (*s.add(slot_param_idx(slot, PARAM_LFO_SHAPE))).round() as usize;
             let pw = (*s.add(slot_param_idx(slot, PARAM_LFO_PW))).clamp(0.05, 0.95);
@@ -1251,10 +1313,17 @@ unsafe extern "C" fn voice_modulator_process(
     }
     let sampler_identity = sampler_identity(s);
 
-    let gate_in = *inp.add(0);
-    let velocity_in = *inp.add(2);
-    let trigger_in = *inp.add(3);
-    let ext_inputs = [*inp.add(4), *inp.add(5), *inp.add(6), *inp.add(7)];
+    let gate_in = *inp.add(INPUT_GATE);
+    let velocity_in = *inp.add(INPUT_VELOCITY);
+    let trigger_in = *inp.add(INPUT_TRIGGER);
+    let transport_bar_phase_in = *inp.add(INPUT_TRANSPORT_BAR_PHASE);
+    let transport_bar_phase_inc_in = *inp.add(INPUT_TRANSPORT_BAR_PHASE_INC);
+    let ext_inputs = [
+        *inp.add(INPUT_EXT_BASE),
+        *inp.add(INPUT_EXT_BASE + 1),
+        *inp.add(INPUT_EXT_BASE + 2),
+        *inp.add(INPUT_EXT_BASE + 3),
+    ];
 
     let mut prev_gate = *s.add(IDX_PREV_GATE);
     if let Some((track_idx, voice_idx)) = sampler_identity {
@@ -1270,6 +1339,10 @@ unsafe extern "C" fn voice_modulator_process(
     let sample_rate = (*s.add(IDX_SAMPLE_RATE)).max(1.0);
     let bpm = (*s.add(PARAM_BPM)).clamp(20.0, 400.0);
     let reset_counter = *s.add(PARAM_RESET_COUNTER);
+    let transport_clock_source = *s.add(IDX_TRANSPORT_CLOCK_SOURCE);
+    let param_transport_bar_phase = *s.add(PARAM_TRANSPORT_BAR_PHASE);
+    let param_transport_bar_phase_inc = *s.add(PARAM_TRANSPORT_BAR_PHASE_INC);
+    let event_slice_start = (*s.add(IDX_EVENT_SLICE_START)).max(0.0) as usize;
 
     if reset_counter != last_reset_counter {
         for slot in 0..SLOT_COUNT {
@@ -1321,6 +1394,22 @@ unsafe extern "C" fn voice_modulator_process(
             sampler_voice_started = true;
         }
         let note_on = (gate > 0.5 && prev_gate <= 0.5) || trigger > 0.5;
+        let transport_bar_phase =
+            if transport_clock_source > 0.5 && !transport_bar_phase_in.is_null() {
+                normalize_phase(*transport_bar_phase_in.add(i))
+            } else {
+                transport_bar_phase_for_frame(
+                    param_transport_bar_phase,
+                    param_transport_bar_phase_inc,
+                    event_slice_start + i,
+                )
+            };
+        let transport_clock_advancing =
+            if transport_clock_source > 0.5 && !transport_bar_phase_inc_in.is_null() {
+                *transport_bar_phase_inc_in.add(i) > 0.0
+            } else {
+                param_transport_bar_phase_inc > 0.0
+            };
 
         for (slot, source) in slot_sources.iter().copied().enumerate() {
             if source == SOURCE_OFF {
@@ -1338,6 +1427,8 @@ unsafe extern "C" fn voice_modulator_process(
                 note_on,
                 sample_rate,
                 bpm,
+                transport_bar_phase,
+                transport_clock_advancing,
             );
         }
 
@@ -1354,6 +1445,7 @@ pub fn voice_modulator_vtable() -> NodeVTable {
         init: Some(voice_modulator_init),
         reset: None,
         migrate: None,
+        begin_event_slice: Some(voice_modulator_begin_event_slice),
         ..NodeVTable::default()
     }
 }
@@ -1364,6 +1456,7 @@ pub fn effect_modulator_vtable() -> NodeVTable {
         init: Some(effect_modulator_init),
         reset: None,
         migrate: None,
+        begin_event_slice: Some(voice_modulator_begin_event_slice),
         ..NodeVTable::default()
     }
 }
@@ -1432,6 +1525,21 @@ mod tests {
         trigger: [f32; 64],
         ext: [[f32; 64]; EXT_INPUT_COUNT],
     ) -> [[f32; 64]; NUM_OUTPUTS] {
+        render_voice_modulator_with_gate_and_clock(
+            state, frames, gate, velocity, trigger, [0.0; 64], [0.0; 64], ext,
+        )
+    }
+
+    fn render_voice_modulator_with_gate_and_clock(
+        state: &mut [f32; STATE_SIZE],
+        frames: usize,
+        gate: [f32; 64],
+        velocity: [f32; 64],
+        trigger: [f32; 64],
+        transport_bar_phase: [f32; 64],
+        transport_bar_phase_inc: [f32; 64],
+        ext: [[f32; 64]; EXT_INPUT_COUNT],
+    ) -> [[f32; 64]; NUM_OUTPUTS] {
         assert!(frames <= 64);
 
         let pitch = [440.0f32; 64];
@@ -1444,6 +1552,8 @@ mod tests {
             ext[1].as_ptr() as *mut f32,
             ext[2].as_ptr() as *mut f32,
             ext[3].as_ptr() as *mut f32,
+            transport_bar_phase.as_ptr() as *mut f32,
+            transport_bar_phase_inc.as_ptr() as *mut f32,
         ];
 
         let mut outputs = [[0.0f32; 64]; NUM_OUTPUTS];
@@ -1512,6 +1622,139 @@ mod tests {
         );
         assert!((synced_rate_hz(SyncDivision::Quarter as usize, bpm) - 2.0).abs() < f32::EPSILON);
         assert!((synced_rate_hz(SyncDivision::Whole as usize, bpm) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn synced_lfo_uses_transport_phase_params_instead_of_stored_phase() {
+        let mut state = init_state();
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::Quarter);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[slot_state_idx(0, IDX_LFO_PHASE)] = 0.875;
+        state[PARAM_TRANSPORT_BAR_PHASE] = 0.125;
+        state[PARAM_TRANSPORT_BAR_PHASE_INC] = 0.001;
+
+        let outputs = render_voice_modulator(&mut state, 1, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!((outputs[0][0] - 0.5).abs() <= 0.00001);
+        assert!((state[slot_state_idx(0, IDX_LFO_PHASE)] - 0.5).abs() <= 0.00001);
+    }
+
+    #[test]
+    fn synced_lfo_advances_sample_accurately_from_transport_increment() {
+        let mut state = init_state();
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::Quarter);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[PARAM_TRANSPORT_BAR_PHASE] = 0.0;
+        state[PARAM_TRANSPORT_BAR_PHASE_INC] = 0.0625;
+
+        let outputs = render_voice_modulator(&mut state, 4, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!((outputs[0][0] - 0.0).abs() <= 0.00001);
+        assert!((outputs[0][1] - 0.25).abs() <= 0.00001);
+        assert!((outputs[0][2] - 0.5).abs() <= 0.00001);
+        assert!((outputs[0][3] - 0.75).abs() <= 0.00001);
+    }
+
+    #[test]
+    fn param_clocked_synced_lfo_runs_locally_when_transport_is_paused() {
+        let mut state = init_state();
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::Quarter);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[PARAM_BPM] = 120.0;
+        state[PARAM_TRANSPORT_BAR_PHASE] = 0.0;
+        state[PARAM_TRANSPORT_BAR_PHASE_INC] = 0.0;
+        state[slot_state_idx(0, IDX_LFO_PHASE)] = 0.25;
+
+        let outputs = render_voice_modulator(&mut state, 2, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!(outputs[0][1] > outputs[0][0]);
+        assert!(state[slot_state_idx(0, IDX_LFO_PHASE)] > 0.25);
+    }
+
+    #[test]
+    fn param_clocked_synced_lfo_accounts_for_event_slice_start() {
+        let mut state = init_state();
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::Quarter);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[PARAM_TRANSPORT_BAR_PHASE] = 0.0;
+        state[PARAM_TRANSPORT_BAR_PHASE_INC] = 0.0625;
+        unsafe {
+            voice_modulator_begin_event_slice(state.as_mut_ptr().cast(), 7, 2, 2);
+        }
+
+        let outputs = render_voice_modulator(&mut state, 2, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!((outputs[0][0] - 0.5).abs() <= 0.00001);
+        assert!((outputs[0][1] - 0.75).abs() <= 0.00001);
+    }
+
+    #[test]
+    fn voice_synced_lfo_uses_transport_phase_input_clock() {
+        let track_idx = 61;
+        let voice_idx = 2;
+        set_sampler_active_mask(track_idx, 1u64 << voice_idx);
+        let mut state = init_sampler_voice_state(track_idx, voice_idx);
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::Quarter);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[PARAM_TRANSPORT_BAR_PHASE] = 0.0;
+        state[PARAM_TRANSPORT_BAR_PHASE_INC] = 0.0;
+
+        let mut clock = [0.0f32; 64];
+        clock[0] = 0.125;
+        let mut clock_inc = [0.0f32; 64];
+        clock_inc[0] = 0.0625;
+        let outputs = render_voice_modulator_with_gate_and_clock(
+            &mut state,
+            1,
+            [1.0; 64],
+            [1.0; 64],
+            [0.0; 64],
+            clock,
+            clock_inc,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
+
+        assert!((outputs[0][0] - 0.5).abs() <= 0.00001);
+        set_sampler_active_mask(track_idx, 0);
+    }
+
+    #[test]
+    fn voice_synced_lfo_runs_locally_when_transport_input_clock_is_paused() {
+        let track_idx = 60;
+        let voice_idx = 2;
+        set_sampler_active_mask(track_idx, 1u64 << voice_idx);
+        let mut state = init_sampler_voice_state(track_idx, voice_idx);
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::Quarter);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[PARAM_BPM] = 120.0;
+        state[slot_state_idx(0, IDX_LFO_PHASE)] = 0.25;
+
+        let outputs = render_voice_modulator_with_gate_and_clock(
+            &mut state,
+            2,
+            [1.0; 64],
+            [1.0; 64],
+            [0.0; 64],
+            [0.0; 64],
+            [0.0; 64],
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
+
+        assert!(outputs[0][1] > outputs[0][0]);
+        assert!(state[slot_state_idx(0, IDX_LFO_PHASE)] > 0.25);
+        set_sampler_active_mask(track_idx, 0);
     }
 
     #[test]
