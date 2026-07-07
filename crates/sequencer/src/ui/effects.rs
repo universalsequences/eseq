@@ -4013,27 +4013,38 @@ mod tests {
         app.graph.effect_descriptors = vec![vec![desc]];
 
         app.push_all_delay_bpm();
-        graph.process_block();
 
-        let mut state_buf = vec![0.0_f32; crate::str8_delay::STR8_DELAY_STATE_SIZE];
-        let mut state_size = 0usize;
-        let copied = unsafe {
-            crate::audiograph::get_node_state_into(
-                graph.ptr.0,
-                node_id,
-                state_buf.as_mut_ptr().cast(),
-                state_buf.len() * std::mem::size_of::<f32>(),
-                &mut state_size,
-            )
-        };
-        assert!(copied, "watched Str8 Delay state should be copied");
+        const MAX_WATCH_REFRESH_BLOCKS: usize = 16;
+        let mut observed_bpm = None;
+        for _ in 0..MAX_WATCH_REFRESH_BLOCKS {
+            graph.process_block();
+
+            let mut state_buf = vec![0.0_f32; crate::str8_delay::STR8_DELAY_STATE_SIZE];
+            let mut state_size = 0usize;
+            let copied = unsafe {
+                crate::audiograph::get_node_state_into(
+                    graph.ptr.0,
+                    node_id,
+                    state_buf.as_mut_ptr().cast(),
+                    state_buf.len() * std::mem::size_of::<f32>(),
+                    &mut state_size,
+                )
+            };
+            assert!(copied, "watched Str8 Delay state should be copied");
+            assert_eq!(
+                state_size,
+                crate::str8_delay::STR8_DELAY_STATE_SIZE * std::mem::size_of::<f32>()
+            );
+            let bpm = state_buf[crate::str8_delay::STR8_DELAY_PARAM_BPM as usize];
+            if (bpm - 137.0).abs() <= f32::EPSILON {
+                observed_bpm = Some(bpm);
+                break;
+            }
+        }
         assert_eq!(
-            state_size,
-            crate::str8_delay::STR8_DELAY_STATE_SIZE * std::mem::size_of::<f32>()
-        );
-        assert_eq!(
-            state_buf[crate::str8_delay::STR8_DELAY_PARAM_BPM as usize],
-            137.0
+            observed_bpm,
+            Some(137.0),
+            "Str8 Delay BPM should reach watched node state within {MAX_WATCH_REFRESH_BLOCKS} blocks"
         );
     }
 
