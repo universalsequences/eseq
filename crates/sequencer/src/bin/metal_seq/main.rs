@@ -10451,6 +10451,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     rt.run_reactive_cycle();
                                 }
                                 editor.refresh_runtime_side_effects();
+                                editor.refresh_visible_layouts_for_buffer_named("*step*");
                                 editor.mark_needs_redraw();
                             }
                         }
@@ -15604,6 +15605,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
             let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let step_visible = editor_has_visible_buffer(&editor, "*step*");
             let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
             let master_meter_visible = transport_visible || mixer_visible;
             let track_meter_visible =
@@ -15627,6 +15629,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_meter_poll_at = Instant::now();
             }
             let mut needs_reactive_cycle = false;
+            let mut refresh_visible_step_after_cycle = false;
             let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
             if selected_neural_snapshot != prev_selected_neural_neurons {
                 needs_reactive_cycle |= sync_selected_neural_neuron_bindings(
@@ -15656,6 +15659,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ct != prev_current_track && !app.tracks.is_empty() {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
                 editor.reset_widget_scroll_for_buffer_named("*fx*");
+                preview_plock_variant = None;
                 let cleared_step_selection = {
                     let mut selection = selected_steps.lock().unwrap();
                     let had_selection = !selection.is_empty();
@@ -15783,7 +15787,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 prev_playing = playing;
                 needs_reactive_cycle = true;
-                if fx_visible && !app.tracks.is_empty() {
+                if (fx_visible || step_visible) && !app.tracks.is_empty() {
                     let rt = editor.runtime_mut();
                     sync_track_params_with_neural_selection(
                         rt,
@@ -15798,7 +15802,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }) {
                         preview_plock_variant = None;
                     }
-                    sync_track_plock_variant_preview(
+                    let preview_dirty = sync_track_plock_variant_preview(
                         rt,
                         &app,
                         &state,
@@ -15806,14 +15810,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &selected_steps,
                         preview_plock_variant.as_ref(),
                     );
-                    sync_fx_param_binding_fields_with_neural_selection(
-                        rt,
-                        &app,
-                        &state,
-                        ct,
-                        &selected_steps,
-                        Some(&selected_neural_snapshot),
-                    );
+                    needs_reactive_cycle |= preview_dirty;
+                    refresh_visible_step_after_cycle |= preview_dirty;
+                    if fx_visible {
+                        sync_fx_param_binding_fields_with_neural_selection(
+                            rt,
+                            &app,
+                            &state,
+                            ct,
+                            &selected_steps,
+                            Some(&selected_neural_snapshot),
+                        );
+                    }
                 }
             }
             if bpm != prev_bpm {
@@ -15988,7 +15996,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !current_track_playhead_visible && prev_playhead != playhead {
                 prev_playhead = playhead;
             }
-            if fx_visible && current_track_playhead_changed && !app.tracks.is_empty() {
+            if (fx_visible || step_visible)
+                && current_track_playhead_changed
+                && !app.tracks.is_empty()
+            {
                 let rt = editor.runtime_mut();
                 sync_track_params_with_neural_selection(
                     rt,
@@ -15998,14 +16009,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &selected_steps,
                     Some(&selected_neural_snapshot),
                 );
-                sync_fx_param_binding_fields_with_neural_selection(
+                if preview_plock_variant.as_ref().is_some_and(|(track, _)| {
+                    *track != ct || !selected_steps.lock().unwrap().is_empty()
+                }) {
+                    preview_plock_variant = None;
+                }
+                let preview_dirty = sync_track_plock_variant_preview(
                     rt,
                     &app,
                     &state,
                     ct,
                     &selected_steps,
-                    Some(&selected_neural_snapshot),
+                    preview_plock_variant.as_ref(),
                 );
+                refresh_visible_step_after_cycle |= preview_dirty;
+                if fx_visible {
+                    sync_fx_param_binding_fields_with_neural_selection(
+                        rt,
+                        &app,
+                        &state,
+                        ct,
+                        &selected_steps,
+                        Some(&selected_neural_snapshot),
+                    );
+                }
                 needs_reactive_cycle = true;
             }
             prev_current_track_playhead_visible = current_track_playhead_visible;
@@ -16121,7 +16148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }) {
                     preview_plock_variant = None;
                 }
-                sync_track_plock_variant_preview(
+                let preview_dirty = sync_track_plock_variant_preview(
                     rt,
                     &app,
                     &state,
@@ -16129,6 +16156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &selected_steps,
                     preview_plock_variant.as_ref(),
                 );
+                refresh_visible_step_after_cycle |= preview_dirty;
                 sync_track_params_elapsed = started.elapsed();
                 let started = Instant::now();
                 sync_fx_param_binding_fields_with_neural_selection(
@@ -16245,6 +16273,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &selected_steps,
                         Some(&selected_neural_snapshot),
                     );
+                    if preview_plock_variant.as_ref().is_some_and(|(track, _)| {
+                        *track != ct || !selected_steps.lock().unwrap().is_empty()
+                    }) {
+                        preview_plock_variant = None;
+                    }
+                    let preview_dirty = sync_track_plock_variant_preview(
+                        rt,
+                        &app,
+                        &state,
+                        ct,
+                        &selected_steps,
+                        preview_plock_variant.as_ref(),
+                    );
+                    refresh_visible_step_after_cycle |= preview_dirty;
                     sync_fx_param_binding_fields_with_neural_selection(
                         rt,
                         &app,
@@ -16484,6 +16526,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let started = Instant::now();
                     editor.refresh_visible_layouts_for_buffer_named("*samples*");
                     refresh_samples_elapsed = started.elapsed();
+                }
+                if refresh_visible_step_after_cycle {
+                    editor.refresh_visible_layouts_for_buffer_named("*step*");
                 }
                 editor.mark_needs_redraw();
                 if profile_cycle {

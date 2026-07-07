@@ -8422,152 +8422,116 @@ pub(crate) fn build_track_plocks_value(
 ) -> Value {
     use sequencer::effects::ParamKind;
 
-    let mut steps: Vec<usize> = selected.lock().unwrap().iter().copied().collect();
-    steps.sort_unstable();
+    let Some(step) = selected_plock_step(selected) else {
+        return Value::List(vec![]);
+    };
     let mut items = Vec::new();
-    if steps.is_empty() {
-        return Value::List(items);
-    }
 
     let tp = &state.pattern.track_params[track];
-    for step in steps {
-        if let Some(timebase) = state.pattern.timebase_plocks[track].get(step) {
-            items.push(plock_entry(
-                step,
-                "timebase",
-                "track",
-                "timebase",
-                timebase as u32 as f32,
-                tp.get_timebase() as u32 as f32,
-                0.0,
-                (Timebase::ALL.len() - 1) as f32,
-                None,
-                None,
-                Some(
-                    Timebase::LABELS
-                        .iter()
-                        .map(|label| label.to_string())
-                        .collect(),
-                ),
-            ));
+    if let Some(timebase) = state.pattern.timebase_plocks[track].get(step) {
+        items.push(plock_entry(
+            step,
+            "timebase",
+            "track",
+            "timebase",
+            timebase as u32 as f32,
+            tp.get_timebase() as u32 as f32,
+            0.0,
+            (Timebase::ALL.len() - 1) as f32,
+            None,
+            None,
+            Some(
+                Timebase::LABELS
+                    .iter()
+                    .map(|label| label.to_string())
+                    .collect(),
+            ),
+        ));
+    }
+    if let Some(swing) = state.pattern.swing_plocks[track].get(step) {
+        items.push(plock_entry(
+            step,
+            "swing",
+            "track",
+            "swing",
+            swing,
+            tp.get_swing(),
+            50.0,
+            75.0,
+            None,
+            None,
+            None,
+        ));
+    }
+    if let Some(resolution) = state.pattern.swing_resolution_plocks[track].get(step) {
+        items.push(plock_entry(
+            step,
+            "swing-resolution",
+            "track",
+            "swing res",
+            resolution as u32 as f32,
+            tp.get_swing_resolution() as u32 as f32,
+            0.0,
+            (SwingResolution::ALL.len() - 1) as f32,
+            None,
+            None,
+            Some(
+                SwingResolution::LABELS
+                    .iter()
+                    .map(|label| label.to_string())
+                    .collect(),
+            ),
+        ));
+    }
+    for param in StepParam::ALL {
+        let value = state.pattern.step_data[track].get(step, param);
+        if value.to_bits() == param.default_value().to_bits() {
+            continue;
         }
-        if let Some(swing) = state.pattern.swing_plocks[track].get(step) {
-            items.push(plock_entry(
-                step,
-                "swing",
-                "track",
-                "swing",
-                swing,
-                tp.get_swing(),
-                50.0,
-                75.0,
-                None,
-                None,
-                None,
-            ));
-        }
-        if let Some(resolution) = state.pattern.swing_resolution_plocks[track].get(step) {
-            items.push(plock_entry(
-                step,
-                "swing-resolution",
-                "track",
-                "swing res",
-                resolution as u32 as f32,
-                tp.get_swing_resolution() as u32 as f32,
-                0.0,
-                (SwingResolution::ALL.len() - 1) as f32,
-                None,
-                None,
-                Some(
-                    SwingResolution::LABELS
-                        .iter()
-                        .map(|label| label.to_string())
-                        .collect(),
-                ),
-            ));
-        }
-        for param in StepParam::ALL {
-            let value = state.pattern.step_data[track].get(step, param);
-            if value.to_bits() == param.default_value().to_bits() {
-                continue;
-            }
-            items.push(plock_entry(
-                step,
-                "step-param",
-                "per step",
-                param.short_label(),
-                value,
-                param.default_value(),
-                param.min(),
-                param.max(),
-                None,
-                Some(param.index()),
-                None,
-            ));
-        }
+        items.push(plock_entry(
+            step,
+            "step-param",
+            "per step",
+            param.short_label(),
+            value,
+            param.default_value(),
+            param.min(),
+            param.max(),
+            None,
+            Some(param.index()),
+            None,
+        ));
+    }
 
-        if let Some(desc) = app.graph.instrument_descriptors.get(track) {
-            let slot = &state.pattern.instrument_slots[track];
-            for (param_idx, param) in desc.params.iter().enumerate() {
-                if let Some(value) = slot.plocks.get(step, param_idx) {
-                    let options = match &param.kind {
-                        ParamKind::Enum { labels } => Some(labels.clone()),
-                        ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
-                        ParamKind::Continuous { .. } => None,
-                    };
-                    items.push(plock_entry(
-                        step,
-                        "instrument",
-                        "inst",
-                        &param.name,
-                        param.stored_to_user(value),
-                        param.stored_to_user(slot.defaults.get(param_idx)),
-                        param.stored_to_user(param.min),
-                        param.stored_to_user(param.max),
-                        None,
-                        Some(param_idx),
-                        options,
-                    ));
-                }
-            }
-        }
-
-        if let Some(descs) = app.graph.effect_descriptors.get(track) {
-            for (slot_idx, desc) in descs.iter().enumerate() {
-                let Some(slot) = state.pattern.effect_chains[track].get(slot_idx) else {
-                    continue;
+    if let Some(desc) = app.graph.instrument_descriptors.get(track) {
+        let slot = &state.pattern.instrument_slots[track];
+        for (param_idx, param) in desc.params.iter().enumerate() {
+            if let Some(value) = slot.plocks.get(step, param_idx) {
+                let options = match &param.kind {
+                    ParamKind::Enum { labels } => Some(labels.clone()),
+                    ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                    ParamKind::Continuous { .. } => None,
                 };
-                for (param_idx, param) in desc.params.iter().enumerate() {
-                    if let Some(value) = slot.plocks.get(step, param_idx) {
-                        let options = match &param.kind {
-                            ParamKind::Enum { labels } => Some(labels.clone()),
-                            ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
-                            ParamKind::Continuous { .. } => None,
-                        };
-                        items.push(plock_entry(
-                            step,
-                            "effect",
-                            &desc.name,
-                            &param.name,
-                            value,
-                            slot.defaults.get(param_idx),
-                            param.min,
-                            param.max,
-                            Some(slot_idx),
-                            Some(param_idx),
-                            options,
-                        ));
-                    }
-                }
+                items.push(plock_entry(
+                    step,
+                    "instrument",
+                    "inst",
+                    &param.name,
+                    param.stored_to_user(value),
+                    param.stored_to_user(slot.defaults.get(param_idx)),
+                    param.stored_to_user(param.min),
+                    param.stored_to_user(param.max),
+                    None,
+                    Some(param_idx),
+                    options,
+                ));
             }
         }
+    }
 
-        let midi_chain = tp.midi_fx_chain();
-        for (slot_idx, slot) in state.pattern.midi_fx_slots[track].iter().enumerate() {
-            let Some(desc) = midi_chain
-                .get(slot_idx)
-                .and_then(|name| sequencer::lisp_host::load_midi_fx_descriptor(name))
-            else {
+    if let Some(descs) = app.graph.effect_descriptors.get(track) {
+        for (slot_idx, desc) in descs.iter().enumerate() {
+            let Some(slot) = state.pattern.effect_chains[track].get(slot_idx) else {
                 continue;
             };
             for (param_idx, param) in desc.params.iter().enumerate() {
@@ -8579,7 +8543,7 @@ pub(crate) fn build_track_plocks_value(
                     };
                     items.push(plock_entry(
                         step,
-                        "midi-fx",
+                        "effect",
                         &desc.name,
                         &param.name,
                         value,
@@ -8591,6 +8555,38 @@ pub(crate) fn build_track_plocks_value(
                         options,
                     ));
                 }
+            }
+        }
+    }
+
+    let midi_chain = tp.midi_fx_chain();
+    for (slot_idx, slot) in state.pattern.midi_fx_slots[track].iter().enumerate() {
+        let Some(desc) = midi_chain
+            .get(slot_idx)
+            .and_then(|name| sequencer::lisp_host::load_midi_fx_descriptor(name))
+        else {
+            continue;
+        };
+        for (param_idx, param) in desc.params.iter().enumerate() {
+            if let Some(value) = slot.plocks.get(step, param_idx) {
+                let options = match &param.kind {
+                    ParamKind::Enum { labels } => Some(labels.clone()),
+                    ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                    ParamKind::Continuous { .. } => None,
+                };
+                items.push(plock_entry(
+                    step,
+                    "midi-fx",
+                    &desc.name,
+                    &param.name,
+                    value,
+                    slot.defaults.get(param_idx),
+                    param.min,
+                    param.max,
+                    Some(slot_idx),
+                    Some(param_idx),
+                    options,
+                ));
             }
         }
     }
@@ -14803,6 +14799,109 @@ mod tests {
     }
 
     #[test]
+    fn track_plocks_value_shows_only_first_selected_variant_rows() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(cutoff_idx, 5000.0);
+        app.state.pattern.instrument_slots[0].set_plock(2, cutoff_idx, 900.0);
+        app.state.pattern.instrument_slots[0].set_plock(4, cutoff_idx, 1200.0);
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([4, 2])));
+
+        let variants = value_list_maps(&build_track_plock_variants_value(
+            &app.state,
+            0,
+            &selected_steps,
+        ));
+        let current_variant = variants
+            .iter()
+            .find(|map| {
+                value_map_string(map, "kind").as_deref() == Some("variant")
+                    && value_map_bool(map, "current") == Some(true)
+            })
+            .expect("first selected step variant should be current");
+        assert_eq!(
+            value_map_string(current_variant, "label").as_deref(),
+            Some("A")
+        );
+
+        let rows = value_list_maps(&build_track_plocks_value(
+            &app,
+            &app.state,
+            0,
+            &selected_steps,
+        ));
+        assert_eq!(
+            rows.len(),
+            1,
+            "selected-step p-lock display should show the current variant rows, not a union"
+        );
+        let row = &rows[0];
+        assert_eq!(value_map_number(row, "step-idx"), Some(2.0));
+        assert_eq!(
+            value_map_string(row, "target").as_deref(),
+            Some("instrument")
+        );
+        assert_eq!(value_map_string(row, "name").as_deref(), Some("cutoff"));
+        assert_eq!(value_map_number(row, "value"), Some(900.0));
+    }
+
+    #[test]
+    fn track_plock_variant_preview_rows_show_variant_without_selected_step() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(cutoff_idx, 5000.0);
+        app.state.pattern.instrument_slots[0].set_plock(4, cutoff_idx, 1200.0);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+
+        let preview_variants = value_list_maps(&build_track_plock_variants_value_with_preview(
+            &app.state,
+            0,
+            &selected_steps,
+            Some("A"),
+        ));
+        let def_chip = preview_variants
+            .iter()
+            .find(|map| value_map_string(map, "kind").as_deref() == Some("def"))
+            .expect("default variant chip");
+        let preview_chip = preview_variants
+            .iter()
+            .find(|map| value_map_string(map, "label").as_deref() == Some("A"))
+            .expect("previewed variant chip");
+        assert_eq!(value_map_bool(def_chip, "current"), Some(false));
+        assert_eq!(value_map_bool(preview_chip, "current"), Some(true));
+
+        let rows = value_list_maps(&build_track_plocks_value_for_variant_label(
+            &app, &app.state, 0, "A",
+        ));
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(value_map_bool(row, "preview"), Some(true));
+        assert_eq!(value_map_string(row, "source").as_deref(), Some("preview"));
+        assert_eq!(
+            value_map_string(row, "target").as_deref(),
+            Some("instrument")
+        );
+        assert_eq!(value_map_string(row, "name").as_deref(), Some("cutoff"));
+        assert_eq!(value_map_number(row, "value"), Some(1200.0));
+        assert_eq!(value_map_number(row, "default"), Some(5000.0));
+        assert_eq!(value_map_number(row, "param-idx"), Some(cutoff_idx as f64));
+    }
+
+    #[test]
     fn slot_param_stored_value_returns_played_plock_or_default() {
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
         let cutoff_idx = desc
@@ -20797,6 +20896,81 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_track_plock_panel_renders_preview_rows_read_only() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plocks",
+            test_list(vec![map_value([
+                ("target", Value::String("instrument".to_string())),
+                ("domain", Value::String("inst".to_string())),
+                ("source", Value::String("preview".to_string())),
+                ("preview", Value::Bool(true)),
+                ("step-idx", Value::Number(0.0)),
+                ("param-idx", Value::Number(13.0)),
+                ("group", Value::String("inst".to_string())),
+                ("name", Value::String("mod bpm src".to_string())),
+                ("value", Value::Number(1.0)),
+                ("default", Value::Number(0.0)),
+                ("text-value", Value::String("Mod".to_string())),
+                ("default-text", Value::String("off".to_string())),
+                ("min", Value::Number(0.0)),
+                ("max", Value::Number(2.0)),
+                (
+                    "options",
+                    test_list(vec![
+                        Value::String("off".to_string()),
+                        Value::String("Mod".to_string()),
+                        Value::String("Env".to_string()),
+                    ]),
+                ),
+            ])]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plock-variants",
+            test_list(vec![map_value([
+                ("kind", Value::String("variant".to_string())),
+                ("label", Value::String("A".to_string())),
+                ("count", Value::Number(1.0)),
+                ("current", Value::Bool(true)),
+                ("color-r", Value::Number(0.270_588_25)),
+                ("color-g", Value::Number(0.784_313_74)),
+                ("color-b", Value::Number(0.862_745_1)),
+            ])]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .expect("stub sequencer param name helper");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect-buffer "*plock-panel-preview-test*" (fx-track-plocks-panel))"#)
+            .expect("create p-lock preview panel test buffer");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*plock-panel-preview-test*")
+            .expect("p-lock preview panel test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(28, 24);
+        editor.refresh_visible_layouts_for_buffer_named("*plock-panel-preview-test*");
+        let layout = editor.widget_layout().expect("track p-lock preview layout");
+        let lock = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock")
+            .expect("preview lock cell should render");
+
+        assert_finite_nonzero_rect(lock, "preview p-lock value label");
+        assert_eq!(
+            lock.widget_type, "label",
+            "preview rows must render the lock value read-only even when options are present"
+        );
+    }
+
+    #[test]
     fn metal_seq_step_plock_panel_backspace_deletes_selected_plock_row() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -20878,6 +21052,83 @@ mod tests {
             }
             other => panic!("expected clear-track-plock-entry host command, got {other:?}"),
         }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("fx-selected-plock-row")
+                .unwrap(),
+            Some(Value::Number(-1.0))
+        );
+    }
+
+    #[test]
+    fn metal_seq_plock_chip_click_previews_without_selected_step() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.drain_host_commands();
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(fx-plock-chip-click (dict :kind "variant" :label "A"))"#)
+            .expect("click p-lock variant chip with no selected step");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "preview-plock-variant");
+                let Value::Map(payload) = payload else {
+                    panic!("preview-plock-variant payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("label").map(|value| value.borrow().clone()),
+                    Some(Value::String("A".to_string()))
+                );
+            }
+            other => panic!("expected preview-plock-variant host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_preview_plock_row_backspace_does_not_clear_real_step() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plocks",
+            test_list(vec![map_value([
+                ("target", Value::String("instrument".to_string())),
+                ("domain", Value::String("inst".to_string())),
+                ("source", Value::String("preview".to_string())),
+                ("preview", Value::Bool(true)),
+                ("step-idx", Value::Number(0.0)),
+                ("param-idx", Value::Number(3.0)),
+                ("group", Value::String("inst".to_string())),
+                ("name", Value::String("cutoff".to_string())),
+                ("value", Value::Number(1200.0)),
+                ("default", Value::Number(5000.0)),
+                ("text-value", Value::String("1200.00".to_string())),
+                ("default-text", Value::String("5000.00".to_string())),
+                ("min", Value::Number(20.0)),
+                ("max", Value::Number(20_000.0)),
+            ])]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(set! fx-selected-plock-row 0)")
+            .expect("select preview p-lock row");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.drain_host_commands();
+
+        let handled = editor
+            .runtime_mut()
+            .eval_str("(fx-delete-selected-plock-row-key)")
+            .expect("delete selected preview p-lock row");
+
+        assert_eq!(handled, Some(Value::Bool(true)));
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "preview row deletion must not emit a clear-track-plock-entry command"
+        );
         assert_eq!(
             editor
                 .runtime_mut()
