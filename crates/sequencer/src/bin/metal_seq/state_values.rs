@@ -2563,12 +2563,12 @@ pub(crate) fn build_track_solos(state: &Arc<SequencerState>) -> Value {
 
 pub(crate) fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
-    let has_solo = (0..count).any(|t| state.pattern.track_params[t].is_solo());
+    let has_solo = any_track_solo(state);
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
         .map(|t| {
-            Rc::new(RefCell::new(Value::Bool(
-                has_solo && !state.pattern.track_params[t].is_solo(),
-            )))
+            Rc::new(RefCell::new(Value::Bool(track_muted_by_solo(
+                state, t, has_solo,
+            ))))
         })
         .collect();
     Value::List(items)
@@ -2581,6 +2581,10 @@ fn track_effectively_muted(state: &Arc<SequencerState>, track: usize, has_solo: 
 
 fn any_track_solo(state: &Arc<SequencerState>) -> bool {
     (0..state.active_track_count()).any(|t| state.pattern.track_params[t].is_solo())
+}
+
+fn track_muted_by_solo(state: &Arc<SequencerState>, track: usize, has_solo: bool) -> bool {
+    has_solo && !state.pattern.track_params[track].is_solo()
 }
 
 /// Per-track "effectively muted" (explicit mute OR muted by another track's
@@ -2611,26 +2615,97 @@ pub(crate) fn build_track_color_channel_effective(
     let has_solo = any_track_solo(state);
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
         .map(|track| {
-            let color = app
-                .track_colors
-                .get(track)
-                .copied()
-                .unwrap_or_else(|| sequencer::track_color::TrackColor::palette_color(track))
-                .clamped();
-            let (raw, dim_base) = match channel {
-                0 => (color.r as f64, 0.10),
-                1 => (color.g as f64, 0.10),
-                _ => (color.b as f64, 0.11),
-            };
-            let value = if track_effectively_muted(state, track, has_solo) {
-                raw * 0.34 + dim_base * 0.66
-            } else {
-                raw
-            };
+            let muted = track_effectively_muted(state, track, has_solo);
+            let value = track_color_channel_effective_value(app, track, channel, muted);
             Rc::new(RefCell::new(Value::Number(value)))
         })
         .collect();
     Value::List(items)
+}
+
+fn track_color_channel_effective_value(
+    app: &ui::App,
+    track: usize,
+    channel: usize,
+    muted: bool,
+) -> f64 {
+    let color = app
+        .track_colors
+        .get(track)
+        .copied()
+        .unwrap_or_else(|| sequencer::track_color::TrackColor::palette_color(track))
+        .clamped();
+    let (raw, dim_base) = match channel {
+        0 => (color.r as f64, 0.10),
+        1 => (color.g as f64, 0.10),
+        _ => (color.b as f64, 0.11),
+    };
+    if muted {
+        raw * 0.34 + dim_base * 0.66
+    } else {
+        raw
+    }
+}
+
+fn track_color_channel_effective_field(channel: usize) -> &'static str {
+    match channel {
+        0 => "track-color-r-effective",
+        1 => "track-color-g-effective",
+        _ => "track-color-b-effective",
+    }
+}
+
+pub(crate) fn sync_track_mute_visual_binding_fields(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    tracks: impl IntoIterator<Item = usize>,
+    sync_muted_by_solo: bool,
+) -> bool {
+    let count = state.active_track_count();
+    let has_solo = any_track_solo(state);
+    let mut effects_dirty = false;
+
+    for track in tracks {
+        if track >= count {
+            continue;
+        }
+        if sync_muted_by_solo {
+            effects_dirty |= rt
+                .set_reactive_list_index(
+                    "SEQ",
+                    "track-muted-by-solo",
+                    track,
+                    Value::Bool(track_muted_by_solo(state, track, has_solo)),
+                )
+                .effects_dirty;
+        }
+
+        let muted = track_effectively_muted(state, track, has_solo);
+        effects_dirty |= rt
+            .set_reactive_list_index(
+                "SEQ",
+                "track-muted-effective",
+                track,
+                Value::Number(if muted { 1.0 } else { 0.0 }),
+            )
+            .effects_dirty;
+
+        for channel in 0..3 {
+            effects_dirty |= rt
+                .set_reactive_list_index(
+                    "SEQ",
+                    track_color_channel_effective_field(channel),
+                    track,
+                    Value::Number(track_color_channel_effective_value(
+                        app, track, channel, muted,
+                    )),
+                )
+                .effects_dirty;
+        }
+    }
+
+    effects_dirty
 }
 
 pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Arc<SequencerState>) {
@@ -14625,6 +14700,29 @@ mod tests {
         }
     }
 
+    fn number_list_values(value: &Value) -> Vec<f64> {
+        match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::Number(value) => *value,
+                    other => panic!("expected number list item, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected number list, got {other:?}"),
+        }
+    }
+
+    fn assert_number_lists_close(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 0.000001,
+                "value {idx} expected {expected}, got {actual}"
+            );
+        }
+    }
+
     fn string_list_values(value: &Value) -> Vec<String> {
         match value {
             Value::List(items) => items
@@ -14638,6 +14736,56 @@ mod tests {
         }
     }
 
+    fn reactive_field_value(runtime: &Runtime, namespace: &str, field: &str) -> Value {
+        let Some(Value::Map(map)) = runtime.global_value(namespace) else {
+            panic!("missing reactive namespace {namespace}");
+        };
+        let value = map
+            .get(field)
+            .unwrap_or_else(|| panic!("missing reactive field {namespace}.{field}"))
+            .borrow()
+            .clone();
+        value
+    }
+
+    fn assert_effective_color_reactives_match_builders(
+        runtime: &Runtime,
+        app: &ui::App,
+        state: &Arc<SequencerState>,
+    ) {
+        for channel in 0..3 {
+            let field = track_color_channel_effective_field(channel);
+            let actual = number_list_values(&reactive_field_value(runtime, "SEQ", field));
+            let expected =
+                number_list_values(&build_track_color_channel_effective(app, state, channel));
+            assert_number_lists_close(&actual, &expected);
+        }
+    }
+
+    fn test_app_for_track_visual_state(state: Arc<SequencerState>) -> ui::App {
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = ui::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            ui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = (0..state.active_track_count())
+            .map(|track| format!("Track {}", track + 1))
+            .collect();
+        app
+    }
+
     fn value_list_maps(value: &Value) -> Vec<HashMap<String, Rc<RefCell<Value>>>> {
         match value {
             Value::List(items) => items
@@ -14649,6 +14797,117 @@ mod tests {
                 .collect(),
             other => panic!("expected map list, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn track_mute_visual_binding_sync_updates_effective_mute_and_color_fields() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        let app = test_app_for_track_visual_state(state.clone());
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("track-muted-by-solo", build_track_muted_by_solo(&state)),
+                ("track-muted-effective", build_track_muted_effective(&state)),
+                (
+                    "track-color-r-effective",
+                    build_track_color_channel_effective(&app, &state, 0),
+                ),
+                (
+                    "track-color-g-effective",
+                    build_track_color_channel_effective(&app, &state, 1),
+                ),
+                (
+                    "track-color-b-effective",
+                    build_track_color_channel_effective(&app, &state, 2),
+                ),
+            ],
+            true,
+        );
+
+        state.pattern.track_params[1].set_mute(true);
+        sync_track_mute_visual_binding_fields(
+            &mut runtime,
+            &app,
+            &state,
+            std::iter::once(1),
+            false,
+        );
+        assert_eq!(
+            number_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                "track-muted-effective"
+            )),
+            vec![0.0, 1.0]
+        );
+        assert_eq!(
+            bool_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                "track-muted-by-solo"
+            )),
+            vec![false, false]
+        );
+        assert_effective_color_reactives_match_builders(&runtime, &app, &state);
+
+        state.pattern.track_params[0].set_solo(true);
+        sync_track_mute_visual_binding_fields(&mut runtime, &app, &state, 0..2, true);
+        assert_eq!(
+            bool_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                "track-muted-by-solo"
+            )),
+            vec![false, true]
+        );
+        assert_eq!(
+            number_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                "track-muted-effective"
+            )),
+            vec![0.0, 1.0]
+        );
+        assert_effective_color_reactives_match_builders(&runtime, &app, &state);
+
+        state.pattern.track_params[0].set_solo(false);
+        sync_track_mute_visual_binding_fields(&mut runtime, &app, &state, 0..2, true);
+        assert_eq!(
+            bool_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                "track-muted-by-solo"
+            )),
+            vec![false, false]
+        );
+        assert_eq!(
+            number_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                "track-muted-effective"
+            )),
+            vec![0.0, 1.0]
+        );
+        assert_effective_color_reactives_match_builders(&runtime, &app, &state);
+
+        state.pattern.track_params[1].set_mute(false);
+        sync_track_mute_visual_binding_fields(
+            &mut runtime,
+            &app,
+            &state,
+            std::iter::once(1),
+            false,
+        );
+        assert_eq!(
+            number_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                "track-muted-effective"
+            )),
+            vec![0.0, 0.0]
+        );
+        assert_effective_color_reactives_match_builders(&runtime, &app, &state);
     }
 
     #[test]
@@ -19912,6 +20171,71 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_samples_sidebar_hide_relayouts_sequencer_expand_button_to_new_width() {
+        #[derive(Debug)]
+        struct ExpandLayoutState {
+            viewport_width: f32,
+            root_width: f32,
+            expand_col: f32,
+            right_gap: f32,
+        }
+
+        fn sequencer_expand_layout_state(editor: &mut eseqlisp::Editor) -> ExpandLayoutState {
+            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(editor, 180, 90);
+            let tile = frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("full grid layout should contain *sequencer* tile");
+            let layout = tile
+                .frame
+                .widget_layout
+                .as_ref()
+                .expect("sequencer tile should have widget layout");
+            let expand = find_layout_node_by_stable_key(layout, "seqv-expand-0")
+                .expect("sequencer expand button should be present");
+            let viewport_width = editor
+                .tile_root
+                .find_leaf(tile.tile_id)
+                .expect("sequencer tile leaf should exist")
+                .widget_viewport_width;
+            ExpandLayoutState {
+                viewport_width,
+                root_width: layout.rect.width,
+                expand_col: expand.rect.col,
+                right_gap: viewport_width - (expand.rect.col + expand.rect.width),
+            }
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let visible = sequencer_expand_layout_state(&mut editor);
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-samples-sidebar)")
+            .expect("hide samples sidebar");
+        editor.refresh_runtime_side_effects();
+
+        let hidden = sequencer_expand_layout_state(&mut editor);
+        assert!(
+            hidden.viewport_width > visible.viewport_width + 8.0,
+            "hiding the samples sidebar should widen the sequencer viewport; visible={visible:?} hidden={hidden:?}"
+        );
+        assert!(
+            (hidden.root_width - hidden.viewport_width).abs() <= 0.05,
+            "sequencer layout root should be rebuilt for the wider viewport; visible={visible:?} hidden={hidden:?}"
+        );
+        assert!(
+            hidden.expand_col > visible.expand_col + 8.0,
+            "expand button should move right when the sequencer viewport widens; visible={visible:?} hidden={hidden:?}"
+        );
+        assert!(
+            (hidden.right_gap - visible.right_gap).abs() <= 0.75,
+            "expand button should keep hugging the right edge after sidebar hide; visible={visible:?} hidden={hidden:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_mixer_panel_toggle_hides_and_restores_mixer_layout_spec() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -24149,7 +24473,15 @@ mod tests {
 
     #[test]
     fn metal_seq_toggle_mixer_panel_restores_retained_10_track_layouts() {
-        fn cached_layout_ptr(editor: &eseqlisp::Editor, buffer_name: &str) -> usize {
+        #[derive(Clone, Copy)]
+        struct CachedLayoutState {
+            ptr: usize,
+            viewport_width: f32,
+            viewport_height: f32,
+            root_width: f32,
+        }
+
+        fn cached_layout_state(editor: &eseqlisp::Editor, buffer_name: &str) -> CachedLayoutState {
             let buffer_idx = editor
                 .buffers
                 .iter()
@@ -24163,7 +24495,41 @@ mod tests {
                 .cached_layout
                 .as_ref()
                 .unwrap_or_else(|| panic!("missing cached layout for {buffer_name}"));
-            std::sync::Arc::as_ptr(layout) as usize
+            CachedLayoutState {
+                ptr: std::sync::Arc::as_ptr(layout) as usize,
+                viewport_width: leaf.widget_viewport_width,
+                viewport_height: leaf.widget_viewport_height,
+                root_width: layout.rect.width,
+            }
+        }
+
+        fn same_viewport(a: CachedLayoutState, b: CachedLayoutState) -> bool {
+            (a.viewport_width - b.viewport_width).abs() <= 0.05
+                && (a.viewport_height - b.viewport_height).abs() <= 0.05
+        }
+
+        fn assert_reused_or_relaid_out_for_viewport_change(
+            buffer_name: &str,
+            initial: CachedLayoutState,
+            shown: CachedLayoutState,
+        ) {
+            if same_viewport(initial, shown) {
+                assert_eq!(
+                    shown.ptr, initial.ptr,
+                    "{buffer_name} show should restore the retained layout when its viewport is unchanged"
+                );
+            } else {
+                assert_ne!(
+                    shown.ptr, initial.ptr,
+                    "{buffer_name} layout must not be reused after the tile viewport changes"
+                );
+                assert!(
+                    (shown.root_width - shown.viewport_width).abs() <= 0.05,
+                    "{buffer_name} layout should be rebuilt for the changed viewport width: root={} viewport={}",
+                    shown.root_width,
+                    shown.viewport_width
+                );
+            }
         }
 
         let track_count = 10;
@@ -24185,10 +24551,10 @@ mod tests {
             "10-track fixture should render one mixer pattern cell per track"
         );
 
-        let initial_mixer = cached_layout_ptr(&editor, "*mixer*");
-        let initial_sequencer = cached_layout_ptr(&editor, "*sequencer*");
-        let initial_step = cached_layout_ptr(&editor, "*step*");
-        let initial_track = cached_layout_ptr(&editor, "*track*");
+        let initial_mixer = cached_layout_state(&editor, "*mixer*");
+        let initial_sequencer = cached_layout_state(&editor, "*sequencer*");
+        let initial_step = cached_layout_state(&editor, "*step*");
+        let initial_track = cached_layout_state(&editor, "*track*");
 
         editor
             .runtime_mut()
@@ -24221,25 +24587,23 @@ mod tests {
             "show toggle should restore the mixer tile"
         );
 
-        assert_eq!(
-            cached_layout_ptr(&editor, "*mixer*"),
-            initial_mixer,
-            "mixer show should restore the retained mixer layout"
-        );
-        assert_eq!(
-            cached_layout_ptr(&editor, "*sequencer*"),
+        let shown_mixer = cached_layout_state(&editor, "*mixer*");
+        assert_reused_or_relaid_out_for_viewport_change("*mixer*", initial_mixer, shown_mixer);
+        let shown_sequencer = cached_layout_state(&editor, "*sequencer*");
+        assert_reused_or_relaid_out_for_viewport_change(
+            "*sequencer*",
             initial_sequencer,
-            "mixer show should restore the retained sequencer layout"
+            shown_sequencer,
         );
-        assert_eq!(
-            cached_layout_ptr(&editor, "*step*"),
+        assert_reused_or_relaid_out_for_viewport_change(
+            "*step*",
             initial_step,
-            "mixer show should keep the retained step layout because it still fits"
+            cached_layout_state(&editor, "*step*"),
         );
-        assert_eq!(
-            cached_layout_ptr(&editor, "*track*"),
+        assert_reused_or_relaid_out_for_viewport_change(
+            "*track*",
             initial_track,
-            "mixer show should keep the retained track layout because it still fits"
+            cached_layout_state(&editor, "*track*"),
         );
     }
 

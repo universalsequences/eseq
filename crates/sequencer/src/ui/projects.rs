@@ -2028,6 +2028,7 @@ impl App {
         self.set_reverb_param(1, reverb.brightness);
         self.set_reverb_param(2, reverb.replace);
         self.push_all_restored_defaults();
+        self.push_all_delay_bpm();
 
         if !self.tracks.is_empty() {
             self.clamp_cursor_to_steps();

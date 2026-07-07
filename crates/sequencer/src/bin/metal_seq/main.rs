@@ -2311,6 +2311,13 @@ fn apply_ui_invalidations(
                             Value::Bool(state.pattern.track_params[track].is_muted()),
                         )
                         .effects_dirty;
+                    needs_reactive_cycle |= sync_track_mute_visual_binding_fields(
+                        rt,
+                        app,
+                        state,
+                        std::iter::once(track),
+                        false,
+                    );
                 }
                 TrackMixerInvalidation::Solo => {
                     needs_reactive_cycle |= rt
@@ -2321,15 +2328,13 @@ fn apply_ui_invalidations(
                             Value::Bool(state.pattern.track_params[track].is_solo()),
                         )
                         .effects_dirty;
-                }
-                TrackMixerInvalidation::MutedBySolo => {
-                    needs_reactive_cycle |= rt
-                        .set_reactive(
-                            "SEQ",
-                            "track-muted-by-solo",
-                            build_track_muted_by_solo(state),
-                        )
-                        .effects_dirty;
+                    needs_reactive_cycle |= sync_track_mute_visual_binding_fields(
+                        rt,
+                        app,
+                        state,
+                        0..active_track_count,
+                        true,
+                    );
                 }
                 TrackMixerInvalidation::RecordArm => {
                     needs_reactive_cycle |= rt

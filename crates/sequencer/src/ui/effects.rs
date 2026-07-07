@@ -3906,6 +3906,53 @@ mod tests {
         test_app_with_track_count(1)
     }
 
+    struct TestLiveGraph {
+        ptr: LiveGraphPtr,
+        block_size: i32,
+        channels: usize,
+    }
+
+    impl TestLiveGraph {
+        fn new(label: &str, block_size: i32, sample_rate: i32, channels: usize) -> Self {
+            static INIT: std::sync::Once = std::sync::Once::new();
+            INIT.call_once(|| unsafe {
+                crate::audiograph::initialize_engine(block_size, sample_rate);
+            });
+
+            let label = CString::new(label).expect("test graph label should not contain nul");
+            let ptr = unsafe {
+                crate::audiograph::create_live_graph(
+                    32,
+                    block_size,
+                    label.as_ptr(),
+                    channels as i32,
+                )
+            };
+            assert!(!ptr.is_null(), "test live graph should be created");
+            Self {
+                ptr: LiveGraphPtr(ptr),
+                block_size,
+                channels,
+            }
+        }
+
+        fn process_block(&self) {
+            let mut output = vec![0.0_f32; self.block_size as usize * self.channels];
+            unsafe {
+                self.ptr
+                    .process_next_block(output.as_mut_ptr(), self.block_size);
+            }
+        }
+    }
+
+    impl Drop for TestLiveGraph {
+        fn drop(&mut self) {
+            unsafe {
+                crate::audiograph::destroy_live_graph(self.ptr.0);
+            }
+        }
+    }
+
     #[test]
     fn audio_port_adapter_duplicates_mono_and_folds_stereo() {
         assert_eq!(adapted_audio_port_connections(1, 1), vec![(0, 0)]);
@@ -3913,6 +3960,81 @@ mod tests {
         assert_eq!(adapted_audio_port_connections(2, 1), vec![(0, 0), (1, 0)]);
         assert_eq!(adapted_audio_port_connections(2, 2), vec![(0, 0), (1, 1)]);
         assert_eq!(adapted_audio_port_connections(4, 4), vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn push_all_delay_bpm_updates_str8_delay_node_state() {
+        let graph = TestLiveGraph::new("str8-delay-bpm-test", 64, 44_100, 2);
+        let name = CString::new("str8_delay_bpm_probe").unwrap();
+        let node_id = unsafe {
+            crate::audiograph::add_node(
+                graph.ptr.0,
+                crate::str8_delay::str8_delay_vtable(),
+                crate::str8_delay::STR8_DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
+                name.as_ptr(),
+                2 + crate::voice_modulator::NUM_OUTPUTS as i32,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert!(node_id > 0, "Str8 Delay node should be allocated");
+        assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, node_id) });
+        graph.process_block();
+
+        let desc = EffectDescriptor::builtin_str8_delay();
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![vec![crate::effects::EffectSlotState::new(
+                &desc,
+                node_id as u32,
+            )]],
+        ));
+        state.transport.bpm.store(137, Ordering::Relaxed);
+
+        let (keyboard_tx, _keyboard_rx) = mpsc::channel();
+        let mut app = App::new(
+            state,
+            graph.ptr,
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.graph.effect_descriptors = vec![vec![desc]];
+
+        app.push_all_delay_bpm();
+        graph.process_block();
+
+        let mut state_buf = vec![0.0_f32; crate::str8_delay::STR8_DELAY_STATE_SIZE];
+        let mut state_size = 0usize;
+        let copied = unsafe {
+            crate::audiograph::get_node_state_into(
+                graph.ptr.0,
+                node_id,
+                state_buf.as_mut_ptr().cast(),
+                state_buf.len() * std::mem::size_of::<f32>(),
+                &mut state_size,
+            )
+        };
+        assert!(copied, "watched Str8 Delay state should be copied");
+        assert_eq!(
+            state_size,
+            crate::str8_delay::STR8_DELAY_STATE_SIZE * std::mem::size_of::<f32>()
+        );
+        assert_eq!(
+            state_buf[crate::str8_delay::STR8_DELAY_PARAM_BPM as usize],
+            137.0
+        );
     }
 
     #[test]

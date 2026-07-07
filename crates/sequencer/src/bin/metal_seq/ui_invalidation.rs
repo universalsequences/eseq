@@ -167,7 +167,6 @@ pub(crate) enum TrackMixerInvalidation {
     Pan,
     Mute,
     Solo,
-    MutedBySolo,
     RecordArm,
     Output,
     Collapsed,

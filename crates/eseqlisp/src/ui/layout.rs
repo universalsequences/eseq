@@ -62,6 +62,29 @@ pub struct LayoutNode {
     pub focusable: bool,
 }
 
+pub fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -> bool {
+    fn fills_axis(layout: &LayoutNode, prop: &str) -> bool {
+        matches!(layout.props.get(prop), Some(Value::Keyword(value)) if value == "fill")
+    }
+
+    fn width_valid(cached: f32, available: f32) -> bool {
+        const EPSILON: f32 = 0.05;
+        (cached - available).abs() <= EPSILON
+    }
+
+    fn height_valid(cached: f32, available: f32, fills_axis: bool) -> bool {
+        const EPSILON: f32 = 0.05;
+        if fills_axis {
+            (cached - available).abs() <= EPSILON
+        } else {
+            cached <= available + EPSILON
+        }
+    }
+
+    width_valid(layout.rect.width, cols)
+        && height_valid(layout.rect.height, rows, fills_axis(layout, "height"))
+}
+
 /// Trait for measuring proportional text width in pixels.
 /// Implemented by the Metal backend wrapping `ProportionalGlyphAtlas`.
 /// `None` in TUI mode — labels fall back to monospace char-count measurement.

@@ -2856,9 +2856,10 @@ impl Runtime {
         widget_id_offset: u64,
         layout_revision: u64,
     ) {
+        let viewport = viewport.map(|(cols, rows)| (cols.max(1.0), rows.max(1.0)));
         if let Some((cols, rows)) = viewport {
-            self.layout_cols = cols.max(1.0);
-            self.layout_rows = rows.max(1.0);
+            self.layout_cols = cols;
+            self.layout_rows = rows;
         }
         self.widget_id_offset = widget_id_offset;
         self.current_widget_tree = Some(tree.clone());
@@ -2870,6 +2871,11 @@ impl Runtime {
             ))
         });
         self.commit_current_ui_snapshot(snapshot);
+        let cached_layout = cached_layout.filter(|layout| {
+            viewport.is_none_or(|(cols, rows)| {
+                crate::layout::layout_root_matches_viewport(layout.as_ref(), cols, rows)
+            })
+        });
         if let Some(layout) = cached_layout {
             self.current_layout = Some(layout);
             self.reactive_registry

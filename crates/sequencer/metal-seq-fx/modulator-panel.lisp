@@ -34,7 +34,7 @@
             :debug-name "modulator-panel-body"
             (box
               
-              :background-color :black
+              :background-color :mixer-strip-bg
               :corner-radius 16
               :padding 1
               :width :fill 

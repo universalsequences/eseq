@@ -122,21 +122,37 @@ fn metal_tile_content_viewport_height_exact(
 }
 
 fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -> bool {
-    fn fills_axis(layout: &LayoutNode, prop: &str) -> bool {
-        matches!(layout.props.get(prop), Some(Value::Keyword(value)) if value == "fill")
-    }
+    crate::layout::layout_root_matches_viewport(layout, cols, rows)
+}
 
-    fn dimension_valid(cached: f32, available: f32, fills_axis: bool) -> bool {
-        const EPSILON: f32 = 0.05;
-        if fills_axis {
-            (cached - available).abs() <= EPSILON
-        } else {
-            cached <= available + EPSILON
-        }
-    }
+fn viewport_matches(stored_cols: f32, stored_rows: f32, cols: f32, rows: f32) -> bool {
+    const EPSILON: f32 = 0.05;
+    stored_cols > 0.0
+        && stored_rows > 0.0
+        && (stored_cols - cols).abs() <= EPSILON
+        && (stored_rows - rows).abs() <= EPSILON
+}
 
-    dimension_valid(layout.rect.width, cols, fills_axis(layout, "width"))
-        && dimension_valid(layout.rect.height, rows, fills_axis(layout, "height"))
+fn leaf_viewport_matches(leaf: &TileLeaf, cols: f32, rows: f32) -> bool {
+    viewport_matches(
+        leaf.widget_viewport_width,
+        leaf.widget_viewport_height,
+        cols,
+        rows,
+    )
+}
+
+fn leaf_cached_layout_matches_viewport(
+    leaf: &TileLeaf,
+    layout: &LayoutNode,
+    cols: f32,
+    rows: f32,
+) -> bool {
+    if leaf.widget_viewport_width > 0.0 && leaf.widget_viewport_height > 0.0 {
+        leaf_viewport_matches(leaf, cols, rows)
+    } else {
+        layout_root_matches_viewport(layout, cols, rows)
+    }
 }
 
 fn format_lisp_reload_report(report: &ReloadReport) -> String {
@@ -489,6 +505,7 @@ struct RetainedTileLayout {
     focused_widget_node: Option<LayoutNode>,
     widget_scroll_top: f32,
     widget_scroll_left: f32,
+    widget_viewport_width: f32,
     widget_viewport_height: f32,
 }
 
@@ -500,19 +517,30 @@ impl RetainedTileLayout {
         layout_revision: u64,
     ) -> Option<Self> {
         let cached_layout = cached_layout?;
+        let viewport_width = if leaf.widget_viewport_width > 0.0 {
+            leaf.widget_viewport_width
+        } else {
+            cached_layout.rect.width
+        };
+        let viewport_height = if leaf.widget_viewport_height > 0.0 {
+            leaf.widget_viewport_height
+        } else {
+            cached_layout.rect.height
+        };
         Some(Self {
             buffer_id: buffer.id,
             widget_tree_revision: buffer.widget_tree_revision,
             layout_revision,
-            viewport_width_bits: cached_layout.rect.width.to_bits(),
-            viewport_height_bits: cached_layout.rect.height.to_bits(),
+            viewport_width_bits: viewport_width.to_bits(),
+            viewport_height_bits: viewport_height.to_bits(),
             cached_layout,
             cached_inactive_frame: leaf.cached_inactive_frame.clone(),
             focused_widget_id: leaf.focused_widget_id,
             focused_widget_node: leaf.focused_widget_node.clone(),
             widget_scroll_top: leaf.widget_scroll_top,
             widget_scroll_left: leaf.widget_scroll_left,
-            widget_viewport_height: leaf.widget_viewport_height,
+            widget_viewport_width: viewport_width,
+            widget_viewport_height: viewport_height,
         })
     }
 
@@ -536,13 +564,19 @@ impl RetainedTileLayout {
         leaf.focused_widget_node = self.focused_widget_node.clone();
         leaf.widget_scroll_top = self.widget_scroll_top;
         leaf.widget_scroll_left = self.widget_scroll_left;
+        leaf.widget_viewport_width = self.widget_viewport_width;
         leaf.widget_viewport_height = self.widget_viewport_height;
         leaf.cached_inactive_frame = self.cached_inactive_frame.clone();
         true
     }
 
     fn matches_viewport(&self, cols: f32, rows: f32) -> bool {
-        layout_root_matches_viewport(&self.cached_layout, cols, rows)
+        viewport_matches(
+            f32::from_bits(self.viewport_width_bits),
+            f32::from_bits(self.viewport_height_bits),
+            cols,
+            rows,
+        )
     }
 }
 
@@ -932,7 +966,7 @@ impl Editor {
         self.cached_tile_rects =
             self.tile_root
                 .compute_rects(area, TILE_GAP_PX_PER_UNIT, cell_w, cell_h);
-        let viewport_heights: Vec<(TileId, f32)> = self
+        let viewport_sizes: Vec<(TileId, f32, f32)> = self
             .cached_tile_rects
             .iter()
             .filter_map(|(tile_id, rect)| {
@@ -941,24 +975,26 @@ impl Editor {
                 let show_status = self
                     .tile_effective_show_status(*tile_id)
                     .unwrap_or(leaf.show_status || buffer.view_mode != ViewMode::UiOnly);
-                Some((
-                    *tile_id,
-                    metal_tile_content_viewport_height_exact(
-                        &tile_body_rect(*rect, !leaf.tabs.is_empty()),
-                        show_status,
-                        leaf.show_border,
-                        leaf.border_width_px,
-                        cell_w,
-                        cell_h,
-                    ),
-                ))
+                let body_rect = tile_body_rect(*rect, !leaf.tabs.is_empty());
+                let (viewport_width, _) = metal_tile_content_viewport(
+                    &body_rect,
+                    show_status,
+                    leaf.show_border,
+                    leaf.border_width_px,
+                    cell_w,
+                    cell_h,
+                );
+                let viewport_height = metal_tile_content_viewport_height_exact(
+                    &body_rect,
+                    show_status,
+                    leaf.show_border,
+                    leaf.border_width_px,
+                    cell_w,
+                    cell_h,
+                );
+                Some((*tile_id, viewport_width, viewport_height))
             })
             .collect();
-        for (tile_id, viewport_height) in viewport_heights {
-            if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
-                leaf.widget_viewport_height = viewport_height;
-            }
-        }
         // If rects changed, invalidate only inactive layouts whose cached root
         // no longer matches the tile's content viewport.
         if old_rects != self.cached_tile_rects {
@@ -988,7 +1024,7 @@ impl Editor {
                     );
                     let valid = leaf.cached_layout.as_ref().is_some_and(|layout| {
                         leaf.cached_layout_widget_tree_revision == buffer.widget_tree_revision
-                            && layout_root_matches_viewport(layout, cols, rows)
+                            && leaf_cached_layout_matches_viewport(leaf, layout, cols, rows)
                     });
                     let retained = if valid {
                         None
@@ -1029,6 +1065,12 @@ impl Editor {
             }
             for buf_idx in buf_indices {
                 self.refresh_inactive_tile_layouts_for_buffer(buf_idx);
+            }
+        }
+        for (tile_id, viewport_width, viewport_height) in viewport_sizes {
+            if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
+                leaf.widget_viewport_width = viewport_width;
+                leaf.widget_viewport_height = viewport_height;
             }
         }
     }
@@ -1132,7 +1174,14 @@ impl Editor {
         let Some(target_leaf) = self.tile_root.find_leaf(new_tile) else {
             return;
         };
-        let cached_layout = target_leaf.cached_layout.clone();
+        let cached_layout = target_leaf.cached_layout.as_ref().and_then(|layout| {
+            viewport
+                .map(|(cols, rows)| {
+                    leaf_cached_layout_matches_viewport(target_leaf, layout, cols, rows)
+                })
+                .unwrap_or(true)
+                .then(|| layout.clone())
+        });
         let layout_revision = target_leaf.layout_revision;
         let buffer_idx = target_leaf.buffer_idx;
         self.save_current_widget_tree();
@@ -1560,7 +1609,35 @@ impl Editor {
             self.record_buffer_access_by_idx(buffer_idx);
         }
         self.sync_runtime_context();
-        self.restore_buffer_widget_tree();
+        let viewport = (
+            self.runtime.layout_cols_exact(),
+            self.runtime.layout_rows_exact(),
+        );
+        let retained = {
+            let buffer = self.active_buffer();
+            self.retained_tile_layout_for_viewport(buffer, viewport.0, viewport.1)
+        };
+        if let Some(retained) = retained {
+            self.restore_buffer_widget_tree_with_cached_layout(
+                Some(retained.cached_layout),
+                Some(viewport),
+                retained.layout_revision,
+            );
+        } else {
+            let (cached_layout, layout_revision) = {
+                let leaf = self.active_leaf();
+                let cached_layout = leaf.cached_layout.as_ref().and_then(|layout| {
+                    leaf_cached_layout_matches_viewport(leaf, layout, viewport.0, viewport.1)
+                        .then(|| layout.clone())
+                });
+                (cached_layout, leaf.layout_revision)
+            };
+            self.restore_buffer_widget_tree_with_cached_layout(
+                cached_layout,
+                Some(viewport),
+                layout_revision,
+            );
+        }
         self.mark_needs_redraw();
     }
 
@@ -3421,6 +3498,29 @@ impl Editor {
     }
 
     pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
+        let cols = cols.max(1.0);
+        let rows = rows.max(1.0);
+        let runtime_viewport_matches = self.runtime.current_layout.is_some()
+            && viewport_matches(
+                self.runtime.layout_cols_exact(),
+                self.runtime.layout_rows_exact(),
+                cols,
+                rows,
+            );
+        let retained = (!runtime_viewport_matches)
+            .then(|| {
+                let buffer = self.active_buffer();
+                self.retained_tile_layout_for_viewport(buffer, cols, rows)
+            })
+            .flatten();
+        if let Some(retained) = retained {
+            self.restore_buffer_widget_tree_with_cached_layout(
+                Some(retained.cached_layout),
+                Some((cols, rows)),
+                retained.layout_revision,
+            );
+            return;
+        }
         self.runtime.set_layout_viewport_exact(cols, rows);
         self.sync_layout_to_active_leaf();
     }
@@ -3474,6 +3574,8 @@ impl Editor {
         self.trace_ui_layout_event(&buffer_name, "active-sync", layout.as_deref());
         let revision = self.runtime.layout_revision();
         let widget_tree_revision = self.active_buffer().widget_tree_revision;
+        let viewport_width = self.runtime.layout_cols_exact();
+        let viewport_height = self.runtime.layout_rows_exact();
         let leaf = self.active_leaf_mut();
         leaf.cached_layout = layout;
         leaf.cached_layout_widget_tree_revision = if leaf.cached_layout.is_some() {
@@ -3482,6 +3584,8 @@ impl Editor {
             0
         };
         leaf.layout_revision = revision;
+        leaf.widget_viewport_width = viewport_width;
+        leaf.widget_viewport_height = viewport_height;
         self.remap_focused_widget_after_layout_change();
         self.sync_reactive_bindings_for_visible_layouts();
     }
@@ -6171,8 +6275,8 @@ impl Editor {
             let existing_layout = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
                 let layout = leaf.cached_layout.clone()?;
                 let current_tree = leaf.cached_layout_widget_tree_revision == widget_tree_revision;
-                let current_viewport =
-                    !viewport_known || layout_root_matches_viewport(&layout, cols, rows);
+                let current_viewport = !viewport_known
+                    || leaf_cached_layout_matches_viewport(leaf, &layout, cols, rows);
                 Some((layout, current_tree, current_viewport))
             });
             let cached_layout = existing_layout
@@ -6225,6 +6329,8 @@ impl Editor {
                 } else {
                     0
                 };
+                leaf.widget_viewport_width = cols;
+                leaf.widget_viewport_height = rows;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;
@@ -6391,6 +6497,8 @@ impl Editor {
                 } else {
                     0
                 };
+                leaf.widget_viewport_width = cols;
+                leaf.widget_viewport_height = rows;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;

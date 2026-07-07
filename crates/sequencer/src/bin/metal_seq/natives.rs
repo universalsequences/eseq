@@ -1831,12 +1831,6 @@ pub(crate) fn init_runtime(
             track,
             change: TrackMixerInvalidation::Solo,
         });
-        for affected_track in 0..st.active_track_count() {
-            ui_inv.push(UiInvalidation::TrackMixer {
-                track: affected_track,
-                change: TrackMixerInvalidation::MutedBySolo,
-            });
-        }
         if trace_ui_enabled() {
             eprintln!(
                 "[ui-trace][native] seq-toggle-track-solo track={} solo={}",

@@ -275,7 +275,11 @@ fn build_render_frame_with_layout_viewport(
     layout_height: f32,
 ) -> RenderFrame {
     editor.set_layout_viewport_exact(layout_width, layout_height);
-    editor.active_leaf_mut().widget_viewport_height = layout_height;
+    {
+        let leaf = editor.active_leaf_mut();
+        leaf.widget_viewport_width = layout_width;
+        leaf.widget_viewport_height = layout_height;
+    }
     editor.clamp_widget_scroll_offsets();
     if let Some(layout) = editor.widget_layout() {
         let aspect = editor.layout_aspect();
@@ -926,6 +930,7 @@ fn build_tiled_render_frame_impl(
         }
 
         if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+            leaf.widget_viewport_width = inner_width_exact;
             leaf.widget_viewport_height = inner_height_exact;
         }
 

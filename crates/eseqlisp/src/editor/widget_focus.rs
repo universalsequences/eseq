@@ -520,6 +520,7 @@ impl Editor {
         leaf.focused_widget_id = None;
         leaf.focused_widget_node = None;
         leaf.widget_scroll_top = 0.0;
+        leaf.widget_viewport_width = 0.0;
         leaf.widget_viewport_height = 0.0;
         leaf.widget_scroll_left = 0.0;
         leaf.active_widget_gesture = None;

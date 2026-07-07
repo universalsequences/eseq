@@ -2519,6 +2519,66 @@ mod tests {
     }
 
     #[test]
+    fn cached_widget_layout_restore_rejects_mismatched_fill_viewport() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(20, 5);
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (h-stack :width :fill :height 1
+                    (box :key "left" :width 4 :height 1)
+                    (box :key "spacer" :flex 1 :width 0 :height 1)
+                    (box :key "right" :width 2 :height 1)))
+                "#,
+            )
+            .expect("install fill-width layout");
+
+        let cached_layout = runtime
+            .current_layout
+            .as_ref()
+            .expect("initial layout")
+            .clone();
+        let cached_right_col = cached_layout
+            .children
+            .iter()
+            .find(|node| node.stable_key.as_deref() == Some("right"))
+            .expect("cached right child")
+            .rect
+            .col;
+        let tree = runtime.current_widget_tree().expect("current widget tree");
+        let snapshot = runtime.current_committed_ui_snapshot();
+        let layout_revision = runtime.layout_revision();
+
+        runtime.restore_widget_tree_with_cached_layout(
+            tree,
+            snapshot,
+            Some(cached_layout),
+            Some((40.0, 5.0)),
+            0,
+            layout_revision,
+        );
+
+        let restored_layout = runtime
+            .current_layout
+            .as_ref()
+            .expect("restored layout should be available");
+        let right_col = restored_layout
+            .children
+            .iter()
+            .find(|node| node.stable_key.as_deref() == Some("right"))
+            .expect("restored right child")
+            .rect
+            .col;
+
+        assert_eq!(restored_layout.rect.width, 40.0);
+        assert!(
+            right_col > cached_right_col + 10.0,
+            "right-aligned child should relayout for the wider viewport, old={cached_right_col} new={right_col}"
+        );
+    }
+
+    #[test]
     fn subtree_inside_each_initial_render_keeps_children() {
         fn first_child_texts(value: &Value) -> Vec<String> {
             let Value::Map(map) = value else {
