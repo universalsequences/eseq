@@ -7845,6 +7845,49 @@ mod tests {
     }
 
     #[test]
+    fn process_chain_and_lane_values_survive_scene_switching() {
+        let state = make_state_with_tracks(1);
+        let mut first = PatternSnapshot::new_default(1, &[]);
+        first.process_chains[0] = sample_process_chain();
+        let mut second = PatternSnapshot::new_default(1, &[]);
+        second.process_chains[0] = sample_process_chain();
+        second.process_chains[0].slots[0].instance_id = crate::process::ProcessInstanceId(99);
+        second.process_chains[0].slots[0].class_name = "second".to_string();
+        second.process_chains[0].slots[0]
+            .lanes
+            .get_mut("amount")
+            .unwrap()
+            .values = vec![4.0, 5.0, 6.0];
+
+        let buffer_ids = [-1];
+        let sample_rates = [44_100];
+        let names = [String::new()];
+        let instrument_types = [InstrumentType::Sampler];
+        state.replace_pattern_repository(vec![first.clone(), second.clone()], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        assert_eq!(
+            state.track_process_chain(0),
+            Some(first.process_chains[0].clone())
+        );
+
+        state
+            .switch_pattern(1, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .expect("switch to scene 2");
+        assert_eq!(
+            state.track_process_chain(0),
+            Some(second.process_chains[0].clone())
+        );
+
+        state
+            .switch_pattern(0, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .expect("switch back to scene 1");
+        assert_eq!(
+            state.track_process_chain(0),
+            Some(first.process_chains[0].clone())
+        );
+    }
+
+    #[test]
     fn clone_pattern_preserves_mod_connections_on_source_and_clone() {
         let state = make_state_with_tracks(2);
         let route = ModConnection {

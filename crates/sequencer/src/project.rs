@@ -1906,7 +1906,23 @@ mod tests {
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
                 rack_tracks: vec![None, None],
-                process_chains: Vec::new(),
+                process_chains: vec![
+                    crate::process::TrackProcessChain {
+                        slots: vec![crate::process::TrackProcessSlot {
+                            instance_id: crate::process::ProcessInstanceId(42),
+                            class_name: "json-sparse".to_string(),
+                            enabled: true,
+                            inlets: std::collections::BTreeMap::new(),
+                            lanes: std::collections::BTreeMap::from([(
+                                "amount".to_string(),
+                                crate::process::ProcessLane {
+                                    values: vec![0.0, 1.0, 0.0, 2.0],
+                                },
+                            )]),
+                        }],
+                    },
+                    crate::process::TrackProcessChain::default(),
+                ],
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
             }],
@@ -1954,6 +1970,18 @@ mod tests {
             vec![0.0, 0.25, 0.5]
         );
         assert_eq!(restored.patterns[0].timebase_plock_snapshots[0].len(), 256);
+        assert_eq!(
+            restored.patterns[0].process_chains[0].slots[0].instance_id,
+            crate::process::ProcessInstanceId(42)
+        );
+        assert_eq!(
+            restored.patterns[0].process_chains[0].slots[0].class_name,
+            "json-sparse"
+        );
+        assert_eq!(
+            restored.patterns[0].process_chains[0].slots[0].lanes["amount"].values,
+            vec![0.0, 1.0, 0.0, 2.0]
+        );
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);
         assert_eq!(restored.patterns[0].track_params[0].accum_mode, 2);
