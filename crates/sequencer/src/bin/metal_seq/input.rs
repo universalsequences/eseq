@@ -88,6 +88,24 @@ fn global_sequencer_navigation_available(editor: &Editor) -> bool {
         && !focused_widget_captures_text_input(editor)
 }
 
+fn fx_plock_row_selected(editor: &mut Editor) -> bool {
+    let Some(callable) = editor.runtime_mut().global_value("fx-plock-row-selected?") else {
+        return false;
+    };
+    matches!(
+        editor.runtime_mut().invoke(callable, vec![]),
+        Ok(Some(Value::Bool(true)))
+    )
+}
+
+fn selected_steps_delete_shortcut_available(
+    editor: &mut Editor,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> bool {
+    let has_selected_steps = !selected_steps.lock().unwrap().is_empty();
+    has_selected_steps && !fx_plock_row_selected(editor)
+}
+
 fn select_track_for_edit(editor: &mut Editor, track: usize) {
     if let Some(callable) = editor
         .runtime_mut()
@@ -226,6 +244,16 @@ fn sample_browser_tab_shortcut_available(
                 crossterm::event::KeyModifiers::NONE
             )
         )
+}
+
+fn sample_browser_search_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Char('/'), KeyModifiers::NONE)
+            | (KeyCode::Char('f') | KeyCode::Char('F'), KeyModifiers::SUPER)
+    )
 }
 
 fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
@@ -799,12 +827,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         }
     }
 
-    if shortcut_context_allows_sample_browser_focus(editor)
-        && matches!(
-            (key.code, key.modifiers),
-            (KeyCode::Char('/'), KeyModifiers::NONE)
-        )
-    {
+    if shortcut_context_allows_sample_browser_focus(editor) && sample_browser_search_shortcut(key) {
         return focus_samples_browser_search(editor);
     }
 
@@ -832,7 +855,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && editor.prompt_text().is_none()
         && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
         && key.modifiers == KeyModifiers::NONE
-        && !selected_steps.lock().unwrap().is_empty()
+        && selected_steps_delete_shortcut_available(editor, selected_steps)
     {
         let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");
         editor.refresh_runtime_side_effects();
@@ -1023,7 +1046,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 return true;
             }
             (KeyCode::Backspace | KeyCode::Delete, KeyModifiers::NONE) => {
-                if selected_steps.lock().unwrap().is_empty() {
+                if !selected_steps_delete_shortcut_available(editor, selected_steps) {
                     return false;
                 }
                 let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");
@@ -1515,6 +1538,85 @@ mod live_keyboard_tests {
             .expect("slash should focus the browser search");
         assert_eq!(focused.widget_type, "text-input");
         assert_eq!(focused.stable_key.as_deref(), Some("sbrowser-search-input"));
+    }
+
+    #[test]
+    fn command_f_focuses_sample_browser_search_from_ui_buffers() {
+        let mut editor = sample_browser_keyboard_editor();
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert_eq!(editor.active_buffer().name, "*samples*");
+        let focused = editor
+            .focused_widget_node()
+            .expect("Cmd+F should focus the browser search");
+        assert_eq!(focused.widget_type, "text-input");
+        assert_eq!(focused.stable_key.as_deref(), Some("sbrowser-search-input"));
+    }
+
+    #[test]
+    fn selected_plock_row_blocks_global_selected_step_delete_shortcut() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def delete-count (state 0))
+                (def plock-row-selected (state false))
+                (def delete-selected-steps ()
+                  (set! delete-count (+ delete-count 1)))
+                (def fx-plock-row-selected? () plock-row-selected)
+                "#,
+            )
+            .expect("install step/plock delete hooks");
+
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+        selected_steps.lock().unwrap().insert(3);
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! plock-row-selected true)")
+            .expect("select plock row");
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("delete-count").unwrap(),
+            Some(Value::Number(0.0)),
+            "global step deletion must not run while a plock row is selected"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! plock-row-selected false)")
+            .expect("clear plock row selection");
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("delete-count").unwrap(),
+            Some(Value::Number(1.0)),
+            "global step deletion should still work once no plock row is selected"
+        );
     }
 
     #[test]

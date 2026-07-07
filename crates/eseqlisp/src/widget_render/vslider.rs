@@ -7,8 +7,8 @@ use super::sdf_widget;
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MouseEventOutcome,
     WidgetDefinition, WidgetEvent, get_f32_prop, mapped_haptic_value, metal_widget_instance,
-    ndc_bounds, resolve_named_color, should_trigger_integer_haptic, styled_cell,
-    trigger_level_change_haptic,
+    ndc_bounds, plock_active, plock_color, resolve_named_color, should_trigger_integer_haptic,
+    styled_cell, trigger_level_change_haptic,
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
@@ -21,6 +21,9 @@ pub struct VerticalSliderWidget;
 pub static VSLIDER_WIDGET: VerticalSliderWidget = VerticalSliderWidget;
 
 fn fill_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    if plock_active(props) {
+        return plock_color(props);
+    }
     resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED())
 }
 
@@ -47,6 +50,10 @@ mod tests {
                 "shader-state-track-r",
                 "shader-state-track-g",
                 "shader-state-track-b",
+                "plock-active",
+                "plock-color-r",
+                "plock-color-g",
+                "plock-color-b",
             ]
         );
         for prop in VSLIDER_WIDGET.bindable_props() {
@@ -238,6 +245,10 @@ impl WidgetDefinition for VerticalSliderWidget {
             "shader-state-track-r",
             "shader-state-track-g",
             "shader-state-track-b",
+            "plock-active",
+            "plock-color-r",
+            "plock-color-g",
+            "plock-color-b",
         ]
     }
 
@@ -373,6 +384,8 @@ impl WidgetDefinition for VerticalSliderWidget {
                         itime: 0.0,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
                         color_a: fill_color(&node.props).to_rgba(),
                         color_b: dot_color(&node.props).to_rgba(),
                         color_c: [0.0; 4],
@@ -404,6 +417,8 @@ impl WidgetDefinition for VerticalSliderWidget {
                 itime: 0.0,
                 uniform_a: [origin_t, 0.0, 0.0, 0.0],
                 uniform_b: [0.0; 4],
+                uniform_c: [0.0; 4],
+                uniform_d: [0.0; 4],
                 color_a: fill_color(&node.props).to_rgba(),
                 color_b: dot_color(&node.props).to_rgba(),
                 color_c: [0.0; 4],

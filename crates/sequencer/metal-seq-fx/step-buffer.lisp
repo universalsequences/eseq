@@ -7,3 +7,5 @@
       (v-stack :gap 0.1
         (fx-step-parameters-panel)
         (fx-track-plocks-panel)))))
+
+(set-buffer-mode-for "*step*" "seq-plock-panel-mode")

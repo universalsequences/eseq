@@ -139,6 +139,8 @@ impl WidgetDefinition for ModulatorCurveWidget {
                 itime: viewport.time_seconds,
                 uniform_a: [rise_t, fall_t, max_ms, 0.0],
                 uniform_b: [phase, level, 0.0, 0.0],
+                uniform_c: [0.0; 4],
+                uniform_d: [0.0; 4],
                 color_a: curve_color.to_rgba(),
                 color_b: bg_color.to_rgba(),
                 color_c: grid_color.to_rgba(),

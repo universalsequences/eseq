@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {},
+    "cables": {}
+  },
+  "macros": {
+    "schroeder-allpass": {
+      "nodes": {
+        "*#0": {
+          "x": 114.96829,
+          "y": 13.512858
+        },
+        "*#1": {
+          "x": 81.81348,
+          "y": 24.0475
+        },
+        "delay1": {
+          "x": 48.171288,
+          "y": 24.0475,
+          "width": 7.293556
+        },
+        "delay_samples": {
+          "x": 81.81348,
+          "y": 4.0
+        },
+        "feedback_hist": {
+          "x": 36.669727,
+          "y": 24.0475
+        },
+        "g": {
+          "x": 151.77747,
+          "y": 4.0
+        },
+        "history1": {
+          "x": 91.913475,
+          "y": 24.0475
+        },
+        "input": {
+          "x": 61.516014,
+          "y": 4.0
+        },
+        "out": {
+          "x": 86.63747,
+          "y": 37.4125
+        },
+        "return": {
+          "x": 79.01348,
+          "y": 30.73
+        },
+        "w": {
+          "x": 61.516014,
+          "y": 17.365,
+          "width": 24.597466
+        }
+      },
+      "cables": {
+        "*#0:0->w:1": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "*#1:0->return:1": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "delay1:0->feedback_hist:0": {
+          "segmented": true,
+          "y": 26.5275
+        },
+        "delay_samples:0->delay1:1": {
+          "segmented": true,
+          "y": 14.81375
+        },
+        "feedback_hist:0->*#0:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "feedback_hist:0->return:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "g:0->*#1:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "input:0->w:0": {
+          "segmented": true,
+          "y": 11.4725
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "w:0->*#1:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "w:0->delay1:0": {
+          "segmented": true,
+          "y": 21.49625
+        }
+      },
+      "inputPresentation": {
+        "*#0:0": "cable"
+      }
+    }
+  }
+}

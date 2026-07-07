@@ -362,6 +362,8 @@ impl WidgetDefinition for ScrollWidget {
                 // uniform_a.x = thumb height ratio, uniform_a.y = track padding (cells)
                 uniform_a: [thumb_ratio, 0.15, 0.0, 0.0],
                 uniform_b: [0.0; 4],
+                uniform_c: [0.0; 4],
+                uniform_d: [0.0; 4],
                 // color_a = thumb color (semi-transparent white)
                 color_a: [1.0, 1.0, 1.0, 0.35],
                 // color_b = track color

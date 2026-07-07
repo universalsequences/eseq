@@ -83,3 +83,15 @@
 (mode-bind-key "seq-fx-mode" "BS" "fx-delete-selected-effect")
 (mode-bind-key "seq-fx-mode" "Delete" "fx-delete-selected-effect")
 (set-buffer-mode-for "*fx*" "seq-fx-mode")
+
+(def fx-delete-selected-plock-row-key ()
+  (if (fx-plock-row-selected?)
+    (do
+      (fx-delete-selected-plock-row)
+      true)
+    false))
+
+(define-mode "seq-plock-panel-mode" :read-only true)
+(mode-bind-key "seq-plock-panel-mode" "BS" "fx-delete-selected-plock-row-key")
+(mode-bind-key "seq-plock-panel-mode" "Delete" "fx-delete-selected-plock-row-key")
+(set-buffer-mode-for "*track*" "seq-plock-panel-mode")

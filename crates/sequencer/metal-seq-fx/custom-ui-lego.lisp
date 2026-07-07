@@ -252,7 +252,12 @@
             :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
             :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
-            :text-color accent :label-color :dim
+            :text-color (custom-ui-param-plock-text-color p) :label-color :dim
+            :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+            :plock-default (custom-ui-param-plock-default p)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
             :width width :height 2.82
             :value-align :center
@@ -281,7 +286,12 @@
             :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
             :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
-            :text-color accent :label-color :dim
+            :text-color (custom-ui-param-plock-text-color p) :label-color :dim
+            :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+            :plock-default (custom-ui-param-plock-default p)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
             :width width :height 3.12
             :value-align :center
@@ -300,7 +310,11 @@
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
-              :text-color accent :edit-color :yellow
+              :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :text-align :left
               :width width :height 0.68
               :on-change (custom-ui-param-change-callback p)))))
@@ -317,7 +331,11 @@
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
-              :text-color accent :edit-color :yellow
+              :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :text-align :left
               :width width :height 0.68
               :on-change (custom-ui-param-change-callback-s section p)))))
@@ -334,7 +352,11 @@
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 9.0
-              :text-color accent :edit-color :yellow
+              :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :text-align :left
               :width width :height 0.50
               :on-change (custom-ui-param-change-callback-s section p)))))
@@ -371,6 +393,10 @@
               :badge-color (rgba 0.16 0.17 0.20 1.0)
               :border-color accent
               :border-width 0.05
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :width width :height 0.78 :font-size 8.0
               :on-change (lambda (v)
                 (custom-ui-set-param-in-scope
@@ -396,6 +422,10 @@
               :badge-color (rgba 0.16 0.17 0.20 1.0)
               :border-color accent
               :border-width 0.05
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :width width :height 0.78 :font-size 8.0
               :on-change (lambda (v)
                 (do
@@ -422,6 +452,10 @@
               :badge-color (rgba 0.16 0.17 0.20 1.0)
               :border-color (rgba 1.0 1.0 1.0 0.2) 
               :border-width 0.05
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :width width :height 0.92 :font-size 8.6
               :on-change (lambda (v)
                 (do
@@ -442,7 +476,11 @@
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 9.0
-            :text-color accent :edit-color :yellow
+            :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+            :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
             :text-align :left
             :width width :height 0.50
             :on-change (custom-ui-param-change-callback p))))
@@ -460,7 +498,11 @@
               :unit unit
               :noui true :font-size 10.2
               :text-align :left
-              :text-color accent :edit-color :yellow
+              :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :width 6.0 :height 0.78
               :on-change (custom-ui-param-change-callback p)))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
@@ -475,7 +517,11 @@
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 10.2
-            :text-color accent :edit-color :yellow
+            :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+            :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
             :text-align :left
             :width width :height 0.68
             :on-change (custom-ui-param-change-callback p))))
@@ -493,7 +539,11 @@
               :unit unit
               :noui true :font-size 10.5
               :text-align :center
-              :text-color :widget_focus_bg :edit-color :yellow
+              :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :width 5.0 :height 0.95
               :on-change (custom-ui-param-change-callback p)))))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
@@ -511,7 +561,11 @@
                 :unit unit
                 :noui true :font-size 10.5
                 :text-align :center
-                :text-color :widget_focus_bg :edit-color :yellow
+                :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+                :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+                :plock-color-r (param-plock-color-r)
+                :plock-color-g (param-plock-color-g)
+                :plock-color-b (param-plock-color-b)
                 :width 5.0 :height 0.95
                 :on-change (custom-ui-param-change-callback-s section p)))))
         (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
@@ -749,6 +803,10 @@
             :color :white
             :fill accent
             :dot-color (rgba 0.16 0.16 0.18 1.0)
+            :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
             :on-change (custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
@@ -762,7 +820,11 @@
           :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
           :unit unit
           :noui true :font-size 8.6
-          :text-color accent :edit-color :yellow
+          :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+          :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
           :text-align :center
           :width width :height 0.46
           :on-change (custom-ui-param-change-callback-s section p)))
@@ -784,6 +846,10 @@
               :width width :height 0.92 :padding 0 :font-size 8.8
               :background-color :instrument-control-bg
               :color accent
+              :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :on-click (lambda (x y r)
                 (do
                   (custom-ui-select-section-in-scope scope section)

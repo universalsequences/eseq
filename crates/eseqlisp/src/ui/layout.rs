@@ -204,6 +204,7 @@ impl<'a> LayoutEngine<'a> {
         next_widget_id: &mut u64,
     ) -> Result<LayoutNode, String> {
         validate_replacement_root_identity(existing, tree)?;
+        collect_layout_widget_ids(existing, dirty_widget_ids);
         let mut layout = self.build_layout_node(tree, rect, inherited_font_size, layout_ctx);
         preserve_layout_internal_props(&existing.props, &mut layout.props);
         let mut reusable_widget_ids = HashMap::new();

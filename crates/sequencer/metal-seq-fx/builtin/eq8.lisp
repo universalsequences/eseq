@@ -107,6 +107,10 @@
         :width 2.35 :height 1.05 :padding 0 :font-size 8.0
         :background-color (if (get band-map :enabled) (rgba 0.92 0.35 0.12 1.0) :mixer-control-bg)
         :color (if (get band-map :enabled) :white :dim)
+        :plock-active (if (param-plock-active? fx enabled-p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :on-click |x y r| (do
           (builtin-fx-eq8-select-band fx band)
           (fx-toggle-effect-value fx enabled-p))))))
@@ -125,7 +129,12 @@
         :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (param-selected-mod-slot-prop fx p)
         :font-size 8.8 :label-font-size 8.6
-        :text-color :fg :label-color :dim
+        :text-color (param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-default (param-plock-default fx p)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :width 4.45 :height 3.48 :knob-size 1.65
         :on-change (lambda (v) (param-set-control-value fx p v))))))
 
@@ -152,6 +161,10 @@
           (dropdown :value (get type-p :text-value)
             :options (get type-p :options)
             :on-change (lambda (v) (builtin-fx-set-effect-option fx type-p v))
+            :plock-active (if (param-plock-active? fx type-p) 1 0)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
             :width 6.6 :height 1.05 :font-size 9.0)
           (builtin-fx-filter-mini-number fx "freq" freq-p)
           (builtin-fx-filter-mini-number fx "gain" gain-p)

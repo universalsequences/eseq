@@ -557,13 +557,17 @@
 
 (defwidget seqv-step-shell
   :width 1.5 :height 1.5
-  :state (active odd plocked selected duration track-r track-g track-b)
-  :bindable (active plocked selected duration track-r track-g track-b)
+  :state (active odd plocked plock-kind selected duration track-r track-g track-b variant-r variant-g variant-b)
+  :bindable (active plocked plock-kind selected duration track-r track-g track-b variant-r variant-g variant-b)
   :shader
-  (let ((border (if (= selected 1)
-          (rgba 1.0 0.86 0.22 1.0)
-          (if (= plocked 1)
-            (rgba 0.25 0.22 0.22 1.0)
+  (let ((vcol (rgba variant-r variant-g variant-b 1.0))
+        (seqcol (rgba 0.545 0.545 0.588 0.95))
+        (border (if (= selected 1)
+          (if (= plock-kind 2)
+            (rgba variant-r variant-g variant-b 1.0)
+            (rgba 0.90 0.92 0.96 1.0))
+          (if (= plock-kind 2)
+            (rgba (* variant-r 0.34) (* variant-g 0.34) (* variant-b 0.34) 1.0)
             (if (= odd 1) (rgba 0.28 0.28 0.28 1.0) (rgba 0.18 0.18 0.18 1.0))))))
     (sdf/layer
       (sdf/fill
@@ -589,11 +593,19 @@
             (rgba 0.015 0.016 0.025 1.0))))
       (sdf/fill
         (sdf/translate 0 0.70
-          (sdf/circle 0.16))
+          (sdf/rounded-rect 0.52 0.10 0.05))
         (material
-          :color (if (= plocked 1)
-            (rgba 0.82 0.84 0.88 0.95)
-            (rgba 0 0 0 0))))
+          :color (if (= plock-kind 2)
+            vcol
+            (if (= plock-kind 1)
+              seqcol
+              (rgba 0 0 0 0)))
+          :shadow (shadow
+            :color (if (= plock-kind 2)
+              (rgba variant-r variant-g variant-b 0.70)
+              (rgba 0 0 0 0))
+            :blur (if (= plock-kind 2) 0.12 0.0)
+            :offset (vec2 0 0))))
       (sdf/fill (sdf/circle 0.36)
         (material
           :lighting (lighting :edge-min -0.35 :edge-max 0.5
@@ -765,6 +777,12 @@
     (set! seqv-duration-drag-source nil)))
 
 ;; Single tight step button (no slider, no number).
+(def seqv-track-step-value (lists track step fallback)
+  (let ((track-list (if (< track (len lists)) (nth lists track) '())))
+    (if (< step (len track-list))
+      (nth track-list step)
+      fallback)))
+
 (def seqv-step-cell (track step visible)
   (let (
       (odd1 (mod (floor (/ step 4)) 2))
@@ -774,7 +792,11 @@
       ;; recolor cells without rerunning the whole track-row subtree.
       (track-r (bind-seq-nth "track-color-r-effective" track))
       (track-g (bind-seq-nth "track-color-g-effective" track))
-      (track-b (bind-seq-nth "track-color-b-effective" track)))
+      (track-b (bind-seq-nth "track-color-b-effective" track))
+      (plock-kind (seqv-track-step-value SEQ.track-step-plock-kinds track step 0))
+      (variant-r (seqv-track-step-value SEQ.track-step-variant-r track step 0))
+      (variant-g (seqv-track-step-value SEQ.track-step-variant-g track step 0))
+      (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0)))
     (box
       :width 3.05 :height 1.45
       :key (str "seqv-step-cell-" track "-" step)
@@ -798,9 +820,11 @@
         :odd odd
         :active (bind-seq (str "seq-track-step-active-" track "-" step))
         :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
+        :plock-kind plock-kind
         :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
         :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
         :track-r track-r :track-g track-g :track-b track-b
+        :variant-r variant-r :variant-g variant-g :variant-b variant-b
         :background "seqv-step-shell"))))
 
 (def seqv-playhead-row (track track-id row)
@@ -809,11 +833,6 @@
     :width 48.8 :height 0.24
     :background "seqv-playhead-row-bar"
     :col (bind-seq (str "track-playhead-row-" track "-" row))))
-
-(def seqv-track-list (lists track)
-  (if (< track (len lists))
-    (nth lists track)
-    '()))
 
 (def seqv-track-num-steps (track)
   (if (< track (len SEQ.track-num-steps))
@@ -845,118 +864,6 @@
     (+ (* (seqv-expanded-track-color-g track) 0.28) (* 0.25 0.72))
     (+ (* (seqv-expanded-track-color-b track) 0.28) (* 0.30 0.72))
     0.55))
-
-(def seqv-current-param-values (mode)
-  (if (= mode 0) SEQ.velocities
-    (if (= mode 1) SEQ.durations
-      (if (= mode 2) SEQ.auxas
-        (if (= mode 3) SEQ.transposes
-          (if (= mode 4) SEQ.pans
-            (if (= mode 5) SEQ.syncs
-              SEQ.delays)))))))
-
-(def seqv-track-param-values (track mode)
-  (if (= mode 0) (seqv-track-list SEQ.track-velocities track)
-    (if (= mode 1) (seqv-track-list SEQ.track-durations track)
-      (if (= mode 2) (seqv-track-list SEQ.track-auxas track)
-        (if (= mode 3) (seqv-track-list SEQ.track-transposes track)
-          (if (= mode 4) (seqv-track-list SEQ.track-pans track)
-            (if (= mode 5) (seqv-track-list SEQ.track-syncs track)
-              (seqv-track-list SEQ.track-delays track))))))))
-
-(def seqv-param-values (track mode)
-  (if (= track SEQ.current-track)
-    (seqv-current-param-values mode)
-    (seqv-track-param-values track mode)))
-
-(def seqv-param-value-at (track mode step)
-  (let ((values (seqv-param-values track mode)))
-    (if (< step (len values))
-      (nth values step)
-      0)))
-
-(def seqv-param-min (mode)
-  (if (= mode 0) 0
-    (if (= mode 1) 0
-      (if (= mode 2) 0
-        (if (= mode 3) -12
-          (if (= mode 4) -1
-            0))))))
-
-(def seqv-param-max (mode)
-  (if (= mode 0) 1
-    (if (= mode 1) 32
-      (if (= mode 2) 16
-        (if (= mode 3) 12
-          (if (= mode 4) 1
-            (if (= mode 5) (- (len SEQ.sync-labels) 1)
-              1)))))))
-
-(def seqv-param-slider-min (mode)
-  (if (= mode 1) 0 (seqv-param-min mode)))
-
-(def seqv-param-slider-max (mode)
-  (if (= mode 1) 1 (seqv-param-max mode)))
-
-(def seqv-param-slider-value (track mode step)
-  (if (= mode 1)
-    (duration-slider-position (seqv-param-value-at track mode step))
-    (seqv-param-value-at track mode step)))
-
-(def seqv-param-haptic-pivot-position (mode)
-  (if (= mode 1) 0.5 1))
-
-(def seqv-param-haptic-pivot-value (mode)
-  (if (= mode 1) 2 (seqv-param-max mode)))
-
-(def seqv-param-haptic-exponent (mode)
-  (if (= mode 1) 4 1))
-
-(def seqv-param-keyword (mode)
-  (if (= mode 0) :velocity
-    (if (= mode 1) :duration
-      (if (= mode 2) :aux-a
-        (if (= mode 3) :transpose
-          (if (= mode 4) :pan
-            (if (= mode 5) :sync
-              :delay)))))))
-
-(def seqv-param-color (mode)
-  (if (= mode 0) :blue
-    (if (= mode 1) :green
-      (if (= mode 2) :magenta
-        (if (= mode 3) :yellow
-          (if (= mode 4) :red
-            (if (= mode 5) :green
-              :cyan)))))))
-
-(def seqv-param-name (mode)
-  (if (= mode 0) "Velocity"
-    (if (= mode 1) "Duration"
-      (if (= mode 2) "Aux A"
-        (if (= mode 3) "Transpose"
-          (if (= mode 4) "Pan"
-            (if (= mode 5) "Sync"
-              "Delay")))))))
-
-(def seqv-param-origin (mode)
-  (if (= mode 3) 0
-    (if (= mode 4) 0
-      (if (= mode 5) 0
-        (seqv-param-min mode)))))
-
-(def seqv-param-decimals (mode)
-  (if (= mode 3) 0 2))
-
-(def seqv-step-param-value (mode value)
-  (if (= mode 3)
-    (round value)
-    value))
-
-(def seqv-step-slider-param-value (mode value)
-  (if (= mode 1)
-    (duration-slider-value value)
-    (seqv-step-param-value mode value)))
 
 (def seqv-current-step (track track-id)
   (seqv-cursor-step track-id))
@@ -1244,7 +1151,7 @@
     (box :padding 0.25
       (box 
         :background-color (rgba 0.1 0.1 0.1 0.2) :corner-radius 8
-        (v-stack :width :fill :padding 0.85 :gap 0.1
+        (v-stack :width :fill :padding 0.35 :gap 0.1
           (h-stack :gap 0.5
             (box :width 1)
             (seqv-param-tab track track-id 0 "vel")

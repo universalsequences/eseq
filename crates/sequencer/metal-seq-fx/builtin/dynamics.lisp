@@ -4,7 +4,12 @@
     :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
     :font-size 9.5 :label-font-size 9.5
-    :text-color :fg :label-color :dim
+    :text-color (param-plock-text-color fx p) :label-color :dim
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-default (param-plock-default fx p)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :width 6.4 :height 3.2 :knob-size 2.0
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
     :on-change (lambda (v) (fx-set-effect-value fx p v))))
@@ -14,7 +19,12 @@
     :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
     :font-size 9.5 :label-font-size 9.5
-    :text-color :fg :label-color :dim
+    :text-color (param-plock-text-color fx p) :label-color :dim
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-default (param-plock-default fx p)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :width 6.8 :height 3.2 :knob-size 2.0
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
     :on-change (lambda (v) (fx-set-effect-value fx p v))))
@@ -25,6 +35,10 @@
     (dropdown :value (get p :text-value)
       :options (get p :options)
       :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
       :width width :height 1.05 :font-size 9.5)))
 
 (def builtin-fx-dynamics-ui (fx)

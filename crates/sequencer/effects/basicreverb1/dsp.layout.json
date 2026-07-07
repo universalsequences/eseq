@@ -1,0 +1,405 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "Left": {
+        "x": 20.751389,
+        "y": 70.013596
+      },
+      "add1": {
+        "x": 21.00335,
+        "y": 28.321753
+      },
+      "add2": {
+        "x": 26.626955,
+        "y": 31.290503
+      },
+      "add3": {
+        "x": 32.121513,
+        "y": 34.425705
+      },
+      "add4": {
+        "x": 35.28086,
+        "y": 8.1501875
+      },
+      "allpass1": {
+        "x": 93.32403,
+        "y": 60.394993
+      },
+      "allpass2": {
+        "x": 93.32403,
+        "y": 67.07749
+      },
+      "allpassdelay": {
+        "x": 65.10756,
+        "y": 40.709
+      },
+      "dampening": {
+        "x": 125.58733,
+        "y": 8.039541
+      },
+      "damping-delay1": {
+        "x": 7.3608027,
+        "y": 22.98055
+      },
+      "damping-delay2": {
+        "x": 46.259186,
+        "y": 22.933996
+      },
+      "damping-delay3": {
+        "x": 86.65433,
+        "y": 22.933996
+      },
+      "damping-delay4": {
+        "x": 128.85742,
+        "y": 22.933996
+      },
+      "delaytime": {
+        "x": 31.04925,
+        "y": 11.069204
+      },
+      "feedback": {
+        "x": 86.65433,
+        "y": 17.257017
+      },
+      "input_l": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "input_r": {
+        "x": 63.639847,
+        "y": 4.0
+      },
+      "mix#0": {
+        "x": 21.606579,
+        "y": 62.147285,
+        "width": 23.63457
+      },
+      "mix#1": {
+        "x": 94.53228,
+        "y": 57.29062
+      },
+      "mix-amt": {
+        "x": 23.33457,
+        "y": 4.0
+      },
+      "modulated1": {
+        "x": 25.65081,
+        "y": 14.286352
+      },
+      "mul1": {
+        "x": 29.426956,
+        "y": 17.171877
+      },
+      "mul2": {
+        "x": 42.38086,
+        "y": 17.171877
+      },
+      "mul3": {
+        "x": 54.403046,
+        "y": 17.171877
+      },
+      "mul4": {
+        "x": 69.700195,
+        "y": 17.61065
+      },
+      "mul5": {
+        "x": 93.32403,
+        "y": 53.712494
+      },
+      "out#0": {
+        "x": 89.26891,
+        "y": 64.28753
+      },
+      "value1": {
+        "x": 84.524025,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "add3:0->mul5:0": {
+        "segmented": true,
+        "y": 51.161247
+      },
+      "allpass1:0->allpass2:0": {
+        "segmented": true,
+        "y": 64.526245
+      },
+      "allpass2:0->mix#0:1": {
+        "segmented": true,
+        "y": 71.20874
+      },
+      "allpass2:0->mix#1:1": {
+        "segmented": true,
+        "y": 71.20874
+      },
+      "dampening:0->damping-delay1:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "dampening:0->damping-delay2:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "dampening:0->damping-delay3:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "dampening:0->damping-delay4:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "input_l:0->mix#1:0": {
+        "segmented": true,
+        "y": 19.949999
+      },
+      "mix#1:0->out#0:0": {
+        "segmented": true,
+        "y": 60.850445
+      },
+      "mix-amt:0->mix#0:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "mix-amt:0->mix#1:2": {
+        "segmented": true,
+        "y": 20.650002
+      },
+      "mul5:0->allpass1:0": {
+        "segmented": true,
+        "y": 57.843742
+      }
+    },
+    "inputPresentation": {
+      "add1:0": "cable",
+      "add1:1": "cable",
+      "add2:0": "cable",
+      "add2:1": "cable",
+      "add3:0": "cable",
+      "add3:1": "cable",
+      "add4:0": "cable",
+      "add4:1": "cable",
+      "damping-delay1:0": "cable",
+      "damping-delay1:1": "cable",
+      "damping-delay1:2": "inline-mod-param",
+      "damping-delay1:3": "inline-raw-param",
+      "damping-delay2:0": "cable",
+      "damping-delay2:1": "cable",
+      "damping-delay2:2": "inline-mod-param",
+      "damping-delay2:3": "inline-raw-param",
+      "damping-delay3:0": "cable",
+      "damping-delay3:1": "cable",
+      "damping-delay3:2": "inline-mod-param",
+      "damping-delay3:3": "inline-raw-param",
+      "damping-delay4:0": "cable",
+      "damping-delay4:1": "cable",
+      "damping-delay4:2": "inline-mod-param",
+      "damping-delay4:3": "inline-raw-param",
+      "mix#0:1": "cable",
+      "mix#0:2": "inline-raw-param",
+      "mix#1:1": "cable",
+      "mix#1:2": "inline-raw-param",
+      "modulated1:0": "cable",
+      "mul1:0": "cable",
+      "mul2:0": "cable",
+      "mul3:0": "cable",
+      "mul4:0": "cable"
+    }
+  },
+  "macros": {
+    "allpass": {
+      "nodes": {
+        "add1": {
+          "x": 31.579103,
+          "y": 24.0475
+        },
+        "add2": {
+          "x": 31.579103,
+          "y": 37.4125
+        },
+        "delay1": {
+          "x": 4.0,
+          "y": 10.6825
+        },
+        "delaytime": {
+          "x": 6.9935546,
+          "y": 4.0
+        },
+        "g": {
+          "x": 51.876564,
+          "y": 4.0
+        },
+        "history1": {
+          "x": 8.0,
+          "y": 30.73
+        },
+        "input": {
+          "x": 4.0,
+          "y": 4.0
+        },
+        "mul1": {
+          "x": 4.0,
+          "y": 17.365,
+          "width": 52.176567
+        },
+        "mul2": {
+          "x": 51.876564,
+          "y": 10.6825
+        },
+        "mul3": {
+          "x": 31.579103,
+          "y": 30.73,
+          "width": 24.597464
+        },
+        "out": {
+          "x": 6.8749995,
+          "y": 29.292295
+        }
+      },
+      "cables": {
+        "add1:0->mul3:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "add2:0->out:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "delay1:0->add2:1": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "delay1:0->mul1:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "delaytime:0->delay1:1": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "g:0->mul2:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "g:0->mul3:1": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "history1:0->delay1:0": {
+          "segmented": true,
+          "y": 32.66
+        },
+        "input:0->add1:0": {
+          "segmented": true,
+          "y": 11.5575
+        },
+        "mul1:0->add1:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "mul2:0->mul1:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "mul3:0->add2:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mul3:0->history1:0": {
+          "segmented": true,
+          "y": 33.210003
+        }
+      },
+      "inputPresentation": {
+        "out:0": "cable"
+      }
+    },
+    "damping-delay": {
+      "nodes": {
+        "*#0": {
+          "x": 21.081184,
+          "y": 17.365
+        },
+        "d-in": {
+          "x": 4.0,
+          "y": 24.0475,
+          "width": 21.381184
+        },
+        "d-out": {
+          "x": 21.081184,
+          "y": 30.73
+        },
+        "damping": {
+          "x": 68.53691,
+          "y": 4.0
+        },
+        "fb-filtered": {
+          "x": 32.437992,
+          "y": 10.6825
+        },
+        "feedback": {
+          "x": 24.29746,
+          "y": 4.0
+        },
+        "h": {
+          "x": 9.579622,
+          "y": 30.73
+        },
+        "input": {
+          "x": 4.0,
+          "y": 4.0
+        },
+        "out": {
+          "x": 21.081184,
+          "y": 37.4125
+        },
+        "time": {
+          "x": 48.59492,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "*#0:0->d-in:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "d-in:0->d-out:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "d-out:0->h:0": {
+          "segmented": true,
+          "y": 33.210003
+        },
+        "d-out:0->out:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "damping:0->fb-filtered:1": {
+          "segmented": true,
+          "y": 7.5112505
+        },
+        "fb-filtered:0->*#0:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "feedback:0->*#0:1": {
+          "segmented": true,
+          "y": 8.216249
+        },
+        "h:0->fb-filtered:0": {
+          "segmented": true,
+          "y": 32.66
+        },
+        "input:0->d-in:0": {
+          "segmented": true,
+          "y": 14.81375
+        },
+        "time:0->d-out:1": {
+          "segmented": true,
+          "y": 14.193749
+        }
+      }
+    }
+  }
+}

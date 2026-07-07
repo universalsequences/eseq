@@ -6,6 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::effects::{EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
+use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
     ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
@@ -315,6 +316,8 @@ pub struct ProjectPattern {
     pub sample_names: Vec<String>,
     #[serde(default)]
     pub rack_tracks: Vec<Option<ProjectRackTrackPattern>>,
+    #[serde(default)]
+    pub plock_variant_registries: Vec<PlockVariantRegistry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -609,6 +612,7 @@ impl ProjectPattern {
                 .cloned()
                 .map(|rack| rack.map(ProjectRackTrackPattern::from))
                 .collect(),
+            plock_variant_registries: snapshot.plock_variant_registries.clone(),
         }
     }
 }
@@ -1829,6 +1833,7 @@ mod tests {
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
                 rack_tracks: vec![None, None],
+                plock_variant_registries: Vec::new(),
             }],
         }
     }

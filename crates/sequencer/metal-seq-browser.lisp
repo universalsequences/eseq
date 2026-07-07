@@ -309,9 +309,14 @@
     (sbrowser-audition item)))
 
 (def sbrowser-select-tab (name)
-  (set! sbrowser-tab name)
-  (if (not (= name "samples"))
-    (set! sbrowser-selected-tags (list))))
+  (let ((changed (not (= sbrowser-tab name))))
+    (set! sbrowser-tab name)
+    (if changed
+      (do
+        (set! sbrowser-filter "")
+        (set! sbrowser-preset-filter "")))
+    (if (not (= name "samples"))
+      (set! sbrowser-selected-tags (list)))))
 
 (def sbrowser-next-tab-name ()
   (if (= sbrowser-tab "samples") "instruments"
@@ -573,18 +578,6 @@
           (status (str "Move instrument to " (get target :label))))
         (status "Drop instruments onto a folder")))))
 
-(def sbrowser-create-search-bar ()
-  (box :key "create-search-bar" :width :fill :height 2.0 :padding 0.25
-    (h-stack :width :fill :gap 0.5 :align :center
-      (text-input
-        :flex 1
-        :value sbrowser-filter
-        :placeholder "Search instruments..."
-        :on-change (lambda (v) (sbrowser-set-search-filter v))
-        :height 1.5
-        :font-size 12
-        (mag-glass)))))
-
 (def sbrowser-loading-instrument? ()
   (not (= sbrowser-loading-instrument-name "")))
 
@@ -598,7 +591,6 @@
 
 (def sbrowser-create-picker ()
   (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
-    (sbrowser-create-search-bar)
     (sbrowser-instrument-loading-row)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "create-picker-scroll" :width :fill :flex 1
@@ -614,50 +606,51 @@
           :on-select (lambda (item) (sbrowser-focus-create-item item))
           :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
 
-(def sbrowser-tab-button (name label)
+(def sbrowser-tab-items ()
+  (list
+    (dict :name "samples" :label "Samples" :icon :waveform)
+    (dict :name "instruments" :label "Instruments" :icon :piano)
+    (dict :name "audio-fx" :label "Audio FX" :icon :sliders)
+    (dict :name "midi-fx" :label "MIDI FX" :icon :note-arrow)
+    (dict :name "presets" :label "Presets" :icon :dial)
+    (dict :name "projects" :label "Projects" :icon :folder)))
+
+(def sbrowser-tab-button (name label icon)
   (button label
-    :variant (if (= sbrowser-tab name) :primary :ghost)
-    :width 8.5
-    :border-color (if (= sbrowser-tab name) :primary '(rgba 1 1 1 0.5))    
-    :height 1.25
-    :font-size 8.8
+    :key (str "browser-tab-" name)
+    :variant :ghost
+    :icon icon
+    :active (= sbrowser-tab name)
+    :width :fill
+    :height 1.45
+    :font-size 11.0
+    :h-align :left
+    :background-color '(rgba 1 1 1 0.0)
+    :active-background-color '(rgba 1 1 1 0.07)
+    :border-color '(rgba 1 1 1 0.0)
+    :highlight-color '(rgba 1 1 1 0.0)
+    :shadow-color '(rgba 0 0 0 0.0)
+    :corner-radius 8
     :on-click |x y r| (sbrowser-select-tab name)
-    :color :white))
+    :color '(rgba 0.88 0.89 0.92 1.0)
+    :active-color :blue))
 
 (def sbrowser-tabs ()
-  (v-stack :key "browser-tabs" :width 9.0 :gap 0.25
-    (sbrowser-tab-button "samples" "Samples")
-    (sbrowser-tab-button "instruments" "Instruments")
-    (sbrowser-tab-button "audio-fx" "Audio FX")
-    (sbrowser-tab-button "midi-fx" "MIDI FX")
-    (sbrowser-tab-button "presets" "Presets")
-    (sbrowser-tab-button "projects" "Projects")))
+  (let ((tabs (sbrowser-tab-items)))
+    (box :key "browser-tabs" :width 11.4 :height :fill :padding 0.35
+      (v-stack :width :fill :gap 0.18
+        (each (range 0 (len tabs)) |i|
+          (let ((tab (nth tabs i)))
+            (sbrowser-tab-button
+              (get tab :name)
+              (get tab :label)
+              (get tab :icon))))))))
 
 (def sbrowser-samples-panel ()
   (let ((browser (seq-sample-browser sbrowser-filter sbrowser-selected-tags)))
     (let ((tags (get browser :tags))
         (items (get browser :items)))
       (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
-        (box :key "sample-rack-actions" :width :fill :padding 0.15
-          (h-stack :width :fill :gap 0.35 :align :center
-            (button "Rack"
-              :variant :secondary
-              :icon :sampler
-              :height 1.15
-              :flex 1
-              :font-size 9.5
-              :on-click |x y r| (sbrowser-add-rack-track)
-              :color :white)
-            (button "Layer"
-              :variant :secondary
-              :icon :sampler
-              :height 1.15
-              :flex 1
-              :font-size 9.5
-              :on-click |x y r| (sbrowser-add-layer-rack-track)
-              :color :white)
-            ))
-        
         (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
           (v-stack :width :fill :gap 0.35
             (if (> (len sbrowser-selected-tags) 0)
@@ -811,7 +804,7 @@
               :width :fill
               :background-color :buffer-bg
               :items items
-              :selected-label SEQ.current-project-name
+              :selected-label SEQ.current-p0roject-name
               :expand-all false
               :focusable true
               :on-select (lambda (item) (sbrowser-load-project (get item :label)))
@@ -828,14 +821,21 @@
 (def sbrowser-tabbed-content ()
   (h-stack :key "browser-tabbed-content" :width :fill :gap 0.5 :flex 1 :align :stretch
     (sbrowser-tabs)
-    (box :key "browser-active-tab-panel" :width 0 :flex 1 :padding 0
-      (sbrowser-active-tab-panel))))
+    (box 
+      :width 0.2 
+      :height :fill 
+      :background-color :bg
+      )
+    (box
+      :key "browser-active-tab-panel" :width 0 :flex 1 :padding 0
+      (v-stack
+        :key "browser-active-tab-column" :width :fill :height :fill :gap 0.15 :flex 1
+        (sbrowser-header)
+        (sbrowser-active-tab-panel)))))
 
 (def sbrowser-main-panel ()
   (v-stack :key "tabbed-browser" :width :fill :height :fill :gap 0.45 :flex 1
-    (sbrowser-header)
-    (box :key "browser-content" :width :fill :height :fill :padding 0 :flex 1
-      (sbrowser-instruments-panel))))
+    (sbrowser-tabbed-content)))
 
 (def sbrowser-preset-search-bar ()
   (box :key "preset-search-bar" :width :fill :height 1.8 :padding 0.15
@@ -1126,7 +1126,6 @@
             (sbrowser-project-save-header)
             (sbrowser-project-save-panel))
           (list
-            (sbrowser-header)
             (sbrowser-tabbed-content)))))))
 
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──

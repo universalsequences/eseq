@@ -1889,6 +1889,26 @@ fn sync_all_track_sequencer_state_inner(
         "track-step-has-plocks",
         build_all_track_step_has_plocks_from_masks(&plock_masks),
     );
+    rt.set_reactive(
+        "SEQ",
+        "track-step-plock-kinds",
+        build_all_track_step_plock_kinds(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-step-variant-r",
+        build_all_track_step_variant_color_channel(state, app, 0),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-step-variant-g",
+        build_all_track_step_variant_color_channel(state, app, 1),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-step-variant-b",
+        build_all_track_step_variant_color_channel(state, app, 2),
+    );
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_step_has_plocks = started.expect("profile timer").elapsed();
     }
@@ -3375,12 +3395,20 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "step-plock-kinds", Value::List(vec![]));
+        rt.set_reactive("SEQ", "step-variant-r", Value::List(vec![]));
+        rt.set_reactive("SEQ", "step-variant-g", Value::List(vec![]));
+        rt.set_reactive("SEQ", "step-variant-b", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-timebases", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-step-plock-kinds", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-step-variant-r", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-step-variant-g", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-step-variant-b", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-velocities", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-durations", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-auxas", Value::List(vec![]));
@@ -3389,6 +3417,8 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-delays", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-plocks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-plock-variants", Value::List(vec![]));
         return;
     }
 
@@ -3432,6 +3462,26 @@ pub(crate) fn sync_track_topology_state(
         "SEQ",
         "step-has-plocks",
         build_step_has_plocks(state, current_track_idx, &app.graph.effect_descriptors),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "step-plock-kinds",
+        build_step_plock_kinds(state, current_track_idx),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "step-variant-r",
+        build_step_variant_color_channel(state, current_track_idx, 0),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "step-variant-g",
+        build_step_variant_color_channel(state, current_track_idx, 1),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "step-variant-b",
+        build_step_variant_color_channel(state, current_track_idx, 2),
     );
     sync_sidebar_browser(rt, app, current_track_idx);
 }
@@ -7666,6 +7716,11 @@ pub(crate) fn sync_track_params(
         "track-plocks",
         build_track_plocks_value(app, state, track, selected),
     );
+    rt.set_reactive(
+        "SEQ",
+        "track-plock-variants",
+        build_track_plock_variants_value(state, track, selected),
+    );
 }
 
 pub(crate) fn sync_track_params_with_neural_selection(
@@ -7690,6 +7745,11 @@ pub(crate) fn sync_track_params_with_neural_selection(
             selected_neural_neurons,
         ),
     );
+    rt.set_reactive(
+        "SEQ",
+        "track-plock-variants",
+        build_track_plock_variants_value(state, track, selected),
+    );
 }
 
 fn plock_entry(
@@ -7698,6 +7758,7 @@ fn plock_entry(
     group: &str,
     name: &str,
     value: f32,
+    default: f32,
     min: f32,
     max: f32,
     slot_idx: Option<usize>,
@@ -7711,6 +7772,7 @@ fn plock_entry(
         group,
         name,
         value,
+        default,
         min,
         max,
         slot_idx,
@@ -7729,6 +7791,7 @@ fn plock_entry_with_label(
     group: &str,
     name: &str,
     value: f32,
+    default: f32,
     min: f32,
     max: f32,
     slot_idx: Option<usize>,
@@ -7768,6 +7831,10 @@ fn plock_entry_with_label(
     map.insert(
         "value".to_string(),
         Rc::new(RefCell::new(Value::Number(value as f64))),
+    );
+    map.insert(
+        "default".to_string(),
+        Rc::new(RefCell::new(Value::Number(default as f64))),
     );
     map.insert(
         "min".to_string(),
@@ -7818,9 +7885,17 @@ fn plock_entry_with_label(
             .get(value.round().max(0.0) as usize)
             .cloned()
             .unwrap_or_default();
+        let default_text = options
+            .get(default.round().max(0.0) as usize)
+            .cloned()
+            .unwrap_or_default();
         map.insert(
             "text-value".to_string(),
             Rc::new(RefCell::new(Value::String(selected))),
+        );
+        map.insert(
+            "default-text".to_string(),
+            Rc::new(RefCell::new(Value::String(default_text))),
         );
         map.insert(
             "options".to_string(),
@@ -7831,8 +7906,374 @@ fn plock_entry_with_label(
                     .collect(),
             ))),
         );
+    } else {
+        map.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String(format!("{value:.2}")))),
+        );
+        map.insert(
+            "default-text".to_string(),
+            Rc::new(RefCell::new(Value::String(format!("{default:.2}")))),
+        );
     }
+    map.insert(
+        "domain".to_string(),
+        Rc::new(RefCell::new(Value::String(
+            plock_entry_domain(target).to_string(),
+        ))),
+    );
     Rc::new(RefCell::new(Value::Map(map)))
+}
+
+fn plock_entry_domain(target: &str) -> &'static str {
+    match target {
+        "instrument"
+        | "instrument-tensor"
+        | "rack-slot-param"
+        | "rack-slot-instrument"
+        | "rack-slot-instrument-tensor" => "inst",
+        "effect" | "effect-tensor" | "bus-effect" => "fx",
+        "neural-instrument" | "neural-effect" => "neural",
+        _ => "seq",
+    }
+}
+
+fn plock_param_options(kind: &sequencer::effects::ParamKind) -> Option<Vec<String>> {
+    match kind {
+        sequencer::effects::ParamKind::Enum { labels } => Some(labels.clone()),
+        sequencer::effects::ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+        sequencer::effects::ParamKind::Continuous { .. } => None,
+    }
+}
+
+fn preview_plock_entry(
+    label: &str,
+    target: &str,
+    group: &str,
+    name: &str,
+    value: f32,
+    default: f32,
+    min: f32,
+    max: f32,
+    slot_idx: Option<usize>,
+    param_idx: Option<usize>,
+    options: Option<Vec<String>>,
+) -> Rc<RefCell<Value>> {
+    let entry = plock_entry_with_label(
+        label,
+        0,
+        target,
+        group,
+        name,
+        value,
+        default,
+        min,
+        max,
+        slot_idx,
+        param_idx,
+        options,
+        Some("preview"),
+        None,
+        None,
+    );
+    {
+        let mut value = entry.borrow_mut();
+        if let Value::Map(map) = &mut *value {
+            map.insert("preview".to_string(), value_cell(Value::Bool(true)));
+            map.insert(
+                "preview-label".to_string(),
+                value_cell(Value::String(label.to_string())),
+            );
+        }
+    }
+    entry
+}
+
+fn tensor_cell_label(desc: &sequencer::effects::TensorParamDescriptor, cell_idx: usize) -> String {
+    let rows = desc.rows();
+    let cols = desc.cols();
+    if rows > 1 && cols > 0 {
+        let row = cell_idx / cols;
+        let col = cell_idx % cols;
+        format!("{} {}:{}", desc.name, row + 1, col + 1)
+    } else {
+        format!("{} {}", desc.name, cell_idx + 1)
+    }
+}
+
+fn live_tensor_default_cell(
+    slot: &sequencer::effects::EffectSlotState,
+    desc: &sequencer::effects::TensorParamDescriptor,
+    tensor_idx: usize,
+    cell_idx: usize,
+) -> f32 {
+    slot.tensor_params
+        .default_values(tensor_idx)
+        .and_then(|values| values.get(cell_idx).copied())
+        .or_else(|| desc.default.get(cell_idx).copied())
+        .unwrap_or_default()
+}
+
+fn snapshot_tensor_default_cell(
+    slot: &sequencer::effects::EffectSlotSnapshot,
+    desc: &sequencer::effects::TensorParamDescriptor,
+    tensor_idx: usize,
+    cell_idx: usize,
+) -> f32 {
+    slot.tensor_default_values(tensor_idx)
+        .and_then(|values| values.get(cell_idx).copied())
+        .or_else(|| desc.default.get(cell_idx).copied())
+        .unwrap_or_default()
+}
+
+fn rack_slot_param_by_index(index: usize) -> Option<sequencer::sequencer::RackSlotParam> {
+    sequencer::sequencer::RackSlotParam::ALL
+        .iter()
+        .copied()
+        .find(|param| param.index() == index)
+}
+
+fn rack_slot_param_bounds(param: sequencer::sequencer::RackSlotParam) -> (f32, f32) {
+    match param {
+        sequencer::sequencer::RackSlotParam::BaseNote => (-48.0, 48.0),
+        sequencer::sequencer::RackSlotParam::Gain => (0.0, 2.0),
+        sequencer::sequencer::RackSlotParam::Pan => (-1.0, 1.0),
+        sequencer::sequencer::RackSlotParam::MaxPolyphony => (
+            1.0,
+            sequencer::sequencer::RackSlotParam::MaxPolyphony.clamp(f32::MAX),
+        ),
+        sequencer::sequencer::RackSlotParam::Mute | sequencer::sequencer::RackSlotParam::Solo => {
+            (0.0, 1.0)
+        }
+    }
+}
+
+fn rack_slot_param_options(param: sequencer::sequencer::RackSlotParam) -> Option<Vec<String>> {
+    match param {
+        sequencer::sequencer::RackSlotParam::Mute | sequencer::sequencer::RackSlotParam::Solo => {
+            Some(vec!["off".to_string(), "on".to_string()])
+        }
+        _ => None,
+    }
+}
+
+fn build_track_plock_preview_row_for_variant_entry(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    label: &str,
+    entry: &sequencer::plock_variants::PlockVariantEntry,
+) -> Option<Rc<RefCell<Value>>> {
+    let stored_value = f32::from_bits(entry.value_bits);
+    match entry.domain {
+        sequencer::plock_variants::PlockVariantDomain::Instrument => {
+            let desc = app.graph.instrument_descriptors.get(track)?;
+            let param = desc.params.get(entry.param)?;
+            let slot = state.pattern.instrument_slots.get(track)?;
+            Some(preview_plock_entry(
+                label,
+                "instrument",
+                "inst",
+                &param.name,
+                param.stored_to_user(stored_value),
+                param.stored_to_user(slot.defaults.get(entry.param)),
+                param.stored_to_user(param.min),
+                param.stored_to_user(param.max),
+                None,
+                Some(entry.param),
+                plock_param_options(&param.kind),
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::InstrumentTensor => {
+            let cell_idx = entry.cell?;
+            let desc = app.graph.instrument_descriptors.get(track)?;
+            let tensor = desc.tensor_params.get(entry.param)?;
+            let slot = state.pattern.instrument_slots.get(track)?;
+            Some(preview_plock_entry(
+                label,
+                "instrument-tensor",
+                "inst",
+                &tensor_cell_label(tensor, cell_idx),
+                stored_value,
+                live_tensor_default_cell(slot, tensor, entry.param, cell_idx),
+                tensor.min,
+                tensor.max,
+                None,
+                Some(entry.param),
+                None,
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::Effect => {
+            let desc = app
+                .graph
+                .effect_descriptors
+                .get(track)
+                .and_then(|descs| descs.get(entry.slot))?;
+            let param = desc.params.get(entry.param)?;
+            let slot = state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(entry.slot))?;
+            Some(preview_plock_entry(
+                label,
+                "effect",
+                &desc.name,
+                &param.name,
+                stored_value,
+                slot.defaults.get(entry.param),
+                param.min,
+                param.max,
+                Some(entry.slot),
+                Some(entry.param),
+                plock_param_options(&param.kind),
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::EffectTensor => {
+            let cell_idx = entry.cell?;
+            let desc = app
+                .graph
+                .effect_descriptors
+                .get(track)
+                .and_then(|descs| descs.get(entry.slot))?;
+            let tensor = desc.tensor_params.get(entry.param)?;
+            let slot = state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(entry.slot))?;
+            Some(preview_plock_entry(
+                label,
+                "effect-tensor",
+                &desc.name,
+                &tensor_cell_label(tensor, cell_idx),
+                stored_value,
+                live_tensor_default_cell(slot, tensor, entry.param, cell_idx),
+                tensor.min,
+                tensor.max,
+                Some(entry.slot),
+                Some(entry.param),
+                None,
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::RackSlotParam => {
+            let param = rack_slot_param_by_index(entry.param)?;
+            let rack = state
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .flatten()?;
+            let slot = rack.slots.get(entry.slot)?;
+            let (min, max) = rack_slot_param_bounds(param);
+            Some(preview_plock_entry(
+                label,
+                "rack-slot-param",
+                "rack",
+                param.name(),
+                param.clamp(stored_value),
+                slot.param_default(param),
+                min,
+                max,
+                Some(entry.slot),
+                Some(entry.param),
+                rack_slot_param_options(param),
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::RackSlotInstrument => {
+            let rack = state
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .flatten()?;
+            let slot = rack.slots.get(entry.slot)?;
+            let desc = app.rack_slot_instrument_descriptor(slot)?;
+            let param = desc.params.get(entry.param)?;
+            Some(preview_plock_entry(
+                label,
+                "rack-slot-instrument",
+                "rack",
+                &param.name,
+                param.stored_to_user(stored_value),
+                param.stored_to_user(
+                    slot.instrument_slot
+                        .defaults
+                        .get(entry.param)
+                        .copied()
+                        .unwrap_or(param.default),
+                ),
+                param.stored_to_user(param.min),
+                param.stored_to_user(param.max),
+                Some(entry.slot),
+                Some(entry.param),
+                plock_param_options(&param.kind),
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::RackSlotInstrumentTensor => {
+            let cell_idx = entry.cell?;
+            let rack = state
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .flatten()?;
+            let slot = rack.slots.get(entry.slot)?;
+            let desc = app.rack_slot_instrument_descriptor(slot)?;
+            let tensor = desc.tensor_params.get(entry.param)?;
+            Some(preview_plock_entry(
+                label,
+                "rack-slot-instrument-tensor",
+                "rack",
+                &tensor_cell_label(tensor, cell_idx),
+                stored_value,
+                snapshot_tensor_default_cell(&slot.instrument_slot, tensor, entry.param, cell_idx),
+                tensor.min,
+                tensor.max,
+                Some(entry.slot),
+                Some(entry.param),
+                None,
+            ))
+        }
+    }
+}
+
+pub(crate) fn build_track_plocks_value_for_variant_label(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    label: &str,
+) -> Value {
+    if label == "def" {
+        return Value::List(vec![]);
+    }
+    let Some(assignment) = state
+        .plock_variant_registry_snapshot(track)
+        .assignment_for_label(label)
+    else {
+        return Value::List(vec![]);
+    };
+    let items = assignment
+        .key
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            build_track_plock_preview_row_for_variant_entry(
+                app,
+                state,
+                track,
+                &assignment.label,
+                entry,
+            )
+        })
+        .collect();
+    Value::List(items)
 }
 
 pub(crate) fn build_track_plocks_value_with_neural_selection(
@@ -7909,6 +8350,7 @@ fn build_selected_neural_plocks_value(
                 &format!("T{} inst", target_track + 1),
                 &param.name,
                 param.stored_to_user(override_param.value),
+                param.stored_to_user(param.default),
                 param.stored_to_user(param.min),
                 param.stored_to_user(param.max),
                 None,
@@ -7956,6 +8398,7 @@ fn build_selected_neural_plocks_value(
                 &format!("T{} {}", target_track + 1, desc.name),
                 &param.name,
                 override_param.value,
+                param.default,
                 param.min,
                 param.max,
                 Some(override_param.slot_index),
@@ -7995,6 +8438,7 @@ pub(crate) fn build_track_plocks_value(
                 "track",
                 "timebase",
                 timebase as u32 as f32,
+                tp.get_timebase() as u32 as f32,
                 0.0,
                 (Timebase::ALL.len() - 1) as f32,
                 None,
@@ -8009,7 +8453,17 @@ pub(crate) fn build_track_plocks_value(
         }
         if let Some(swing) = state.pattern.swing_plocks[track].get(step) {
             items.push(plock_entry(
-                step, "swing", "track", "swing", swing, 50.0, 75.0, None, None, None,
+                step,
+                "swing",
+                "track",
+                "swing",
+                swing,
+                tp.get_swing(),
+                50.0,
+                75.0,
+                None,
+                None,
+                None,
             ));
         }
         if let Some(resolution) = state.pattern.swing_resolution_plocks[track].get(step) {
@@ -8019,6 +8473,7 @@ pub(crate) fn build_track_plocks_value(
                 "track",
                 "swing res",
                 resolution as u32 as f32,
+                tp.get_swing_resolution() as u32 as f32,
                 0.0,
                 (SwingResolution::ALL.len() - 1) as f32,
                 None,
@@ -8029,6 +8484,25 @@ pub(crate) fn build_track_plocks_value(
                         .map(|label| label.to_string())
                         .collect(),
                 ),
+            ));
+        }
+        for param in StepParam::ALL {
+            let value = state.pattern.step_data[track].get(step, param);
+            if value.to_bits() == param.default_value().to_bits() {
+                continue;
+            }
+            items.push(plock_entry(
+                step,
+                "step-param",
+                "per step",
+                param.short_label(),
+                value,
+                param.default_value(),
+                param.min(),
+                param.max(),
+                None,
+                Some(param.index()),
+                None,
             ));
         }
 
@@ -8047,6 +8521,7 @@ pub(crate) fn build_track_plocks_value(
                         "inst",
                         &param.name,
                         param.stored_to_user(value),
+                        param.stored_to_user(slot.defaults.get(param_idx)),
                         param.stored_to_user(param.min),
                         param.stored_to_user(param.max),
                         None,
@@ -8075,6 +8550,7 @@ pub(crate) fn build_track_plocks_value(
                             &desc.name,
                             &param.name,
                             value,
+                            slot.defaults.get(param_idx),
                             param.min,
                             param.max,
                             Some(slot_idx),
@@ -8107,6 +8583,7 @@ pub(crate) fn build_track_plocks_value(
                         &desc.name,
                         &param.name,
                         value,
+                        slot.defaults.get(param_idx),
                         param.min,
                         param.max,
                         Some(slot_idx),
@@ -8116,6 +8593,107 @@ pub(crate) fn build_track_plocks_value(
                 }
             }
         }
+    }
+
+    Value::List(items)
+}
+
+pub(crate) fn build_track_plock_variants_value(
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    build_track_plock_variants_value_with_preview(state, track, selected, None)
+}
+
+pub(crate) fn build_track_plock_variants_value_with_preview(
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+    preview_label: Option<&str>,
+) -> Value {
+    let registry = state.plock_variant_registry_snapshot(track);
+    let selected_step = selected_plock_step(selected);
+    let current_key = selected_step.and_then(|step| {
+        sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step)
+    });
+    let preview_label = current_key.is_none().then_some(preview_label).flatten();
+    let preview_is_def = preview_label.map_or(true, |label| label == "def");
+
+    let mut items = Vec::with_capacity(registry.entries.len() + 1);
+    let mut def_map = HashMap::new();
+    def_map.insert(
+        "kind".to_string(),
+        Rc::new(RefCell::new(Value::String("def".to_string()))),
+    );
+    def_map.insert(
+        "label".to_string(),
+        Rc::new(RefCell::new(Value::String("def".to_string()))),
+    );
+    def_map.insert(
+        "count".to_string(),
+        Rc::new(RefCell::new(Value::Number(0.0))),
+    );
+    def_map.insert(
+        "current".to_string(),
+        Rc::new(RefCell::new(Value::Bool(
+            current_key.is_none() && preview_is_def,
+        ))),
+    );
+    def_map.insert(
+        "color-r".to_string(),
+        Rc::new(RefCell::new(Value::Number(0.545_098_07))),
+    );
+    def_map.insert(
+        "color-g".to_string(),
+        Rc::new(RefCell::new(Value::Number(0.545_098_07))),
+    );
+    def_map.insert(
+        "color-b".to_string(),
+        Rc::new(RefCell::new(Value::Number(0.588_235_3))),
+    );
+    items.push(Rc::new(RefCell::new(Value::Map(def_map))));
+
+    for entry in registry.entries {
+        let mut map = HashMap::new();
+        map.insert(
+            "kind".to_string(),
+            Rc::new(RefCell::new(Value::String("variant".to_string()))),
+        );
+        map.insert(
+            "label".to_string(),
+            Rc::new(RefCell::new(Value::String(entry.label.clone()))),
+        );
+        map.insert(
+            "display".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                entry.name.clone().unwrap_or_else(|| entry.label.clone()),
+            ))),
+        );
+        map.insert(
+            "count".to_string(),
+            Rc::new(RefCell::new(Value::Number(entry.key.param_count() as f64))),
+        );
+        map.insert(
+            "current".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                current_key.as_ref().is_some_and(|key| key == &entry.key)
+                    || preview_label.is_some_and(|label| label == entry.label),
+            ))),
+        );
+        map.insert(
+            "color-r".to_string(),
+            Rc::new(RefCell::new(Value::Number(entry.color[0] as f64))),
+        );
+        map.insert(
+            "color-g".to_string(),
+            Rc::new(RefCell::new(Value::Number(entry.color[1] as f64))),
+        );
+        map.insert(
+            "color-b".to_string(),
+            Rc::new(RefCell::new(Value::Number(entry.color[2] as f64))),
+        );
+        items.push(Rc::new(RefCell::new(Value::Map(map))));
     }
 
     Value::List(items)
@@ -8266,6 +8844,97 @@ pub(crate) fn build_step_has_plocks_from_mask(mask: &[u64; MAX_STEPS / 64]) -> V
     Value::List(items)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PlockVariantStepRender {
+    kind: u8,
+    color: [f32; 3],
+}
+
+fn plock_variant_step_render_values(
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> Vec<PlockVariantStepRender> {
+    const SEQ_ONLY_COLOR: [f32; 3] = [0.545_098_07, 0.545_098_07, 0.588_235_3];
+    let assignments = state.reconcile_plock_variant_registry_for_track(track);
+    (0..MAX_STEPS)
+        .map(|step| {
+            if let Some(assignment) = assignments.get(step).and_then(Clone::clone) {
+                PlockVariantStepRender {
+                    kind: 2,
+                    color: assignment.color,
+                }
+            } else if sequencer::plock_variants::live_track_has_seq_lock(
+                state.as_ref(),
+                track,
+                step,
+            ) {
+                PlockVariantStepRender {
+                    kind: 1,
+                    color: SEQ_ONLY_COLOR,
+                }
+            } else {
+                PlockVariantStepRender {
+                    kind: 0,
+                    color: [0.0, 0.0, 0.0],
+                }
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn build_step_plock_kinds(state: &Arc<SequencerState>, track: usize) -> Value {
+    Value::List(
+        plock_variant_step_render_values(state, track)
+            .into_iter()
+            .map(|render| Rc::new(RefCell::new(Value::Number(render.kind as f64))))
+            .collect(),
+    )
+}
+
+pub(crate) fn build_step_variant_color_channel(
+    state: &Arc<SequencerState>,
+    track: usize,
+    channel: usize,
+) -> Value {
+    Value::List(
+        plock_variant_step_render_values(state, track)
+            .into_iter()
+            .map(|render| {
+                Rc::new(RefCell::new(Value::Number(
+                    render.color.get(channel).copied().unwrap_or(0.0) as f64,
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_all_track_step_plock_kinds(
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+) -> Value {
+    Value::List(
+        (0..app.tracks.len())
+            .map(|track| Rc::new(RefCell::new(build_step_plock_kinds(state, track))))
+            .collect(),
+    )
+}
+
+pub(crate) fn build_all_track_step_variant_color_channel(
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    channel: usize,
+) -> Value {
+    Value::List(
+        (0..app.tracks.len())
+            .map(|track| {
+                Rc::new(RefCell::new(build_step_variant_color_channel(
+                    state, track, channel,
+                )))
+            })
+            .collect(),
+    )
+}
+
 /// One bit per step: whether any effect/instrument/midi-fx/timebase/swing
 /// plock exists for that step. Single flat scan per slot instead of the
 /// per-(step, slot, param) probing done by track_step_has_plock.
@@ -8326,6 +8995,9 @@ pub(crate) fn track_step_plock_mask(
         if timebase_plocks.has_plock(step)
             || swing_plocks.has_plock(step)
             || swing_resolution_plocks.has_plock(step)
+            || sequencer::plock_variants::live_track_has_seq_lock(state.as_ref(), track, step)
+            || sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step)
+                .is_some()
         {
             mask[word] |= bit;
         }
@@ -8392,6 +9064,8 @@ pub(crate) fn track_step_has_plock(
         || timebase_plocks.has_plock(step)
         || swing_plocks.has_plock(step)
         || swing_resolution_plocks.has_plock(step)
+        || sequencer::plock_variants::live_track_has_seq_lock(state.as_ref(), track, step)
+        || sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step).is_some()
 }
 
 #[cfg(test)]
@@ -10066,6 +10740,19 @@ mod tests {
             .find_map(|child| find_layout_node_by_stable_key(child, key))
     }
 
+    fn collect_layout_nodes_by_stable_key<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        key: &str,
+        out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+    ) {
+        if node.stable_key.as_deref() == Some(key) {
+            out.push(node);
+        }
+        for child in &node.children {
+            collect_layout_nodes_by_stable_key(child, key, out);
+        }
+    }
+
     fn layout_prop_bool(node: &eseqlisp::layout::LayoutNode, prop: &str) -> Option<bool> {
         match node.props.get(prop)? {
             Value::Bool(value) => Some(*value),
@@ -10626,9 +11313,9 @@ mod tests {
             let layout = editor.widget_layout().expect("browser layout");
             let header = find_layout_node_by_stable_key(&layout, "browser-header")
                 .expect("browser header node");
-            let content = find_layout_node_by_stable_key(&layout, "browser-tabbed-content")
-                .expect("browser tabbed content node");
-            content.rect.row - (header.rect.row + header.rect.height)
+            let panel = find_layout_node_by_stable_key(&layout, "samples-browser-panel")
+                .expect("samples browser panel node");
+            panel.rect.row - (header.rect.row + header.rect.height)
         }
 
         let mut editor = browser_editor_on_instrument_tab();
@@ -10838,31 +11525,121 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_tab_switch_preserves_search_text() {
+    fn metal_seq_browser_default_layout_has_one_relocated_search_input() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"instruments\")")
-            .expect("select instruments tab");
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"kick\")")
-            .expect("set browser search");
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(72, 60);
 
-        editor
-            .runtime_mut()
-            .eval_str("(sbrowser-select-tab \"samples\")")
-            .expect("select samples tab");
+        let layout = editor.widget_layout().expect("browser layout");
+        let rendered = render_layout_cells(&layout, 72, 60);
+        let rail = find_layout_node_by_stable_key(&layout, "browser-tabs")
+            .unwrap_or_else(|| panic!("browser tab rail should render; rendered:\n{rendered}"));
+        let header =
+            find_layout_node_by_stable_key(&layout, "browser-header").unwrap_or_else(|| {
+                panic!("browser search header should render; rendered:\n{rendered}")
+            });
+        let mut search_inputs = Vec::new();
+        collect_layout_nodes_by_stable_key(&layout, "sbrowser-search-input", &mut search_inputs);
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
-            Ok(Some(Value::String("kick".to_string()))),
-            "switching tabs should preserve search text"
+            search_inputs.len(),
+            1,
+            "non-editor browser layout must contain exactly one stable search input; rendered:\n{rendered}"
+        );
+        assert_eq!(search_inputs[0].widget_type, "text-input");
+        assert!(
+            rail.rect.height > 10.0 && header.rect.height > 0.0 && search_inputs[0].rect.height > 0.0,
+            "rail and relocated search should have finite visible rects: rail={:?}, header={:?}, input={:?}; rendered:\n{rendered}",
+            rail.rect,
+            header.rect,
+            search_inputs[0].rect
+        );
+        assert!(
+            header.rect.col >= rail.rect.col + rail.rect.width,
+            "search header should live in the content column to the right of the rail: rail={:?}, header={:?}; rendered:\n{rendered}",
+            rail.rect,
+            header.rect
         );
     }
 
     #[test]
-    fn metal_seq_browser_leaving_samples_clears_sample_only_tags() {
+    fn metal_seq_browser_tab_switch_clears_search_text() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-filter \"kick\")")
+            .expect("set browser search");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-preset-filter \"pad\")")
+            .expect("set preset search");
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-select-tab \"instruments\")")
+            .expect("select instruments tab");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String(String::new()))),
+            "switching tabs should clear the shared search text"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-preset-filter"),
+            Ok(Some(Value::String(String::new()))),
+            "switching tabs should clear the separate preset search text"
+        );
+        let destination_items = editor
+            .runtime_mut()
+            .eval_str("(sbrowser-create-items)")
+            .expect("build destination instrument tree")
+            .expect("destination instrument tree should return a value");
+        assert!(
+            value_contains_string(&destination_items, "Sampler"),
+            "destination tab should use an unfiltered tree after tab switch: {destination_items:?}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_reselecting_active_tab_preserves_search_text() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-filter \"kick\")")
+            .expect("set browser search");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-preset-filter \"pad\")")
+            .expect("set preset search");
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-select-tab \"samples\")")
+            .expect("reselect samples tab");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("kick".to_string()))),
+            "reselecting the active tab should not clear the active pane search"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-preset-filter"),
+            Ok(Some(Value::String("pad".to_string()))),
+            "reselecting the active tab should not clear the separate preset search"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_leaving_samples_clears_sample_search_and_tags() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -10884,8 +11661,8 @@ mod tests {
 
         assert_eq!(
             editor.runtime_mut().eval_str("sbrowser-filter"),
-            Ok(Some(Value::String("kick".to_string()))),
-            "switching away from samples should preserve search text"
+            Ok(Some(Value::String(String::new()))),
+            "switching away from samples should clear search text"
         );
         assert_eq!(
             editor
@@ -11978,31 +12755,32 @@ mod tests {
 
         let good_body = r#"
           (list
-            (sbrowser-header)
-            (sbrowser-tabs)
-            (sbrowser-active-tab-panel))
+            (sbrowser-tabbed-content))
         "#;
         let side_by_side_body = r#"
           (list
-            (sbrowser-header)
             (h-stack :key "diagnostic-side-by-side" :width :fill :gap 0.5 :flex 1
               (sbrowser-tabs)
-              (sbrowser-active-tab-panel)))
+              (v-stack :key "diagnostic-active-tab-column" :width :fill :gap 0.45 :flex 1
+                (sbrowser-header)
+                (sbrowser-active-tab-panel))))
         "#;
         let stretched_side_by_side_body = r#"
           (list
-            (sbrowser-header)
             (h-stack :key "diagnostic-side-by-side-stretched" :width :fill :gap 0.5 :flex 1 :align :stretch
               (sbrowser-tabs)
-              (sbrowser-active-tab-panel)))
+              (v-stack :key "diagnostic-active-tab-column" :width :fill :gap 0.45 :flex 1
+                (sbrowser-header)
+                (sbrowser-active-tab-panel))))
         "#;
         let fixed_side_by_side_body = r#"
           (list
-            (sbrowser-header)
             (h-stack :key "diagnostic-side-by-side-fixed" :width :fill :gap 0.5 :flex 1 :align :stretch
               (sbrowser-tabs)
               (box :key "diagnostic-active-tab-panel" :width 0 :flex 1 :padding 0
-                (sbrowser-active-tab-panel))))
+                (v-stack :key "diagnostic-active-tab-column" :width :fill :height :fill :gap 0.45 :flex 1
+                  (sbrowser-header)
+                  (sbrowser-active-tab-panel)))))
         "#;
 
         let (good_scroll, good_tree, good_rows, _) = snapshot(good_body);
@@ -13864,6 +14642,19 @@ mod tests {
         }
     }
 
+    fn value_list_maps(value: &Value) -> Vec<HashMap<String, Rc<RefCell<Value>>>> {
+        match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::Map(map) => map.clone(),
+                    other => panic!("expected map list item, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected map list, got {other:?}"),
+        }
+    }
+
     #[test]
     fn duration_spans_cover_steps_held_by_active_sources() {
         let state = Arc::new(SequencerState::new(1, vec![]));
@@ -13931,6 +14722,84 @@ mod tests {
 
         state.transport.playing.store(true, Ordering::Relaxed);
         assert_eq!(displayed_plock_step(&state, 0, None), Some(4));
+    }
+
+    #[test]
+    fn track_plock_variant_current_uses_selected_step_not_playhead() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![vec![sequencer::effects::EffectSlotState::new(&desc, 0)]],
+        ));
+        state.pattern.track_params[0].set_num_steps(16);
+        state.pattern.effect_chains[0][0].set_plock(4, cutoff_idx, 1200.0);
+        state.transport.track_playheads[0].store(4, Ordering::Relaxed);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+
+        let idle_variants = value_list_maps(&build_track_plock_variants_value(
+            &state,
+            0,
+            &selected_steps,
+        ));
+        let def_chip = idle_variants
+            .iter()
+            .find(|map| value_map_string(map, "kind").as_deref() == Some("def"))
+            .expect("default variant chip");
+        assert_eq!(value_map_bool(def_chip, "current"), Some(true));
+        assert!(
+            idle_variants
+                .iter()
+                .filter(|map| value_map_string(map, "kind").as_deref() == Some("variant"))
+                .all(|map| value_map_bool(map, "current") != Some(true)),
+            "idle display with no selected step should not mark a p-lock variant current"
+        );
+
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let playing_variants = value_list_maps(&build_track_plock_variants_value(
+            &state,
+            0,
+            &selected_steps,
+        ));
+        let playing_def_chip = playing_variants
+            .iter()
+            .find(|map| value_map_string(map, "kind").as_deref() == Some("def"))
+            .expect("default variant chip while playing");
+        assert_eq!(value_map_bool(playing_def_chip, "current"), Some(true));
+        assert!(
+            playing_variants
+                .iter()
+                .filter(|map| value_map_string(map, "kind").as_deref() == Some("variant"))
+                .all(|map| value_map_bool(map, "current") != Some(true)),
+            "playback should not make the variant chips follow the playhead"
+        );
+
+        state.pattern.effect_chains[0][0].set_plock(2, cutoff_idx, 900.0);
+        selected_steps.lock().unwrap().insert(2);
+        let selected_variants = value_list_maps(&build_track_plock_variants_value(
+            &state,
+            0,
+            &selected_steps,
+        ));
+        let selected_chip = selected_variants
+            .iter()
+            .find(|map| {
+                value_map_string(map, "kind").as_deref() == Some("variant")
+                    && value_map_bool(map, "current") == Some(true)
+            })
+            .expect("selected step variant chip");
+        assert_eq!(
+            value_map_string(selected_chip, "label").as_deref(),
+            Some("B")
+        );
+        assert_eq!(
+            value_map_number(selected_chip, "color-r"),
+            Some(sequencer::plock_variants::VARIANT_PALETTE[1][0] as f64)
+        );
     }
 
     #[test]
@@ -15935,6 +16804,13 @@ mod tests {
         })
     }
 
+    fn value_map_bool(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<bool> {
+        map.get(key).and_then(|value| match &*value.borrow() {
+            Value::Bool(value) => Some(*value),
+            _ => None,
+        })
+    }
+
     fn test_string_list(values: &[&str]) -> Value {
         test_list(
             values
@@ -15954,6 +16830,18 @@ mod tests {
 
     fn test_repeated_bool_list(value: bool, len: usize) -> Value {
         test_list((0..len).map(|_| Value::Bool(value)).collect())
+    }
+
+    fn test_repeated_track_number_lists(
+        value: f64,
+        track_count: usize,
+        step_count: usize,
+    ) -> Value {
+        test_list(
+            (0..track_count)
+                .map(|_| test_repeated_number_list(value, step_count))
+                .collect(),
+        )
     }
 
     fn test_multi_track_colors(track_count: usize) -> Value {
@@ -16011,6 +16899,35 @@ mod tests {
         test_list(
             (0..step_count)
                 .map(|step| Value::Bool((step * 5 + track + generation) % 11 == 0))
+                .collect(),
+        )
+    }
+
+    fn sequencer_perf_plock_kinds(track: usize, generation: usize, step_count: usize) -> Value {
+        test_list(
+            (0..step_count)
+                .map(|step| {
+                    let plocked = (step * 5 + track + generation) % 11 == 0;
+                    Value::Number(if plocked { 2.0 } else { 0.0 })
+                })
+                .collect(),
+        )
+    }
+
+    fn sequencer_perf_variant_color_channel(
+        track: usize,
+        generation: usize,
+        step_count: usize,
+        channel: usize,
+    ) -> Value {
+        const PERF_VARIANT_COLOR: [f64; 3] = [0.270_588_25, 0.784_313_74, 0.862_745_1];
+        let value = PERF_VARIANT_COLOR.get(channel).copied().unwrap_or(0.0);
+        test_list(
+            (0..step_count)
+                .map(|step| {
+                    let plocked = (step * 5 + track + generation) % 11 == 0;
+                    Value::Number(if plocked { value } else { 0.0 })
+                })
                 .collect(),
         )
     }
@@ -16216,6 +17133,22 @@ mod tests {
                     "track-step-has-plocks",
                     test_list(vec![empty_plocks.clone()]),
                 ),
+                (
+                    "track-step-plock-kinds",
+                    test_list(vec![test_number_list(&[0.0; 16])]),
+                ),
+                (
+                    "track-step-variant-r",
+                    test_list(vec![test_number_list(&[0.0; 16])]),
+                ),
+                (
+                    "track-step-variant-g",
+                    test_list(vec![test_number_list(&[0.0; 16])]),
+                ),
+                (
+                    "track-step-variant-b",
+                    test_list(vec![test_number_list(&[0.0; 16])]),
+                ),
                 ("track-velocities", test_list(vec![step_numbers.clone()])),
                 (
                     "track-durations",
@@ -16229,6 +17162,7 @@ mod tests {
                 ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
+                ("track-plock-variants", test_list(vec![])),
                 ("selected-neural-neurons", test_list(vec![])),
                 ("steps", steps.clone()),
                 ("velocities", step_numbers.clone()),
@@ -16238,6 +17172,10 @@ mod tests {
                 ("pans", test_number_list(&[0.0; 16])),
                 ("syncs", test_number_list(&[0.0; 16])),
                 ("step-has-plocks", empty_plocks.clone()),
+                ("step-plock-kinds", test_number_list(&[0.0; 16])),
+                ("step-variant-r", test_number_list(&[0.0; 16])),
+                ("step-variant-g", test_number_list(&[0.0; 16])),
+                ("step-variant-b", test_number_list(&[0.0; 16])),
                 ("selected-steps", test_bool_list(&[false; 16])),
                 ("playhead", Value::Number(0.0)),
                 ("playhead-page", Value::Number(0.0)),
@@ -16394,8 +17332,21 @@ mod tests {
             .expect("install default custom UI dispatchers");
 
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
-        editor.runtime_mut().eval_str(&src).expect("load grid lisp");
-        editor.refresh_runtime_side_effects();
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(std::path::PathBuf::from("metal-seq-grid.lisp")),
+            &src,
+            overlays,
+        );
+        if !report.success {
+            panic!("load grid lisp: {}", report.failure_message());
+        }
+        editor.process_lisp_reload_report(report);
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            if status.to_ascii_lowercase().contains("error") {
+                panic!("full grid lisp status after load: {status}");
+            }
+        }
         for name in [
             "*transport*",
             "*sequencer*",
@@ -16415,6 +17366,16 @@ mod tests {
                 panic!("full grid lisp status after refresh: {status}");
             }
         }
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*sequencer*"),
+            "full grid test fixture should expose an active sequencer tile"
+        );
+        editor.set_layout_viewport(140, 20);
+        assert!(
+            editor.widget_layout().is_some(),
+            "full grid test fixture should activate a sequencer widget layout"
+        );
         editor
     }
 
@@ -16555,6 +17516,26 @@ mod tests {
         );
         rt.set_reactive(
             "SEQ",
+            "track-step-plock-kinds",
+            test_repeated_track_number_lists(0.0, track_count, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-variant-r",
+            test_repeated_track_number_lists(0.0, track_count, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-variant-g",
+            test_repeated_track_number_lists(0.0, track_count, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-variant-b",
+            test_repeated_track_number_lists(0.0, track_count, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
             "track-playheads",
             test_repeated_number_list(0.0, track_count),
         );
@@ -16606,6 +17587,28 @@ mod tests {
             "step-has-plocks",
             test_repeated_bool_list(false, step_count),
         );
+        rt.set_reactive(
+            "SEQ",
+            "step-plock-kinds",
+            test_repeated_number_list(0.0, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "step-variant-r",
+            test_repeated_number_list(0.0, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "step-variant-g",
+            test_repeated_number_list(0.0, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "step-variant-b",
+            test_repeated_number_list(0.0, step_count),
+        );
+        rt.set_reactive("SEQ", "track-plocks", test_list(vec![]));
+        rt.set_reactive("SEQ", "track-plock-variants", test_list(vec![]));
         for track in 0..track_count {
             rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
             rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
@@ -16750,6 +17753,23 @@ mod tests {
         );
     }
 
+    fn assert_layout_inside(
+        child: &eseqlisp::layout::LayoutNode,
+        parent: &eseqlisp::layout::LayoutNode,
+        label: &str,
+    ) {
+        assert!(
+            child.rect.row >= parent.rect.row - 0.01
+                && child.rect.col >= parent.rect.col - 0.01
+                && child.rect.row + child.rect.height
+                    <= parent.rect.row + parent.rect.height + 0.01
+                && child.rect.col + child.rect.width <= parent.rect.col + parent.rect.width + 0.01,
+            "{label} should stay inside parent: child={:?}, parent={:?}",
+            child.rect,
+            parent.rect
+        );
+    }
+
     fn compact_step_shell<'a>(
         node: &'a eseqlisp::layout::LayoutNode,
     ) -> &'a eseqlisp::layout::LayoutNode {
@@ -16781,6 +17801,18 @@ mod tests {
             .collect::<Vec<_>>();
         let track_step_has_plocks = (0..track_count)
             .map(|track| sequencer_perf_plocks(track, generation, step_count))
+            .collect::<Vec<_>>();
+        let track_step_plock_kinds = (0..track_count)
+            .map(|track| sequencer_perf_plock_kinds(track, generation, step_count))
+            .collect::<Vec<_>>();
+        let track_step_variant_r = (0..track_count)
+            .map(|track| sequencer_perf_variant_color_channel(track, generation, step_count, 0))
+            .collect::<Vec<_>>();
+        let track_step_variant_g = (0..track_count)
+            .map(|track| sequencer_perf_variant_color_channel(track, generation, step_count, 1))
+            .collect::<Vec<_>>();
+        let track_step_variant_b = (0..track_count)
+            .map(|track| sequencer_perf_variant_color_channel(track, generation, step_count, 2))
             .collect::<Vec<_>>();
         let track_velocities = (0..track_count)
             .map(|_| test_repeated_number_list(1.0, step_count))
@@ -16896,6 +17928,26 @@ mod tests {
             "track-step-has-plocks",
             test_list(track_step_has_plocks),
         );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-plock-kinds",
+            test_list(track_step_plock_kinds),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-variant-r",
+            test_list(track_step_variant_r),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-variant-g",
+            test_list(track_step_variant_g),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-variant-b",
+            test_list(track_step_variant_b),
+        );
         rt.set_reactive("SEQ", "track-velocities", test_list(track_velocities));
         rt.set_reactive("SEQ", "track-durations", test_list(track_durations));
         rt.set_reactive("SEQ", "track-auxas", test_list(track_auxas));
@@ -16912,6 +17964,26 @@ mod tests {
             "SEQ",
             "step-has-plocks",
             sequencer_perf_plocks(0, generation, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "step-plock-kinds",
+            sequencer_perf_plock_kinds(0, generation, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "step-variant-r",
+            sequencer_perf_variant_color_channel(0, generation, step_count, 0),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "step-variant-g",
+            sequencer_perf_variant_color_channel(0, generation, step_count, 1),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "step-variant-b",
+            sequencer_perf_variant_color_channel(0, generation, step_count, 2),
         );
         rt.set_reactive(
             "SEQ",
@@ -18159,14 +19231,12 @@ mod tests {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.refresh_runtime_side_effects();
 
-        let track_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*track*")
-            .expect("track buffer should exist")
-            .id;
-        editor.set_active_buffer(track_id);
-        editor.set_layout_viewport(80, 20);
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*step*")"#)
+            .expect("switch to step buffer");
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(80, 60);
         editor
             .runtime_mut()
             .set_reactive("SEQ", "tp-timebase", Value::String("8T".to_string()));
@@ -19507,6 +20577,14 @@ mod tests {
         plock.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
         plock.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(1.0))));
         plock.insert(
+            "default".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        plock.insert(
+            "default-text".to_string(),
+            Rc::new(RefCell::new(Value::String("0.00".to_string()))),
+        );
+        plock.insert(
             "source".to_string(),
             Rc::new(RefCell::new(Value::String("neuron".to_string()))),
         );
@@ -19518,57 +20596,295 @@ mod tests {
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
-        let track_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*track*")
-            .expect("track buffer should exist")
-            .id;
-        editor.set_active_buffer(track_id);
-        editor.set_layout_viewport(80, 20);
-        let layout = editor.widget_layout().expect("track panel layout");
-        let label = find_layout_node_by_text(&layout, "N1")
-            .expect("selected neuron p-lock label should render");
-
-        assert_finite_nonzero_rect(label, "selected neuron p-lock label");
-
-        let clear = find_layout_node_by_text(&layout, "x")
-            .expect("selected neuron p-lock clear button should render");
-        assert_eq!(clear.widget_type, "button");
-        assert_finite_nonzero_rect(clear, "selected neuron p-lock clear button");
-
-        let _ = editor.drain_host_commands();
-        let callback = clear
-            .props
-            .get("on-click")
-            .cloned()
-            .expect("selected neuron p-lock clear button on-click");
         editor
             .runtime_mut()
-            .invoke(
-                callback,
-                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
-            )
-            .expect("invoke selected neuron p-lock clear button");
+            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .expect("stub sequencer param name helper");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect-buffer "*plock-panel-test*" (fx-track-plocks-panel))"#)
+            .expect("create p-lock panel test buffer");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*plock-panel-test*")
+            .expect("p-lock panel test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(80, 60);
+        editor.refresh_visible_layouts_for_buffer_named("*plock-panel-test*");
+        let layout = editor.widget_layout().expect("track panel layout");
+        let label = find_layout_node_by_stable_key(&layout, "track-plock-row-0-param")
+            .expect("selected neuron p-lock param cell should render");
+
+        assert_finite_nonzero_rect(label, "selected neuron p-lock label");
+    }
+
+    #[test]
+    fn metal_seq_track_plock_panel_keeps_table_columns_aligned() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let plocks = test_list(vec![
+            map_value([
+                ("target", Value::String("instrument".to_string())),
+                ("domain", Value::String("inst".to_string())),
+                ("step-idx", Value::Number(20.0)),
+                ("param-idx", Value::Number(12.0)),
+                ("group", Value::String("inst".to_string())),
+                ("name", Value::String("mod sr amt".to_string())),
+                ("value", Value::Number(-42100.0)),
+                ("default", Value::Number(0.0)),
+                ("text-value", Value::String("-42100.00".to_string())),
+                ("default-text", Value::String("0.00".to_string())),
+                ("min", Value::Number(-50000.0)),
+                ("max", Value::Number(50000.0)),
+            ]),
+            map_value([
+                ("target", Value::String("instrument".to_string())),
+                ("domain", Value::String("inst".to_string())),
+                ("step-idx", Value::Number(20.0)),
+                ("param-idx", Value::Number(13.0)),
+                ("group", Value::String("inst".to_string())),
+                ("name", Value::String("mod bpm src".to_string())),
+                ("value", Value::Number(1.0)),
+                ("default", Value::Number(0.0)),
+                ("text-value", Value::String("Mod".to_string())),
+                ("default-text", Value::String("off".to_string())),
+                ("min", Value::Number(0.0)),
+                ("max", Value::Number(2.0)),
+                (
+                    "options",
+                    test_list(vec![
+                        Value::String("off".to_string()),
+                        Value::String("Mod".to_string()),
+                        Value::String("Env".to_string()),
+                    ]),
+                ),
+            ]),
+            map_value([
+                ("target", Value::String("step-param".to_string())),
+                ("domain", Value::String("seq".to_string())),
+                ("step-idx", Value::Number(20.0)),
+                ("param-idx", Value::Number(1.0)),
+                ("group", Value::String("per step".to_string())),
+                ("name", Value::String("dur".to_string())),
+                ("value", Value::Number(6.0)),
+                ("default", Value::Number(1.0)),
+                ("text-value", Value::String("6.00".to_string())),
+                ("default-text", Value::String("1.00".to_string())),
+                ("min", Value::Number(0.0)),
+                ("max", Value::Number(16.0)),
+            ]),
+        ]);
+        let variants = test_list(vec![
+            map_value([
+                ("kind", Value::String("def".to_string())),
+                ("label", Value::String("def".to_string())),
+                ("count", Value::Number(0.0)),
+                ("current", Value::Bool(false)),
+                ("color-r", Value::Number(0.545_098_07)),
+                ("color-g", Value::Number(0.545_098_07)),
+                ("color-b", Value::Number(0.588_235_3)),
+            ]),
+            map_value([
+                ("kind", Value::String("variant".to_string())),
+                ("label", Value::String("A".to_string())),
+                ("count", Value::Number(7.0)),
+                ("current", Value::Bool(false)),
+                ("color-r", Value::Number(0.270_588_25)),
+                ("color-g", Value::Number(0.784_313_74)),
+                ("color-b", Value::Number(0.862_745_1)),
+            ]),
+            map_value([
+                ("kind", Value::String("variant".to_string())),
+                ("label", Value::String("B".to_string())),
+                ("count", Value::Number(7.0)),
+                ("current", Value::Bool(true)),
+                ("color-r", Value::Number(0.909_803_9)),
+                ("color-g", Value::Number(0.643_137_3)),
+                ("color-b", Value::Number(0.309_803_93)),
+            ]),
+            map_value([
+                ("kind", Value::String("variant".to_string())),
+                ("label", Value::String("D".to_string())),
+                ("count", Value::Number(3.0)),
+                ("current", Value::Bool(false)),
+                ("color-r", Value::Number(0.435_294_12)),
+                ("color-g", Value::Number(0.807_843_15)),
+                ("color-b", Value::Number(0.541_176_5)),
+            ]),
+        ]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-plocks", plocks);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-plock-variants", variants);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .expect("stub sequencer param name helper");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect-buffer "*plock-panel-table-test*" (fx-track-plocks-panel))"#)
+            .expect("create p-lock table test buffer");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*plock-panel-table-test*")
+            .expect("p-lock table test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(24, 60);
+        editor.refresh_visible_layouts_for_buffer_named("*plock-panel-table-test*");
+        let layout = editor.widget_layout().expect("track p-lock table layout");
+        let panel = find_layout_node_by_debug_name(&layout, "track-plocks-panel")
+            .expect("p-lock panel should render");
+        let table = find_layout_node_by_stable_key(&layout, "track-plock-table")
+            .expect("p-lock table should render");
+        let variant_strip = find_layout_node_by_stable_key(&layout, "track-plock-variant-strip")
+            .expect("variant strip should render");
+        let current_chip = find_layout_node_by_stable_key(&layout, "track-plock-chip-variant-B")
+            .expect("current variant chip should render");
+
+        assert_finite_nonzero_rect(table, "p-lock table");
+        assert_finite_nonzero_rect(variant_strip, "p-lock variant strip");
+        assert_finite_nonzero_rect(current_chip, "current p-lock variant chip");
+        assert_layout_inside(table, panel, "p-lock table");
+        assert_layout_inside(variant_strip, panel, "p-lock variant strip");
+        assert_layout_inside(current_chip, panel, "current p-lock variant chip");
+
+        for idx in 0..3 {
+            let param =
+                find_layout_node_by_stable_key(&layout, &format!("track-plock-row-{idx}-param"))
+                    .unwrap_or_else(|| panic!("row {idx} param cell should render"));
+            let lock =
+                find_layout_node_by_stable_key(&layout, &format!("track-plock-row-{idx}-lock"))
+                    .unwrap_or_else(|| panic!("row {idx} lock cell should render"));
+            let default =
+                find_layout_node_by_stable_key(&layout, &format!("track-plock-row-{idx}-def"))
+                    .unwrap_or_else(|| panic!("row {idx} default cell should render"));
+            assert_finite_nonzero_rect(param, &format!("row {idx} param cell"));
+            assert_finite_nonzero_rect(lock, &format!("row {idx} lock cell"));
+            assert_finite_nonzero_rect(default, &format!("row {idx} default cell"));
+            assert!(
+                param.rect.col + param.rect.width <= lock.rect.col + 0.01,
+                "row {idx} param cell should not overlap lock cell: param={:?}, lock={:?}",
+                param.rect,
+                lock.rect
+            );
+            assert!(
+                lock.rect.col + lock.rect.width <= default.rect.col + 0.01,
+                "row {idx} lock cell should not overlap default cell: lock={:?}, default={:?}",
+                lock.rect,
+                default.rect
+            );
+            assert_layout_inside(param, panel, &format!("row {idx} param cell"));
+            assert_layout_inside(lock, panel, &format!("row {idx} lock cell"));
+            assert_layout_inside(default, panel, &format!("row {idx} default cell"));
+        }
+
+        let long_value = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock").unwrap();
+        assert!(
+            long_value.rect.width >= 6.2,
+            "long signed values need enough lock-column width to avoid drawing into DEF; got {:?}",
+            long_value.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_step_plock_panel_backspace_deletes_selected_plock_row() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plocks",
+            test_list(vec![map_value([
+                ("target", Value::String("step-param".to_string())),
+                ("domain", Value::String("seq".to_string())),
+                ("step-idx", Value::Number(20.0)),
+                ("param-idx", Value::Number(3.0)),
+                ("group", Value::String("per step".to_string())),
+                ("name", Value::String("trn".to_string())),
+                ("value", Value::Number(-5.0)),
+                ("default", Value::Number(0.0)),
+                ("text-value", Value::String("-5.00".to_string())),
+                ("default-text", Value::String("0.00".to_string())),
+                ("min", Value::Number(-48.0)),
+                ("max", Value::Number(48.0)),
+            ])]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(set! fx-selected-plock-row 0)")
+            .expect("select plock row");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.drain_host_commands();
+
+        let step_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*step*")
+            .expect("step buffer should be loaded")
+            .id;
+        editor.set_active_buffer(step_id);
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        selected_steps.lock().unwrap().insert(20);
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &backspace,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "global selected-step delete shortcut must defer to the selected plock row"
+        );
+        editor.handle_key(backspace);
+
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
         match &commands[0] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
                 assert_eq!(name, "clear-track-plock-entry");
                 let Value::Map(payload) = payload else {
-                    panic!("expected clear-track-plock-entry map payload, got {payload:?}");
+                    panic!("clear-track-plock-entry payload should be a dict: {payload:?}");
                 };
                 assert_eq!(
-                    value_map_string(payload, "target").as_deref(),
-                    Some("neural-instrument")
+                    payload.get("target").map(|value| value.borrow().clone()),
+                    Some(Value::String("step-param".to_string()))
                 );
-                assert_eq!(value_map_number(payload, "network-id"), Some(11.0));
-                assert_eq!(value_map_number(payload, "neuron-idx"), Some(0.0));
-                assert_eq!(value_map_number(payload, "target-track"), Some(0.0));
-                assert_eq!(value_map_number(payload, "param-idx"), Some(3.0));
+                assert_eq!(
+                    payload.get("step-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(20.0))
+                );
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(3.0))
+                );
             }
             other => panic!("expected clear-track-plock-entry host command, got {other:?}"),
         }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("fx-selected-plock-row")
+                .unwrap(),
+            Some(Value::Number(-1.0))
+        );
     }
 
     #[test]
@@ -20351,6 +21667,772 @@ mod tests {
             count_stable_key_prefix(expanded_layout, "seqv-expanded-step-slider-"),
             PAGE_SIZE,
             "plain Tab should still expand the current track row"
+        );
+    }
+
+    #[test]
+    fn metal_seq_plain_tab_handler_updates_layout_without_extra_reactive_cycle() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 10, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 44);
+        let initial_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let initial_layout = initial_frame
+            .widget_layout
+            .as_ref()
+            .expect("initial sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(initial_layout, "seqv-expanded-step-slider-"),
+            0,
+            "fixture should start with compact sequencer rows"
+        );
+
+        let state = Arc::new(SequencerState::new(10, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should be handled by the sequencer shortcut path"
+        );
+        let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let expanded_layout = expanded_frame
+            .widget_layout
+            .as_ref()
+            .expect("expanded sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(expanded_layout, "seqv-expanded-step-slider-"),
+            PAGE_SIZE,
+            "plain Tab handler should make the next rendered frame expanded without relying on inspect or another reactive pass"
+        );
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "second plain Tab should collapse the current sequencer row"
+        );
+        let collapsed_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let collapsed_layout = collapsed_frame
+            .widget_layout
+            .as_ref()
+            .expect("collapsed sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
+            0,
+            "second plain Tab handler should make the next rendered frame compact without relying on inspect or another reactive pass"
+        );
+    }
+
+    #[test]
+    fn metal_seq_plain_tab_non_first_track_partial_layout_matches_full_layout_after_collapse() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 10, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 44);
+        let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+
+        let state = Arc::new(SequencerState::new(10, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(2));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should expand the third sequencer row"
+        );
+        let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let expanded_layout = expanded_frame
+            .widget_layout
+            .as_ref()
+            .expect("expanded sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-slider-2-0")
+                .is_some(),
+            "third row should be expanded"
+        );
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should collapse the third sequencer row"
+        );
+        let collapsed_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let collapsed_layout = collapsed_frame
+            .widget_layout
+            .as_ref()
+            .expect("collapsed sequencer layout should build");
+        let tree = editor
+            .runtime()
+            .current_widget_tree()
+            .expect("current sequencer widget tree should exist");
+        let full_layout = editor
+            .runtime_mut()
+            .layout_snapshot_for_tree_with_viewport_and_offset(&tree, Some((180.0, 44.0)), 0)
+            .expect("full sequencer layout should build");
+
+        fn layout_geometry_close(
+            left: &eseqlisp::layout::LayoutNode,
+            right: &eseqlisp::layout::LayoutNode,
+        ) -> bool {
+            const EPSILON: f32 = 0.001;
+            left.widget_type == right.widget_type
+                && left.stable_widget_id == right.stable_widget_id
+                && left.subtree_root_id == right.subtree_root_id
+                && left.parent_subtree_root_id == right.parent_subtree_root_id
+                && left.stable_key == right.stable_key
+                && (left.rect.row - right.rect.row).abs() <= EPSILON
+                && (left.rect.col - right.rect.col).abs() <= EPSILON
+                && (left.rect.width - right.rect.width).abs() <= EPSILON
+                && (left.rect.height - right.rect.height).abs() <= EPSILON
+                && left.children.len() == right.children.len()
+                && left
+                    .children
+                    .iter()
+                    .zip(right.children.iter())
+                    .all(|(left_child, right_child)| layout_geometry_close(left_child, right_child))
+        }
+
+        if !layout_geometry_close(collapsed_layout, full_layout.as_ref()) {
+            fn first_layout_diff(
+                left: &eseqlisp::layout::LayoutNode,
+                right: &eseqlisp::layout::LayoutNode,
+                path: &str,
+            ) -> Option<String> {
+                if left.widget_type != right.widget_type {
+                    return Some(format!(
+                        "{path}: widget_type {} != {}",
+                        left.widget_type, right.widget_type
+                    ));
+                }
+                if left.stable_widget_id != right.stable_widget_id {
+                    return Some(format!(
+                        "{path}: stable_widget_id {:?} != {:?}",
+                        left.stable_widget_id, right.stable_widget_id
+                    ));
+                }
+                if left.subtree_root_id != right.subtree_root_id {
+                    return Some(format!(
+                        "{path}: subtree_root_id {:?} != {:?}",
+                        left.subtree_root_id, right.subtree_root_id
+                    ));
+                }
+                if left.parent_subtree_root_id != right.parent_subtree_root_id {
+                    return Some(format!(
+                        "{path}: parent_subtree_root_id {:?} != {:?}",
+                        left.parent_subtree_root_id, right.parent_subtree_root_id
+                    ));
+                }
+                if left.stable_key != right.stable_key {
+                    return Some(format!(
+                        "{path}: stable_key {:?} != {:?}",
+                        left.stable_key, right.stable_key
+                    ));
+                }
+                const EPSILON: f32 = 0.001;
+                if (left.rect.row - right.rect.row).abs() > EPSILON
+                    || (left.rect.col - right.rect.col).abs() > EPSILON
+                    || (left.rect.width - right.rect.width).abs() > EPSILON
+                    || (left.rect.height - right.rect.height).abs() > EPSILON
+                {
+                    return Some(format!("{path}: rect {:?} != {:?}", left.rect, right.rect));
+                }
+                if left.children.len() != right.children.len() {
+                    return Some(format!(
+                        "{path}: children len {} != {}",
+                        left.children.len(),
+                        right.children.len()
+                    ));
+                }
+                for (idx, (left_child, right_child)) in
+                    left.children.iter().zip(right.children.iter()).enumerate()
+                {
+                    if let Some(diff) =
+                        first_layout_diff(left_child, right_child, &format!("{path}/{idx}"))
+                    {
+                        return Some(diff);
+                    }
+                }
+                None
+            }
+            let row_summary = |layout: &eseqlisp::layout::LayoutNode| {
+                (0..5)
+                    .map(|track| {
+                        let key = format!("sequencer-track-{track}");
+                        let row = find_layout_node_by_stable_key(layout, &key)
+                            .unwrap_or_else(|| panic!("missing {key}"));
+                        format!("{key}:row={:.2},h={:.2}", row.rect.row, row.rect.height)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            panic!(
+                "targeted collapse relayout should match a fresh full layout for the same widget tree\nfirst diff: {}\npartial: {}\nfull: {}",
+                first_layout_diff(collapsed_layout, full_layout.as_ref(), "root")
+                    .unwrap_or_else(|| "unknown".to_string()),
+                row_summary(collapsed_layout),
+                row_summary(full_layout.as_ref())
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_plain_tab_collapse_marks_removed_expanded_widgets_dirty() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 10, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 44);
+        let initial_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let initial_layout = initial_frame
+            .widget_layout
+            .as_ref()
+            .expect("initial sequencer layout should build");
+        let initial_layout_revision = initial_frame.widget_layout_cache_key;
+        let initial_row = find_layout_node_by_stable_key(initial_layout, "sequencer-track-0")
+            .expect("initial row should render");
+        let initial_row_height = initial_row.rect.height;
+        assert_eq!(
+            count_stable_key_prefix(initial_layout, "seqv-expanded-step-slider-"),
+            0,
+            "fixture should start with compact sequencer rows"
+        );
+
+        let state = Arc::new(SequencerState::new(10, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should expand the current sequencer row"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let expanded_layout = expanded_frame
+            .widget_layout
+            .as_ref()
+            .expect("expanded sequencer layout should build");
+        assert_ne!(
+            expanded_frame.widget_layout_cache_key, initial_layout_revision,
+            "expanding a row changes geometry and must bump the layout cache key"
+        );
+        let expanded_row = find_layout_node_by_stable_key(expanded_layout, "sequencer-track-0")
+            .expect("expanded row should render");
+        let expanded_row_id = expanded_row.widget_id;
+        let expanded_row_height = expanded_row.rect.height;
+        let expanded_column =
+            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-column-0-0")
+                .expect("expanded row should render a step column");
+        let expanded_row_bottom = expanded_row.rect.row + expanded_row.rect.height;
+        let expanded_column_bottom = expanded_column.rect.row + expanded_column.rect.height;
+        let removed_slider_id =
+            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-slider-0-0")
+                .expect("expanded row should render a step slider")
+                .widget_id;
+        let removed_toggle_id =
+            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-toggle-0-0")
+                .expect("expanded row should render a step toggle")
+                .widget_id;
+        assert!(
+            expanded_row_bottom - expanded_column_bottom < 0.75,
+            "expanded row should not leave excessive bottom padding below step columns, row={:?} column={:?}",
+            expanded_row.rect,
+            expanded_column.rect
+        );
+        assert!(
+            expanded_row.rect.height > initial_row_height * 2.0,
+            "expanded row should be substantially taller than compact row"
+        );
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should collapse the current sequencer row"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let collapsed_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        let collapsed_layout = collapsed_frame
+            .widget_layout
+            .as_ref()
+            .expect("collapsed sequencer layout should build");
+        assert_ne!(
+            collapsed_frame.widget_layout_cache_key, expanded_frame.widget_layout_cache_key,
+            "collapsing a row changes geometry and must bump the layout cache key"
+        );
+        let collapsed_row = find_layout_node_by_stable_key(collapsed_layout, "sequencer-track-0")
+            .expect("collapsed row should render");
+
+        assert_eq!(
+            count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
+            0,
+            "collapse should remove expanded step sliders from the layout"
+        );
+        assert!(
+            collapsed_row.rect.height < expanded_row_height * 0.25,
+            "collapsed row should return to compact height, expanded={} collapsed={}",
+            expanded_row_height,
+            collapsed_row.rect.height
+        );
+        assert!(
+            (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
+            "collapsed row should return to compact height, initial={} collapsed={}",
+            initial_row_height,
+            collapsed_row.rect.height
+        );
+        assert!(
+            collapsed_frame.dirty_widget_ids.contains(&expanded_row_id)
+                && collapsed_frame
+                    .dirty_widget_ids
+                    .contains(&removed_slider_id)
+                && collapsed_frame
+                    .dirty_widget_ids
+                    .contains(&removed_toggle_id),
+            "collapse must dirty the resized row and removed expanded-row widgets so retained rendering drops stale runs; dirty ids: {:?}",
+            collapsed_frame.dirty_widget_ids
+        );
+    }
+
+    #[test]
+    fn metal_seq_tiled_plain_tab_collapse_marks_resized_row_dirty() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let sequencer_tile =
+            |frame: &eseqlisp::backend::TiledRenderFrame| -> eseqlisp::backend::RenderFrame {
+                frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("sequencer tile frame should render")
+                    .frame
+                    .clone()
+            };
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 10, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*sequencer*"),
+            "sequencer tile should be visible and activatable"
+        );
+        let initial_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 44);
+        let initial_frame = sequencer_tile(&initial_tiled);
+        let initial_layout = initial_frame
+            .widget_layout
+            .as_ref()
+            .expect("initial tiled sequencer layout should build");
+        let initial_row = find_layout_node_by_stable_key(initial_layout, "sequencer-track-0")
+            .expect("initial tiled row should render");
+        let initial_row_height = initial_row.rect.height;
+
+        let state = Arc::new(SequencerState::new(10, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should expand the current sequencer row"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let expanded_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 44);
+        let expanded_frame = sequencer_tile(&expanded_tiled);
+        let expanded_layout = expanded_frame
+            .widget_layout
+            .as_ref()
+            .expect("expanded tiled sequencer layout should build");
+        let expanded_row = find_layout_node_by_stable_key(expanded_layout, "sequencer-track-0")
+            .expect("expanded tiled row should render");
+        let expanded_row_id = expanded_row.widget_id;
+        assert!(
+            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-slider-0-0")
+                .is_some(),
+            "expanded tiled row should render a step slider"
+        );
+
+        assert!(
+            expanded_row.rect.height > initial_row_height * 2.0,
+            "expanded tiled row should be substantially taller than compact row"
+        );
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should collapse the current sequencer row"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let collapsed_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 44);
+        let collapsed_frame = sequencer_tile(&collapsed_tiled);
+        let collapsed_layout = collapsed_frame
+            .widget_layout
+            .as_ref()
+            .expect("collapsed tiled sequencer layout should build");
+        let collapsed_row = find_layout_node_by_stable_key(collapsed_layout, "sequencer-track-0")
+            .expect("collapsed tiled row should render");
+
+        assert!(
+            (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
+            "collapsed tiled row should return to initial compact height, initial={} collapsed={}",
+            initial_row_height,
+            collapsed_row.rect.height
+        );
+        assert!(
+            collapsed_frame.dirty_widget_ids.contains(&expanded_row_id),
+            "tiled collapse must pass the resized row ID to Metal; row_id={expanded_row_id} dirty ids: {:?}",
+            collapsed_frame.dirty_widget_ids
+        );
+    }
+
+    #[test]
+    fn metal_seq_inactive_tiled_track_expand_collapse_relayouts_row() {
+        fn sequencer_tile(
+            frame: &eseqlisp::backend::TiledRenderFrame,
+        ) -> &eseqlisp::backend::TileFrame {
+            frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("sequencer tile frame should render")
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 1, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let initial_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        let initial_tile = sequencer_tile(&initial_tiled);
+        let initial_layout = initial_tile
+            .frame
+            .widget_layout
+            .as_ref()
+            .expect("initial inactive-path sequencer layout should build");
+        let initial_row = find_layout_node_by_stable_key(initial_layout, "sequencer-track-0")
+            .expect("initial sequencer row should render");
+        let initial_row_height = initial_row.rect.height;
+
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*fx*")
+                || editor.switch_active_tile_to_buffer_named("*track*"),
+            "test fixture should expose a non-sequencer tile to make *sequencer* inactive"
+        );
+        let active_name = editor.active_buffer().name.clone();
+        assert_ne!(
+            active_name, "*sequencer*",
+            "test must exercise the inactive sequencer tile path"
+        );
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-set-track-expanded 0 true)")
+            .expect("expand track through inactive sequencer effect");
+        editor.refresh_runtime_side_effects();
+        let expanded_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        let expanded_tile = sequencer_tile(&expanded_tiled);
+        assert!(
+            !expanded_tile.is_active,
+            "sequencer tile should remain inactive after direct track expansion"
+        );
+        let expanded_layout = expanded_tile
+            .frame
+            .widget_layout
+            .as_ref()
+            .expect("expanded inactive sequencer layout should build");
+        let expanded_row = find_layout_node_by_stable_key(expanded_layout, "sequencer-track-0")
+            .expect("expanded inactive row should render");
+        let expanded_row_id = expanded_row.widget_id;
+        assert!(
+            expanded_row.rect.height > initial_row_height * 1.5,
+            "inactive sequencer row should expand, initial={} expanded={}",
+            initial_row_height,
+            expanded_row.rect.height
+        );
+        assert!(
+            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-slider-0-0")
+                .is_some(),
+            "inactive expanded row should render expanded step controls"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-set-track-expanded 0 false)")
+            .expect("collapse track through inactive sequencer effect");
+        editor.refresh_runtime_side_effects();
+        let collapsed_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        let collapsed_tile = sequencer_tile(&collapsed_tiled);
+        let collapsed_layout = collapsed_tile
+            .frame
+            .widget_layout
+            .as_ref()
+            .expect("collapsed inactive sequencer layout should build");
+        let collapsed_row = find_layout_node_by_stable_key(collapsed_layout, "sequencer-track-0")
+            .expect("collapsed inactive row should render");
+
+        assert!(
+            (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
+            "inactive collapse should restore compact row height, initial={} collapsed={}",
+            initial_row_height,
+            collapsed_row.rect.height
+        );
+        assert_eq!(
+            count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
+            0,
+            "inactive collapse should remove expanded step sliders"
+        );
+        assert!(
+            collapsed_tile
+                .frame
+                .dirty_widget_ids
+                .contains(&expanded_row_id),
+            "inactive collapse must dirty the resized row ID so retained rendering drops the old row primitive; dirty ids: {:?}",
+            collapsed_tile.frame.dirty_widget_ids
+        );
+    }
+
+    #[test]
+    fn metal_seq_tiled_plain_tab_single_track_reveal_keeps_row_height_tight() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let sequencer_tile =
+            |frame: &eseqlisp::backend::TiledRenderFrame| -> eseqlisp::backend::RenderFrame {
+                frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("sequencer tile frame should render")
+                    .frame
+                    .clone()
+            };
+
+        let row_bottom_gap = |layout: &eseqlisp::layout::LayoutNode, track: usize| -> f32 {
+            let row_key = format!("sequencer-track-{track}");
+            let column_key = format!("seqv-expanded-step-column-{track}-0");
+            let row = find_layout_node_by_stable_key(layout, &row_key)
+                .unwrap_or_else(|| panic!("{row_key} should render"));
+            let column = find_layout_node_by_stable_key(layout, &column_key)
+                .unwrap_or_else(|| panic!("{column_key} should render"));
+            row.rect.row + row.rect.height - (column.rect.row + column.rect.height)
+        };
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 1, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*sequencer*"),
+            "sequencer tile should be visible and activatable"
+        );
+
+        let initial_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        let initial_frame = sequencer_tile(&initial_tiled);
+        let initial_layout = initial_frame
+            .widget_layout
+            .as_ref()
+            .expect("initial tiled sequencer layout should build");
+        let initial_row = find_layout_node_by_stable_key(initial_layout, "sequencer-track-0")
+            .expect("initial row should render");
+        let initial_row_height = initial_row.rect.height;
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain Tab should expand the only sequencer row"
+        );
+        editor.ensure_widget_stable_key_visible_in_buffer_named(
+            "*sequencer*",
+            "sequencer-track-0",
+            1.0,
+        );
+        let expanded_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        let expanded_frame = sequencer_tile(&expanded_tiled);
+        let expanded_layout = expanded_frame
+            .widget_layout
+            .as_ref()
+            .expect("expanded tiled sequencer layout should build");
+        let expanded_row = find_layout_node_by_stable_key(expanded_layout, "sequencer-track-0")
+            .expect("expanded row should render");
+        let expanded_row_height = expanded_row.rect.height;
+        assert!(
+            row_bottom_gap(expanded_layout, 0) < 0.75,
+            "expanded single-track row should not absorb viewport slack below the step columns, row={:?}",
+            expanded_row.rect
+        );
+
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "second plain Tab should collapse the only sequencer row"
+        );
+        editor.ensure_widget_stable_key_visible_in_buffer_named(
+            "*sequencer*",
+            "sequencer-track-0",
+            1.0,
+        );
+        let collapsed_tiled =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        let collapsed_frame = sequencer_tile(&collapsed_tiled);
+        let collapsed_layout = collapsed_frame
+            .widget_layout
+            .as_ref()
+            .expect("collapsed tiled sequencer layout should build");
+        let collapsed_row = find_layout_node_by_stable_key(collapsed_layout, "sequencer-track-0")
+            .expect("collapsed row should render");
+
+        assert!(
+            expanded_row_height > initial_row_height * 1.5,
+            "single-track expanded row should be visibly taller than compact row, initial={} expanded={} initial_row={:?} expanded_row={:?}",
+            initial_row_height,
+            expanded_row_height,
+            initial_row.rect,
+            expanded_row.rect
+        );
+        assert!(
+            (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
+            "single-track collapse should restore the compact row height after the real Tab reveal path, initial={} collapsed={}",
+            initial_row_height,
+            collapsed_row.rect.height
+        );
+        assert_eq!(
+            count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
+            0,
+            "single-track collapse should remove expanded sliders from the rendered frame"
         );
     }
 
@@ -23625,6 +25707,48 @@ mod tests {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let mut sr_plock = HashMap::new();
+        sr_plock.insert(
+            "target".to_string(),
+            Rc::new(RefCell::new(Value::String("instrument".to_string()))),
+        );
+        sr_plock.insert(
+            "param-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(8.0))),
+        );
+        sr_plock.insert(
+            "default".to_string(),
+            Rc::new(RefCell::new(Value::Number(44_100.0))),
+        );
+        sr_plock.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(22_050.0))),
+        );
+        let mut current_variant = HashMap::new();
+        current_variant.insert(
+            "kind".to_string(),
+            Rc::new(RefCell::new(Value::String("variant".to_string()))),
+        );
+        current_variant.insert(
+            "label".to_string(),
+            Rc::new(RefCell::new(Value::String("A".to_string()))),
+        );
+        current_variant.insert(
+            "current".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        current_variant.insert(
+            "color-r".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.2))),
+        );
+        current_variant.insert(
+            "color-g".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.7))),
+        );
+        current_variant.insert(
+            "color-b".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.9))),
+        );
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -23643,6 +25767,11 @@ mod tests {
                 ),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("bus-effects", test_list(vec![])),
+                ("track-plocks", test_list(vec![Value::Map(sr_plock)])),
+                (
+                    "track-plock-variants",
+                    test_list(vec![Value::Map(current_variant)]),
+                ),
             ],
             true,
         );
@@ -23682,6 +25811,11 @@ mod tests {
         let sr_knob = find_layout_node_by_stable_key(&layout, "sampler-param-8-base")
             .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
             .unwrap_or_else(|| panic!("sampler sr knob; layout={layout_summaries:#?}"));
+        assert_eq!(layout_prop_number(sr_knob, "plock-active"), Some(1.0));
+        assert_eq!(layout_prop_number(sr_knob, "plock-default"), Some(44_100.0));
+        assert_eq!(layout_prop_number(sr_knob, "plock-color-r"), Some(0.2));
+        assert_eq!(layout_prop_number(sr_knob, "plock-color-g"), Some(0.7));
+        assert_eq!(layout_prop_number(sr_knob, "plock-color-b"), Some(0.9));
         let callback = sr_knob
             .props
             .get("on-change")
@@ -27830,6 +29964,183 @@ mod tests {
         );
 
         for suffix in ["lfo_rate_hz", "mm2_amt", "volume_db", "lp_freq", "drift"] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_membrane_tabla_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let tabla_ui = std::fs::read_to_string("instruments/drums/membrane-tabla/ui.lisp")
+            .expect("read membrane-tabla ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/drums/membrane-tabla/ui.lisp".to_string(),
+            tabla_ui,
+        )));
+        let mut tabla_inst = test_instrument_map();
+        tabla_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("release", 0, 700.0, 20.0, 4000.0)),
+                Value::Map(test_param_map("tune", 1, 5.0, -48.0, 24.0)),
+                Value::Map(test_param_map("bend", 2, 0.2, 0.0, 4.0)),
+                Value::Map(test_param_map("tone_damp", 3, 0.002, 0.0, 0.02)),
+                Value::Map(test_param_map("syahi", 4, 1.0, 0.0, 1.5)),
+                Value::Map(test_param_map("finger_hard", 5, 0.004, 0.0002, 0.05)),
+                Value::Map(test_param_map("finger_speed", 6, 0.02, 0.002, 0.2)),
+                Value::Map(test_param_map("scrape", 7, 0.05, 0.0, 1.0)),
+                Value::Map(test_param_map("stroke", 8, 0.5, 0.0, 1.0)),
+                Value::Map(test_param_map("press", 9, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("gliss_range", 10, 0.4, 0.0, 0.8)),
+                Value::Map(test_param_map("damp", 11, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("mic_blend", 12, 0.35, 0.0, 1.0)),
+                Value::Map(test_param_map("body1_freq", 13, 250.0, 40.0, 2000.0)),
+                Value::Map(test_param_map("body1_gain", 14, 1.0, 0.0, 8.0)),
+                Value::Map(test_param_map("body2_freq", 15, 520.0, 40.0, 4000.0)),
+                Value::Map(test_param_map("body2_gain", 16, 0.6, 0.0, 8.0)),
+                Value::Map(test_param_map("body3_freq", 17, 1400.0, 100.0, 8000.0)),
+                Value::Map(test_param_map("body3_gain", 18, 0.3, 0.0, 8.0)),
+                Value::Map(test_param_map("level", 19, 0.3, 0.0, 2.0)),
+            ]))),
+        );
+        let mut tensor = HashMap::new();
+        tensor.insert("idx".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
+        tensor.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("strike_mask".to_string()))),
+        );
+        tensor.insert(
+            "rows".to_string(),
+            Rc::new(RefCell::new(Value::Number(8.0))),
+        );
+        tensor.insert(
+            "cols".to_string(),
+            Rc::new(RefCell::new(Value::Number(8.0))),
+        );
+        tensor.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
+        tensor.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(2.0))));
+        tensor.insert(
+            "value-field".to_string(),
+            Rc::new(RefCell::new(Value::String("tabla-strike-mask".to_string()))),
+        );
+        tensor.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(test_list(
+                (0..64).map(|_| Value::Number(0.0)).collect(),
+            ))),
+        );
+        tabla_inst.insert(
+            "tensors".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Map(tensor)]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(tabla_inst)])),
+                (
+                    "tabla-strike-mask",
+                    test_list((0..64).map(|_| Value::Number(0.0)).collect()),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load membrane-tabla custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("membrane-tabla fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("membrane-tabla layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 40.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        for suffix in [
+            "strike_mask",
+            "stroke",
+            "press",
+            "syahi",
+            "gliss_range",
+            "body1_freq",
+            "mic_blend",
+        ] {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
             assert!(

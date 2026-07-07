@@ -2762,6 +2762,30 @@ impl Runtime {
         snapshot
     }
 
+    pub(crate) fn relayout_subtree_for_tree_with_viewport(
+        &self,
+        existing: &LayoutNode,
+        tree: &Value,
+        child_path: &[usize],
+        viewport: Option<(f32, f32)>,
+        dirty_widget_ids: &mut Vec<u64>,
+    ) -> Result<LayoutNode, String> {
+        let (cols, rows) = viewport.unwrap_or((self.layout_cols, self.layout_rows));
+        let engine = if let Some(measurer) = self.text_measurer.as_deref() {
+            LayoutEngine::with_text_measurer_exact(
+                cols,
+                rows,
+                self.layout_aspect,
+                measurer,
+                self.layout_cell_w,
+                self.layout_cell_h,
+            )
+        } else {
+            LayoutEngine::new_exact(cols, rows, self.layout_aspect)
+        };
+        relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
+    }
+
     /// Clear the current widget tree and layout without destroying reactive effects.
     /// Used when switching to a buffer/tile that has no widget tree.
     pub fn clear_current_widget_tree(&mut self) {
@@ -2941,7 +2965,10 @@ impl Runtime {
         true
     }
 
-    fn reuse_current_layout_for_subtrees(&mut self, subtree_roots: &[u64]) -> Result<(), String> {
+    fn relayout_current_layout_for_subtrees(
+        &mut self,
+        subtree_roots: &[u64],
+    ) -> Result<(), String> {
         let relayout_started = Instant::now();
         if subtree_roots.is_empty() {
             return Ok(());
@@ -2958,7 +2985,10 @@ impl Runtime {
         roots.sort_unstable();
         roots.dedup();
         let mut dirty_widget_ids = Vec::new();
+        let mut geometry_changed = false;
+        let mut used_partial_relayout = false;
         for subtree_root_id in roots {
+            let previous_layout = layout.clone();
             let paths = subtree_root_paths(layout.as_ref());
             let Some(child_path) = paths.get(&subtree_root_id) else {
                 return Err(format!("missing-subtree-path:{subtree_root_id}"));
@@ -2973,28 +3003,13 @@ impl Runtime {
             ) {
                 Ok(updated) => updated,
                 Err(reuse_reason) => {
-                    let engine = if let Some(measurer) = self.text_measurer.as_deref() {
-                        LayoutEngine::with_text_measurer_exact(
-                            self.layout_cols,
-                            self.layout_rows,
-                            self.layout_aspect,
-                            measurer,
-                            self.layout_cell_w,
-                            self.layout_cell_h,
-                        )
-                    } else {
-                        LayoutEngine::new_exact(
-                            self.layout_cols,
-                            self.layout_rows,
-                            self.layout_aspect,
-                        )
-                    };
-                    relayout_subtree_path_result(
+                    used_partial_relayout = true;
+                    self.relayout_subtree_for_tree_with_viewport(
                         layout.as_ref(),
                         tree,
                         child_path,
+                        None,
                         &mut dirty_widget_ids,
-                        &engine,
                     )
                     .map_err(|relayout_reason| {
                         format!(
@@ -3007,6 +3022,9 @@ impl Runtime {
                 .ok_or_else(|| format!("missing-updated-layout-path:{subtree_root_id}"))?;
             self.reactive_registry
                 .replace_widget_bindings_for_layout_subtree(child_layout, updated_child);
+            if !same_layout_geometry(previous_layout.as_ref(), &updated) {
+                geometry_changed = true;
+            }
             layout = Arc::new(updated);
         }
         let mut combined_dirty_widget_ids = std::mem::take(&mut self.dirty_widget_ids);
@@ -3015,11 +3033,19 @@ impl Runtime {
         combined_dirty_widget_ids.dedup();
         self.current_layout = Some(layout);
         self.dirty_widget_ids = combined_dirty_widget_ids;
-        if self.force_layout_revision_bump {
+        if geometry_changed || self.force_layout_revision_bump {
             self.layout_revision = self.layout_revision.wrapping_add(1);
         }
         self.force_layout_revision_bump = false;
-        self.update_last_trace_relayout("subtree-reuse", None, relayout_started.elapsed());
+        self.update_last_trace_relayout(
+            if used_partial_relayout {
+                "subtree-relayout"
+            } else {
+                "subtree-reuse"
+            },
+            None,
+            relayout_started.elapsed(),
+        );
         self.perf_stats
             .note_relayout(true, true, relayout_started.elapsed(), None);
         Ok(())
@@ -3269,7 +3295,7 @@ impl Runtime {
             self.layout_revision = self.layout_revision.wrapping_add(1);
         } else if !active_changed_subtree_roots.is_empty()
             && let Err(reason) =
-                self.reuse_current_layout_for_subtrees(&active_changed_subtree_roots)
+                self.relayout_current_layout_for_subtrees(&active_changed_subtree_roots)
         {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some(reason);
@@ -3329,6 +3355,7 @@ impl Runtime {
         if let Some(existing) = self.current_layout.as_ref()
             && let Some(updated) = reuse_layout_node(existing.as_ref(), tree, &mut dirty_widget_ids)
         {
+            let geometry_changed = !same_layout_geometry(existing.as_ref(), &updated);
             #[cfg(test)]
             self.rendered_layouts
                 .push(crate::layout::format_layout_tree_lines(&updated, 0));
@@ -3336,7 +3363,7 @@ impl Runtime {
             self.reactive_registry
                 .replace_widget_bindings_from_layout(self.current_layout.as_deref());
             self.dirty_widget_ids = dirty_widget_ids;
-            if self.force_layout_revision_bump {
+            if geometry_changed || self.force_layout_revision_bump {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
             self.force_layout_revision_bump = false;

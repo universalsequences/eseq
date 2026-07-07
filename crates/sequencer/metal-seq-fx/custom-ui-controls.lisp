@@ -21,7 +21,12 @@
             :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
             :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.5 :label-font-size 10
-            :text-color :dim :label-color :dim
+            :text-color (custom-ui-param-plock-text-color p) :label-color :dim
+            :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+            :plock-default (custom-ui-param-plock-default p)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
             :width 4.4 :height 2.4
             :value-align :center
             :on-change (custom-ui-param-change-callback p))))
@@ -64,7 +69,12 @@
             :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
             :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 8.5 :label-font-size 7.5
-            :text-color :dim :label-color :dim
+            :text-color (custom-ui-param-plock-text-color p) :label-color :dim
+            :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+            :plock-default (custom-ui-param-plock-default p)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
             :width 3.8 :height 1.8
             :label-height 0.5 :knob-size 1.25
             :on-change (custom-ui-param-change-callback p))))
@@ -79,7 +89,12 @@
           :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
           :step 1
           :font-size 8.5 :label-font-size 7.5
-          :text-color :dim :label-color :dim
+          :text-color (custom-ui-param-plock-text-color p) :label-color :dim
+          :plock-active (if (custom-ui-param-plock-active? p) 1 0)
+          :plock-default (custom-ui-param-plock-default p)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
           :width 3.8 :height 1.8
           :label-height 0.5 :knob-size 1.25
           :on-change (custom-ui-param-change-callback p)))

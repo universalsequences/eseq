@@ -676,6 +676,8 @@ impl WidgetDefinition for MatrixWidget {
                             0.0,
                         ],
                         uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
                         color_a: color.to_rgba(),
                         color_b: bg.to_rgba(),
                         color_c: cell_border.to_rgba(),

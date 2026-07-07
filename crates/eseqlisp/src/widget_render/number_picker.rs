@@ -5,8 +5,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    get_bool_prop, get_f32_prop, resolve_named_color, should_trigger_integer_haptic, styled_cell,
-    trigger_level_change_haptic,
+    get_bool_prop, get_f32_prop, plock_active, plock_color, resolve_named_color,
+    should_trigger_integer_haptic, styled_cell, trigger_level_change_haptic,
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
@@ -93,7 +93,16 @@ mod tests {
 
     #[test]
     fn value_is_bindable_but_not_size_affecting() {
-        assert_eq!(NUMBER_PICKER_WIDGET.bindable_props(), &["value"]);
+        assert_eq!(
+            NUMBER_PICKER_WIDGET.bindable_props(),
+            &[
+                "value",
+                "plock-active",
+                "plock-color-r",
+                "plock-color-g",
+                "plock-color-b",
+            ]
+        );
         assert!(
             !NUMBER_PICKER_WIDGET
                 .size_affecting_props()
@@ -397,7 +406,13 @@ impl WidgetDefinition for NumberPickerWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["value"]
+        &[
+            "value",
+            "plock-active",
+            "plock-color-r",
+            "plock-color-g",
+            "plock-color-b",
+        ]
     }
 
     fn measure(
@@ -647,8 +662,13 @@ impl WidgetDefinition for NumberPickerWidget {
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
-        let text_color =
-            resolve_named_color(&node.props, "text-color", theme::BUTTON_SECONDARY_FG());
+        let plocked = plock_active(&node.props);
+        let plock_color = plock_color(&node.props);
+        let text_color = if plocked {
+            plock_color
+        } else {
+            resolve_named_color(&node.props, "text-color", theme::BUTTON_SECONDARY_FG())
+        };
         let edit_color = resolve_named_color(
             &node.props,
             "edit-color",
@@ -677,7 +697,11 @@ impl WidgetDefinition for NumberPickerWidget {
             let ring_color = resolve_named_color(&node.props, "ring-color", theme::DROPDOWN_RING());
             let tri_color =
                 resolve_named_color(&node.props, "tri-color", theme::BUTTON_SECONDARY_FG());
-            let border_color = number_picker_border(&node.props);
+            let border_color = if plocked {
+                plock_color
+            } else {
+                number_picker_border(&node.props)
+            };
             let highlight_color = number_picker_highlight(&node.props);
             let shadow_color = number_picker_shadow(&node.props);
 
@@ -704,6 +728,8 @@ impl WidgetDefinition for NumberPickerWidget {
                         itime: viewport.time_seconds,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
                         color_a: ring_color.to_rgba(),
                         color_b: [0.0; 4],
                         color_c: [0.0; 4],
@@ -730,6 +756,8 @@ impl WidgetDefinition for NumberPickerWidget {
                         itime: viewport.time_seconds,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
                         color_a: bg_color.to_rgba(),
                         color_b: border_color.to_rgba(),
                         color_c: highlight_color.to_rgba(),
@@ -764,6 +792,8 @@ impl WidgetDefinition for NumberPickerWidget {
                         itime: viewport.time_seconds,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
                         color_a: tri_color.to_rgba(),
                         color_b: [0.0; 4],
                         color_c: [0.0; 4],
@@ -846,6 +876,19 @@ impl WidgetDefinition for NumberPickerWidget {
             prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: cursor_rect,
                 color: cursor_color,
+            }));
+        }
+
+        if plocked {
+            let underline_rect = Rect {
+                row: node.rect.row + node.rect.height - 0.08,
+                col: node.rect.col,
+                width: node.rect.width,
+                height: 0.06,
+            };
+            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                rect: underline_rect,
+                color: plock_color,
             }));
         }
 

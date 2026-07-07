@@ -215,6 +215,8 @@ impl WidgetDefinition for KnobWidget {
                 itime: 0.0,
                 uniform_a: [0.0; 4],
                 uniform_b: [0.0; 4],
+                uniform_c: [0.0; 4],
+                uniform_d: [0.0; 4],
                 color_a: theme::WIDGET_KNOB_FILLED().to_rgba(),
                 color_b: theme::WIDGET_KNOB_TRACK().to_rgba(),
                 color_c: [0.0; 4],

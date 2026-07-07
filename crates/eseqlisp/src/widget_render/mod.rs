@@ -391,6 +391,8 @@ pub struct WidgetInstance {
     pub itime: f32,
     pub uniform_a: [f32; 4],
     pub uniform_b: [f32; 4],
+    pub uniform_c: [f32; 4],
+    pub uniform_d: [f32; 4],
     pub color_a: [f32; 4],
     pub color_b: [f32; 4],
     pub color_c: [f32; 4],
@@ -1343,6 +1345,7 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
     let mut stats = RetainedMetalPrimitiveRunStats::default();
     let mut run_ordinals = HashMap::new();
     let mut rebuilt_indices = Vec::new();
+    let mut visited_indices = Vec::new();
     for run in runs.iter_mut() {
         run.reused_from_previous = true;
     }
@@ -1358,8 +1361,14 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
         dirty_widget_ids,
         &mut run_ordinals,
         &mut rebuilt_indices,
+        &mut visited_indices,
         &mut stats,
     );
+    visited_indices.sort_unstable();
+    visited_indices.dedup();
+    if visited_indices.len() < runs.len() {
+        stats.invalid_previous_runs += runs.len() - visited_indices.len();
+    }
     let overlay = drain_overlay_primitives();
     (overlay, stats)
 }
@@ -1453,6 +1462,7 @@ fn refresh_retained_primitive_run_in_place(
     run_indices: &HashMap<MetalPrimitiveRunKey, usize>,
     run_ordinals: &mut HashMap<u64, u16>,
     rebuilt_indices: &mut Vec<usize>,
+    visited_indices: &mut Vec<usize>,
     stats: &mut RetainedMetalPrimitiveRunStats,
     dirty_ancestor: bool,
     widget_id: u64,
@@ -1473,6 +1483,7 @@ fn refresh_retained_primitive_run_in_place(
         return;
     };
 
+    visited_indices.push(index);
     let run = &mut runs[index];
     if run.widget_type != widget_type || run.ancestor_widget_ids.as_slice() != ancestor_widget_ids {
         stats.invalid_previous_runs += 1;
@@ -1964,6 +1975,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     dirty_widget_ids: &[u64],
     run_ordinals: &mut HashMap<u64, u16>,
     rebuilt_indices: &mut Vec<usize>,
+    visited_indices: &mut Vec<usize>,
     stats: &mut RetainedMetalPrimitiveRunStats,
 ) {
     let node_is_dirty = dirty_widget_ids.contains(&node.widget_id);
@@ -1989,6 +2001,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             run_indices,
             run_ordinals,
             rebuilt_indices,
+            visited_indices,
             stats,
             subtree_dirty,
             node.widget_id,
@@ -2024,6 +2037,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                 dirty_widget_ids,
                 run_ordinals,
                 rebuilt_indices,
+                visited_indices,
                 stats,
             );
             for index in &rebuilt_indices[rebuilt_start..] {
@@ -2040,6 +2054,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             run_indices,
             run_ordinals,
             rebuilt_indices,
+            visited_indices,
             stats,
             subtree_dirty,
             node.widget_id,
@@ -2067,6 +2082,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             run_indices,
             run_ordinals,
             rebuilt_indices,
+            visited_indices,
             stats,
             subtree_dirty,
             node.widget_id,
@@ -2102,6 +2118,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                 dirty_widget_ids,
                 run_ordinals,
                 rebuilt_indices,
+                visited_indices,
                 stats,
             );
         }
@@ -2111,6 +2128,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             run_indices,
             run_ordinals,
             rebuilt_indices,
+            visited_indices,
             stats,
             subtree_dirty,
             node.widget_id,
@@ -2126,6 +2144,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
         run_indices,
         run_ordinals,
         rebuilt_indices,
+        visited_indices,
         stats,
         subtree_dirty,
         node.widget_id,
@@ -2159,6 +2178,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             dirty_widget_ids,
             run_ordinals,
             rebuilt_indices,
+            visited_indices,
             stats,
         );
     }
@@ -2311,6 +2331,19 @@ pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -
     match props.get(key) {
         Some(Value::Bool(b)) => *b,
         _ => default,
+    }
+}
+
+pub fn plock_active(props: &HashMap<String, Value>) -> bool {
+    get_f32_prop(props, "plock-active", 0.0) > 0.5
+}
+
+pub fn plock_color(props: &HashMap<String, Value>) -> Color {
+    Color {
+        r: get_f32_prop(props, "plock-color-r", 0.270_588_25),
+        g: get_f32_prop(props, "plock-color-g", 0.784_313_74),
+        b: get_f32_prop(props, "plock-color-b", 0.862_745_1),
+        a: 1.0,
     }
 }
 
@@ -2527,15 +2560,19 @@ mod tests {
                 instance,
                 is_background,
             } => format!(
-                "widget:{widget_type}:{is_background}:{}:{}:{:08x}:{:08x}:{}:{}:{}:{}:{:08x}:{:08x}",
+                "widget:{widget_type}:{is_background}:{}:{}:{:08x}:{:08x}:{}:{}:{}:{}:{}:{}:{}:{}:{:08x}:{:08x}",
                 f32s(instance.ndc_min),
                 f32s(instance.ndc_max),
                 instance.value_t.to_bits(),
                 instance.orientation.to_bits(),
                 f32s(instance.uniform_a),
                 f32s(instance.uniform_b),
+                f32s(instance.uniform_c),
+                f32s(instance.uniform_d),
                 f32s(instance.color_a),
                 f32s(instance.color_b),
+                f32s(instance.color_c),
+                f32s(instance.color_d),
                 instance.corner_radius.to_bits(),
                 instance.pixel_aspect.to_bits()
             ),
@@ -2970,6 +3007,72 @@ mod tests {
         assert_eq!(
             primitive_tokens(&flatten_metal_primitive_runs(&cached_runs)),
             primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_metal_in_place_refresh_reports_removed_previous_runs() {
+        let make_layout = |include_button: bool| {
+            let label = test_node(
+                2,
+                "label",
+                Rect {
+                    row: 1.0,
+                    col: 1.0,
+                    width: 8.0,
+                    height: 1.0,
+                },
+                HashMap::from([("text".to_string(), Value::String("Keep".to_string()))]),
+                Vec::new(),
+            );
+            let mut children = vec![label];
+            if include_button {
+                children.push(test_node(
+                    3,
+                    "button",
+                    Rect {
+                        row: 3.0,
+                        col: 1.0,
+                        width: 6.0,
+                        height: 1.5,
+                    },
+                    HashMap::from([("text".to_string(), Value::String("Remove".to_string()))]),
+                    Vec::new(),
+                ));
+            }
+            test_node(
+                1,
+                "box",
+                Rect {
+                    row: 0.0,
+                    col: 0.0,
+                    width: 12.0,
+                    height: 8.0,
+                },
+                HashMap::new(),
+                children,
+            )
+        };
+
+        let viewport = test_viewport();
+        let before = make_layout(true);
+        let after = make_layout(false);
+        let (mut cached_runs, _) = collect_metal_primitive_runs(&before, viewport, 0.0, 24);
+        let run_indices = build_metal_primitive_run_index(&cached_runs);
+        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+            &after,
+            viewport,
+            0.0,
+            24,
+            &mut cached_runs,
+            &run_indices,
+            &[1],
+        );
+
+        assert!(
+            stats.invalid_previous_runs > 0,
+            "removed cached runs must force a full retained-run rebuild"
         );
     }
 

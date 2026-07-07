@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "name": "schroeder-allpass",
+  "params": [
+    "input",
+    "delay_samples",
+    "g"
+  ],
+  "outputs": [
+    "out"
+  ]
+}

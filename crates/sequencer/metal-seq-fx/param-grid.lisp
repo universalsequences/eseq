@@ -9,23 +9,35 @@
             (label (substring (get p :name) 0 9) :font-size 12 :width 7
                    :color :dim :bg :transparent)
             (if (get p :boolean)
-              (box :width 5.5 :height 1.25 :align :center
-                   :bg :transparent
+              (button (if (fx-param-on? p) "ON" "OFF")
+                   :width 5.5 :height 1.25 :padding 0 :font-size 11
+                   :background-color :transparent
+                   :border-color :transparent
+                   :color :white
+                   :plock-active (if (param-plock-active? fx p) 1 0)
+                   :plock-color-r (param-plock-color-r)
+                   :plock-color-g (param-plock-color-g)
+                   :plock-color-b (param-plock-color-b)
                    :on-click |x y r|
                      (if fx
                        (fx-toggle-effect-value fx p)
-                       (fx-toggle-instrument-value p))
-                (label (if (fx-param-on? p) "ON" "OFF")
-                       :font-size 11 :width 5.5
-                       :color :white :bg :transparent))
+                       (fx-toggle-instrument-value p)))
               (if (get p :options)
               (dropdown :value (get p :text-value)
                 :options (get p :options)
                 :on-change (lambda (v) (param-set-option fx p v))
+                :plock-active (if (param-plock-active? fx p) 1 0)
+                :plock-color-r (param-plock-color-r)
+                :plock-color-g (param-plock-color-g)
+                :plock-color-b (param-plock-color-b)
                 :width 5.8 :height 1.2 :font-size 11)
               (number-picker :value (fx-param-value-for fx p)
                 :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-                :noui true :font-size 12 :text-color :dim
+                :noui true :font-size 12 :text-color (param-plock-text-color fx p)
+                :plock-active (if (param-plock-active? fx p) 1 0)
+                :plock-color-r (param-plock-color-r)
+                :plock-color-g (param-plock-color-g)
+                :plock-color-b (param-plock-color-b)
                 :on-change (lambda (v)
                   (param-set-control-value fx p v))
                 :width 5.2 :height 1.1)))))
@@ -34,6 +46,10 @@
           (hslider :width 7.8 :min (param-control-min fx p) :max (param-control-max fx p)
                    :value (fx-param-value-for fx p)
                    :material (aqua-slider-material)
+                   :plock-active (if (param-plock-active? fx p) 1 0)
+                   :plock-color-r (param-plock-color-r)
+                   :plock-color-g (param-plock-color-g)
+                   :plock-color-b (param-plock-color-b)
                    :on-change (lambda (v)
                      (param-set-control-value fx p v)))))))))
 
@@ -229,6 +245,10 @@
           :width 4.2 :height 1.05 :padding 0 :font-size 10.0
           :background-color (if (fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
           :color (if (fx-param-on? p) :black :dim)
+          :plock-active (if (param-plock-active? fx p) 1 0)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
           :on-click |x y r|
             (if fx
               (fx-toggle-effect-value fx p)
@@ -244,6 +264,10 @@
         (dropdown :value (get p :text-value)
           :options (get p :options)
           :on-change (lambda (v) (param-set-option fx p v))
+          :plock-active (if (param-plock-active? fx p) 1 0)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
           :width 5.9 :height 1.05 :font-size 9.2)))))
 
 (def fx-param-compact-knob (p fx key)
@@ -256,7 +280,12 @@
           :value (fx-param-value-for fx p)
           :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
           :font-size 10.0 :label-font-size 8.8
-          :text-color :dim :label-color :dim
+          :text-color (param-plock-text-color fx p) :label-color :dim
+          :plock-active (if (param-plock-active? fx p) 1 0)
+          :plock-default (param-plock-default fx p)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
           :width (fx-param-compact-control-width) :height 2.42
           :on-change (lambda (v)
             (param-set-control-value fx p v)))))))
@@ -280,7 +309,11 @@
             :decimals decimals :unit unit
             :noui true :font-size 10.0
             :text-align :center
-            :text-color :widget_focus_bg :edit-color :yellow
+            :text-color (param-plock-text-color fx p) :edit-color :yellow
+            :plock-active (if (param-plock-active? fx p) 1 0)
+            :plock-color-r (param-plock-color-r)
+            :plock-color-g (param-plock-color-g)
+            :plock-color-b (param-plock-color-b)
             :width 5.0 :height 0.82
             :on-change (lambda (v)
               (param-set-control-value fx p v))))))))

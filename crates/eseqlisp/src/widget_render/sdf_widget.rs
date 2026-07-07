@@ -25,7 +25,7 @@ pub struct SdfWidgetDef {
     pub animates: bool,
 }
 
-pub const MAX_SDF_STATE_UNIFORMS: usize = 8;
+pub const MAX_SDF_STATE_UNIFORMS: usize = 16;
 pub const SHADER_TYPE_PROP: &str = "__shader_type";
 
 static SDF_WIDGET_REGISTRY_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -558,6 +558,8 @@ pub fn build_material_overlay(
 
     let mut uniform_a = [0.0; 4];
     let mut uniform_b = [0.0; 4];
+    let mut uniform_c = [0.0; 4];
+    let mut uniform_d = [0.0; 4];
     for (idx, name) in def
         .state_uniforms
         .iter()
@@ -567,8 +569,12 @@ pub fn build_material_overlay(
         let val = super::get_f32_prop(&node.props, &shader_state_prop_name(name), 0.0);
         if idx < 4 {
             uniform_a[idx] = val;
-        } else {
+        } else if idx < 8 {
             uniform_b[idx - 4] = val;
+        } else if idx < 12 {
+            uniform_c[idx - 8] = val;
+        } else {
+            uniform_d[idx - 12] = val;
         }
     }
 
@@ -586,6 +592,8 @@ pub fn build_material_overlay(
             itime: viewport.time_seconds,
             uniform_a,
             uniform_b,
+            uniform_c,
+            uniform_d,
             color_a: [0.0; 4],
             color_b: [
                 hit.hit_region as f32,
@@ -785,6 +793,8 @@ pub fn sdf_widget_metal_primitives(
         visual_scale_anim_uniforms(node.widget_id, &node.props, &hit, viewport.time_seconds);
     let mut uniform_a = [0.0; 4];
     let mut uniform_b = [0.0; 4];
+    let mut uniform_c = [0.0; 4];
+    let mut uniform_d = [0.0; 4];
     for (idx, name) in def
         .state_uniforms
         .iter()
@@ -794,8 +804,12 @@ pub fn sdf_widget_metal_primitives(
         let value = prop_uniform_value(&node.props, name);
         if idx < 4 {
             uniform_a[idx] = value;
-        } else {
+        } else if idx < 8 {
             uniform_b[idx - 4] = value;
+        } else if idx < 12 {
+            uniform_c[idx - 8] = value;
+        } else {
+            uniform_d[idx - 12] = value;
         }
     }
 
@@ -809,6 +823,8 @@ pub fn sdf_widget_metal_primitives(
             itime: viewport.time_seconds,
             uniform_a,
             uniform_b,
+            uniform_c,
+            uniform_d,
             color_a,
             color_b: [
                 hit.hit_region as f32,
@@ -856,6 +872,8 @@ pub fn sdf_widget_background_primitives(
     // Resolve state uniforms from the box's props
     let mut uniform_a = [0.0; 4];
     let mut uniform_b = [0.0; 4];
+    let mut uniform_c = [0.0; 4];
+    let mut uniform_d = [0.0; 4];
     for (idx, name) in def
         .state_uniforms
         .iter()
@@ -865,8 +883,12 @@ pub fn sdf_widget_background_primitives(
         let value = prop_uniform_value(props, name);
         if idx < 4 {
             uniform_a[idx] = value;
-        } else {
+        } else if idx < 8 {
             uniform_b[idx - 4] = value;
+        } else if idx < 12 {
+            uniform_c[idx - 8] = value;
+        } else {
+            uniform_d[idx - 12] = value;
         }
     }
 
@@ -880,6 +902,8 @@ pub fn sdf_widget_background_primitives(
             itime: viewport.time_seconds,
             uniform_a,
             uniform_b,
+            uniform_c,
+            uniform_d,
             color_a: super::resolve_named_color(
                 props,
                 "color",

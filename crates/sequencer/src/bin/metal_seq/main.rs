@@ -1380,6 +1380,27 @@ fn sync_single_track_sequencer_state(
             step_has_plocks.clone(),
         )
         .effects_dirty;
+    let step_plock_kinds = build_step_plock_kinds(state, track);
+    let step_variant_r = build_step_variant_color_channel(state, track, 0);
+    let step_variant_g = build_step_variant_color_channel(state, track, 1);
+    let step_variant_b = build_step_variant_color_channel(state, track, 2);
+    dirty |= rt
+        .set_reactive_list_index(
+            "SEQ",
+            "track-step-plock-kinds",
+            track,
+            step_plock_kinds.clone(),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-r", track, step_variant_r.clone())
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-g", track, step_variant_g.clone())
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-b", track, step_variant_b.clone())
+        .effects_dirty;
     dirty |= sync_track_step_param_list_bindings(rt, state, track, current_track_idx);
 
     if track == current_track_idx {
@@ -1388,6 +1409,18 @@ fn sync_single_track_sequencer_state(
             .effects_dirty;
         dirty |= rt
             .set_reactive("SEQ", "step-has-plocks", step_has_plocks)
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds)
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "step-variant-r", step_variant_r)
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "step-variant-g", step_variant_g)
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "step-variant-b", step_variant_b)
             .effects_dirty;
     }
 
@@ -1458,6 +1491,41 @@ fn sync_single_step_structural_bindings(
             ),
         )
         .effects_dirty;
+    let step_plock_kinds = build_step_plock_kinds(state, track);
+    let step_variant_r = build_step_variant_color_channel(state, track, 0);
+    let step_variant_g = build_step_variant_color_channel(state, track, 1);
+    let step_variant_b = build_step_variant_color_channel(state, track, 2);
+    dirty |= rt
+        .set_reactive_list_index(
+            "SEQ",
+            "track-step-plock-kinds",
+            track,
+            step_plock_kinds.clone(),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-r", track, step_variant_r.clone())
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-g", track, step_variant_g.clone())
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-b", track, step_variant_b.clone())
+        .effects_dirty;
+    if track == current_track_idx {
+        dirty |= rt
+            .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds)
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "step-variant-r", step_variant_r)
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "step-variant-g", step_variant_g)
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "step-variant-b", step_variant_b)
+            .effects_dirty;
+    }
     dirty |= rt
         .set_reactive(
             "SEQ",
@@ -1609,6 +1677,46 @@ fn sync_track_plocks_for_neural_selection(
         ),
     )
     .effects_dirty
+}
+
+fn sync_track_plock_variant_preview(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    preview: Option<&(usize, String)>,
+) -> bool {
+    if !selected_steps.lock().unwrap().is_empty() {
+        return false;
+    }
+    let Some((preview_track, label)) = preview else {
+        return false;
+    };
+    if *preview_track != track {
+        return false;
+    }
+    let mut dirty = false;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "track-plocks",
+            build_track_plocks_value_for_variant_label(app, state, track, label),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "track-plock-variants",
+            build_track_plock_variants_value_with_preview(
+                state,
+                track,
+                selected_steps,
+                Some(label),
+            ),
+        )
+        .effects_dirty;
+    dirty
 }
 
 fn sync_instrument_plock_presence_fields(
@@ -4979,6 +5087,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_current_track_playhead_visible = false;
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
+    let mut preview_plock_variant: Option<(usize, String)> = None;
     let mut prev_active_buffer_name = editor.active_buffer().name.clone();
     let mut prev_selected_neural_neurons = selected_neural_neurons.lock().unwrap().clone();
     let mut prev_agent_generation_watermark = agent_generation_watermark(&app);
@@ -9869,6 +9978,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                         state.publish_scheduler_snapshot();
                                     }
+                                    "step-param" => {
+                                        if let Some(param_idx) = param_idx {
+                                            if let Some(param) =
+                                                sequencer::sequencer::StepParam::ALL.get(param_idx)
+                                            {
+                                                state.set_step_param(track, step, *param, value);
+                                            }
+                                        }
+                                    }
                                     "instrument" => {
                                         if let Some(param_idx) = param_idx {
                                             if let Some(desc) = app
@@ -9995,6 +10113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             state.publish_scheduler_snapshot();
                                         }
                                     }
+                                    "step-param" => {}
                                     "instrument" => {
                                         if let Some(param_idx) = param_idx {
                                             if let Some(selected_idx) = app
@@ -10182,6 +10301,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             state.pattern.swing_resolution_plocks[track].clear(step)
                                         }
                                     }
+                                    "step-param" => {
+                                        if let (Some(step), Some(param_idx)) = (step, param_idx) {
+                                            if let Some(param) =
+                                                sequencer::sequencer::StepParam::ALL.get(param_idx)
+                                            {
+                                                state.pattern.step_data[track].set(
+                                                    step,
+                                                    *param,
+                                                    param.default_value(),
+                                                );
+                                            }
+                                        }
+                                    }
                                     "instrument" => {
                                         if let (Some(step), Some(param_idx)) = (step, param_idx) {
                                             state.pattern.instrument_slots[track]
@@ -10294,6 +10426,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
+                            }
+                        }
+                    }
+                    "preview-plock-variant" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(label) = map_string(map, "label") {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if !selected_steps.lock().unwrap().is_empty() {
+                                    preview_plock_variant = None;
+                                    continue;
+                                }
+                                preview_plock_variant = Some((track, label));
+                                {
+                                    let rt = editor.runtime_mut();
+                                    sync_track_plock_variant_preview(
+                                        rt,
+                                        &app,
+                                        &state,
+                                        track,
+                                        &selected_steps,
+                                        preview_plock_variant.as_ref(),
+                                    );
+                                    rt.run_reactive_cycle();
+                                }
+                                editor.refresh_runtime_side_effects();
+                                editor.mark_needs_redraw();
+                            }
+                        }
+                    }
+                    "stamp-plock-variant" | "clear-step-variant-locks" => {
+                        if let Value::Map(ref map) = payload {
+                            preview_plock_variant = None;
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            let fallback_step =
+                                map.get("step").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let mut steps: Vec<usize> =
+                                selected_steps.lock().unwrap().iter().copied().collect();
+                            steps.sort_unstable();
+                            if steps.is_empty() {
+                                if let Some(step) = fallback_step {
+                                    steps.push(step.min(MAX_STEPS - 1));
+                                }
+                            }
+                            if steps.is_empty() {
+                                continue;
+                            }
+                            let track = current_track.load(Ordering::Relaxed);
+                            let is_clear = name == "clear-step-variant-locks"
+                                || label.as_deref() == Some("def");
+                            let changed = if is_clear {
+                                state.clear_variant_locks_for_steps(track, &steps)
+                            } else if let Some(label) = label {
+                                state
+                                    .plock_variant_registry_snapshot(track)
+                                    .assignment_for_label(&label)
+                                    .is_some_and(|assignment| {
+                                        state.stamp_variant_key_to_steps(
+                                            track,
+                                            &assignment.key,
+                                            &steps,
+                                        )
+                                    })
+                            } else {
+                                false
+                            };
+                            if changed {
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }
@@ -15587,6 +15793,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &selected_steps,
                         Some(&selected_neural_snapshot),
                     );
+                    if preview_plock_variant.as_ref().is_some_and(|(track, _)| {
+                        *track != ct || !selected_steps.lock().unwrap().is_empty()
+                    }) {
+                        preview_plock_variant = None;
+                    }
+                    sync_track_plock_variant_preview(
+                        rt,
+                        &app,
+                        &state,
+                        ct,
+                        &selected_steps,
+                        preview_plock_variant.as_ref(),
+                    );
                     sync_fx_param_binding_fields_with_neural_selection(
                         rt,
                         &app,
@@ -15896,6 +16115,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ct,
                     &selected_steps,
                     Some(&selected_neural_snapshot),
+                );
+                if preview_plock_variant.as_ref().is_some_and(|(track, _)| {
+                    *track != ct || !selected_steps.lock().unwrap().is_empty()
+                }) {
+                    preview_plock_variant = None;
+                }
+                sync_track_plock_variant_preview(
+                    rt,
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    preview_plock_variant.as_ref(),
                 );
                 sync_track_params_elapsed = started.elapsed();
                 let started = Instant::now();

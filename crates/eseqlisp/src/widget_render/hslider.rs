@@ -6,8 +6,9 @@ use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 use super::sdf_widget;
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
-    get_f32_prop, mapped_haptic_value, metal_widget_instance, ndc_bounds, resolve_named_color,
-    should_trigger_integer_haptic, styled_cell, trigger_level_change_haptic,
+    get_f32_prop, mapped_haptic_value, metal_widget_instance, ndc_bounds, plock_active,
+    plock_color, resolve_named_color, should_trigger_integer_haptic, styled_cell,
+    trigger_level_change_haptic,
 };
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
@@ -18,6 +19,9 @@ pub struct HorizontalSliderWidget;
 pub static HSLIDER_WIDGET: HorizontalSliderWidget = HorizontalSliderWidget;
 
 fn fill_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    if plock_active(props) {
+        return plock_color(props);
+    }
     resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED())
 }
 
@@ -27,7 +31,16 @@ mod tests {
 
     #[test]
     fn value_is_bindable_but_not_size_affecting() {
-        assert_eq!(HSLIDER_WIDGET.bindable_props(), &["value"]);
+        assert_eq!(
+            HSLIDER_WIDGET.bindable_props(),
+            &[
+                "value",
+                "plock-active",
+                "plock-color-r",
+                "plock-color-g",
+                "plock-color-b",
+            ]
+        );
         assert!(!HSLIDER_WIDGET.size_affecting_props().contains(&"value"));
     }
 }
@@ -121,7 +134,13 @@ impl WidgetDefinition for HorizontalSliderWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["value"]
+        &[
+            "value",
+            "plock-active",
+            "plock-color-r",
+            "plock-color-g",
+            "plock-color-b",
+        ]
     }
 
     fn measure(
@@ -235,6 +254,8 @@ impl WidgetDefinition for HorizontalSliderWidget {
                         itime: 0.0,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
                         color_a: fill_color(&node.props).to_rgba(),
                         color_b: dot_color(&node.props).to_rgba(),
                         color_c: [0.0; 4],
@@ -266,6 +287,8 @@ impl WidgetDefinition for HorizontalSliderWidget {
                 itime: 0.0,
                 uniform_a: [0.0; 4],
                 uniform_b: [0.0; 4],
+                uniform_c: [0.0; 4],
+                uniform_d: [0.0; 4],
                 color_a: fill_color(&node.props).to_rgba(),
                 color_b: dot_color(&node.props).to_rgba(),
                 color_c: [0.0; 4],

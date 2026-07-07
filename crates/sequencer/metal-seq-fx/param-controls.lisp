@@ -137,6 +137,53 @@
       (bind-seq (get p :value-field))
       (get p :value))))
 
+(def param-plock-row-target (fx)
+  (if fx
+    (if (get fx :midi-fx) "midi-fx" "effect")
+    "instrument"))
+
+(def param-plock-row (fx p)
+  (if (get p :idx)
+    (let ((target (param-plock-row-target fx))
+          (slot (if fx (get fx :slot-idx) -1))
+          (idx (get p :idx)))
+      (nth (filter |row|
+        (and (= (get row :target) target)
+             (= (get row :param-idx) idx)
+             (if fx (= (get row :slot-idx) slot) true))
+        SEQ.track-plocks) 0))
+    false))
+
+(def param-current-variant-chip ()
+  (nth (filter |chip| (and (get chip :current)
+                           (= (get chip :kind) "variant"))
+        SEQ.track-plock-variants) 0))
+
+(def param-plock-active? (fx p)
+  (and (not (param-mods-open? fx))
+       (param-plock-row fx p)))
+
+(def param-plock-default (fx p)
+  (let ((row (param-plock-row fx p)))
+    (if row (get row :default) (fx-param-value-for fx p))))
+
+(def param-plock-color-r ()
+  (let ((chip (param-current-variant-chip)))
+    (if chip (get chip :color-r) 0.27058825)))
+
+(def param-plock-color-g ()
+  (let ((chip (param-current-variant-chip)))
+    (if chip (get chip :color-g) 0.78431374)))
+
+(def param-plock-color-b ()
+  (let ((chip (param-current-variant-chip)))
+    (if chip (get chip :color-b) 0.8627451)))
+
+(def param-plock-text-color (fx p)
+  (if (param-plock-active? fx p)
+    (rgba (param-plock-color-r) (param-plock-color-g) (param-plock-color-b) 1.0)
+    :dim))
+
 (def param-control-min (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
     (let ((target (param-control-mod-target fx p)))

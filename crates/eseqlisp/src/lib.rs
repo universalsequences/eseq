@@ -2418,47 +2418,103 @@ mod tests {
                 .as_ref()
                 .and_then(|layout| layout.children.first())
                 .is_some_and(|node| node.props.get("active") == Some(&Value::Bool(false))),
-            "targeted subtree reuse should update layout props"
+            "targeted subtree relayout should update layout props"
         );
     }
 
     #[test]
-    fn active_subtree_size_change_falls_back_to_full_relayout() {
+    fn active_subtree_size_change_uses_targeted_relayout() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);
-        runtime.register_reactive("APP", vec![("width", Value::Number(4.0))], false);
+        runtime.register_reactive("APP", vec![("height", Value::Number(1.0))], false);
         runtime
             .eval_str(
                 r#"
                 (effect
                   (v-stack
                     (subtree :key "row"
-                      (box :width APP.width :height 1))
+                      (box :width 4 :height APP.height))
                     (label "static" :width 6)))
                 "#,
             )
             .expect("install active subtree effect");
         let initial_revision = runtime.layout_revision();
+        let initial_row_height = runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| layout.children.first())
+            .map(|node| node.rect.height)
+            .expect("initial subtree row height");
+        let initial_static_row = runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| layout.children.get(1))
+            .map(|node| node.rect.row)
+            .expect("initial static sibling row");
         let _ = runtime.take_dirty_widget_ids();
         let _ = runtime.drain_rendered_layouts();
 
-        runtime.set_reactive("APP", "width", Value::Number(5.0));
+        runtime.set_reactive("APP", "height", Value::Number(3.0));
         runtime.run_reactive_cycle();
 
         let trace = runtime
             .last_ui_invalidation_trace()
             .expect("invalidation trace");
-        assert_eq!(trace.relayout_mode.as_deref(), Some("full"));
-        assert!(
-            trace
-                .subtree_failure_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("size-props:box")),
-            "targeted subtree reuse should report the size-prop miss: {trace:?}"
-        );
+        assert_eq!(trace.relayout_mode.as_deref(), Some("subtree-relayout"));
+        assert_eq!(trace.relayout_failure_reason, None);
+        assert_eq!(trace.subtree_failure_reason, None);
         assert!(
             runtime.layout_revision() > initial_revision,
-            "size-changing subtree updates should fall back to a layout revision bump"
+            "size-changing subtree updates should bump the layout revision"
+        );
+        let layout = runtime
+            .current_layout
+            .as_ref()
+            .expect("updated current layout");
+        assert!(
+            layout.children[0].rect.height > initial_row_height,
+            "partial relayout should resize the changed subtree, before={} after={}",
+            initial_row_height,
+            layout.children[0].rect.height
+        );
+        assert!(
+            layout.children[1].rect.row > initial_static_row,
+            "partial relayout should translate following siblings after the resized subtree"
+        );
+    }
+
+    #[test]
+    fn whole_tree_reuse_geometry_change_bumps_layout_revision() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (v-stack
+                    (label "short" :width 5)
+                    (label "tail" :width 4)))
+                "#,
+            )
+            .expect("install initial layout effect");
+        let initial_revision = runtime.layout_revision();
+        let _ = runtime.take_dirty_widget_ids();
+
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (v-stack
+                    (label "short" :width 8)
+                    (label "tail" :width 4)))
+                "#,
+            )
+            .expect("install width-changing layout effect");
+
+        assert!(
+            runtime.layout_revision() > initial_revision,
+            "whole-tree layout reuse must bump the cache key when reused geometry changes"
         );
     }
 

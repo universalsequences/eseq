@@ -514,6 +514,8 @@ struct WidgetInstance {
     float         itime;
     packed_float4 uniform_a;
     packed_float4 uniform_b;
+    packed_float4 uniform_c;
+    packed_float4 uniform_d;
     packed_float4 color_a;
     packed_float4 color_b;
     packed_float4 color_c;
@@ -529,6 +531,8 @@ struct WidgetVaryings {
     float  itime         [[flat]];
     float4 uniform_a     [[flat]];
     float4 uniform_b     [[flat]];
+    float4 uniform_c     [[flat]];
+    float4 uniform_d     [[flat]];
     float4 color_a       [[flat]];
     float4 color_b       [[flat]];
     float4 color_c       [[flat]];
@@ -577,6 +581,8 @@ vertex WidgetVaryings widget_vert(
     out.itime = inst.itime;
     out.uniform_a = inst.uniform_a;
     out.uniform_b = inst.uniform_b;
+    out.uniform_c = inst.uniform_c;
+    out.uniform_d = inst.uniform_d;
     out.color_a = inst.color_a;
     out.color_b = inst.color_b;
     out.color_c = inst.color_c;
@@ -2087,6 +2093,8 @@ fragment float4 live_spectrogram_frag(
         }
         hash_f32_array(instance.uniform_a, hasher);
         hash_f32_array(instance.uniform_b, hasher);
+        hash_f32_array(instance.uniform_c, hasher);
+        hash_f32_array(instance.uniform_d, hasher);
         hash_f32_array(instance.color_a, hasher);
         hash_f32_array(instance.color_b, hasher);
         hash_f32_array(instance.color_c, hasher);
@@ -9010,6 +9018,8 @@ fragment float4 live_spectrogram_frag(
             itime: 0.0,
             uniform_a: [0.0; 4],
             uniform_b: [0.0; 4],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
             color_a: rgba,
             color_b: rgba,
             color_c: rgba,
@@ -9067,6 +9077,8 @@ fragment float4 live_spectrogram_frag(
             itime: 0.0,
             uniform_a: [border_width_px.max(0.0), 0.0, 0.0, 0.0],
             uniform_b: [width, height, 0.0, 0.0],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
             color_a: fill.to_rgba(),
             color_b: border.to_rgba(),
             color_c: [0.0; 4],
@@ -10194,6 +10206,8 @@ fragment float4 live_spectrogram_frag(
                     itime,
                     uniform_a: [0.0; 4],
                     uniform_b: [0.0; 4],
+                    uniform_c: [0.0; 4],
+                    uniform_d: [0.0; 4],
                     color_a: [0.2, 0.3, 0.4, 1.0],
                     color_b: [0.5, 0.6, 0.7, 1.0],
                     color_c: [0.0; 4],
@@ -10317,6 +10331,8 @@ fragment float4 live_spectrogram_frag(
                         itime: 0.0,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
                         color_a: [0.0; 4],
                         color_b: [0.0; 4],
                         color_c: [0.0; 4],

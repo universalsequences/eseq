@@ -119,6 +119,15 @@
 (def custom-ui-param-base-max-prop (p)
   (param-base-max-prop (custom-ui-current-fx) p))
 
+(def custom-ui-param-plock-active? (p)
+  (param-plock-active? (custom-ui-current-fx) p))
+
+(def custom-ui-param-plock-default (p)
+  (param-plock-default (custom-ui-current-fx) p))
+
+(def custom-ui-param-plock-text-color (p)
+  (param-plock-text-color (custom-ui-current-fx) p))
+
 (def custom-ui-param-knob-mod-slot-prop (p idx)
   (param-knob-mod-slot-prop (custom-ui-current-fx) p idx))
 

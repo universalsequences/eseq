@@ -79,6 +79,7 @@ pub mod neural;
 #[allow(dead_code)]
 mod ott;
 pub mod paths;
+pub mod plock_variants;
 pub mod process;
 pub mod project;
 pub mod recorder;

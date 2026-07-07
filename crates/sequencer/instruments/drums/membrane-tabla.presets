@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "engine_name": "drums/membrane-tabla/",
+  "source_file": "instruments/drums/membrane-tabla/.lisp",
+  "presets": [
+    {
+      "id": "Tun",
+      "name": "Tun",
+      "base_note_offset": 0.0,
+      "params": {
+        "stroke": 0.5,
+        "press": 0.0,
+        "damp": 0.0
+      }
+    },
+    {
+      "id": "Na",
+      "name": "Na",
+      "base_note_offset": 0.0,
+      "params": {
+        "stroke": 1.0,
+        "press": 0.0,
+        "damp": 0.0
+      }
+    },
+    {
+      "id": "Te",
+      "name": "Te",
+      "base_note_offset": 0.0,
+      "params": {
+        "stroke": 0.0,
+        "press": 0.0,
+        "damp": 0.15,
+        "release": 300.0
+      }
+    },
+    {
+      "id": "Tin",
+      "name": "Tin",
+      "base_note_offset": 0.0,
+      "params": {
+        "stroke": 0.85,
+        "press": 0.0,
+        "damp": 0.06,
+        "release": 500.0
+      }
+    },
+    {
+      "id": "Bayan Ga",
+      "name": "Bayan Ga",
+      "base_note_offset": -12.0,
+      "params": {
+        "stroke": 0.45,
+        "press": 0.6,
+        "gliss_range": 0.5,
+        "release": 1500.0,
+        "finger_hard": 0.002,
+        "body1_freq": 120.0,
+        "body1_gain": 1.6,
+        "body2_freq": 260.0
+      }
+    },
+    {
+      "id": "Bayan Ka",
+      "name": "Bayan Ka",
+      "base_note_offset": -12.0,
+      "params": {
+        "stroke": 0.0,
+        "press": 0.9,
+        "damp": 0.3,
+        "release": 250.0,
+        "body1_freq": 120.0,
+        "body1_gain": 1.4
+      }
+    },
+    {
+      "id": "Bare Mylar",
+      "name": "Bare Mylar",
+      "base_note_offset": 0.0,
+      "params": {
+        "syahi": 0.0,
+        "stroke": 0.5,
+        "release": 900.0
+      }
+    },
+    {
+      "id": "Overloaded",
+      "name": "Overloaded",
+      "base_note_offset": 0.0,
+      "params": {
+        "syahi": 1.5,
+        "stroke": 0.5,
+        "tone_damp": 0.001,
+        "release": 1200.0
+      }
+    }
+  ]
+}

@@ -471,6 +471,11 @@ impl WidgetDefinition for KnobNumberWidget {
             "mod-range-8-depth",
             "mod-range-9-slot",
             "mod-range-9-depth",
+            "plock-active",
+            "plock-default",
+            "plock-color-r",
+            "plock-color-g",
+            "plock-color-b",
         ]
     }
 
@@ -786,7 +791,18 @@ impl WidgetDefinition for KnobNumberWidget {
                 a: 1.0,
             },
         );
-        let arc_color = resolve_named_color(&node.props, "arc-color", theme::WIDGET_KNOB_FILLED());
+        let plock_active = get_f32_prop(&node.props, "plock-active", 0.0) > 0.5;
+        let plock_color = Color {
+            r: get_f32_prop(&node.props, "plock-color-r", 0.270_588_25),
+            g: get_f32_prop(&node.props, "plock-color-g", 0.784_313_74),
+            b: get_f32_prop(&node.props, "plock-color-b", 0.862_745_1),
+            a: 1.0,
+        };
+        let arc_color = if plock_active {
+            plock_color
+        } else {
+            resolve_named_color(&node.props, "arc-color", theme::WIDGET_KNOB_FILLED())
+        };
         let track_color =
             resolve_named_color(&node.props, "track-color", theme::WIDGET_KNOB_TRACK());
 
@@ -871,6 +887,14 @@ impl WidgetDefinition for KnobNumberWidget {
         let (ndc_min, ndc_max) = ndc_bounds(knob_rect, viewport);
         let px_w = knob_rect.width * viewport.cell_w;
         let px_h = knob_rect.height * viewport.cell_h;
+        let min = get_f32_prop(&node.props, "min", 0.0);
+        let max = get_f32_prop(&node.props, "max", 1.0);
+        let default_t = if (max - min).abs() > 0.000_001 {
+            ((get_f32_prop(&node.props, "plock-default", value) - min) / (max - min))
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let mut prims = vec![MetalPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
@@ -879,12 +903,19 @@ impl WidgetDefinition for KnobNumberWidget {
                 value_t: normalized_value(&node.props),
                 orientation: 0.0,
                 itime: viewport.time_seconds,
-                uniform_a: [if is_focused { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                uniform_a: [
+                    if is_focused { 1.0 } else { 0.0 },
+                    if plock_active { 1.0 } else { 0.0 },
+                    default_t,
+                    0.0,
+                ],
                 uniform_b: [0.0; 4],
+                uniform_c: [0.0; 4],
+                uniform_d: [0.0; 4],
                 color_a: [arc_color.r, arc_color.g, arc_color.b, arc_color.a],
                 color_b: [track_color.r, track_color.g, track_color.b, track_color.a],
                 color_c: [edit_color.r, edit_color.g, edit_color.b, edit_color.a],
-                color_d: [0.0; 4],
+                color_d: [plock_color.r, plock_color.g, plock_color.b, plock_color.a],
                 corner_radius: 0.0,
                 pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
             },
@@ -961,6 +992,8 @@ impl WidgetDefinition for KnobNumberWidget {
                             end_t,
                             if selected { 1.0 } else { 0.0 },
                         ],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
                         color_a: [color.r, color.g, color.b, color.a],
                         color_b: [track_color.r, track_color.g, track_color.b, track_color.a],
                         color_c: [edit_color.r, edit_color.g, edit_color.b, edit_color.a],
@@ -1001,6 +1034,11 @@ impl WidgetDefinition for KnobNumberWidget {
             (
                 format_value(display_value(&node.props, value) as f64, decimals),
                 edit_color,
+            )
+        } else if plock_active {
+            (
+                format_value(display_value(&node.props, value) as f64, decimals),
+                plock_color,
             )
         } else {
             (
@@ -1108,6 +1146,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float aa = max(fwidth(r), 0.0015);
     float ringMask = smoothstep(aa, -aa, ring) * inRange;
     float activeMask = smoothstep(aa, -aa, activeRing) * inRange * active;
+    float glowRing = abs(r - knobRadius) - 0.150;
+    float glowMask = smoothstep(aa * 4.0, -aa * 4.0, glowRing) * inRange * active * step(0.5, in.uniform_a.y);
     float trackMask = ringMask * (1.0 - active);
 
     float notchAngle = start + sweep * in.value_t;
@@ -1119,12 +1159,20 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float lineSegment = step(0.0, lineAlong) * step(lineAlong, 0.52);
     float line = lineAcross - 0.070;
     float lineMask = smoothstep(aa, -aa, line) * lineSegment;
+    float defaultAngle = start + sweep * clamp(in.uniform_a.z, 0.0, 1.0);
+    float2 dn = float2(cos(defaultAngle), sin(defaultAngle));
+    float defaultNotch = length(p - dn * knobRadius) - 0.046;
+    float defaultMask = smoothstep(aa, -aa, defaultNotch)
+        * step(0.5, in.uniform_a.y)
+        * step(0.01, abs(in.uniform_a.z - in.value_t));
 
     float4 col = float4(0.0);
+    col = mix(col, float4(in.color_d.rgb, 0.20), glowMask);
     col = mix(col, in.color_b, trackMask);
     col = mix(col, in.color_a, activeMask);
     col = mix(col, in.color_b, lineMask);
     col = mix(col, in.color_a, notchMask);
+    col = mix(col, float4(0.36, 0.36, 0.41, 0.95), defaultMask);
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }

@@ -6340,10 +6340,24 @@ impl Editor {
                     &mut dirty_widget_ids,
                 ) {
                     Ok(updated) => updated,
-                    Err(reason) => {
-                        targeted = false;
-                        miss_reason = Some(format!("subtree:{subtree_root_id}:{reason}"));
-                        break;
+                    Err(reuse_reason) => {
+                        reuse_mode = "targeted-relayout";
+                        match self.runtime.relayout_subtree_for_tree_with_viewport(
+                            existing.as_ref(),
+                            tree,
+                            child_path,
+                            Some((cols, rows)),
+                            &mut dirty_widget_ids,
+                        ) {
+                            Ok(updated) => updated,
+                            Err(relayout_reason) => {
+                                targeted = false;
+                                miss_reason = Some(format!(
+                                    "subtree:{subtree_root_id}:{reuse_reason}; partial-relayout:{relayout_reason}"
+                                ));
+                                break;
+                            }
+                        }
                     }
                 };
                 layout = Some(std::sync::Arc::new(updated));
@@ -6351,41 +6365,15 @@ impl Editor {
             let (layout, dirty_widget_ids) = if targeted {
                 (layout, dirty_widget_ids)
             } else {
-                let mut dirty_widget_ids = Vec::new();
-                let reused_layout = reusable_existing_layout.as_ref().and_then(|existing| {
-                    match crate::layout::reuse_layout_node(
-                        existing.as_ref(),
+                reuse_mode = "full";
+                let layout = self
+                    .runtime
+                    .layout_snapshot_for_tree_with_viewport_and_offset(
                         tree,
-                        &mut dirty_widget_ids,
-                    ) {
-                        Some(layout) => {
-                            reuse_mode = "whole-tree";
-                            Some(std::sync::Arc::new(layout))
-                        }
-                        None => {
-                            if miss_reason.is_none() {
-                                miss_reason = crate::layout::reuse_layout_failure_reason(
-                                    existing.as_ref(),
-                                    tree,
-                                );
-                            }
-                            None
-                        }
-                    }
-                });
-                if let Some(layout) = reused_layout {
-                    (Some(layout), dirty_widget_ids)
-                } else {
-                    reuse_mode = "full";
-                    let layout = self
-                        .runtime
-                        .layout_snapshot_for_tree_with_viewport_and_offset(
-                            tree,
-                            Some((cols, rows)),
-                            buffer_id * 100_000,
-                        );
-                    (layout, Vec::new())
-                }
+                        Some((cols, rows)),
+                        buffer_id * 100_000,
+                    );
+                (layout, Vec::new())
             };
             if trace_ui_invalidation_enabled() && reuse_mode != "targeted" {
                 eprintln!(
@@ -7370,6 +7358,10 @@ impl Editor {
                 }
                 crate::runtime::TileOp::SetWindowBuffer(name) => {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                        if self.active_buffer_idx() == idx {
+                            self.record_buffer_access_by_idx(idx);
+                            continue;
+                        }
                         self.save_current_widget_tree();
                         {
                             let leaf = self.active_leaf_mut();

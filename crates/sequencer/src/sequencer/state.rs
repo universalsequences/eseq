@@ -11,6 +11,10 @@ use crate::neural::{
     remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
     ProjectNeuralNetwork,
 };
+use crate::plock_variants::{
+    live_track_variant_key, live_track_variant_keys, PlockVariantAssignment, PlockVariantKey,
+    PlockVariantRegistry,
+};
 use crate::voice::MAX_VOICES;
 
 use super::data::{
@@ -343,6 +347,7 @@ pub struct PatternSnapshot {
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
     pub rack_tracks: Vec<Option<RackTrackSnapshot>>,
+    pub plock_variant_registries: Vec<PlockVariantRegistry>,
 }
 
 #[derive(Clone, Debug)]
@@ -457,6 +462,7 @@ pub struct TrackPatternData {
     pub instrument_type: InstrumentType,
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub rack_track: Option<RackTrackSnapshot>,
+    pub plock_variant_registry: PlockVariantRegistry,
 }
 
 impl TrackPatternData {
@@ -475,6 +481,7 @@ impl TrackPatternData {
             || track >= state.pattern.timebase_plocks.len()
             || track >= state.pattern.swing_plocks.len()
             || track >= state.pattern.swing_resolution_plocks.len()
+            || track >= state.pattern.plock_variant_registries.lock().unwrap().len()
         {
             return false;
         }
@@ -544,6 +551,22 @@ impl TrackPatternData {
             if track < rack_tracks.len() {
                 rack_tracks[track] = self.rack_track.clone();
             }
+        }
+        {
+            let mut registries = state.pattern.plock_variant_registries.lock().unwrap();
+            if track < registries.len() {
+                registries[track] = self.plock_variant_registry.clone();
+            }
+        }
+        let active_variant_keys = live_track_variant_keys(state, track);
+        if let Some(registry) = state
+            .pattern
+            .plock_variant_registries
+            .lock()
+            .unwrap()
+            .get_mut(track)
+        {
+            registry.prune_to_keys(&active_variant_keys);
         }
 
         self.chord_snapshot
@@ -719,6 +742,8 @@ impl TrackPatternData {
         self.swing_resolution_plock_snapshot = [None; MAX_STEPS];
         self.instrument_type = instrument_type;
         self.instrument_run_mode = CustomInstrumentRunMode::Instrument;
+        self.rack_track = None;
+        self.plock_variant_registry = PlockVariantRegistry::default();
     }
 
     fn default_step_params() -> [f32; NUM_PARAMS] {
@@ -1321,6 +1346,7 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.instrument_types, track_idx);
         remove_track_lane_if_present(&mut self.instrument_run_modes, track_idx);
         remove_track_lane_if_present(&mut self.rack_tracks, track_idx);
+        remove_track_lane_if_present(&mut self.plock_variant_registries, track_idx);
         self.mod_connections = self
             .mod_connections
             .iter()
@@ -1485,12 +1511,18 @@ impl PatternSnapshot {
             self.instrument_run_modes
                 .push(CustomInstrumentRunMode::Instrument);
             self.rack_tracks.push(None);
+            self.plock_variant_registries
+                .push(PlockVariantRegistry::default());
         }
         while self.neural_reset_bits.len() < track_count {
             self.neural_reset_bits.push([0u64; TRACK_PATTERN_WORDS]);
         }
         while self.rack_tracks.len() < track_count {
             self.rack_tracks.push(None);
+        }
+        while self.plock_variant_registries.len() < track_count {
+            self.plock_variant_registries
+                .push(PlockVariantRegistry::default());
         }
         self.mod_connections.retain(|connection| {
             connection.source_track < track_count
@@ -1528,6 +1560,7 @@ impl PatternSnapshot {
         self.instrument_types.truncate(track_count);
         self.instrument_run_modes.truncate(track_count);
         self.rack_tracks.truncate(track_count);
+        self.plock_variant_registries.truncate(track_count);
         self.mod_connections.retain(|connection| {
             connection.source_track < track_count
                 && mod_destination_valid_for_track_count(connection.destination, track_count)
@@ -1560,8 +1593,8 @@ impl PatternSnapshot {
         let mut swing_resolution_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut inst_types = Vec::with_capacity(num_tracks);
         let mut instrument_run_modes = Vec::with_capacity(num_tracks);
-        let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let mut rack_tracks = Vec::with_capacity(num_tracks);
+        let mut plock_variant_registries = Vec::with_capacity(num_tracks);
 
         let scene_trace = {
             static SCENE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1645,7 +1678,26 @@ impl PatternSnapshot {
             instrument_run_modes.push(CustomInstrumentRunMode::from_runtime_flag(
                 state.pattern.instrument_run_modes[t].load(Ordering::Relaxed),
             ));
-            rack_tracks.push(live_rack_tracks.get(t).cloned().unwrap_or(None));
+            rack_tracks.push(
+                state
+                    .pattern
+                    .rack_tracks
+                    .lock()
+                    .unwrap()
+                    .get(t)
+                    .cloned()
+                    .unwrap_or(None),
+            );
+            let mut registry = state
+                .pattern
+                .plock_variant_registries
+                .lock()
+                .unwrap()
+                .get(t)
+                .cloned()
+                .unwrap_or_default();
+            registry.prune_to_keys(&live_track_variant_keys(state, t));
+            plock_variant_registries.push(registry);
             rest_elapsed += rest_started.elapsed();
         }
         if scene_trace {
@@ -1680,6 +1732,7 @@ impl PatternSnapshot {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_tracks,
+            plock_variant_registries,
         }
     }
 
@@ -1786,6 +1839,11 @@ impl PatternSnapshot {
                 .copied()
                 .unwrap_or(CustomInstrumentRunMode::Instrument),
             rack_track: self.rack_tracks.get(track).cloned().unwrap_or(None),
+            plock_variant_registry: self
+                .plock_variant_registries
+                .get(track)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1812,6 +1870,7 @@ impl PatternSnapshot {
         self.instrument_types[track] = data.instrument_type;
         self.instrument_run_modes[track] = data.instrument_run_mode;
         self.rack_tracks[track] = data.rack_track;
+        self.plock_variant_registries[track] = data.plock_variant_registry;
     }
 
     pub fn clone_track_lane_from(&mut self, source: &PatternSnapshot, track: usize) {
@@ -1846,6 +1905,7 @@ impl PatternSnapshot {
         self.instrument_types[track] = instrument_type;
         self.instrument_run_modes[track] = CustomInstrumentRunMode::Instrument;
         self.rack_tracks[track] = None;
+        self.plock_variant_registries[track] = PlockVariantRegistry::default();
     }
 
     fn default_step_data() -> Vec<[f32; NUM_PARAMS]> {
@@ -1905,6 +1965,8 @@ impl PatternSnapshot {
         self.instrument_run_modes
             .push(CustomInstrumentRunMode::Instrument);
         self.rack_tracks.push(None);
+        self.plock_variant_registries
+            .push(PlockVariantRegistry::default());
     }
 
     pub fn new_default(num_tracks: usize, slot_descriptors: &[Vec<EffectDescriptor>]) -> Self {
@@ -1929,6 +1991,7 @@ impl PatternSnapshot {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_tracks: Vec::with_capacity(num_tracks),
+            plock_variant_registries: Vec::with_capacity(num_tracks),
         };
         for t in 0..num_tracks {
             snap.push_default_track(t, slot_descriptors);
@@ -1969,6 +2032,7 @@ impl PatternSnapshot {
             && self.swing_resolution_plock_snapshots.len() == n
             && self.instrument_run_modes.len() == n
             && self.rack_tracks.len() == n
+            && self.plock_variant_registries.len() == n
             && self.step_data.iter().all(|steps| steps.len() == MAX_STEPS)
     }
 
@@ -2273,6 +2337,7 @@ pub struct PatternState {
     pub instrument_run_modes: Vec<AtomicU32>,
     pub track_sound_state: Mutex<Vec<TrackSoundState>>,
     pub rack_tracks: Mutex<Vec<Option<RackTrackSnapshot>>>,
+    pub plock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
 }
 
 pub struct TransportState {
@@ -2524,6 +2589,11 @@ impl SequencerState {
                         .collect(),
                 ),
                 rack_tracks: Mutex::new((0..MAX_TRACKS).map(|_| None).collect()),
+                plock_variant_registries: Mutex::new(
+                    (0..MAX_TRACKS)
+                        .map(|_| PlockVariantRegistry::default())
+                        .collect(),
+                ),
             },
             transport: TransportState {
                 playhead: AtomicU32::new(0),
@@ -3858,6 +3928,15 @@ impl SequencerState {
         if let Some(rack_track) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             *rack_track = None;
         }
+        if let Some(registry) = self
+            .pattern
+            .plock_variant_registries
+            .lock()
+            .unwrap()
+            .get_mut(track)
+        {
+            *registry = PlockVariantRegistry::default();
+        }
     }
 
     fn clear_runtime_track_binding_in_place(&self, track: usize) {
@@ -5087,6 +5166,121 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
     }
 
+    pub fn reconcile_plock_variant_registry_for_track(
+        &self,
+        track: usize,
+    ) -> Vec<Option<PlockVariantAssignment>> {
+        let keys = live_track_variant_keys(self, track);
+        let mut registries = self.pattern.plock_variant_registries.lock().unwrap();
+        let Some(registry) = registries.get_mut(track) else {
+            return vec![None; MAX_STEPS];
+        };
+        registry.reconcile(keys)
+    }
+
+    pub fn plock_variant_registry_snapshot(&self, track: usize) -> PlockVariantRegistry {
+        let _ = self.reconcile_plock_variant_registry_for_track(track);
+        self.pattern
+            .plock_variant_registries
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn clear_variant_locks_for_steps(&self, track: usize, steps: &[usize]) -> bool {
+        if track >= self.pattern.instrument_slots.len() {
+            return false;
+        }
+        let mut changed = false;
+        for step in steps.iter().copied().filter(|step| *step < MAX_STEPS) {
+            changed |= self.clear_variant_locks_for_step_inner(track, step);
+        }
+        if changed {
+            let _ = self.reconcile_plock_variant_registry_for_track(track);
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    pub fn stamp_variant_key_to_steps(
+        &self,
+        track: usize,
+        key: &PlockVariantKey,
+        steps: &[usize],
+    ) -> bool {
+        let Some(source_step) = self.find_step_with_variant_key(track, key) else {
+            return false;
+        };
+        self.copy_variant_locks_from_step_to_steps(track, source_step, steps)
+    }
+
+    pub fn copy_variant_locks_from_step_to_steps(
+        &self,
+        track: usize,
+        source_step: usize,
+        steps: &[usize],
+    ) -> bool {
+        if track >= self.pattern.instrument_slots.len() || source_step >= MAX_STEPS {
+            return false;
+        }
+        let mut changed = false;
+        for target_step in steps.iter().copied().filter(|step| *step < MAX_STEPS) {
+            changed |= self.copy_variant_locks_between_steps_inner(track, source_step, target_step);
+        }
+        if changed {
+            let _ = self.reconcile_plock_variant_registry_for_track(track);
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    fn find_step_with_variant_key(&self, track: usize, key: &PlockVariantKey) -> Option<usize> {
+        (0..MAX_STEPS).find(|step| {
+            live_track_variant_key(self, track, *step)
+                .as_ref()
+                .is_some_and(|candidate| candidate == key)
+        })
+    }
+
+    fn clear_variant_locks_for_step_inner(&self, track: usize, step: usize) -> bool {
+        let mut changed = false;
+        for slot in &self.pattern.effect_chains[track] {
+            changed |= clear_live_slot_variant_locks(slot, step);
+        }
+        changed |= clear_live_slot_variant_locks(&self.pattern.instrument_slots[track], step);
+        if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            for slot in &mut rack.slots {
+                changed |= clear_rack_slot_variant_locks(slot, step);
+            }
+        }
+        changed
+    }
+
+    fn copy_variant_locks_between_steps_inner(
+        &self,
+        track: usize,
+        source_step: usize,
+        target_step: usize,
+    ) -> bool {
+        let mut changed = false;
+        for slot in &self.pattern.effect_chains[track] {
+            changed |= copy_live_slot_variant_locks(slot, source_step, target_step);
+        }
+        changed |= copy_live_slot_variant_locks(
+            &self.pattern.instrument_slots[track],
+            source_step,
+            target_step,
+        );
+        if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            for slot in &mut rack.slots {
+                changed |= copy_rack_slot_variant_locks(slot, source_step, target_step);
+            }
+        }
+        changed
+    }
+
     fn set_step_param_inner(&self, track: usize, step: usize, param: StepParam, value: f32) {
         let previous = self.pattern.step_data[track].get(step, param);
         self.pattern.step_data[track].set(step, param, value);
@@ -5364,6 +5558,210 @@ impl SequencerState {
     }
 }
 
+fn option_f32_bits_equal(a: Option<f32>, b: Option<f32>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn f32_slices_bits_equal(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+fn clear_live_slot_variant_locks(slot: &EffectSlotState, step: usize) -> bool {
+    let mut changed = false;
+    let num_params = (slot.num_params.load(Ordering::Relaxed) as usize).min(MAX_SLOT_PARAMS);
+    for param_idx in 0..num_params {
+        if slot.plocks.get(step, param_idx).is_some() {
+            slot.plocks.clear_param(step, param_idx);
+            changed = true;
+        }
+    }
+    for tensor_idx in 0..slot.tensor_params.num_params() {
+        if slot.tensor_params.plock_values(step, tensor_idx).is_some() {
+            slot.tensor_params.clear_plock(step, tensor_idx);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn copy_live_slot_variant_locks(
+    slot: &EffectSlotState,
+    source_step: usize,
+    target_step: usize,
+) -> bool {
+    let mut changed = false;
+    let num_params = (slot.num_params.load(Ordering::Relaxed) as usize).min(MAX_SLOT_PARAMS);
+    for param_idx in 0..num_params {
+        let source = slot.plocks.get(source_step, param_idx);
+        let target = slot.plocks.get(target_step, param_idx);
+        if option_f32_bits_equal(source, target) {
+            continue;
+        }
+        match source {
+            Some(value) => slot.set_plock(target_step, param_idx, value),
+            None => slot.plocks.clear_param(target_step, param_idx),
+        }
+        changed = true;
+    }
+
+    for tensor_idx in 0..slot.tensor_params.num_params() {
+        let source = slot.tensor_params.plock_values(source_step, tensor_idx);
+        let target = slot.tensor_params.plock_values(target_step, tensor_idx);
+        let equal = match (&source, &target) {
+            (Some(source), Some(target)) => f32_slices_bits_equal(source, target),
+            (None, None) => true,
+            _ => false,
+        };
+        if equal {
+            continue;
+        }
+        match source {
+            Some(values) => {
+                slot.tensor_params
+                    .set_plock(target_step, tensor_idx, &values);
+            }
+            None => {
+                slot.tensor_params.clear_plock(target_step, tensor_idx);
+            }
+        }
+        changed = true;
+    }
+    changed
+}
+
+fn clear_rack_slot_variant_locks(slot: &mut RackSlotSnapshot, step: usize) -> bool {
+    let mut changed = false;
+    for param in RackSlotParam::ALL {
+        if slot.param_plocks.get(step, param).is_some() {
+            slot.param_plocks.clear(step, param);
+            changed = true;
+        }
+    }
+    changed |= clear_snapshot_slot_variant_locks(&mut slot.instrument_slot, step);
+    changed
+}
+
+fn copy_rack_slot_variant_locks(
+    slot: &mut RackSlotSnapshot,
+    source_step: usize,
+    target_step: usize,
+) -> bool {
+    let mut changed = false;
+    for param in RackSlotParam::ALL {
+        let source = slot.param_plocks.get(source_step, param);
+        let target = slot.param_plocks.get(target_step, param);
+        if option_f32_bits_equal(source, target) {
+            continue;
+        }
+        match source {
+            Some(value) => {
+                slot.param_plocks.set(target_step, param, value);
+            }
+            None => {
+                slot.param_plocks.clear(target_step, param);
+            }
+        }
+        changed = true;
+    }
+    changed |=
+        copy_snapshot_slot_variant_locks(&mut slot.instrument_slot, source_step, target_step);
+    changed
+}
+
+fn clear_snapshot_slot_variant_locks(slot: &mut EffectSlotSnapshot, step: usize) -> bool {
+    let mut changed = false;
+    let num_params = slot.num_params as usize;
+    let params_to_clear = slot
+        .plocks
+        .get(step)
+        .map(|row| {
+            (0..num_params.min(row.len()))
+                .filter(|param_idx| row[*param_idx].is_some())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for param_idx in params_to_clear {
+        slot.clear_plock(step, param_idx);
+        changed = true;
+    }
+    for tensor_idx in 0..slot.tensor_params.len() {
+        if slot.tensor_plock_values(step, tensor_idx).is_some() {
+            slot.clear_tensor_plock(step, tensor_idx);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn copy_snapshot_slot_variant_locks(
+    slot: &mut EffectSlotSnapshot,
+    source_step: usize,
+    target_step: usize,
+) -> bool {
+    let mut changed = false;
+    let num_params = slot.num_params as usize;
+    for param_idx in 0..num_params {
+        let source = slot
+            .plocks
+            .get(source_step)
+            .and_then(|row| row.get(param_idx))
+            .copied()
+            .flatten();
+        let target = slot
+            .plocks
+            .get(target_step)
+            .and_then(|row| row.get(param_idx))
+            .copied()
+            .flatten();
+        if option_f32_bits_equal(source, target) {
+            continue;
+        }
+        match source {
+            Some(value) => {
+                slot.set_plock(target_step, param_idx, value);
+            }
+            None => {
+                slot.clear_plock(target_step, param_idx);
+            }
+        }
+        changed = true;
+    }
+
+    for tensor_idx in 0..slot.tensor_params.len() {
+        let source = slot
+            .tensor_plock_values(source_step, tensor_idx)
+            .map(|values| values.to_vec());
+        let target = slot
+            .tensor_plock_values(target_step, tensor_idx)
+            .map(|values| values.to_vec());
+        let equal = match (&source, &target) {
+            (Some(source), Some(target)) => f32_slices_bits_equal(source, target),
+            (None, None) => true,
+            _ => false,
+        };
+        if equal {
+            continue;
+        }
+        match source {
+            Some(values) => {
+                slot.set_tensor_plock(target_step, tensor_idx, values);
+            }
+            None => {
+                slot.clear_tensor_plock(target_step, tensor_idx);
+            }
+        }
+        changed = true;
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5533,6 +5931,7 @@ mod tests {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_tracks: vec![None; num_tracks],
+            plock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
         }
     }
 
@@ -6936,6 +7335,7 @@ mod tests {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_tracks: vec![None; 4],
+            plock_variant_registries: vec![PlockVariantRegistry::default(); 4],
         };
         let descriptors = vec![
             vec![EffectDescriptor::builtin_filter()],

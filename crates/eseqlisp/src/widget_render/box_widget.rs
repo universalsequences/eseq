@@ -234,6 +234,8 @@ fn push_rounded_rect(
             itime: viewport.time_seconds,
             uniform_a: [0.0; 4],
             uniform_b: [0.0; 4],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
             color_a: color.to_rgba(),
             color_b: [0.0; 4],
             color_c: [0.0; 4],

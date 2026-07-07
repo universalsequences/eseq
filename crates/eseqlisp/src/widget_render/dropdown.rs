@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    get_f32_prop, resolve_named_color, styled_cell,
+    get_f32_prop, plock_active, plock_color, resolve_named_color, styled_cell,
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_map,
@@ -384,7 +384,15 @@ impl WidgetDefinition for DropdownWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["value", "value-index", "value-index-offset"]
+        &[
+            "value",
+            "value-index",
+            "value-index-offset",
+            "plock-active",
+            "plock-color-r",
+            "plock-color-g",
+            "plock-color-b",
+        ]
     }
 
     fn renders_own_focus(&self) -> bool {
@@ -655,7 +663,13 @@ impl WidgetDefinition for DropdownWidget {
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
         let bg_color = resolve_named_color(&node.props, "bg-color", theme::DROPDOWN_BG());
-        let text_color = resolve_named_color(&node.props, "text-color", theme::DROPDOWN_FG());
+        let plocked = plock_active(&node.props);
+        let plock_color = plock_color(&node.props);
+        let text_color = if plocked {
+            plock_color
+        } else {
+            resolve_named_color(&node.props, "text-color", theme::DROPDOWN_FG())
+        };
         let ring_color = resolve_named_color(&node.props, "ring-color", theme::DROPDOWN_RING());
         let chevron_color =
             resolve_named_color(&node.props, "chevron-color", theme::DROPDOWN_CHEVRON());
@@ -685,10 +699,17 @@ impl WidgetDefinition for DropdownWidget {
         }
 
         // ── Border (only when border-color is set; default is no border) ──
-        if node.props.contains_key("border-color") {
-            let border_color =
-                resolve_named_color(&node.props, "border-color", theme::DROPDOWN_RING());
-            let bw_v = get_f32_prop(&node.props, "border-width", 0.08);
+        if plocked || node.props.contains_key("border-color") {
+            let border_color = if plocked {
+                plock_color
+            } else {
+                resolve_named_color(&node.props, "border-color", theme::DROPDOWN_RING())
+            };
+            let bw_v = get_f32_prop(
+                &node.props,
+                "border-width",
+                if plocked { 0.10 } else { 0.08 },
+            );
             let bw_h = bw_v * viewport.cell_h / viewport.cell_w;
             let border_rect = Rect {
                 row: node.rect.row - bw_v,
@@ -766,6 +787,8 @@ impl WidgetDefinition for DropdownWidget {
                     itime: viewport.time_seconds,
                     uniform_a: [0.0; 4],
                     uniform_b: [0.0; 4],
+                    uniform_c: [0.0; 4],
+                    uniform_d: [0.0; 4],
                     color_a: [
                         chevron_color.r,
                         chevron_color.g,
@@ -993,6 +1016,8 @@ fn emit_rounded_rect(
             itime: viewport.time_seconds,
             uniform_a: [0.0; 4],
             uniform_b: [0.0; 4],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
             color_a: [color.r, color.g, color.b, color.a],
             color_b: [0.0; 4],
             color_c: [0.0; 4],
@@ -1019,6 +1044,8 @@ fn emit_rounded_rect_overlay(rect: Rect, color: Color, radius_px: f32, viewport:
             itime: viewport.time_seconds,
             uniform_a: [0.0; 4],
             uniform_b: [0.0; 4],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
             color_a: [color.r, color.g, color.b, color.a],
             color_b: [0.0; 4],
             color_c: [0.0; 4],

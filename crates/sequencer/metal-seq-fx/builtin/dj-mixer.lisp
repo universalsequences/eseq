@@ -13,7 +13,12 @@
         :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (param-selected-mod-slot-prop fx p)
         :font-size 10.0 :label-font-size 10.0
-        :text-color :fg :label-color :dim
+        :text-color (param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-default (param-plock-default fx p)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :width 5.6 :height 2.65 :knob-size 1.9
         :on-change (lambda (v) (param-set-control-value fx p v))))))
 
@@ -34,6 +39,10 @@
           :active-background-color (if mod-mode (rgba 0.00 0.48 0.95 1.0) (rgba 1.0 0.62 0.25 1.0))
           :color :dim
           :active-color (if mod-mode :white :black)
+          :plock-active (if (param-plock-active? fx p) 1 0)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
           :on-click |x y r|
             (let ((active (builtin-fx-dj-mixer-toggle-active? fx p)))
               (if mod-mode
@@ -45,6 +54,10 @@
     :width 5.6 :height 1.2 :padding 0 :font-size 11.0
     :background-color (if (fx-param-on? p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (fx-param-on? p) :black :dim)
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :on-click |x y r| (fx-toggle-effect-value fx p)))
 
 (def builtin-fx-dj-mixer-div-button (fx p label-text)
@@ -52,6 +65,10 @@
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (= (get p :text-value) label-text) :black :dim)
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
 
 (def builtin-fx-dj-mixer-div-grid (fx p)

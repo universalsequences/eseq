@@ -4,8 +4,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MouseEventOutcome,
-    WidgetDefinition, WidgetEvent, get_f32_prop, label::label_text_row, ndc_bounds,
-    resolve_named_color, styled_cell,
+    WidgetDefinition, WidgetEvent, get_f32_prop, label::label_text_row, ndc_bounds, plock_active,
+    plock_color, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
 use crate::layout::{
@@ -44,6 +44,28 @@ fn prop_text(props: &HashMap<String, Value>) -> String {
         Some(Value::String(text)) => text.clone(),
         Some(value) => crate::vm::format_lisp_value(value),
         None => String::new(),
+    }
+}
+
+fn resolve_h_align(props: &HashMap<String, Value>) -> f32 {
+    match props.get("h-align") {
+        Some(Value::Number(value)) => (*value as f32).clamp(0.0, 1.0),
+        Some(Value::Keyword(value)) | Some(Value::String(value))
+            if value == "left" || value == "start" =>
+        {
+            0.0
+        }
+        Some(Value::Keyword(value)) | Some(Value::String(value))
+            if value == "right" || value == "end" =>
+        {
+            1.0
+        }
+        Some(Value::Keyword(value)) | Some(Value::String(value))
+            if value == "center" || value == "middle" =>
+        {
+            0.5
+        }
+        _ => 0.5,
     }
 }
 
@@ -94,6 +116,9 @@ fn variant_fg(props: &HashMap<String, Value>) -> Color {
 }
 
 fn button_border(props: &HashMap<String, Value>) -> Color {
+    if plock_active(props) {
+        return plock_color(props);
+    }
     resolve_named_color(props, "border-color", theme::BUTTON_BORDER())
 }
 
@@ -111,6 +136,11 @@ fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
             "plus" | "new" => Some(0.0),
             "sampler" => Some(1.0),
             "waveform" => Some(2.0),
+            "piano" | "keys" => Some(3.0),
+            "sliders" | "controls" => Some(4.0),
+            "note-arrow" | "midi-fx" => Some(5.0),
+            "dial" | "preset" | "bookmark" => Some(6.0),
+            "folder" | "project" => Some(7.0),
             _ => None,
         },
         _ => None,
@@ -157,7 +187,44 @@ fn normalized_corner_radius(rect: Rect, viewport: super::WidgetViewport, radius_
 }
 
 #[cfg(target_os = "macos")]
+fn button_icon_rect(rect: Rect) -> Rect {
+    let icon_size = rect.height.min(1.08);
+    Rect {
+        row: rect.row + (rect.height - icon_size).max(0.0) * 0.5,
+        col: rect.col + 0.56,
+        width: icon_size,
+        height: icon_size,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn button_icon_text_inset(rect: Rect) -> f32 {
+    let icon_rect = button_icon_rect(rect);
+    (icon_rect.col - rect.col) + icon_rect.width + 0.42
+}
+
+#[cfg(target_os = "macos")]
 const BUTTON_ICON_SHADER: &str = r#"
+float button_icon_box(float2 p, float2 b)
+{
+    float2 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
+
+float button_icon_round_rect(float2 p, float2 b, float r)
+{
+    float2 q = abs(p) - (b - float2(r));
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+float button_icon_segment(float2 p, float2 a, float2 b)
+{
+    float2 pa = p - a;
+    float2 ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -166,6 +233,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float4 col = in.color_a;
 
     float d = 1.0;
+    float stroke = 0.070;
     if (in.value_t < 0.5) {
         // plus
         float2 bar_v = abs(p) - float2(0.09, 0.38);
@@ -194,11 +262,57 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         }
         float knob = abs(length(p - float2(-0.32, 0.16)) - 0.055) - 0.045;
         d = min(min(body, screen), min(pad, knob));
+    } else if (in.value_t < 2.5) {
+        // waveform: vertical sample bars, clearer than a tiny sine curve.
+        float b0 = button_icon_segment(p, float2(-0.45, -0.16), float2(-0.45, 0.16)) - stroke;
+        float b1 = button_icon_segment(p, float2(-0.25, -0.38), float2(-0.25, 0.38)) - stroke;
+        float b2 = button_icon_segment(p, float2(-0.05, -0.26), float2(-0.05, 0.26)) - stroke;
+        float b3 = button_icon_segment(p, float2(0.15, -0.46), float2(0.15, 0.46)) - stroke;
+        float b4 = button_icon_segment(p, float2(0.35, -0.30), float2(0.35, 0.30)) - stroke;
+        float b5 = button_icon_segment(p, float2(0.52, -0.14), float2(0.52, 0.14)) - stroke;
+        d = min(min(min(b0, b1), min(b2, b3)), min(b4, b5));
+    } else if (in.value_t < 3.5) {
+        // piano keys: simple outline plus two dividers; avoids clutter at source-list size.
+        float body = abs(button_icon_round_rect(p, float2(0.50, 0.34), 0.055)) - stroke;
+        float div_a = button_icon_segment(p, float2(-0.16, -0.31), float2(-0.16, 0.34)) - 0.048;
+        float div_b = button_icon_segment(p, float2(0.18, -0.31), float2(0.18, 0.34)) - 0.048;
+        d = min(body, min(div_a, div_b));
+    } else if (in.value_t < 4.5) {
+        // sliders
+        float a = button_icon_segment(p, float2(-0.52, -0.30), float2(0.52, -0.30)) - stroke;
+        float b = button_icon_segment(p, float2(-0.52, 0.00), float2(0.52, 0.00)) - stroke;
+        float c = button_icon_segment(p, float2(-0.52, 0.30), float2(0.52, 0.30)) - stroke;
+        float ka = length(p - float2(-0.24, -0.30)) - 0.12;
+        float kb = length(p - float2(0.20, 0.00)) - 0.12;
+        float kc = length(p - float2(-0.02, 0.30)) - 0.12;
+        d = min(min(a, b), min(c, min(ka, min(kb, kc))));
+    } else if (in.value_t < 5.5) {
+        // note with a rightward arrow
+        float2 head_p = (p - float2(-0.30, 0.24)) * float2(1.08, 0.92);
+        float head = abs(length(head_p) - 0.16) - 0.052;
+        float stem = button_icon_segment(p, float2(-0.13, 0.21), float2(-0.13, -0.42)) - stroke;
+        float beam = button_icon_segment(p, float2(-0.13, -0.40), float2(0.15, -0.32)) - stroke;
+        float shaft = button_icon_segment(p, float2(0.00, 0.18), float2(0.46, 0.18)) - stroke;
+        float arrow_a = button_icon_segment(p, float2(0.46, 0.18), float2(0.27, 0.00)) - stroke;
+        float arrow_b = button_icon_segment(p, float2(0.46, 0.18), float2(0.27, 0.36)) - stroke;
+        d = min(min(head, stem), min(beam, min(shaft, min(arrow_a, arrow_b))));
+    } else if (in.value_t < 6.5) {
+        // bookmark
+        float left = button_icon_segment(p, float2(-0.34, -0.46), float2(-0.34, 0.46)) - stroke;
+        float right = button_icon_segment(p, float2(0.34, -0.46), float2(0.34, 0.46)) - stroke;
+        float top = button_icon_segment(p, float2(-0.34, -0.46), float2(0.34, -0.46)) - stroke;
+        float fold_a = button_icon_segment(p, float2(-0.34, 0.46), float2(0.00, 0.20)) - stroke;
+        float fold_b = button_icon_segment(p, float2(0.34, 0.46), float2(0.00, 0.20)) - stroke;
+        d = min(min(left, right), min(top, min(fold_a, fold_b)));
     } else {
-        // waveform: a single stroked oscillator curve
-        float x = clamp(p.x, -0.55 * aspect, 0.55 * aspect);
-        float y = 0.28 * sin((x / max(aspect, 0.001) + 0.55) * 10.0);
-        d = length(float2(p.x - x, p.y - y)) - 0.085;
+        // folder
+        float left = button_icon_segment(p, float2(-0.44, -0.16), float2(-0.44, 0.40)) - stroke;
+        float right = button_icon_segment(p, float2(0.50, -0.04), float2(0.50, 0.40)) - stroke;
+        float bottom = button_icon_segment(p, float2(-0.44, 0.40), float2(0.50, 0.40)) - stroke;
+        float tab_top = button_icon_segment(p, float2(-0.44, -0.32), float2(-0.12, -0.32)) - stroke;
+        float tab_side = button_icon_segment(p, float2(-0.12, -0.32), float2(0.02, -0.16)) - stroke;
+        float lip = button_icon_segment(p, float2(-0.44, -0.16), float2(0.46, -0.16)) - stroke;
+        d = min(min(left, right), min(bottom, min(tab_top, min(tab_side, lip))));
     }
 
     float edge = max(fwidth(d), 0.001) * 1.2;
@@ -314,11 +428,17 @@ impl WidgetDefinition for ButtonWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["text", "width", "height", "font-size", "padding"]
+        &["text", "icon", "width", "height", "font-size", "padding"]
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["active"]
+        &[
+            "active",
+            "plock-active",
+            "plock-color-r",
+            "plock-color-g",
+            "plock-color-b",
+        ]
     }
 
     fn measure(
@@ -354,7 +474,12 @@ impl WidgetDefinition for ButtonWidget {
         let col = rect.col.round() as u16;
         let width = rect.width.round() as u16;
         let text_len = text.chars().count() as u16;
-        let start = col + width.saturating_sub(text_len) / 2;
+        let icon_offset = if icon_value(props).is_some() { 2 } else { 0 };
+        let align_width = width.saturating_sub(icon_offset);
+        let align_pad = (align_width.saturating_sub(text_len) as f32 * resolve_h_align(props))
+            .round()
+            .max(0.0) as u16;
+        let start = col + icon_offset + align_pad;
         for i in 0..width {
             buf.set(row, col + i, styled_cell(' ', fg, Some(bg)));
         }
@@ -441,6 +566,7 @@ impl WidgetDefinition for ButtonWidget {
             let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
             let px_w = node.rect.width * viewport.cell_w;
             let px_h = node.rect.height * viewport.cell_h;
+            let corner_radius_px = get_f32_prop(&node.props, "corner-radius", 12.0).max(0.0);
             prims.push(MetalPrimitive::WidgetInstance {
                 widget_type: "button".to_string(),
                 instance: super::WidgetInstance {
@@ -460,11 +586,13 @@ impl WidgetDefinition for ButtonWidget {
                         0.0,
                     ],
                     uniform_b: [0.0; 4],
+                    uniform_c: [0.0; 4],
+                    uniform_d: [0.0; 4],
                     color_a: bg.to_rgba(),
                     color_b: button_border(&node.props).to_rgba(),
                     color_c: button_highlight(&node.props).to_rgba(),
                     color_d: button_shadow(&node.props).to_rgba(),
-                    corner_radius: normalized_corner_radius(node.rect, viewport, 12.0),
+                    corner_radius: normalized_corner_radius(node.rect, viewport, corner_radius_px),
                     pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                 },
                 is_background: true,
@@ -472,13 +600,7 @@ impl WidgetDefinition for ButtonWidget {
         }
 
         if let Some(icon) = icon_value(&node.props) {
-            let icon_size = node.rect.height.min(1.0);
-            let icon_rect = Rect {
-                row: node.rect.row + (node.rect.height - icon_size).max(0.0) * 0.5 - 0.08,
-                col: node.rect.col + 0.47,
-                width: icon_size + 0.16,
-                height: icon_size + 0.16,
-            };
+            let icon_rect = button_icon_rect(node.rect);
             let (ndc_min, ndc_max) = ndc_bounds(icon_rect, viewport);
             let px_w = icon_rect.width * viewport.cell_w;
             let px_h = icon_rect.height * viewport.cell_h;
@@ -492,6 +614,8 @@ impl WidgetDefinition for ButtonWidget {
                     itime: viewport.time_seconds,
                     uniform_a: [0.0; 4],
                     uniform_b: [0.0; 4],
+                    uniform_c: [0.0; 4],
+                    uniform_d: [0.0; 4],
                     color_a: variant_fg(&node.props).to_rgba(),
                     color_b: [0.0; 4],
                     color_c: [0.0; 4],
@@ -507,9 +631,14 @@ impl WidgetDefinition for ButtonWidget {
         if !text.is_empty() {
             let font_size = super::get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
             let has_icon = icon_value(&node.props).is_some();
-            let text_col = node.rect.col + if has_icon { 1.25 } else { 0.0 };
+            let text_inset = if has_icon {
+                button_icon_text_inset(node.rect)
+            } else {
+                0.0
+            };
+            let text_col = node.rect.col + text_inset;
             let align_width = if has_icon {
-                (node.rect.width - 1.35).max(0.0)
+                (node.rect.width - text_inset).max(0.0)
             } else {
                 node.rect.width
             };
@@ -522,7 +651,7 @@ impl WidgetDefinition for ButtonWidget {
                     row: label_text_row(&text_props, node.rect),
                     col: text_col,
                     align_width,
-                    h_align: 0.5,
+                    h_align: resolve_h_align(&node.props),
                     text,
                     font_size,
                     scale: 1.0,
@@ -666,8 +795,25 @@ mod tests {
 
     #[test]
     fn active_is_bindable_but_not_size_affecting() {
-        assert_eq!(BUTTON_WIDGET.bindable_props(), &["active"]);
+        assert_eq!(
+            BUTTON_WIDGET.bindable_props(),
+            &[
+                "active",
+                "plock-active",
+                "plock-color-r",
+                "plock-color-g",
+                "plock-color-b",
+            ]
+        );
         assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"active"));
+    }
+
+    #[test]
+    fn source_list_icon_names_resolve_to_button_icons() {
+        for icon in ["piano", "sliders", "note-arrow", "dial", "folder"] {
+            let props = HashMap::from([("icon".to_string(), Value::Keyword(icon.to_string()))]);
+            assert!(icon_value(&props).is_some(), "{icon} should resolve");
+        }
     }
 
     #[test]
@@ -724,6 +870,62 @@ mod tests {
             .expect("button background");
 
         assert_eq!(instance.uniform_a[0], 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn button_metal_left_aligns_icon_text_when_requested() {
+        let node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Samples".to_string())),
+            ("icon".to_string(), Value::Keyword("waveform".to_string())),
+            ("h-align".to_string(), Value::Keyword("left".to_string())),
+            ("font-size".to_string(), Value::Number(11.0)),
+        ]));
+
+        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let text = prims
+            .iter()
+            .find_map(|prim| match prim {
+                MetalPrimitive::ProportionalText(text) => Some(text),
+                _ => None,
+            })
+            .expect("button should emit text");
+
+        assert_eq!(text.h_align, 0.0);
+        let icon_rect = button_icon_rect(node.rect);
+        assert!(
+            text.col >= icon_rect.col + icon_rect.width + 0.35,
+            "icon text should start after the icon plus a visible gap: icon={icon_rect:?}, text_col={}",
+            text.col
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn button_metal_respects_custom_corner_radius() {
+        let node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Samples".to_string())),
+            (
+                "background-color".to_string(),
+                color_value(1.0, 1.0, 1.0, 0.07),
+            ),
+            ("corner-radius".to_string(), Value::Number(8.0)),
+        ]));
+
+        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let instance = prims
+            .iter()
+            .find_map(|prim| match prim {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    is_background: true,
+                } if widget_type == "button" => Some(instance),
+                _ => None,
+            })
+            .expect("button background");
+
+        assert!((instance.corner_radius - 0.5).abs() < 0.0001);
     }
 
     #[cfg(target_os = "macos")]

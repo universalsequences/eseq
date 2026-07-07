@@ -308,6 +308,8 @@ impl WidgetDefinition for AdsrEditorWidget {
                 itime: viewport.time_seconds,
                 uniform_a: [attack, decay, sustain, release],
                 uniform_b: [hold, 0.0, 0.0, 0.0],
+                uniform_c: [0.0; 4],
+                uniform_d: [0.0; 4],
                 color_a: curve_color.to_rgba(),
                 color_b: bg_color.to_rgba(),
                 color_c: grid_color.to_rgba(),

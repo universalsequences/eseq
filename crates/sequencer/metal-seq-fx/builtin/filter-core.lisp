@@ -91,7 +91,11 @@
     (label label-text :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
     (number-picker :value value
       :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-      :noui true :font-size 9.5 :text-color :dim
+      :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
       :on-change (lambda (v) (param-set-control-value fx p v))
       :width width :height 0.95)))
 
@@ -100,7 +104,11 @@
     (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
     (number-picker :value (fx-param-value-for fx p)
       :min (param-control-min fx p) :max (param-control-max fx p) :decimals decimals
-      :noui true :font-size 9.5 :text-color :fg
+      :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
       :on-change (lambda (v) (param-set-control-value fx p v))
       :width width :height 1.05)))
 
@@ -109,7 +117,11 @@
     (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
     (number-picker :value (fx-param-value-for fx p)
       :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
-      :noui true :font-size 9.5 :text-color :fg
+      :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
       :on-change (lambda (v) (param-set-control-value fx p v))
       :width width :height 1.05)))
 
@@ -119,6 +131,10 @@
     (dropdown :value (get p :text-value)
       :options (get p :options)
       :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
       :width width :height 1.05 :font-size 9.5)))
 
 (def builtin-fx-filter-sync-label (p)
@@ -130,6 +146,10 @@
     (dropdown :value (builtin-fx-filter-sync-label p)
       :options '("free" "sync")
       :on-change (lambda (v) (fx-set-effect-value fx p (if (= v "sync") 1 0)))
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
       :width 4.8 :height 1.05 :font-size 9.5)))
 
 (def builtin-fx-filter-mini-number (fx label-text p)
@@ -138,7 +158,11 @@
       (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
       (number-picker :value (fx-param-value-for fx p)
         :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-        :noui true :font-size 9.5 :text-color :fg
+        :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :on-change (lambda (v) (param-set-control-value fx p v))
         :width 4.6 :height 1.0))))
 
@@ -148,7 +172,11 @@
       (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
       (number-picker :value (builtin-fx-filter-cutoff-value fx p)
         :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-        :noui true :font-size 9.5 :text-color :fg
+        :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :on-change (lambda (v) (param-set-control-value fx p v))
         :width 4.6 :height 1.0))))
 
@@ -157,7 +185,11 @@
     (label "res" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
     (number-picker :value (builtin-fx-filter-resonance-value fx p)
       :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-      :noui true :font-size 9.5 :text-color :fg
+      :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
       :on-change (lambda (v) (param-set-control-value fx p v))
       :width 4.6 :height 1.0)))
 
@@ -167,7 +199,12 @@
       :value (builtin-fx-filter-cutoff-value fx p)
       :min (param-control-min fx p) :max (param-control-max fx p) :decimals 0
       :font-size 9.5 :label-font-size 9.5
-      :text-color :dim :label-color :dim
+      :text-color (param-plock-text-color fx p) :label-color :dim
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-default (param-plock-default fx p)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
       :width 4.65 :height 2.55 :knob-size 1.65
       :on-change (lambda (v) (param-set-control-value fx p v)))))
 
@@ -176,7 +213,12 @@
     :value (builtin-fx-filter-resonance-value fx p)
     :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
     :font-size 9.5 :label-font-size 9.5
-    :text-color :dim :label-color :dim
+    :text-color (param-plock-text-color fx p) :label-color :dim
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-default (param-plock-default fx p)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :width 4.65 :height 2.55 :knob-size 1.65
     :on-change (lambda (v) (param-set-control-value fx p v))))
 
@@ -186,7 +228,11 @@
       (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
       (number-picker :value (fx-param-value-for fx p)
         :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
-        :noui true :font-size 9.5 :text-color :fg
+        :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :on-change (lambda (v) (param-set-control-value fx p v))
         :width 4.6 :height 1.0))))
 
@@ -194,4 +240,8 @@
   (dropdown :value (get p :text-value)
     :options (get p :options)
     :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :width 5.4 :height 1.05 :font-size 9.5))

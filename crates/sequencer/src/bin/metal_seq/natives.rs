@@ -422,6 +422,22 @@ pub(crate) fn init_runtime(
                     build_all_track_duration_spans_value(&state, app),
                 ),
                 (
+                    "track-step-plock-kinds",
+                    build_all_track_step_plock_kinds(&state, app),
+                ),
+                (
+                    "track-step-variant-r",
+                    build_all_track_step_variant_color_channel(&state, app, 0),
+                ),
+                (
+                    "track-step-variant-g",
+                    build_all_track_step_variant_color_channel(&state, app, 1),
+                ),
+                (
+                    "track-step-variant-b",
+                    build_all_track_step_variant_color_channel(&state, app, 2),
+                ),
+                (
                     "steps",
                     if track_count == 0 {
                         Value::List(vec![])
@@ -758,11 +774,51 @@ pub(crate) fn init_runtime(
                     },
                 ),
                 (
+                    "step-plock-kinds",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_step_plock_kinds(&state, 0)
+                    },
+                ),
+                (
+                    "step-variant-r",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_step_variant_color_channel(&state, 0, 0)
+                    },
+                ),
+                (
+                    "step-variant-g",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_step_variant_color_channel(&state, 0, 1)
+                    },
+                ),
+                (
+                    "step-variant-b",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_step_variant_color_channel(&state, 0, 2)
+                    },
+                ),
+                (
                     "track-plocks",
                     if track_count == 0 {
                         Value::List(vec![])
                     } else {
                         build_track_plocks_value(&app, &state, 0, &selected_steps)
+                    },
+                ),
+                (
+                    "track-plock-variants",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_track_plock_variants_value(&state, 0, &selected_steps)
                     },
                 ),
                 ("compiling", Value::Bool(false)),

@@ -41,6 +41,16 @@ fn project_slot_into_synced_snapshot_with_modulator(
     snapshot
 }
 
+fn project_track_effect_slot_into_synced_snapshot(
+    slot: project::ProjectEffectSlot,
+    desc: &EffectDescriptor,
+    live_slot: &crate::effects::EffectSlotState,
+) -> crate::effects::EffectSlotSnapshot {
+    let node_id = live_slot.node_id.load(Ordering::Relaxed);
+    let modulator_node_id = live_slot.modulator_node_id.load(Ordering::Relaxed);
+    project_slot_into_synced_snapshot_with_modulator(slot, desc, node_id, modulator_node_id)
+}
+
 fn project_midi_fx_slot_into_synced_snapshot(
     slot: project::ProjectEffectSlot,
     fx_name: Option<&str>,
@@ -2253,6 +2263,7 @@ impl App {
             sample_paths: _,
             sample_names: _,
             rack_tracks,
+            plock_variant_registries,
         } = pattern;
         let bus_patterns = bus_patterns
             .into_iter()
@@ -2283,17 +2294,21 @@ impl App {
                         .into_iter()
                         .enumerate()
                         .map(|(slot_idx, slot)| {
-                            let node_id = self.state.pattern.effect_chains[track_idx][slot_idx]
-                                .node_id
-                                .load(Ordering::Relaxed);
                             if let Some(desc) = self
                                 .graph
                                 .effect_descriptors
                                 .get(track_idx)
                                 .and_then(|descs| descs.get(slot_idx))
                             {
-                                project_slot_into_synced_snapshot(slot, desc, node_id)
+                                project_track_effect_slot_into_synced_snapshot(
+                                    slot,
+                                    desc,
+                                    &self.state.pattern.effect_chains[track_idx][slot_idx],
+                                )
                             } else {
+                                let node_id = self.state.pattern.effect_chains[track_idx][slot_idx]
+                                    .node_id
+                                    .load(Ordering::Relaxed);
                                 slot.into_snapshot_with_node_id(node_id)
                             }
                         })
@@ -2493,6 +2508,7 @@ impl App {
             neural_networks,
             graph_overrides,
             rack_tracks: self.rebind_project_rack_tracks_to_graph(rack_tracks, num_tracks),
+            plock_variant_registries,
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
         refresh_neural_output_override_param_ids(&mut snapshot);
@@ -2629,6 +2645,58 @@ mod tests {
         assert_eq!(restored.defaults[1], 1.0);
         assert_eq!(restored.param_node_indices, vec![0, 1]);
         assert_eq!(restored.param_node_spans, vec![1, 1]);
+    }
+
+    #[test]
+    fn project_restore_preserves_track_effect_modulator_node_id() {
+        let desc = EffectDescriptor::builtin_filter();
+        let mut saved_slot = default_project_effect_slot(&desc);
+        let source_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "mod1_source")
+            .expect("filter should expose Mod 1 source");
+        let depth_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "mod cutoff slot 1 amt")
+            .expect("filter should expose Mod 1 cutoff depth");
+        saved_slot.defaults[source_idx] = 5.0;
+        saved_slot.defaults[depth_idx] = -2.0;
+
+        let live_slot = crate::effects::EffectSlotState::new(&desc, 101);
+        live_slot.apply_descriptor_with_modulator(&desc, 101, 202);
+
+        let restored =
+            project_track_effect_slot_into_synced_snapshot(saved_slot, &desc, &live_slot);
+
+        assert_eq!(restored.node_id, 101);
+        assert_eq!(restored.modulator_node_id, 202);
+        assert_eq!(restored.defaults[source_idx], 5.0);
+        assert_eq!(restored.defaults[depth_idx], -2.0);
+        assert_eq!(
+            ParamNodeId::from_slot_param(
+                restored.node_id,
+                restored.modulator_node_id,
+                restored.param_node_indices[source_idx],
+            ),
+            Some(ParamNodeId {
+                logical_id: 202,
+                node_param_idx: restored.param_node_indices[source_idx]
+                    - crate::voice_modulator::MOD_PARAM_BASE,
+            })
+        );
+        assert_eq!(
+            ParamNodeId::from_slot_param(
+                restored.node_id,
+                restored.modulator_node_id,
+                restored.param_node_indices[depth_idx],
+            ),
+            Some(ParamNodeId {
+                logical_id: 101,
+                node_param_idx: restored.param_node_indices[depth_idx],
+            })
+        );
     }
 
     fn test_slot_snapshot(
@@ -2822,6 +2890,7 @@ mod tests {
                 sample_paths: Vec::new(),
                 sample_names: Vec::new(),
                 rack_tracks: Vec::new(),
+                plock_variant_registries: Vec::new(),
             }],
         }
     }

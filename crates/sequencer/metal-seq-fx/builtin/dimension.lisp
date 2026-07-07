@@ -24,7 +24,12 @@
         :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color :fg :label-color :dim
+        :text-color (param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-default (param-plock-default fx p)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :width 4.35 :height 2.45 :knob-size 1.85
         :on-change (lambda (v) (param-set-control-value fx p v))))))
 
@@ -35,6 +40,10 @@
     :width 1.95 :height 1.55 :padding 0 :font-size 9.5
     :background-color (if (> (get p :value) 0.5) (dimension-cream) :mixer-control-bg)
     :color (if (> (get p :value) 0.5) :black :dim)
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :on-click |x y r| (fx-toggle-effect-value fx p)))
 
 (def builtin-fx-dimension-off-button (fx b1 b2 b3 b4)
@@ -69,6 +78,10 @@
     :width 4.4 :height 0.95 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (dimension-cream) :mixer-control-bg)
     :color (if (= (get p :text-value) label-text) :black :dim)
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
 
 (def builtin-fx-dimension-character-box (fx color-p shape-p)

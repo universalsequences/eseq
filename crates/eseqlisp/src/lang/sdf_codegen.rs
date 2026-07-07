@@ -1081,7 +1081,12 @@ fn uniform_layout(state_symbols: &[String]) -> HashMap<String, String> {
 
 fn emit_uniform_declarations(shader: &mut String, state_symbols: &[String]) {
     for (idx, name) in state_symbols.iter().enumerate() {
-        let register = if idx < 4 { "uniform_a" } else { "uniform_b" };
+        let register = match idx / 4 {
+            0 => "uniform_a",
+            1 => "uniform_b",
+            2 => "uniform_c",
+            _ => "uniform_d",
+        };
         let component = match idx % 4 {
             0 => "x",
             1 => "y",
@@ -1798,6 +1803,23 @@ mod tests {
             output
                 .shader_source
                 .contains("length(float2(x, y)) - sdf_state_val")
+        );
+    }
+
+    #[test]
+    fn captured_state_symbols_use_extended_uniform_slots() {
+        let expr = expand_sdf("(sdf/layer (sdf/fill (sdf/circle s15) :accent))");
+        let symbols = (0..16).map(|idx| format!("s{idx}")).collect::<Vec<_>>();
+        let output = compile_sdf_to_metal_with_state(&expr, &symbols).unwrap();
+        assert!(
+            output
+                .shader_source
+                .contains("float sdf_state_s8 = in.uniform_c.x;")
+        );
+        assert!(
+            output
+                .shader_source
+                .contains("float sdf_state_s15 = in.uniform_d.w;")
         );
     }
 

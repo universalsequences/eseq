@@ -14,7 +14,9 @@
        (< selected-bus (len SEQ.bus-effects))))
 
 (def fx-delete-selected-effect ()
-  (seq-delete-active-target))
+  (if (fx-plock-row-selected?)
+    (fx-delete-selected-plock-row)
+    (seq-delete-active-target)))
 
 (defwidget fx-panel-bg
   :width 1 :height 1

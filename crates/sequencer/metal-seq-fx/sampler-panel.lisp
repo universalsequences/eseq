@@ -90,7 +90,12 @@
         :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
         :selected-mod-slot (instrument-selected-mod-slot-prop p)
         :font-size 10.5 :label-font-size 10
-        :text-color :dim :label-color :dim
+        :text-color (param-plock-text-color false p) :label-color :dim
+        :plock-active (if (param-plock-active? false p) 1 0)
+        :plock-default (param-plock-default false p)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :width 4.7 :height 2.05
         :knob-size 2.5
         :on-change (lambda (v) (instrument-set-param-control-value p v))))))
@@ -106,7 +111,11 @@
           :noui true
           :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 1
           :font-size 10.5
-          :text-color :dim :edit-color :yellow
+          :text-color (param-plock-text-color false p) :edit-color :yellow
+          :plock-active (if (param-plock-active? false p) 1 0)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
           :text-align :left
           :width 4.0 :height 1.0
           :on-change (lambda (v) (instrument-set-param-control-value p v)))))))
@@ -119,6 +128,10 @@
         :width 3.2 :height 1.5 :padding 0 :font-size 10
         :background-color (if (fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
         :color (if (fx-param-on? p) :black :dim)
+        :plock-active (if (param-plock-active? false p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :on-click |x y r| (fx-set-instrument-value p (if (fx-param-on? p) 0 1))))))
 
 (def sampler-param-dropdown (p key)
@@ -134,6 +147,10 @@
         ;:badge-color (rgba 0.16 0.17 0.20 1.0)
         :border-color :gray
         :border-width 0.05  
+        :plock-active (if (param-plock-active? false p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :on-change (lambda (v) (fx-set-instrument-option p v))
         :width 5.8 :height 1.0 :font-size 9))))
 
@@ -217,7 +234,12 @@
           :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
           :selected-mod-slot (instrument-selected-mod-slot-prop p)
           :font-size 10.5 :label-font-size 10
-          :text-color :dim :label-color :dim
+          :text-color (param-plock-text-color false p) :label-color :dim
+          :plock-active (if (param-plock-active? false p) 1 0)
+          :plock-default (param-plock-default false p)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
           :width 4.0 :height 2.05
           :knob-size 3.0
           :on-change (lambda (v) (instrument-set-param-control-value p v)))))

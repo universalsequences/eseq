@@ -65,57 +65,207 @@
             :label label))))
 
 (def fx-plock-clear (p)
+  (host-command "clear-track-plock-entry"
+    (dict :target (get p :target)
+          :step-idx (get p :step-idx)
+          :slot-idx (get p :slot-idx)
+          :param-idx (get p :param-idx)
+          :target-track (get p :target-track)
+          :network-id (get p :network-id)
+          :neuron-idx (get p :neuron-idx))))
+
+(defstate fx-selected-plock-row -1)
+
+(def fx-plock-param-col-width 6.45)
+(def fx-plock-lock-col-width 6.35)
+(def fx-plock-def-col-width 4.25)
+(def fx-plock-col-gap 0.22)
+
+(def fx-plock-row-selected? ()
+  (and (>= fx-selected-plock-row 0)
+       (< fx-selected-plock-row (len SEQ.track-plocks))))
+
+(def fx-selected-plock-row-preview? ()
+  (and (fx-plock-row-selected?)
+       (get (nth SEQ.track-plocks fx-selected-plock-row) :preview)))
+
+(def fx-delete-selected-plock-row ()
+  (if (fx-plock-row-selected?)
+    (if (fx-selected-plock-row-preview?)
+      (set! fx-selected-plock-row -1)
+      (let ((idx fx-selected-plock-row)
+            (next-count (- (len SEQ.track-plocks) 1)))
+        (do
+          (fx-plock-clear (nth SEQ.track-plocks idx))
+          (set! fx-selected-plock-row
+            (if (<= next-count 0)
+              -1
+              (min idx (- next-count 1)))))))
+    nil))
+
+(def fx-plock-chip-color (chip)
+  (rgba (get chip :color-r) (get chip :color-g) (get chip :color-b) 1.0))
+
+(def fx-plock-chip-label (chip)
+  (if (get chip :display)
+    (substring (get chip :display) 0 6)
+    (get chip :label)))
+
+(def fx-plock-chip-click (chip)
   (do
     (cool-off-follow)
-    (host-command "clear-track-plock-entry"
-      (dict :target (get p :target)
-            :step-idx (get p :step-idx)
-            :slot-idx (get p :slot-idx)
-            :param-idx (get p :param-idx)
-            :target-track (get p :target-track)
-            :network-id (get p :network-id)
-            :neuron-idx (get p :neuron-idx)))))
+    (set! fx-selected-plock-row -1)
+    (if (seq-has-selection?)
+      (host-command "stamp-plock-variant"
+        (dict :label (get chip :label)
+              :step (current-step)))
+      (host-command "preview-plock-variant"
+        (dict :label (get chip :label))))))
+
+(def fx-plock-chip (chip)
+  (let ((current (get chip :current))
+      (def-chip (= (get chip :kind) "def"))
+      (c (fx-plock-chip-color chip)))
+    (box :key (str "track-plock-chip-" (get chip :kind) "-" (get chip :label))
+      :height 1.12
+      :align :baseline
+      :padding 0.14
+      :background-color (if current
+        (rgba (get chip :color-r) (get chip :color-g) (get chip :color-b) 0.11)
+        (rgba 1 1 1 0.025))
+      :border-width (if current 0.75 0.35)
+      :border-color (if current c (rgba 1 1 1 0.10))
+      :corner-radius 5
+      :on-click |x y r| (fx-plock-chip-click chip)
+      (h-stack :gap 0.16 :align :baseline
+        (box :width 0.18 :height 0.68
+          :corner-radius 2
+          :background-color (if def-chip :transparent c)
+          :border-width (if def-chip 1 0)
+          :border-color c)
+        (label (fx-plock-chip-label chip)
+          :font-size 8.6 :color (if current :black :dim) :bg :transparent)
+        (label (str (get chip :count))
+          :font-size 8.6 :color (if current :black :dark-gray) :bg :transparent)))))
+
+(def fx-plock-domain-title (domain)
+  (if (= domain "inst")
+    "INST"
+    (if (= domain "seq")
+      "SEQ"
+      (if (= domain "fx")
+        "FX"
+        "NEURAL"))))
+
+(def fx-plock-domain-count (domain)
+  (len (filter |p| (= (fx-plock-row-domain p) domain) SEQ.track-plocks)))
+
+(def fx-plock-row-domain (p)
+  (if (get p :domain)
+    (get p :domain)
+    (if (or (= (get p :target) "neural-instrument")
+            (= (get p :target) "neural-effect"))
+      "neural"
+      (if (or (= (get p :target) "instrument")
+              (= (get p :target) "rack-slot-param")
+              (= (get p :target) "rack-slot-instrument"))
+        "inst"
+        (if (= (get p :target) "effect")
+          "fx"
+          "seq")))))
+
+(def fx-plock-row-title (p)
+  (if (= (get p :source) "neuron")
+    (str (get p :label) " " (get p :name))
+    (get p :name)))
+
+(def fx-plock-row-key (idx suffix)
+  (str "track-plock-row-" idx "-" suffix))
+
+(def fx-plock-group-header (domain)
+  (box :height 0.95
+    (h-stack :gap 0.35 :align :center
+      (label (fx-plock-domain-title domain)
+        :font-size 8.5 :color :dim :bg :transparent :width 4.5)
+      (box :height 0.05 :width :fill :background-color (rgba 1 1 1 0.10)))))
 
 (def fx-plock-row (p idx)
   (subtree :key (str "track-plock-" idx "-" (get p :target) "-" (get p :step-idx) "-"
-                     (get p :slot-idx) "-" (get p :param-idx))
-    (box :height 1.28
-      (h-stack :gap 0.35 :align :center
-        (label (get p :label) :font-size 9 :width 2.2 :color :yellow :bg :transparent)
-        (label (substring (get p :group) 0 8) :font-size 9 :width 5.6 :color :dim :bg :transparent)
-        (label (substring (get p :name) 0 9) :font-size 10 :width 5.9 :color :white :bg :transparent)
-        (if (= (get p :source) "neuron")
+      (get p :slot-idx) "-" (get p :param-idx))
+    (box :width :fill
+      :height 1.14
+      :align :baseline
+      :padding 0.07
+      :background-color (if (= fx-selected-plock-row idx)
+        (rgba 0.27 0.78 0.86 0.18)
+        (if (= (mod idx 2) 0) (rgba 1 1 1 0.025) :transparent))
+      :border-width (if (= fx-selected-plock-row idx) 1 0)
+      :border-color (rgba 0.27 0.78 0.86 0.55)
+      :corner-radius 2
+      :on-click |x y r| (set! fx-selected-plock-row idx)
+      (h-stack :width :fill :gap fx-plock-col-gap :align :baseline
+        (label (substring (fx-plock-row-title p) 0 12)
+          :key (fx-plock-row-key idx "param")
+          :font-size 9.2 :width fx-plock-param-col-width
+          :color (if (= fx-selected-plock-row idx) :white :dim)
+          :bg :transparent)
+        (if (or (= (get p :source) "neuron") (get p :preview))
           (label (if (get p :text-value) (get p :text-value) (str (get p :value)))
-            :font-size 10 :width 5.2 :color :dim :bg :transparent)
+            :key (fx-plock-row-key idx "lock")
+            :font-size 9.2 :width fx-plock-lock-col-width
+            :h-align :right :color :yellow :bg :transparent)
           (if (get p :options)
             (dropdown :value (get p :text-value)
               :options (get p :options)
+              :key (fx-plock-row-key idx "lock")
               :on-change (lambda (v) (fx-plock-set-option p v))
-              :width 5.2 :height 1.1 :font-size 9)
+              :width fx-plock-lock-col-width :height 0.98 :font-size 8.4)
             (number-picker :value (get p :value)
               :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
-              :noui true :font-size 10 :text-color :dim
+              :key (fx-plock-row-key idx "lock")
+              :noui true :font-size 9.2 :text-color :yellow :text-align :right
               :on-change (lambda (v) (fx-plock-set-value p v))
-              :width 4.5 :height 1.05)))
-        (button "x"
-          :width 1.35 :height 1.05 :padding 0 :font-size 9
-          :background-color :dark-gray :color :dim
-          :on-click |x y r| (fx-plock-clear p))))))
+              :width fx-plock-lock-col-width :height 1.0)))
+        (label (if (get p :default-text) (get p :default-text) (str (get p :default)))
+          :key (fx-plock-row-key idx "def")
+          :font-size 9.2 :width fx-plock-def-col-width
+          :h-align :right :color :dark-gray :bg :transparent)))))
+
+(def fx-plock-group (domain)
+  (if (> (fx-plock-domain-count domain) 0)
+    (v-stack :gap 0.12
+      (fx-plock-group-header domain)
+      (each SEQ.track-plocks |p idx|
+        (if (= (fx-plock-row-domain p) domain)
+          (fx-plock-row p idx)
+          (box :height 0))))
+    (box :height 0)))
 
 (def fx-track-plocks-panel ()
-  (box :debug-name "track-plocks-panel" :padding 0.75
-    (v-stack :gap 0.35
-      (h-stack :gap 0.35 :align :baseline
-        (label "p-locks" :font-size 10 :color :white :bg :transparent)
-        (label (str (len SEQ.track-plocks))
-          :font-size 8 :color :dim :bg :transparent))
+  (box :debug-name "track-plocks-panel" :padding 0.72
+    (v-stack :gap 0.30
+      (wrap :key "track-plock-variant-strip"
+            :width :fill :gap 0.18 :row-gap 0.14 :align :start
+        (each SEQ.track-plock-variants |chip idx|
+          (fx-plock-chip chip)))
       (if (> (len SEQ.track-plocks) 0)
-        (v-stack :gap 0.2
-          (each SEQ.track-plocks |p idx|
-            (fx-plock-row p idx)))
+        (v-stack :key "track-plock-table" :width :fill :gap 0.1
+          (h-stack :key "track-plock-table-header" :width :fill :gap fx-plock-col-gap
+            (label "PARAM" :key "track-plock-header-param"
+              :font-size 8.2 :width fx-plock-param-col-width :color :dark-gray :bg :transparent)
+            (label "LOCK" :key "track-plock-header-lock"
+              :font-size 8.2 :width fx-plock-lock-col-width :h-align :right
+              :color :dark-gray :bg :transparent)
+            (label "DEF" :key "track-plock-header-def"
+              :font-size 8.2 :width fx-plock-def-col-width :h-align :right
+              :color :dark-gray :bg :transparent))
+          (fx-plock-group "inst")
+          (fx-plock-group "seq")
+          (fx-plock-group "fx")
+          (fx-plock-group "neural"))
         (label (if (> (len SEQ.selected-neural-neurons) 0)
                  "no p-locks for selected neurons"
-                 "no p-locks for selected steps")
+                 "No locks")
           :font-size 9 :color :dim :bg :transparent)))))
 
 (def fx-step-selected-count ()

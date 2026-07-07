@@ -65,6 +65,10 @@
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
     :background-color (if (> (get p :value) 0.5) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (> (get p :value) 0.5) :black :dim)
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :on-click |x y r| (fx-toggle-effect-value fx p)))
 
 (def builtin-fx-str8-delay-div-button (fx p label-text)
@@ -72,6 +76,10 @@
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (= (get p :text-value) label-text) :black :dim)
+    :plock-active (if (param-plock-active? fx p) 1 0)
+    :plock-color-r (param-plock-color-r)
+    :plock-color-g (param-plock-color-g)
+    :plock-color-b (param-plock-color-b)
     :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
 
 (def builtin-fx-str8-delay-div-grid (fx p)
@@ -120,7 +128,12 @@
         :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color :fg :label-color :dim
+        :text-color (param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-default (param-plock-default fx p)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :width 4.35 :height 2.45 :knob-size 1.55
         :on-change (lambda (v) (param-set-control-value fx p v))))))
 
@@ -138,7 +151,12 @@
         :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color :fg :label-color :dim
+        :text-color (param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-default (param-plock-default fx p)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
         :width 4.35 :height 2.45 :knob-size 1.55
         :on-change (lambda (v) (param-set-control-value fx p v))))))
 

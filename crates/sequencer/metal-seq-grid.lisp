@@ -450,16 +450,16 @@
     (list :cols :gap 1
       0.333 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
       0.334 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
-      0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
+      0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13))
     (if samples-sidebar-visible
       (list :cols :gap 1
         0.5 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
-        0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
+        0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13))
       (if mixer-panel-visible
         (list :cols :gap 1
           0.5 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
           0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
-        (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13)))))
+        (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13)))))
 
 (def seq-instrument-patcher-layout-spec (patcher-buffer)
   (list :rows :gap 1
@@ -919,6 +919,123 @@
 
 (def param-decimals ()
   (if (= param-mode 3) 0 2))
+
+(def seqv-track-list (lists track)
+  (if (< track (len lists))
+    (nth lists track)
+    '()))
+
+(def seqv-current-param-values (mode)
+  (if (= mode 0) SEQ.velocities
+    (if (= mode 1) SEQ.durations
+      (if (= mode 2) SEQ.auxas
+        (if (= mode 3) SEQ.transposes
+          (if (= mode 4) SEQ.pans
+            (if (= mode 5) SEQ.syncs
+              SEQ.delays)))))))
+
+(def seqv-track-param-values (track mode)
+  (if (= mode 0) (seqv-track-list SEQ.track-velocities track)
+    (if (= mode 1) (seqv-track-list SEQ.track-durations track)
+      (if (= mode 2) (seqv-track-list SEQ.track-auxas track)
+        (if (= mode 3) (seqv-track-list SEQ.track-transposes track)
+          (if (= mode 4) (seqv-track-list SEQ.track-pans track)
+            (if (= mode 5) (seqv-track-list SEQ.track-syncs track)
+              (seqv-track-list SEQ.track-delays track))))))))
+
+(def seqv-param-values (track mode)
+  (if (= track SEQ.current-track)
+    (seqv-current-param-values mode)
+    (seqv-track-param-values track mode)))
+
+(def seqv-param-value-at (track mode step)
+  (let ((values (seqv-param-values track mode)))
+    (if (< step (len values))
+      (nth values step)
+      0)))
+
+(def seqv-param-min (mode)
+  (if (= mode 0) 0
+    (if (= mode 1) 0
+      (if (= mode 2) 0
+        (if (= mode 3) -12
+          (if (= mode 4) -1
+            0))))))
+
+(def seqv-param-max (mode)
+  (if (= mode 0) 1
+    (if (= mode 1) 32
+      (if (= mode 2) 16
+        (if (= mode 3) 12
+          (if (= mode 4) 1
+            (if (= mode 5) (- (len SEQ.sync-labels) 1)
+              1)))))))
+
+(def seqv-param-slider-min (mode)
+  (if (= mode 1) 0 (seqv-param-min mode)))
+
+(def seqv-param-slider-max (mode)
+  (if (= mode 1) 1 (seqv-param-max mode)))
+
+(def seqv-param-slider-value (track mode step)
+  (if (= mode 1)
+    (duration-slider-position (seqv-param-value-at track mode step))
+    (seqv-param-value-at track mode step)))
+
+(def seqv-param-haptic-pivot-position (mode)
+  (if (= mode 1) 0.5 1))
+
+(def seqv-param-haptic-pivot-value (mode)
+  (if (= mode 1) 2 (seqv-param-max mode)))
+
+(def seqv-param-haptic-exponent (mode)
+  (if (= mode 1) 4 1))
+
+(def seqv-param-keyword (mode)
+  (if (= mode 0) :velocity
+    (if (= mode 1) :duration
+      (if (= mode 2) :aux-a
+        (if (= mode 3) :transpose
+          (if (= mode 4) :pan
+            (if (= mode 5) :sync
+              :delay)))))))
+
+(def seqv-param-color (mode)
+  (if (= mode 0) :blue
+    (if (= mode 1) :green
+      (if (= mode 2) :magenta
+        (if (= mode 3) :yellow
+          (if (= mode 4) :red
+            (if (= mode 5) :green
+              :cyan)))))))
+
+(def seqv-param-name (mode)
+  (if (= mode 0) "Velocity"
+    (if (= mode 1) "Duration"
+      (if (= mode 2) "Aux A"
+        (if (= mode 3) "Transpose"
+          (if (= mode 4) "Pan"
+            (if (= mode 5) "Sync"
+              "Delay")))))))
+
+(def seqv-param-origin (mode)
+  (if (= mode 3) 0
+    (if (= mode 4) 0
+      (if (= mode 5) 0
+        (seqv-param-min mode)))))
+
+(def seqv-param-decimals (mode)
+  (if (= mode 3) 0 2))
+
+(def seqv-step-param-value (mode value)
+  (if (= mode 3)
+    (round value)
+    value))
+
+(def seqv-step-slider-param-value (mode value)
+  (if (= mode 1)
+    (duration-slider-value value)
+    (seqv-step-param-value mode value)))
 
 (def seq-grid-handle-key (key text)
   (if (= (current-buffer-name) "*sequencer*")
