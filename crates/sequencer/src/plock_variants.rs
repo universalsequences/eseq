@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 
-use crate::effects::{EffectSlotSnapshot, EffectSlotState, MAX_SLOT_PARAMS};
+use crate::effects::{EffectSlotSnapshot, EffectSlotState, MAX_MIDI_NOTES, MAX_SLOT_PARAMS};
 use crate::sequencer::{RackSlotParam, RackSlotSnapshot, SequencerState, StepParam, MAX_STEPS};
 
 pub const VARIANT_PALETTE: [[f32; 3]; 6] = [
@@ -24,6 +24,7 @@ pub enum PlockVariantDomain {
     RackSlotParam,
     RackSlotInstrument,
     RackSlotInstrumentTensor,
+    InstrumentKeyLock,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -275,6 +276,45 @@ pub fn live_track_variant_key(
         for (slot_idx, slot) in rack.slots.iter().enumerate() {
             collect_rack_slot_entries(&mut entries, slot, step, slot_idx);
         }
+    }
+
+    PlockVariantKey::new(entries)
+}
+
+pub fn live_track_key_lock_variant_keys(
+    state: &SequencerState,
+    track: usize,
+) -> Vec<Option<PlockVariantKey>> {
+    (0..MAX_MIDI_NOTES)
+        .map(|note| live_track_key_lock_variant_key(state, track, note as u8))
+        .collect()
+}
+
+pub fn live_track_key_lock_variant_key(
+    state: &SequencerState,
+    track: usize,
+    note: u8,
+) -> Option<PlockVariantKey> {
+    let slot = state.pattern.instrument_slots.get(track)?;
+    let mut entries = Vec::new();
+    let num_params = (slot.num_params.load(Ordering::Relaxed) as usize).min(MAX_SLOT_PARAMS);
+    if !slot.key_locks.note_has_any_lock(note, num_params) {
+        return None;
+    }
+    for param_idx in 0..num_params {
+        let Some(value) = slot.key_locks.get(note, param_idx) else {
+            continue;
+        };
+        if slot.key_locks.get_id(note, param_idx) != slot.param_node_id(param_idx) {
+            continue;
+        }
+        entries.push(PlockVariantEntry {
+            domain: PlockVariantDomain::InstrumentKeyLock,
+            slot: 0,
+            param: param_idx,
+            cell: None,
+            value_bits: value.to_bits(),
+        });
     }
 
     PlockVariantKey::new(entries)

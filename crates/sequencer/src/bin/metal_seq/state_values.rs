@@ -6025,6 +6025,7 @@ pub(crate) fn build_instrument_panel_value(
         value_field: Option<String>,
         mod_targets: Option<&Vec<UiModMetadata>>,
         ui_metadata: Option<&sequencer::effects::ParamUiMetadata>,
+        key_locks: &[(u8, f32)],
     ) {
         let is_boolean_name = name == "enabled" || name == "sync";
         let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -6081,6 +6082,27 @@ pub(crate) fn build_instrument_panel_value(
         }
         if let Some(value_field) = value_field {
             insert_string_prop(&mut pmap, "value-field", value_field);
+        }
+        if !key_locks.is_empty() {
+            let rows = key_locks
+                .iter()
+                .map(|(note, value)| {
+                    let mut row = HashMap::new();
+                    row.insert(
+                        "note".to_string(),
+                        Rc::new(RefCell::new(Value::Number(*note as f64))),
+                    );
+                    row.insert(
+                        "value".to_string(),
+                        Rc::new(RefCell::new(Value::Number(*value as f64))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(row)))
+                })
+                .collect();
+            pmap.insert(
+                "key-locks".to_string(),
+                Rc::new(RefCell::new(Value::List(rows))),
+            );
         }
         if let Some(targets) = mod_targets {
             pmap.insert(
@@ -6168,6 +6190,126 @@ pub(crate) fn build_instrument_panel_value(
     }
 
     let source_actual = selected_voice_mod_source_indices(desc, slot, plock_step);
+    let slot_num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    let mut key_locks_by_param = vec![Vec::<(u8, f32)>::new(); desc.params.len()];
+    for note in 0..sequencer::effects::MAX_MIDI_NOTES {
+        let note = note as u8;
+        if !slot.key_locks.note_has_any_lock(note, slot_num_params) {
+            continue;
+        }
+        for (param_idx, pdesc) in desc.params.iter().enumerate().take(slot_num_params) {
+            let Some(value) = slot.key_locks.get(note, param_idx) else {
+                continue;
+            };
+            if slot.key_locks.get_id(note, param_idx) != slot.param_node_id(param_idx) {
+                continue;
+            }
+            if let Some(rows) = key_locks_by_param.get_mut(param_idx) {
+                rows.push((note, pdesc.stored_to_user(value)));
+            }
+        }
+    }
+    let key_lock_assignments = app
+        .state
+        .reconcile_key_lock_variant_registry_for_track(track);
+    let key_lock_note_variants = key_lock_assignments
+        .iter()
+        .enumerate()
+        .filter_map(|(note, assignment)| {
+            let assignment = assignment.as_ref()?;
+            let mut map = HashMap::new();
+            map.insert(
+                "note".to_string(),
+                Rc::new(RefCell::new(Value::Number(note as f64))),
+            );
+            map.insert(
+                "label".to_string(),
+                Rc::new(RefCell::new(Value::String(assignment.label.clone()))),
+            );
+            map.insert(
+                "count".to_string(),
+                Rc::new(RefCell::new(Value::Number(assignment.param_count as f64))),
+            );
+            map.insert(
+                "color-r".to_string(),
+                Rc::new(RefCell::new(Value::Number(assignment.color[0] as f64))),
+            );
+            map.insert(
+                "color-g".to_string(),
+                Rc::new(RefCell::new(Value::Number(assignment.color[1] as f64))),
+            );
+            map.insert(
+                "color-b".to_string(),
+                Rc::new(RefCell::new(Value::Number(assignment.color[2] as f64))),
+            );
+            Some(Rc::new(RefCell::new(Value::Map(map))))
+        })
+        .collect::<Vec<_>>();
+    let mut key_lock_variant_items = Vec::new();
+    let mut def_map = HashMap::new();
+    def_map.insert(
+        "kind".to_string(),
+        Rc::new(RefCell::new(Value::String("def".to_string()))),
+    );
+    def_map.insert(
+        "label".to_string(),
+        Rc::new(RefCell::new(Value::String("def".to_string()))),
+    );
+    def_map.insert(
+        "display".to_string(),
+        Rc::new(RefCell::new(Value::String("def".to_string()))),
+    );
+    def_map.insert(
+        "count".to_string(),
+        Rc::new(RefCell::new(Value::Number(0.0))),
+    );
+    def_map.insert(
+        "color-r".to_string(),
+        Rc::new(RefCell::new(Value::Number(0.545_098_07))),
+    );
+    def_map.insert(
+        "color-g".to_string(),
+        Rc::new(RefCell::new(Value::Number(0.545_098_07))),
+    );
+    def_map.insert(
+        "color-b".to_string(),
+        Rc::new(RefCell::new(Value::Number(0.588_235_3))),
+    );
+    key_lock_variant_items.push(Rc::new(RefCell::new(Value::Map(def_map))));
+    for entry in app.state.key_lock_variant_registry_snapshot(track).entries {
+        let mut map = HashMap::new();
+        map.insert(
+            "kind".to_string(),
+            Rc::new(RefCell::new(Value::String("variant".to_string()))),
+        );
+        map.insert(
+            "label".to_string(),
+            Rc::new(RefCell::new(Value::String(entry.label.clone()))),
+        );
+        map.insert(
+            "display".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                entry.name.clone().unwrap_or_else(|| entry.label.clone()),
+            ))),
+        );
+        map.insert(
+            "count".to_string(),
+            Rc::new(RefCell::new(Value::Number(entry.key.param_count() as f64))),
+        );
+        map.insert(
+            "color-r".to_string(),
+            Rc::new(RefCell::new(Value::Number(entry.color[0] as f64))),
+        );
+        map.insert(
+            "color-g".to_string(),
+            Rc::new(RefCell::new(Value::Number(entry.color[1] as f64))),
+        );
+        map.insert(
+            "color-b".to_string(),
+            Rc::new(RefCell::new(Value::Number(entry.color[2] as f64))),
+        );
+        key_lock_variant_items.push(Rc::new(RefCell::new(Value::Map(map))));
+    }
 
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
@@ -6249,6 +6391,7 @@ pub(crate) fn build_instrument_panel_value(
         Some(instrument_base_note_value_field(track)),
         None,
         None,
+        &[],
     );
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
@@ -6288,6 +6431,10 @@ pub(crate) fn build_instrument_panel_value(
                 Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
                 None,
+                key_locks_by_param
+                    .get(param_idx)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
             );
         } else {
             push_param(
@@ -6302,6 +6449,10 @@ pub(crate) fn build_instrument_panel_value(
                 Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 modulation_targets.get(&param_idx),
                 pdesc.ui_metadata.as_ref(),
+                key_locks_by_param
+                    .get(param_idx)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
             );
         }
     }
@@ -6343,6 +6494,10 @@ pub(crate) fn build_instrument_panel_value(
                 Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
                 None,
+                key_locks_by_param
+                    .get(param_idx)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
             );
             if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
                 == Some("source")
@@ -6503,6 +6658,14 @@ pub(crate) fn build_instrument_panel_value(
     panel_map.insert(
         "sources".to_string(),
         Rc::new(RefCell::new(Value::List(source_sections))),
+    );
+    panel_map.insert(
+        "key-lock-note-variants".to_string(),
+        Rc::new(RefCell::new(Value::List(key_lock_note_variants))),
+    );
+    panel_map.insert(
+        "key-lock-variants".to_string(),
+        Rc::new(RefCell::new(Value::List(key_lock_variant_items))),
     );
 
     Value::List(vec![Rc::new(RefCell::new(Value::Map(panel_map)))])
@@ -7587,6 +7750,7 @@ pub(crate) fn load_instrument_preset_into_track(
             slot.defaults.set(param_idx, clamped);
             app.send_instrument_param(track, param_idx, clamped);
         }
+        sequencer::effects::restore_key_locks_by_param_name(slot, &desc, &preset.key_locks);
     }
 
     app.state.pattern.instrument_base_note_offsets[track]
@@ -8316,6 +8480,7 @@ fn build_track_plock_preview_row_for_variant_entry(
                 None,
             ))
         }
+        sequencer::plock_variants::PlockVariantDomain::InstrumentKeyLock => None,
     }
 }
 
@@ -14065,7 +14230,363 @@ mod tests {
             "sources".to_string(),
             Rc::new(RefCell::new(test_list(vec![]))),
         );
+        inst.insert(
+            "key-lock-note-variants".to_string(),
+            Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst.insert(
+            "key-lock-variants".to_string(),
+            Rc::new(RefCell::new(test_list(vec![map_value([
+                ("kind", Value::String("def".to_string())),
+                ("label", Value::String("def".to_string())),
+                ("display", Value::String("def".to_string())),
+                ("count", Value::Number(0.0)),
+                ("color-r", Value::Number(0.545_098_07)),
+                ("color-g", Value::Number(0.545_098_07)),
+                ("color-b", Value::Number(0.588_235_3)),
+            ])]))),
+        );
         inst
+    }
+
+    #[test]
+    fn instrument_keys_tab_reads_and_writes_key_lock_values() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut cutoff = test_param_map("cutoff", 0, 0.5, 0.0, 1.0);
+        let mut key_lock = std::collections::HashMap::new();
+        key_lock.insert(
+            "note".to_string(),
+            Rc::new(RefCell::new(Value::Number(69.0))),
+        );
+        key_lock.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.8))),
+        );
+        cutoff.insert(
+            "key-locks".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Map(key_lock)]))),
+        );
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Map(cutoff)]))),
+        );
+        inst.insert(
+            "key-lock-note-variants".to_string(),
+            Rc::new(RefCell::new(test_list(vec![map_value([
+                ("note", Value::Number(69.0)),
+                ("label", Value::String("A".to_string())),
+                ("count", Value::Number(1.0)),
+                ("color-r", Value::Number(0.270_588_25)),
+                ("color-g", Value::Number(0.784_313_74)),
+                ("color-b", Value::Number(0.862_745_1)),
+            ])]))),
+        );
+        inst.insert(
+            "key-lock-variants".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                map_value([
+                    ("kind", Value::String("def".to_string())),
+                    ("label", Value::String("def".to_string())),
+                    ("display", Value::String("def".to_string())),
+                    ("count", Value::Number(0.0)),
+                    ("color-r", Value::Number(0.545_098_07)),
+                    ("color-g", Value::Number(0.545_098_07)),
+                    ("color-b", Value::Number(0.588_235_3)),
+                ]),
+                map_value([
+                    ("kind", Value::String("variant".to_string())),
+                    ("label", Value::String("A".to_string())),
+                    ("display", Value::String("A".to_string())),
+                    ("count", Value::Number(1.0)),
+                    ("color-r", Value::Number(0.270_588_25)),
+                    ("color-g", Value::Number(0.784_313_74)),
+                    ("color-b", Value::Number(0.862_745_1)),
+                ]),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("bus-effects", test_list(vec![])),
+                ("track-plocks", test_list(vec![])),
+                ("track-plock-variants", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (def cool-off-follow () false)
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install keys tab test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-panel-tab 1) (set! instrument-key-lock-selected-notes (list 69)))")
+            .expect("select key");
+
+        editor
+            .runtime_mut()
+            .eval_str("(instrument-key-select-note 72)")
+            .expect("select key for audition");
+        let audition_commands = editor.drain_host_commands();
+        assert_eq!(
+            audition_commands.len(),
+            1,
+            "audition_commands={audition_commands:?}"
+        );
+        match &audition_commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "audition-instrument-key");
+                let Value::Map(payload) = payload else {
+                    panic!("audition-instrument-key payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("note").map(|value| value.borrow().clone()),
+                    Some(Value::Number(72.0))
+                );
+            }
+            other => panic!("expected audition-instrument-key host command, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(set! instrument-key-lock-selected-notes (list 69))")
+            .expect("restore selected key");
+        editor
+            .runtime_mut()
+            .eval_str("(instrument-key-select-note 69)")
+            .expect("deselect the last selected key");
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.is_empty(),
+            "deselecting an already-selected key should not audition or force a replacement selection: {commands:?}"
+        );
+        let selected_count = editor
+            .runtime_mut()
+            .eval_str("(len instrument-key-lock-selected-notes)")
+            .expect("read selected key count");
+        assert_eq!(selected_count, Some(Value::Number(0.0)));
+        let default_chip_current = editor
+            .runtime_mut()
+            .eval_str(
+                "(instrument-key-lock-chip-current?
+                   (nth SEQ.instrument-panel 0)
+                   (nth (instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 0))",
+            )
+            .expect("read default key-lock chip current state");
+        assert_eq!(default_chip_current, Some(Value::Bool(true)));
+        let default_value = editor
+            .runtime_mut()
+            .eval_str(
+                "(fx-param-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
+            )
+            .expect("read default value with no key selected");
+        assert_eq!(default_value, Some(Value::Number(0.5)));
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(param-set-control-value false (nth (get (nth SEQ.instrument-panel 0) :synth) 0) 0.7)",
+            )
+            .expect("write default value with no key selected");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-instrument-param");
+                let Value::Map(payload) = payload else {
+                    panic!("set-instrument-param payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("value").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.7))
+                );
+            }
+            other => panic!("expected set-instrument-param host command, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(set! instrument-key-lock-selected-notes (list 69))")
+            .expect("restore selected key");
+
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(80, 20);
+        let layout = editor.widget_layout().expect("keys tab layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let key_panel =
+            find_layout_node_by_debug_name(&layout, "instrument-key-lock-control-panel")
+                .unwrap_or_else(|| panic!("key lock control panel; layout={layout_summaries:#?}"));
+        let key_row = find_layout_node_by_debug_name(&layout, "instrument-key-row")
+            .unwrap_or_else(|| panic!("key row; layout={layout_summaries:#?}"));
+        let synth = find_layout_node_by_debug_name(&layout, "fallback-synth-wrapper")
+            .unwrap_or_else(|| panic!("fallback synth wrapper; layout={layout_summaries:#?}"));
+        let variant_chip =
+            find_layout_node_by_stable_key(&layout, "instrument-key-lock-chip-variant-A")
+                .unwrap_or_else(|| panic!("key-lock variant chip; layout={layout_summaries:#?}"));
+        let white_key = find_layout_node_by_stable_key(&layout, "instrument-key-60")
+            .unwrap_or_else(|| panic!("white key; layout={layout_summaries:#?}"));
+        let black_key = find_layout_node_by_stable_key(&layout, "instrument-key-61")
+            .unwrap_or_else(|| panic!("black key; layout={layout_summaries:#?}"));
+        let variant_key = find_layout_node_by_stable_key(&layout, "instrument-key-69")
+            .unwrap_or_else(|| panic!("key with variant strip; layout={layout_summaries:#?}"));
+        let variant_strip = find_layout_node_by_stable_key(&layout, "instrument-key-strip-69")
+            .unwrap_or_else(|| panic!("key-lock variant strip; layout={layout_summaries:#?}"));
+
+        assert!(
+            key_row.rect.col >= key_panel.rect.col
+                && key_row.rect.col + key_row.rect.width <= key_panel.rect.col + key_panel.rect.width + 0.01,
+            "key row must fit inside the key panel; key_row={:?} key_panel={:?}; layout={layout_summaries:#?}",
+            key_row.rect,
+            key_panel.rect
+        );
+        assert!(
+            key_panel.rect.col + key_panel.rect.width <= synth.rect.col + 0.01,
+            "key panel must reserve enough horizontal space before the synth body; key_panel={:?} synth={:?}; layout={layout_summaries:#?}",
+            key_panel.rect,
+            synth.rect
+        );
+        assert_finite_nonzero_rect(variant_chip, "key-lock variant chip");
+        assert_layout_inside(variant_chip, key_panel, "key-lock variant chip");
+        assert_finite_nonzero_rect(white_key, "white piano key");
+        assert_finite_nonzero_rect(black_key, "black piano key");
+        assert!(
+            white_key.rect.height > black_key.rect.height,
+            "white keys should be taller than black keys; white={:?} black={:?}",
+            white_key.rect,
+            black_key.rect
+        );
+        assert!(
+            white_key.rect.width > black_key.rect.width,
+            "white keys should be wider than black keys; white={:?} black={:?}",
+            white_key.rect,
+            black_key.rect
+        );
+        assert_finite_nonzero_rect(variant_strip, "key-lock variant strip");
+        assert_layout_inside(variant_strip, variant_key, "key-lock variant strip");
+        assert!(
+            variant_strip.rect.height < variant_key.rect.height * 0.25,
+            "variant color should be a strip, not the whole key; strip={:?} key={:?}",
+            variant_strip.rect,
+            variant_key.rect
+        );
+
+        let variant_label = editor
+            .runtime_mut()
+            .eval_str(
+                "(get (instrument-key-note-variant-row (nth SEQ.instrument-panel 0) 69) :label)",
+            )
+            .expect("read key-lock note variant label");
+        assert_eq!(variant_label, Some(Value::String("A".to_string())));
+
+        let value = editor
+            .runtime_mut()
+            .eval_str(
+                "(fx-param-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
+            )
+            .expect("read key lock value");
+        assert_eq!(value, Some(Value::Number(0.8)));
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(param-set-control-value false (nth (get (nth SEQ.instrument-panel 0) :synth) 0) 0.9)",
+            )
+            .expect("write key lock value");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-instrument-key-lock-multi");
+                let Value::Map(payload) = payload else {
+                    panic!("set-instrument-key-lock-multi payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                let Some(notes) = payload.get("notes") else {
+                    panic!("set-instrument-key-lock-multi payload missing notes: {payload:?}");
+                };
+                let Value::List(notes) = &*notes.borrow() else {
+                    panic!("set-instrument-key-lock-multi notes should be a list: {payload:?}");
+                };
+                assert_eq!(notes.len(), 1);
+                assert_eq!(*notes[0].borrow(), Value::Number(69.0));
+                assert_eq!(
+                    payload.get("value").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.9))
+                );
+            }
+            other => panic!("expected set-instrument-key-lock-multi host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do
+                   (set! instrument-key-lock-selected-notes (list 69 72))
+                   (instrument-key-lock-chip-click
+                     (nth (instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 1)))",
+            )
+            .expect("stamp selected keys with variant chip");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "stamp-key-lock-variant");
+                let Value::Map(payload) = payload else {
+                    panic!("stamp-key-lock-variant payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("label").map(|value| value.borrow().clone()),
+                    Some(Value::String("A".to_string()))
+                );
+                let Some(notes) = payload.get("notes") else {
+                    panic!("stamp-key-lock-variant payload missing notes: {payload:?}");
+                };
+                let Value::List(notes) = &*notes.borrow() else {
+                    panic!("stamp-key-lock-variant notes should be a list: {payload:?}");
+                };
+                assert_eq!(notes.len(), 2);
+                assert_eq!(*notes[0].borrow(), Value::Number(69.0));
+                assert_eq!(*notes[1].borrow(), Value::Number(72.0));
+            }
+            other => panic!("expected stamp-key-lock-variant host command, got {other:?}"),
+        }
     }
 
     fn test_sampler_instrument_map(

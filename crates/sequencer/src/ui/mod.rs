@@ -2081,11 +2081,9 @@ impl App {
 
         for draft in drafts {
             let mut params = std::collections::BTreeMap::new();
+            let slot = &self.state.pattern.instrument_slots[track];
             for (idx, param) in desc.params.iter().enumerate() {
-                params.insert(
-                    param.name.clone(),
-                    self.state.pattern.instrument_slots[track].defaults.get(idx),
-                );
+                params.insert(param.name.clone(), slot.defaults.get(idx));
             }
             for (param_name, value) in &draft.params {
                 let (idx, param_desc) = desc
@@ -2110,6 +2108,7 @@ impl App {
                     .base_note_offset
                     .unwrap_or_else(|| self.instrument_base_note_offset(track)),
                 params,
+                key_locks: crate::effects::capture_key_locks_by_param_name(slot, desc),
             };
             presets_by_name.insert(draft.name.clone(), preset);
         }

@@ -150,6 +150,10 @@
   (instrument-header-tab-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
     (lambda (info) (instrument-toggle-mods-view))))
 
+(def instrument-keys-button ()
+  (instrument-header-tab-button "keys" (= instrument-panel-tab 1) 4.0
+    (lambda (info) (do (set! instrument-panel-tab 1) (set! instrument-mods-open false)))))
+
 (def effect-toggle-mods-view (fx)
   (let ((chain (fx-effect-chain-kind fx))
         (slot (get fx :slot-idx))

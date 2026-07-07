@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -11,6 +12,7 @@ pub const MAX_SLOT_PARAMS: usize = 512;
 pub const MAX_SLOT_TENSOR_PARAMS: usize = 16;
 pub const MAX_SLOT_TENSOR_PARAM_CELLS: usize = 64;
 pub const MAX_SLOT_TENSOR_CELLS: usize = MAX_SLOT_TENSOR_PARAMS * MAX_SLOT_TENSOR_PARAM_CELLS;
+pub const MAX_MIDI_NOTES: usize = 128;
 
 /// Number of fixed built-in effect slots. Built-ins are now ordinary inserts,
 /// so track effect chains start at slot 0.
@@ -255,6 +257,7 @@ fn param_kinds_are_compatible(old: &ParamKind, new: &ParamKind) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::Ordering;
 
     use super::{
@@ -474,6 +477,8 @@ mod tests {
             plock_param_ids: (0..crate::sequencer::MAX_STEPS)
                 .map(|_| vec![None])
                 .collect(),
+            key_locks: BTreeMap::new(),
+            key_lock_param_ids: BTreeMap::new(),
             param_node_indices: vec![15],
             param_node_spans: vec![1],
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
@@ -4906,6 +4911,239 @@ impl SlotPLockData {
     }
 }
 
+pub struct SlotKeyLockData {
+    data: Vec<AtomicU32>,
+    id_logical_ids: Vec<AtomicU64>,
+    id_node_param_indices: Vec<AtomicU32>,
+    max_params: usize,
+    lock_count: AtomicU32,
+    note_counts: Vec<AtomicU32>,
+}
+
+impl SlotKeyLockData {
+    pub fn new(max_params: usize) -> Self {
+        let size = MAX_MIDI_NOTES * max_params;
+        let data: Vec<AtomicU32> = (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect();
+        let id_logical_ids: Vec<AtomicU64> = (0..size).map(|_| AtomicU64::new(0)).collect();
+        let id_node_param_indices: Vec<AtomicU32> =
+            (0..size).map(|_| AtomicU32::new(u32::MAX)).collect();
+        Self {
+            data,
+            id_logical_ids,
+            id_node_param_indices,
+            max_params,
+            lock_count: AtomicU32::new(0),
+            note_counts: (0..MAX_MIDI_NOTES).map(|_| AtomicU32::new(0)).collect(),
+        }
+    }
+
+    fn index(&self, note: u8, param_idx: usize) -> usize {
+        note as usize * self.max_params + param_idx
+    }
+
+    pub fn has_any_lock(&self) -> bool {
+        self.lock_count.load(Ordering::Relaxed) > 0
+    }
+
+    fn note_count(&self, note: u8) -> u32 {
+        self.note_counts
+            .get(note as usize)
+            .map(|count| count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn note_cell_transition(&self, note: u8, old_bits: u32, new_bits: u32) {
+        let old_set = !f32::from_bits(old_bits).is_nan();
+        let new_set = !f32::from_bits(new_bits).is_nan();
+        if !old_set && new_set {
+            self.lock_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(count) = self.note_counts.get(note as usize) {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if old_set && !new_set {
+            self.lock_count.fetch_sub(1, Ordering::Relaxed);
+            if let Some(count) = self.note_counts.get(note as usize) {
+                count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn clear_all(&self) {
+        if !self.has_any_lock() {
+            return;
+        }
+        for idx in 0..self.data.len() {
+            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        }
+        self.lock_count.store(0, Ordering::Relaxed);
+        for count in &self.note_counts {
+            count.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub fn get(&self, note: u8, param_idx: usize) -> Option<f32> {
+        let idx = self.index(note, param_idx);
+        if idx >= self.data.len() {
+            return None;
+        }
+        let value = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+        (!value.is_nan()).then_some(value)
+    }
+
+    pub fn set(&self, note: u8, param_idx: usize, value: f32) {
+        let idx = self.index(note, param_idx);
+        if idx < self.data.len() {
+            let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+            self.note_cell_transition(note, old_bits, value.to_bits());
+            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        }
+    }
+
+    pub fn set_with_id(&self, note: u8, param_idx: usize, value: f32, param_id: ParamNodeId) {
+        let idx = self.index(note, param_idx);
+        if idx < self.data.len() {
+            let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+            self.note_cell_transition(note, old_bits, value.to_bits());
+            self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
+        }
+    }
+
+    pub fn get_id(&self, note: u8, param_idx: usize) -> Option<ParamNodeId> {
+        let idx = self.index(note, param_idx);
+        if idx >= self.data.len() {
+            return None;
+        }
+        let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+        let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+        if logical_id == 0 || node_param_idx == u32::MAX {
+            None
+        } else {
+            Some(ParamNodeId {
+                logical_id,
+                node_param_idx,
+            })
+        }
+    }
+
+    pub fn clear_note(&self, note: u8) {
+        if self.note_count(note) == 0 {
+            return;
+        }
+        for param_idx in 0..self.max_params {
+            let idx = self.index(note, param_idx);
+            if idx < self.data.len() {
+                let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+                self.note_cell_transition(note, old_bits, NAN_BITS);
+                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn clear_param(&self, note: u8, param_idx: usize) {
+        let idx = self.index(note, param_idx);
+        if idx < self.data.len() {
+            let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+            self.note_cell_transition(note, old_bits, NAN_BITS);
+            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        }
+    }
+
+    pub fn note_has_any_lock(&self, note: u8, num_params: usize) -> bool {
+        if num_params.min(self.max_params) == 0 {
+            return false;
+        }
+        self.note_count(note) > 0
+    }
+
+    pub fn capture_rows(
+        &self,
+        num_params: usize,
+    ) -> (
+        BTreeMap<u8, Vec<Option<f32>>>,
+        BTreeMap<u8, Vec<Option<ParamNodeId>>>,
+    ) {
+        let mut locks = BTreeMap::new();
+        let mut lock_ids = BTreeMap::new();
+        if !self.has_any_lock() {
+            return (locks, lock_ids);
+        }
+        let read_np = num_params.min(self.max_params);
+        for note in 0..MAX_MIDI_NOTES {
+            let note = note as u8;
+            if self.note_count(note) == 0 {
+                continue;
+            }
+            let base = note as usize * self.max_params;
+            let mut row = vec![None; num_params];
+            let mut id_row = vec![None; num_params];
+            for param_idx in 0..read_np {
+                let idx = base + param_idx;
+                let value = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+                if !value.is_nan() {
+                    row[param_idx] = Some(value);
+                }
+                let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+                if logical_id != 0 {
+                    let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+                    if node_param_idx != u32::MAX {
+                        id_row[param_idx] = Some(ParamNodeId {
+                            logical_id,
+                            node_param_idx,
+                        });
+                    }
+                }
+            }
+            if row.iter().any(Option::is_some) {
+                locks.insert(note, row);
+                lock_ids.insert(note, id_row);
+            }
+        }
+        (locks, lock_ids)
+    }
+
+    pub fn restore_rows(
+        &self,
+        locks: &BTreeMap<u8, Vec<Option<f32>>>,
+        lock_ids: &BTreeMap<u8, Vec<Option<ParamNodeId>>>,
+        num_params: usize,
+    ) {
+        self.clear_all();
+        let np = num_params.min(self.max_params);
+        for (&note, row) in locks {
+            let base = note as usize * self.max_params;
+            if base >= self.data.len() {
+                continue;
+            }
+            let id_row = lock_ids.get(&note);
+            for param_idx in 0..np.min(row.len()) {
+                let Some(value) = row[param_idx] else {
+                    continue;
+                };
+                let idx = base + param_idx;
+                let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+                self.note_cell_transition(note, old_bits, value.to_bits());
+                match id_row.and_then(|ids| ids.get(param_idx)).copied().flatten() {
+                    Some(param_id) => {
+                        self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+                        self.id_node_param_indices[idx]
+                            .store(param_id.node_param_idx, Ordering::Relaxed);
+                    }
+                    None => {
+                        self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                        self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── SlotParamDefaults (replaces TrackEffectDefaults and LispParamDefaults) ──
 
 pub struct SlotParamDefaults {
@@ -5336,12 +5574,74 @@ pub struct EffectSlotState {
     pub node_id: AtomicU32,           // audio graph node (0 = empty)
     pub modulator_node_id: AtomicU32, // optional host modulation bank node
     pub plocks: SlotPLockData,
+    pub key_locks: SlotKeyLockData,
     pub defaults: SlotParamDefaults,
     pub tensor_params: SlotTensorParamData,
     pub num_params: AtomicU32,
     pub param_node_indices: Vec<AtomicU32>, // per-param: idx field for ParamMsg
     pub param_node_spans: Vec<AtomicU32>,   // per-param: contiguous DGen cells updated by idx
     pub transport_phase_param_idx: AtomicU32,
+}
+
+pub fn capture_key_locks_by_param_name(
+    slot: &EffectSlotState,
+    desc: &EffectDescriptor,
+) -> BTreeMap<u8, BTreeMap<String, f32>> {
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    let num_params = num_params.min(desc.params.len());
+    let (key_locks, _) = slot.key_locks.capture_rows(num_params);
+    let mut out = BTreeMap::new();
+
+    for (note, row) in key_locks {
+        let mut note_locks = BTreeMap::new();
+        for param_idx in 0..num_params.min(row.len()) {
+            let Some(value) = row[param_idx] else {
+                continue;
+            };
+            if slot.key_locks.get_id(note, param_idx).is_some()
+                && slot.key_locks.get_id(note, param_idx) != slot.param_node_id(param_idx)
+            {
+                continue;
+            }
+            note_locks.insert(desc.params[param_idx].name.clone(), value);
+        }
+        if !note_locks.is_empty() {
+            out.insert(note, note_locks);
+        }
+    }
+
+    out
+}
+
+pub fn restore_key_locks_by_param_name(
+    slot: &EffectSlotState,
+    desc: &EffectDescriptor,
+    key_locks: &BTreeMap<u8, BTreeMap<String, f32>>,
+) {
+    slot.key_locks.clear_all();
+
+    let mut name_to_idx = BTreeMap::<String, Option<usize>>::new();
+    for (idx, param) in desc.params.iter().enumerate() {
+        match name_to_idx.get_mut(&param.name) {
+            Some(existing) => *existing = None,
+            None => {
+                name_to_idx.insert(param.name.clone(), Some(idx));
+            }
+        }
+    }
+
+    for (&note, note_locks) in key_locks {
+        for (param_name, value) in note_locks {
+            if !value.is_finite() {
+                continue;
+            }
+            let Some(Some(param_idx)) = name_to_idx.get(param_name).copied() else {
+                continue;
+            };
+            let clamped = desc.params[param_idx].clamp(*value);
+            slot.set_key_lock(note, param_idx, clamped);
+        }
+    }
 }
 
 impl EffectSlotState {
@@ -5364,6 +5664,7 @@ impl EffectSlotState {
             node_id: AtomicU32::new(node_id),
             modulator_node_id: AtomicU32::new(0),
             plocks: SlotPLockData::new(capacity),
+            key_locks: SlotKeyLockData::new(capacity),
             defaults: SlotParamDefaults::new_from_descriptor(desc),
             tensor_params: SlotTensorParamData::new(),
             num_params: AtomicU32::new(num_params as u32),
@@ -5434,12 +5735,29 @@ impl EffectSlotState {
         }
     }
 
+    pub fn set_key_lock(&self, note: u8, param_idx: usize, val: f32) {
+        if let Some(param_id) = self.param_node_id(param_idx) {
+            self.key_locks.set_with_id(note, param_idx, val, param_id);
+        } else {
+            self.key_locks.set(note, param_idx, val);
+        }
+    }
+
+    pub fn clear_key_lock(&self, note: u8, param_idx: usize) {
+        self.key_locks.clear_param(note, param_idx);
+    }
+
+    pub fn clear_note_key_locks(&self, note: u8) {
+        self.key_locks.clear_note(note);
+    }
+
     /// Create an empty slot (no effect loaded).
     pub fn empty() -> Self {
         Self {
             node_id: AtomicU32::new(0),
             modulator_node_id: AtomicU32::new(0),
             plocks: SlotPLockData::new(MAX_SLOT_PARAMS),
+            key_locks: SlotKeyLockData::new(MAX_SLOT_PARAMS),
             defaults: SlotParamDefaults::new_zeroed(MAX_SLOT_PARAMS),
             tensor_params: SlotTensorParamData::new(),
             num_params: AtomicU32::new(0),
@@ -5506,6 +5824,7 @@ impl EffectSlotState {
         let mut saved_plocks = Vec::with_capacity(MAX_STEPS);
         let mut saved_plock_ids = Vec::with_capacity(MAX_STEPS);
         let saved_tensor_params = self.tensor_params.capture();
+        let (saved_key_locks, saved_key_lock_ids) = self.key_locks.capture_rows(preserve);
         for step in 0..MAX_STEPS {
             let mut step_plocks = Vec::with_capacity(preserve);
             let mut step_ids = Vec::with_capacity(preserve);
@@ -5538,6 +5857,8 @@ impl EffectSlotState {
                 }
             }
         }
+        self.key_locks
+            .restore_rows(&saved_key_locks, &saved_key_lock_ids, preserve);
         self.recompute_modulation_active_params(desc);
     }
 
@@ -5601,8 +5922,18 @@ impl EffectSlotState {
                     plocks.push((step, value));
                 }
             }
+            let mut key_locks = Vec::new();
+            for note in 0..MAX_MIDI_NOTES {
+                let note = note as u8;
+                let Some(value) = self.key_locks.get(note, old_idx) else {
+                    continue;
+                };
+                if new_param.accepts_migrated_value_from(old_param, value) {
+                    key_locks.push((note, value));
+                }
+            }
 
-            migrated.push((new_idx, default, plocks));
+            migrated.push((new_idx, default, plocks, key_locks));
         }
 
         self.apply_descriptor_with_modulator(new_desc, node_id, modulator_node_id);
@@ -5613,13 +5944,17 @@ impl EffectSlotState {
                 self.plocks.clear_param(step, param_idx);
             }
         }
+        self.key_locks.clear_all();
 
-        for (new_idx, default, plocks) in migrated {
+        for (new_idx, default, plocks, key_locks) in migrated {
             if let Some(value) = default {
                 self.defaults.set(new_idx, value);
             }
             for (step, value) in plocks {
                 self.set_plock(step, new_idx, value);
+            }
+            for (note, value) in key_locks {
+                self.set_key_lock(note, new_idx, value);
             }
         }
         self.recompute_modulation_active_params(new_desc);
@@ -5702,6 +6037,7 @@ impl EffectSlotState {
                 self.plocks.clear_param(step, param_idx);
             }
         }
+        self.key_locks.clear_all();
     }
 
     /// Copy all runtime slot payload from another slot.
@@ -5735,6 +6071,8 @@ pub struct EffectSlotSnapshot {
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
     pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    pub key_locks: BTreeMap<u8, Vec<Option<f32>>>,
+    pub key_lock_param_ids: BTreeMap<u8, Vec<Option<ParamNodeId>>>,
     pub tensor_params: Vec<TensorParamSnapshot>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
@@ -5757,6 +6095,7 @@ impl EffectSlotSnapshot {
         }
 
         let (plocks, plock_param_ids) = slot.plocks.capture_rows(np);
+        let (key_locks, key_lock_param_ids) = slot.key_locks.capture_rows(np);
         let tensor_params = slot.tensor_params.capture();
 
         let mut param_node_indices = Vec::with_capacity(np);
@@ -5781,6 +6120,8 @@ impl EffectSlotSnapshot {
             defaults,
             plocks,
             plock_param_ids,
+            key_locks,
+            key_lock_param_ids,
             tensor_params,
             param_node_indices,
             param_node_spans,
@@ -5814,6 +6155,8 @@ impl EffectSlotSnapshot {
 
         slot.plocks
             .restore_rows(&self.plocks, &self.plock_param_ids, np);
+        slot.key_locks
+            .restore_rows(&self.key_locks, &self.key_lock_param_ids, np);
         slot.tensor_params.restore_snapshots(&self.tensor_params);
     }
 
@@ -5854,6 +6197,8 @@ impl EffectSlotSnapshot {
             defaults,
             plocks,
             plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; np]).collect(),
+            key_locks: BTreeMap::new(),
+            key_lock_param_ids: BTreeMap::new(),
             tensor_params,
             param_node_indices,
             param_node_spans,
@@ -5872,6 +6217,8 @@ impl EffectSlotSnapshot {
             defaults: Vec::new(),
             plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+            key_locks: BTreeMap::new(),
+            key_lock_param_ids: BTreeMap::new(),
             tensor_params: Vec::new(),
             param_node_indices: Vec::new(),
             param_node_spans: Vec::new(),
@@ -5949,6 +6296,68 @@ impl EffectSlotSnapshot {
                 *value = None;
             }
         }
+    }
+
+    fn ensure_key_lock_row_capacity(&mut self, note: u8, num_params: usize) {
+        let row = self.key_locks.entry(note).or_default();
+        if row.len() < num_params {
+            row.resize(num_params, None);
+        }
+        let id_row = self.key_lock_param_ids.entry(note).or_default();
+        if id_row.len() < num_params {
+            id_row.resize(num_params, None);
+        }
+    }
+
+    pub fn set_key_lock(&mut self, note: u8, param_idx: usize, value: f32) -> bool {
+        let num_params = self.num_params as usize;
+        if param_idx >= num_params {
+            return false;
+        }
+        self.ensure_key_lock_row_capacity(note, num_params);
+        let param_id = self.param_node_id(param_idx);
+        self.key_locks
+            .get_mut(&note)
+            .and_then(|row| row.get_mut(param_idx))
+            .map(|cell| *cell = Some(value));
+        self.key_lock_param_ids
+            .get_mut(&note)
+            .and_then(|row| row.get_mut(param_idx))
+            .map(|cell| *cell = param_id);
+        true
+    }
+
+    pub fn clear_key_lock(&mut self, note: u8, param_idx: usize) -> bool {
+        let remove_lock_row = if let Some(row) = self.key_locks.get_mut(&note) {
+            if param_idx < row.len() {
+                row[param_idx] = None;
+            }
+            row.iter().all(Option::is_none)
+        } else {
+            false
+        };
+        if remove_lock_row {
+            self.key_locks.remove(&note);
+        }
+
+        let remove_id_row = if let Some(row) = self.key_lock_param_ids.get_mut(&note) {
+            if param_idx < row.len() {
+                row[param_idx] = None;
+            }
+            row.iter().all(Option::is_none)
+        } else {
+            false
+        };
+        if remove_id_row {
+            self.key_lock_param_ids.remove(&note);
+        }
+
+        true
+    }
+
+    pub fn clear_note_key_locks(&mut self, note: u8) {
+        self.key_locks.remove(&note);
+        self.key_lock_param_ids.remove(&note);
     }
 
     pub fn tensor_default_values(&self, tensor_idx: usize) -> Option<&[f32]> {

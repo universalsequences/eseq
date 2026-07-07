@@ -206,6 +206,61 @@ struct PendingSavedInstrumentLoad {
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
+struct PendingKeyLockAudition {
+    track: usize,
+    transpose: f32,
+    release_at: Instant,
+}
+
+const KEY_LOCK_AUDITION_DURATION: Duration = Duration::from_millis(220);
+
+fn send_keyboard_note_off(
+    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    track: usize,
+    transpose: f32,
+) {
+    let _ = keyboard_tx.send(KeyboardTrigger {
+        track,
+        transpose,
+        velocity: 0.0,
+        note_off: true,
+    });
+}
+
+fn release_due_key_lock_auditions(
+    pending: &mut Vec<PendingKeyLockAudition>,
+    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    now: Instant,
+) {
+    let mut idx = 0;
+    while idx < pending.len() {
+        if pending[idx].release_at <= now {
+            let audition = pending.swap_remove(idx);
+            send_keyboard_note_off(keyboard_tx, audition.track, audition.transpose);
+        } else {
+            idx += 1;
+        }
+    }
+}
+
+fn release_matching_key_lock_auditions(
+    pending: &mut Vec<PendingKeyLockAudition>,
+    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    track: usize,
+    transpose: f32,
+) {
+    let mut idx = 0;
+    while idx < pending.len() {
+        let audition = &pending[idx];
+        if audition.track == track && (audition.transpose - transpose).abs() < 0.01 {
+            let audition = pending.swap_remove(idx);
+            send_keyboard_note_off(keyboard_tx, audition.track, audition.transpose);
+        } else {
+            idx += 1;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum EffectEditTarget {
     Track { track: usize, slot: usize },
@@ -959,6 +1014,27 @@ fn map_usize(
     key: &str,
 ) -> Option<usize> {
     map_number(map, key).map(|value| value as usize)
+}
+
+fn map_u8_list(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Option<Vec<u8>> {
+    let cell = map.get(key)?;
+    let Value::List(items) = &*cell.borrow() else {
+        return None;
+    };
+    Some(
+        items
+            .iter()
+            .filter_map(|item| match &*item.borrow() {
+                Value::Number(value) if *value >= 0.0 && *value <= u8::MAX as f64 => {
+                    Some(*value as u8)
+                }
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 fn rack_slot_snapshot_for_host(
@@ -5065,6 +5141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_instrument_preview: Option<PendingInstrumentPreview> = None;
     let mut pending_instrument_cancel_restore: Option<PendingInstrumentCancelRestore> = None;
     let mut pending_saved_instrument_load: Option<PendingSavedInstrumentLoad> = None;
+    let mut pending_key_lock_auditions: Vec<PendingKeyLockAudition> = Vec::new();
     let mut effect_edit_session: Option<EffectEditSession> = None;
     let mut pending_effect_preview: Option<PendingEffectPreview> = None;
     let mut pending_effect_cancel_restore: Option<PendingEffectCancelRestore> = None;
@@ -5156,6 +5233,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if backend.poll_editable_shader_overrides() {
             editor.mark_needs_redraw();
         }
+        release_due_key_lock_auditions(
+            &mut pending_key_lock_auditions,
+            &keyboard_tx,
+            Instant::now(),
+        );
         pull_shared_bus_state(&mut app, &bus_state);
         if !app.has_pending_project_load() {
             pull_named_scratch_buffer_into_project(&editor, &mut app);
@@ -7498,6 +7580,252 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
+                                }
+                            }
+                        }
+                    }
+                    "audition-instrument-key" => {
+                        if let Value::Map(ref map) = payload {
+                            let note =
+                                map_usize(map, "note").and_then(|note| u8::try_from(note).ok());
+                            if let Some(note) = note {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if track < app.tracks.len() {
+                                    let base_note_offset = f32::from_bits(
+                                        app.state.pattern.instrument_base_note_offsets[track]
+                                            .load(Ordering::Relaxed),
+                                    );
+                                    let transpose = note as f32 - 60.0 - base_note_offset;
+                                    release_matching_key_lock_auditions(
+                                        &mut pending_key_lock_auditions,
+                                        &keyboard_tx,
+                                        track,
+                                        transpose,
+                                    );
+                                    if keyboard_tx
+                                        .send(KeyboardTrigger {
+                                            track,
+                                            transpose,
+                                            velocity: 1.0,
+                                            note_off: false,
+                                        })
+                                        .is_ok()
+                                    {
+                                        pending_key_lock_auditions.push(PendingKeyLockAudition {
+                                            track,
+                                            transpose,
+                                            release_at: Instant::now() + KEY_LOCK_AUDITION_DURATION,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-instrument-key-lock" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map_usize(map, "param-idx");
+                            let note =
+                                map_usize(map, "note").and_then(|note| u8::try_from(note).ok());
+                            let value = map_number(map, "value").map(|value| value as f32);
+                            if let (Some(param_idx), Some(note), Some(user_val)) =
+                                (param_idx, note, value)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(desc) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .cloned()
+                                {
+                                    let stored = desc.clamp(desc.user_input_to_stored(user_val));
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetInstrumentKeyLock {
+                                            track,
+                                            note,
+                                            param_idx,
+                                            value: stored,
+                                        },
+                                    );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-instrument-key-lock-multi" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map_usize(map, "param-idx");
+                            let notes = map_u8_list(map, "notes").filter(|notes| !notes.is_empty());
+                            let value = map_number(map, "value").map(|value| value as f32);
+                            if let (Some(param_idx), Some(notes), Some(user_val)) =
+                                (param_idx, notes, value)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(desc) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .cloned()
+                                {
+                                    let stored = desc.clamp(desc.user_input_to_stored(user_val));
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetInstrumentKeyLockMulti {
+                                            track,
+                                            notes,
+                                            param_idx,
+                                            value: stored,
+                                        },
+                                    );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-instrument-key-lock-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map_usize(map, "param-idx");
+                            let note =
+                                map_usize(map, "note").and_then(|note| u8::try_from(note).ok());
+                            let label = map_string(map, "label");
+                            if let (Some(param_idx), Some(note), Some(label)) =
+                                (param_idx, note, label)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(sequencer::effects::ParamKind::Enum { labels }) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .map(|d| &d.kind)
+                                {
+                                    if let Some(selected_idx) =
+                                        labels.iter().position(|item| item == &label)
+                                    {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentKeyLock {
+                                                track,
+                                                note,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-instrument-key-lock-option-multi" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map_usize(map, "param-idx");
+                            let notes = map_u8_list(map, "notes").filter(|notes| !notes.is_empty());
+                            let label = map_string(map, "label");
+                            if let (Some(param_idx), Some(notes), Some(label)) =
+                                (param_idx, notes, label)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(sequencer::effects::ParamKind::Enum { labels }) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .map(|d| &d.kind)
+                                {
+                                    if let Some(selected_idx) =
+                                        labels.iter().position(|item| item == &label)
+                                    {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentKeyLockMulti {
+                                                track,
+                                                notes,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "clear-instrument-key-lock" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map_usize(map, "param-idx");
+                            let note =
+                                map_usize(map, "note").and_then(|note| u8::try_from(note).ok());
+                            if let (Some(param_idx), Some(note)) = (param_idx, note) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::ClearInstrumentKeyLock {
+                                        track,
+                                        note,
+                                        param_idx,
+                                    },
+                                );
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    "clear-instrument-key-locks-for-note" => {
+                        if let Value::Map(ref map) = payload {
+                            let note =
+                                map_usize(map, "note").and_then(|note| u8::try_from(note).ok());
+                            if let Some(note) = note {
+                                let track = current_track.load(Ordering::Relaxed);
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::ClearInstrumentKeyLocksForNote { track, note },
+                                );
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    "stamp-key-lock-variant" => {
+                        if let Value::Map(ref map) = payload {
+                            let notes = map_u8_list(map, "notes").filter(|notes| !notes.is_empty());
+                            let label = map_string(map, "label");
+                            if let (Some(notes), Some(label)) = (notes, label) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let applied = if label == "def" {
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::ClearInstrumentKeyLockVariantsForNotes {
+                                            track,
+                                            notes,
+                                        },
+                                    );
+                                    true
+                                } else {
+                                    state
+                                        .key_lock_variant_registry_snapshot(track)
+                                        .assignment_for_label(&label)
+                                        .is_some_and(|assignment| {
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::StampInstrumentKeyLockVariant {
+                                                    track,
+                                                    notes,
+                                                    key: assignment.key,
+                                                },
+                                            );
+                                            true
+                                        })
+                                };
+                                if applied {
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         }

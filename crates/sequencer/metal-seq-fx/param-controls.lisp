@@ -9,6 +9,40 @@
           :rack-slot (get source-p :rack-slot))
     (dict :idx idx :control "param")))
 
+(def instrument-keys-active? ()
+  (= instrument-panel-tab 1))
+
+(def instrument-key-lock-has-selection? ()
+  (> (len instrument-key-lock-selected-notes) 0))
+
+(def instrument-key-lock-authoring-active? ()
+  (and (instrument-keys-active?) (instrument-key-lock-has-selection?)))
+
+(def instrument-selected-key-note ()
+  (nth instrument-key-lock-selected-notes 0))
+
+(def instrument-param-key-lock-row (p note)
+  (nth (filter |row| (= (get row :note) note) (get p :key-locks))
+    0))
+
+(def instrument-param-key-lock-active? (p)
+  (let ((note (instrument-selected-key-note)))
+    (if note
+      (if (instrument-param-key-lock-row p note) true false)
+      false)))
+
+(def instrument-param-base-value (p)
+  (if (get p :value-field)
+    (bind-seq (get p :value-field))
+    (get p :value)))
+
+(def instrument-param-key-lock-value (p)
+  (let ((note (instrument-selected-key-note)))
+    (if note
+      (let ((row (instrument-param-key-lock-row p note)))
+        (if row (get row :value) (instrument-param-base-value p)))
+      (instrument-param-base-value p))))
+
 (def fx-set-instrument-value (p v)
   (do
     (fx-clear-selected-effect)
@@ -24,8 +58,10 @@
         (if (= (get p :control) "base-note")
           (host-command "set-instrument-base-note" (dict :value v))
           (host-command
-            (if (seq-has-selection?) "set-instrument-plock" "set-instrument-param")
-            (dict :param-idx (get p :idx) :value v)))))))
+            (if (instrument-key-lock-authoring-active?)
+              "set-instrument-key-lock-multi"
+              (if (seq-has-selection?) "set-instrument-plock" "set-instrument-param"))
+            (dict :param-idx (get p :idx) :value v :notes instrument-key-lock-selected-notes)))))))
 
 (def fx-set-instrument-option (p label)
   (do
@@ -37,8 +73,10 @@
           (if (seq-has-selection?) "set-rack-slot-instrument-plock-option" "set-rack-slot-instrument-param-option")
           (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :label label))
         (host-command
-          (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option")
-          (dict :param-idx (get p :idx) :label label))))))
+          (if (instrument-key-lock-authoring-active?)
+            "set-instrument-key-lock-option-multi"
+            (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option"))
+          (dict :param-idx (get p :idx) :label label :notes instrument-key-lock-selected-notes))))))
 
 (def custom-ui-option-index (options label)
   (nth (filter |idx| (= (nth options idx) label) (range (len options))) 0))
@@ -68,8 +106,13 @@
         (host-command
           (if (seq-has-selection?) "toggle-rack-slot-instrument-plock" "toggle-rack-slot-instrument-param")
           (dict :track rack-track :slot rack-slot :param-idx (get p :idx)))
-        (host-command "toggle-instrument-param"
-          (dict :param-idx (get p :idx)))))))
+        (if (instrument-key-lock-authoring-active?)
+          (host-command "set-instrument-key-lock-multi"
+            (dict :param-idx (get p :idx)
+                  :notes instrument-key-lock-selected-notes
+                  :value (if (fx-param-on? p) 0 1)))
+          (host-command "toggle-instrument-param"
+            (dict :param-idx (get p :idx))))))))
 
 (def fx-toggle-effect-value (fx p)
   (do
@@ -81,13 +124,16 @@
             :slot-idx (get fx :slot-idx)
             :param-idx (get p :idx)))))
 
+(def fx-param-has-idx? (p)
+  (not (= (get p :idx) nil)))
+
 (def fx-param-value (p)
-  (if (and instrument-mods-open (get p :modulatable))
+  (if (and (instrument-keys-active?) (fx-param-has-idx? p))
+    (instrument-param-key-lock-value p)
+    (if (and instrument-mods-open (get p :modulatable))
     (let ((target (instrument-param-control-mod-target p)))
       (if target (instrument-mod-target-depth target) 0))
-    (if (get p :value-field)
-      (bind-seq (get p :value-field))
-      (get p :value))))
+    (instrument-param-base-value p))))
 
 (def effect-mods-active? (fx)
   (and fx
@@ -130,12 +176,19 @@
           (nth (instrument-param-mod-targets p) 0))))))
 
 (def fx-param-value-for (fx p)
-  (if (and (param-mods-open? fx) (get p :modulatable))
+  (if (and (not fx) (instrument-keys-active?) (fx-param-has-idx? p))
+    (instrument-param-key-lock-value p)
+    (if (and (param-mods-open? fx) (get p :modulatable))
     (let ((target (param-control-mod-target fx p)))
       (if target (instrument-mod-target-depth target) 0))
     (if (get p :value-field)
       (bind-seq (get p :value-field))
-      (get p :value))))
+      (get p :value)))))
+
+(def fx-param-text-value-for (fx p)
+  (if (and (not fx) (instrument-keys-active?) (get p :options))
+    (nth (get p :options) (fx-param-value-for fx p))
+    (get p :text-value)))
 
 (def param-plock-row-target (fx)
   (if fx
@@ -160,8 +213,10 @@
         SEQ.track-plock-variants) 0))
 
 (def param-plock-active? (fx p)
-  (and (not (param-mods-open? fx))
-       (param-plock-row fx p)))
+  (if (and (not fx) (instrument-keys-active?))
+    (instrument-param-key-lock-active? p)
+    (and (not (param-mods-open? fx))
+         (param-plock-row fx p))))
 
 (def param-plock-default (fx p)
   (let ((row (param-plock-row fx p)))

@@ -73,10 +73,9 @@
 (def instrument-mod-selector (inst)
   (box :debug-name "instrument-mod-selector"
        :width 9.4
-       :height :fill
+       :height 7
        :padding 0.25
     (v-stack :gap 0.18 :align :start
-      (label "mods" :font-size 9 :color :dim :bg :transparent)
       (v-stack :gap 0.18 :align :start
         (each (instrument-mod-selector-sections inst) |modulator mi|
           (instrument-mod-selector-row modulator))))))
@@ -215,30 +214,30 @@
   (let ((slot (instrument-mod-selected-slot)))
     (box :debug-name "instrument-selected-mod-source-editor"
          :width 25.5
-         :height :fill
+         :height 8
          :padding 0.35
       (let ((section (instrument-selected-mod-source-section inst)))
         (if section
           (let ((source-type (instrument-source-type section)))
-            (v-stack :width :fill :height :fill :gap 0.3 :align :start
-              (label (get section :name) :font-size 9 :color :dim :bg :transparent)
+            (v-stack :width :fill :height 4 :gap 0.3 :align :start
               (if (= source-type "env")
                 (instrument-env-source-editor section)
                 (if (= source-type "lfo")
                   (instrument-lfo-source-editor section)
                   (if (or (= source-type "rand") (= source-type "drift"))
                     (fx-param-grid (get section :params) false)
-                    (box :width :fill :height :fill :h-align :center :v-align :center
+                    (box :width :fill :height 5 :h-align :center :v-align :center
                       (label "no source controls" :font-size 12 :color :dim :bg :transparent)))))))
           (box :width :fill :height :fill :h-align :center :v-align :center
             (label "no source controls" :font-size 12 :color :dim :bg :transparent)))))))
 
 (def instrument-mod-control-panel (inst)
   (box :debug-name "instrument-mod-control-panel"
-       :width 36.4
-       :height :fill
-       :background-color :black
-       :corner-radius 10
-    (h-stack :height :fill :gap 0.25 :align :stretch
+    :width 36.4
+    :height 7
+    :padding 1
+    :background-color :black
+    :corner-radius 10
+    (h-stack :height 7 :gap 0.25 :align :stretch
       (instrument-mod-selector inst)
       (instrument-selected-mod-source-editor inst))))

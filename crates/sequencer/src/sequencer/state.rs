@@ -12,8 +12,8 @@ use crate::neural::{
     ProjectNeuralNetwork,
 };
 use crate::plock_variants::{
-    live_track_variant_key, live_track_variant_keys, PlockVariantAssignment, PlockVariantKey,
-    PlockVariantRegistry,
+    live_track_key_lock_variant_key, live_track_key_lock_variant_keys, live_track_variant_key,
+    live_track_variant_keys, PlockVariantAssignment, PlockVariantKey, PlockVariantRegistry,
 };
 use crate::voice::MAX_VOICES;
 
@@ -348,6 +348,7 @@ pub struct PatternSnapshot {
     pub graph_overrides: Vec<ProjectGraphOverrides>,
     pub rack_tracks: Vec<Option<RackTrackSnapshot>>,
     pub plock_variant_registries: Vec<PlockVariantRegistry>,
+    pub key_lock_variant_registries: Vec<PlockVariantRegistry>,
 }
 
 #[derive(Clone, Debug)]
@@ -463,6 +464,7 @@ pub struct TrackPatternData {
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub rack_track: Option<RackTrackSnapshot>,
     pub plock_variant_registry: PlockVariantRegistry,
+    pub key_lock_variant_registry: PlockVariantRegistry,
 }
 
 impl TrackPatternData {
@@ -482,6 +484,13 @@ impl TrackPatternData {
             || track >= state.pattern.swing_plocks.len()
             || track >= state.pattern.swing_resolution_plocks.len()
             || track >= state.pattern.plock_variant_registries.lock().unwrap().len()
+            || track
+                >= state
+                    .pattern
+                    .key_lock_variant_registries
+                    .lock()
+                    .unwrap()
+                    .len()
         {
             return false;
         }
@@ -567,6 +576,22 @@ impl TrackPatternData {
             .get_mut(track)
         {
             registry.prune_to_keys(&active_variant_keys);
+        }
+        {
+            let mut registries = state.pattern.key_lock_variant_registries.lock().unwrap();
+            if track < registries.len() {
+                registries[track] = self.key_lock_variant_registry.clone();
+            }
+        }
+        let active_key_lock_variant_keys = live_track_key_lock_variant_keys(state, track);
+        if let Some(registry) = state
+            .pattern
+            .key_lock_variant_registries
+            .lock()
+            .unwrap()
+            .get_mut(track)
+        {
+            registry.prune_to_keys(&active_key_lock_variant_keys);
         }
 
         self.chord_snapshot
@@ -1347,6 +1372,7 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.instrument_run_modes, track_idx);
         remove_track_lane_if_present(&mut self.rack_tracks, track_idx);
         remove_track_lane_if_present(&mut self.plock_variant_registries, track_idx);
+        remove_track_lane_if_present(&mut self.key_lock_variant_registries, track_idx);
         self.mod_connections = self
             .mod_connections
             .iter()
@@ -1513,6 +1539,8 @@ impl PatternSnapshot {
             self.rack_tracks.push(None);
             self.plock_variant_registries
                 .push(PlockVariantRegistry::default());
+            self.key_lock_variant_registries
+                .push(PlockVariantRegistry::default());
         }
         while self.neural_reset_bits.len() < track_count {
             self.neural_reset_bits.push([0u64; TRACK_PATTERN_WORDS]);
@@ -1522,6 +1550,10 @@ impl PatternSnapshot {
         }
         while self.plock_variant_registries.len() < track_count {
             self.plock_variant_registries
+                .push(PlockVariantRegistry::default());
+        }
+        while self.key_lock_variant_registries.len() < track_count {
+            self.key_lock_variant_registries
                 .push(PlockVariantRegistry::default());
         }
         self.mod_connections.retain(|connection| {
@@ -1561,6 +1593,7 @@ impl PatternSnapshot {
         self.instrument_run_modes.truncate(track_count);
         self.rack_tracks.truncate(track_count);
         self.plock_variant_registries.truncate(track_count);
+        self.key_lock_variant_registries.truncate(track_count);
         self.mod_connections.retain(|connection| {
             connection.source_track < track_count
                 && mod_destination_valid_for_track_count(connection.destination, track_count)
@@ -1595,6 +1628,7 @@ impl PatternSnapshot {
         let mut instrument_run_modes = Vec::with_capacity(num_tracks);
         let mut rack_tracks = Vec::with_capacity(num_tracks);
         let mut plock_variant_registries = Vec::with_capacity(num_tracks);
+        let mut key_lock_variant_registries = Vec::with_capacity(num_tracks);
 
         let scene_trace = {
             static SCENE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1698,6 +1732,16 @@ impl PatternSnapshot {
                 .unwrap_or_default();
             registry.prune_to_keys(&live_track_variant_keys(state, t));
             plock_variant_registries.push(registry);
+            let mut key_registry = state
+                .pattern
+                .key_lock_variant_registries
+                .lock()
+                .unwrap()
+                .get(t)
+                .cloned()
+                .unwrap_or_default();
+            key_registry.prune_to_keys(&live_track_key_lock_variant_keys(state, t));
+            key_lock_variant_registries.push(key_registry);
             rest_elapsed += rest_started.elapsed();
         }
         if scene_trace {
@@ -1733,6 +1777,7 @@ impl PatternSnapshot {
             graph_overrides: Vec::new(),
             rack_tracks,
             plock_variant_registries,
+            key_lock_variant_registries,
         }
     }
 
@@ -1844,6 +1889,11 @@ impl PatternSnapshot {
                 .get(track)
                 .cloned()
                 .unwrap_or_default(),
+            key_lock_variant_registry: self
+                .key_lock_variant_registries
+                .get(track)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1871,6 +1921,7 @@ impl PatternSnapshot {
         self.instrument_run_modes[track] = data.instrument_run_mode;
         self.rack_tracks[track] = data.rack_track;
         self.plock_variant_registries[track] = data.plock_variant_registry;
+        self.key_lock_variant_registries[track] = data.key_lock_variant_registry;
     }
 
     pub fn clone_track_lane_from(&mut self, source: &PatternSnapshot, track: usize) {
@@ -1906,6 +1957,7 @@ impl PatternSnapshot {
         self.instrument_run_modes[track] = CustomInstrumentRunMode::Instrument;
         self.rack_tracks[track] = None;
         self.plock_variant_registries[track] = PlockVariantRegistry::default();
+        self.key_lock_variant_registries[track] = PlockVariantRegistry::default();
     }
 
     fn default_step_data() -> Vec<[f32; NUM_PARAMS]> {
@@ -1967,6 +2019,8 @@ impl PatternSnapshot {
         self.rack_tracks.push(None);
         self.plock_variant_registries
             .push(PlockVariantRegistry::default());
+        self.key_lock_variant_registries
+            .push(PlockVariantRegistry::default());
     }
 
     pub fn new_default(num_tracks: usize, slot_descriptors: &[Vec<EffectDescriptor>]) -> Self {
@@ -1992,6 +2046,7 @@ impl PatternSnapshot {
             graph_overrides: Vec::new(),
             rack_tracks: Vec::with_capacity(num_tracks),
             plock_variant_registries: Vec::with_capacity(num_tracks),
+            key_lock_variant_registries: Vec::with_capacity(num_tracks),
         };
         for t in 0..num_tracks {
             snap.push_default_track(t, slot_descriptors);
@@ -2033,6 +2088,7 @@ impl PatternSnapshot {
             && self.instrument_run_modes.len() == n
             && self.rack_tracks.len() == n
             && self.plock_variant_registries.len() == n
+            && self.key_lock_variant_registries.len() == n
             && self.step_data.iter().all(|steps| steps.len() == MAX_STEPS)
     }
 
@@ -2338,6 +2394,7 @@ pub struct PatternState {
     pub track_sound_state: Mutex<Vec<TrackSoundState>>,
     pub rack_tracks: Mutex<Vec<Option<RackTrackSnapshot>>>,
     pub plock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
+    pub key_lock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
 }
 
 pub struct TransportState {
@@ -2590,6 +2647,11 @@ impl SequencerState {
                 ),
                 rack_tracks: Mutex::new((0..MAX_TRACKS).map(|_| None).collect()),
                 plock_variant_registries: Mutex::new(
+                    (0..MAX_TRACKS)
+                        .map(|_| PlockVariantRegistry::default())
+                        .collect(),
+                ),
+                key_lock_variant_registries: Mutex::new(
                     (0..MAX_TRACKS)
                         .map(|_| PlockVariantRegistry::default())
                         .collect(),
@@ -3937,6 +3999,15 @@ impl SequencerState {
         {
             *registry = PlockVariantRegistry::default();
         }
+        if let Some(registry) = self
+            .pattern
+            .key_lock_variant_registries
+            .lock()
+            .unwrap()
+            .get_mut(track)
+        {
+            *registry = PlockVariantRegistry::default();
+        }
     }
 
     fn clear_runtime_track_binding_in_place(&self, track: usize) {
@@ -5189,6 +5260,87 @@ impl SequencerState {
             .unwrap_or_default()
     }
 
+    pub fn reconcile_key_lock_variant_registry_for_track(
+        &self,
+        track: usize,
+    ) -> Vec<Option<PlockVariantAssignment>> {
+        let keys = live_track_key_lock_variant_keys(self, track);
+        let mut registries = self.pattern.key_lock_variant_registries.lock().unwrap();
+        let Some(registry) = registries.get_mut(track) else {
+            return vec![None; crate::effects::MAX_MIDI_NOTES];
+        };
+        registry.reconcile(keys)
+    }
+
+    pub fn key_lock_variant_registry_snapshot(&self, track: usize) -> PlockVariantRegistry {
+        let _ = self.reconcile_key_lock_variant_registry_for_track(track);
+        self.pattern
+            .key_lock_variant_registries
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn clear_key_lock_variant_locks_for_notes(&self, track: usize, notes: &[u8]) -> bool {
+        if track >= self.pattern.instrument_slots.len() {
+            return false;
+        }
+        let slot = &self.pattern.instrument_slots[track];
+        let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+        let mut changed = false;
+        for note in notes.iter().copied() {
+            if slot.key_locks.note_has_any_lock(note, num_params) {
+                slot.clear_note_key_locks(note);
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = self.reconcile_key_lock_variant_registry_for_track(track);
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    pub fn stamp_key_lock_variant_key_to_notes(
+        &self,
+        track: usize,
+        key: &PlockVariantKey,
+        notes: &[u8],
+    ) -> bool {
+        if track >= self.pattern.instrument_slots.len() {
+            return false;
+        }
+        let mut changed = false;
+        for note in notes.iter().copied() {
+            if live_track_key_lock_variant_key(self, track, note)
+                .as_ref()
+                .is_some_and(|candidate| candidate == key)
+            {
+                continue;
+            }
+            let slot = &self.pattern.instrument_slots[track];
+            slot.clear_note_key_locks(note);
+            for entry in &key.entries {
+                if entry.domain != crate::plock_variants::PlockVariantDomain::InstrumentKeyLock
+                    || entry.slot != 0
+                    || entry.cell.is_some()
+                    || entry.param >= slot.num_params.load(Ordering::Relaxed) as usize
+                {
+                    continue;
+                }
+                slot.set_key_lock(note, entry.param, f32::from_bits(entry.value_bits));
+            }
+            changed = true;
+        }
+        if changed {
+            let _ = self.reconcile_key_lock_variant_registry_for_track(track);
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
     pub fn clear_variant_locks_for_steps(&self, track: usize, steps: &[usize]) -> bool {
         if track >= self.pattern.instrument_slots.len() {
             return false;
@@ -5766,8 +5918,8 @@ fn copy_snapshot_slot_variant_locks(
 mod tests {
     use super::*;
     use crate::effects::{
-        EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
-        BUILTIN_SLOT_COUNT,
+        EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
+        ParamScaling, BUILTIN_SLOT_COUNT,
     };
     use crate::sequencer::ModDestination;
 
@@ -5820,6 +5972,8 @@ mod tests {
                 })
                 .collect(),
             plock_param_ids: vec![vec![None, None]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![id as u32, id as u32 + 10],
             param_node_spans: vec![1, 1],
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
@@ -5838,6 +5992,58 @@ mod tests {
 
         params.set_mute_group(42);
         assert_eq!(params.get_mute_group(), 8);
+    }
+
+    #[test]
+    fn key_lock_variant_stamp_copies_key_lock_signature_to_selected_notes() {
+        let desc = EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let mode_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "mode")
+            .expect("filter descriptor should include mode");
+        let state = SequencerState::new(1, vec![]);
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 100);
+        state.pattern.instrument_slots[0].set_key_lock(60, cutoff_idx, 900.0);
+        state.pattern.instrument_slots[0].set_key_lock(60, mode_idx, 2.0);
+
+        let assignments = state.reconcile_key_lock_variant_registry_for_track(0);
+        let assignment = assignments[60]
+            .clone()
+            .expect("source note should be assigned to a key-lock variant");
+        assert_eq!(assignment.label, "A");
+        assert_eq!(assignment.param_count, 2);
+
+        assert!(state.stamp_key_lock_variant_key_to_notes(0, &assignment.key, &[62, 64]));
+        let slot = &state.pattern.instrument_slots[0];
+        assert_eq!(slot.key_locks.get(62, cutoff_idx), Some(900.0));
+        assert_eq!(slot.key_locks.get(62, mode_idx), Some(2.0));
+        assert_eq!(slot.key_locks.get(64, cutoff_idx), Some(900.0));
+        assert_eq!(slot.key_locks.get(64, mode_idx), Some(2.0));
+
+        let assignments = state.reconcile_key_lock_variant_registry_for_track(0);
+        assert_eq!(
+            assignments[60].as_ref().map(|item| item.label.as_str()),
+            Some("A")
+        );
+        assert_eq!(
+            assignments[62].as_ref().map(|item| item.label.as_str()),
+            Some("A")
+        );
+        assert_eq!(
+            assignments[64].as_ref().map(|item| item.label.as_str()),
+            Some("A")
+        );
+
+        assert!(state.clear_key_lock_variant_locks_for_notes(0, &[62]));
+        assert_eq!(slot.key_locks.get(62, cutoff_idx), None);
+        assert_eq!(slot.key_locks.get(62, mode_idx), None);
+        assert_eq!(slot.key_locks.get(64, cutoff_idx), Some(900.0));
     }
 
     fn sample_pattern_snapshot(num_tracks: usize) -> PatternSnapshot {
@@ -5932,6 +6138,7 @@ mod tests {
             graph_overrides: Vec::new(),
             rack_tracks: vec![None; num_tracks],
             plock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
+            key_lock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
         }
     }
 
@@ -7305,6 +7512,8 @@ mod tests {
                         plocks
                     },
                     plock_param_ids: vec![vec![None]; MAX_STEPS],
+                    key_locks: std::collections::BTreeMap::new(),
+                    key_lock_param_ids: std::collections::BTreeMap::new(),
                     param_node_indices: vec![0],
                     param_node_spans: vec![1],
                     transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
@@ -7336,6 +7545,7 @@ mod tests {
             graph_overrides: Vec::new(),
             rack_tracks: vec![None; 4],
             plock_variant_registries: vec![PlockVariantRegistry::default(); 4],
+            key_lock_variant_registries: vec![PlockVariantRegistry::default(); 4],
         };
         let descriptors = vec![
             vec![EffectDescriptor::builtin_filter()],

@@ -705,6 +705,7 @@ impl App {
             slot.defaults.set(idx, clamped);
             self.send_instrument_param(track, idx, clamped);
         }
+        crate::effects::restore_key_locks_by_param_name(slot, desc, &preset.key_locks);
         self.state.pattern.instrument_base_note_offsets[track].store(
             preset.base_note_offset.to_bits(),
             std::sync::atomic::Ordering::Relaxed,
@@ -738,6 +739,7 @@ impl App {
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
             params,
+            key_locks: crate::effects::capture_key_locks_by_param_name(slot, desc),
         };
 
         let mut presets = match lisp_host::load_instrument_presets(instrument_name) {

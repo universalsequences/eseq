@@ -318,6 +318,8 @@ pub struct ProjectPattern {
     pub rack_tracks: Vec<Option<ProjectRackTrackPattern>>,
     #[serde(default)]
     pub plock_variant_registries: Vec<PlockVariantRegistry>,
+    #[serde(default)]
+    pub key_lock_variant_registries: Vec<PlockVariantRegistry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,6 +412,8 @@ pub struct ProjectEffectSlot {
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
     pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    pub key_locks: std::collections::BTreeMap<u8, Vec<Option<f32>>>,
+    pub key_lock_param_ids: std::collections::BTreeMap<u8, Vec<Option<ParamNodeId>>>,
     pub tensor_params: Vec<TensorParamSnapshot>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
@@ -613,6 +617,7 @@ impl ProjectPattern {
                 .map(|rack| rack.map(ProjectRackTrackPattern::from))
                 .collect(),
             plock_variant_registries: snapshot.plock_variant_registries.clone(),
+            key_lock_variant_registries: snapshot.key_lock_variant_registries.clone(),
         }
     }
 }
@@ -752,6 +757,8 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             defaults: value.defaults.clone(),
             plocks: value.plocks.clone(),
             plock_param_ids: value.plock_param_ids.clone(),
+            key_locks: value.key_locks.clone(),
+            key_lock_param_ids: value.key_lock_param_ids.clone(),
             tensor_params: value.tensor_params.clone(),
             param_node_indices: value.param_node_indices.clone(),
             param_node_spans: value.param_node_spans.clone(),
@@ -777,6 +784,8 @@ impl ProjectEffectSlot {
             defaults: self.defaults,
             plocks: self.plocks,
             plock_param_ids: self.plock_param_ids,
+            key_locks: self.key_locks,
+            key_lock_param_ids: self.key_lock_param_ids,
             tensor_params: self.tensor_params,
             param_node_indices: self.param_node_indices,
             param_node_spans: self.param_node_spans,
@@ -1350,6 +1359,15 @@ struct SparseEffectSlotPlock {
 }
 
 #[derive(Serialize, Deserialize)]
+struct SparseEffectSlotKeyLock {
+    note: u8,
+    param: usize,
+    value: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    param_id: Option<ParamNodeId>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct SparseTensorParamPlock {
     step: usize,
     value: Vec<f32>,
@@ -1372,6 +1390,8 @@ struct SparseProjectEffectSlot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     plocks_sparse: Vec<SparseEffectSlotPlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    key_locks_sparse: Vec<SparseEffectSlotKeyLock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tensor_params: Vec<SparseProjectTensorParam>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     param_node_indices: Vec<u32>,
@@ -1388,6 +1408,10 @@ struct DenseProjectEffectSlot {
     plocks: Vec<Vec<Option<f32>>>,
     #[serde(default)]
     plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    #[serde(default)]
+    key_locks: std::collections::BTreeMap<u8, Vec<Option<f32>>>,
+    #[serde(default)]
+    key_lock_param_ids: std::collections::BTreeMap<u8, Vec<Option<ParamNodeId>>>,
     #[serde(default)]
     tensor_params: Vec<SparseProjectTensorParam>,
     param_node_indices: Vec<u32>,
@@ -1472,11 +1496,31 @@ impl Serialize for ProjectEffectSlot {
             .iter()
             .map(sparse_tensor_param_from_snapshot)
             .collect::<Vec<_>>();
+        let key_locks_sparse = self
+            .key_locks
+            .iter()
+            .flat_map(|(&note, row)| {
+                row.iter().enumerate().filter_map(move |(param, value)| {
+                    value.map(|value| SparseEffectSlotKeyLock {
+                        note,
+                        param,
+                        value,
+                        param_id: self
+                            .key_lock_param_ids
+                            .get(&note)
+                            .and_then(|ids| ids.get(param))
+                            .copied()
+                            .flatten(),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
 
         if self.num_params == 0
             && self.defaults.is_empty()
             && self.param_node_indices.is_empty()
             && plocks_sparse.is_empty()
+            && key_locks_sparse.is_empty()
             && tensor_params.is_empty()
             && self.ir.is_none()
         {
@@ -1487,6 +1531,7 @@ impl Serialize for ProjectEffectSlot {
             num_params: self.num_params,
             defaults: self.defaults.clone(),
             plocks_sparse,
+            key_locks_sparse,
             tensor_params,
             param_node_indices: self.param_node_indices.clone(),
             param_node_spans: self.param_node_spans.clone(),
@@ -1512,11 +1557,28 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                         plock_param_ids[entry.step][entry.param] = entry.param_id;
                     }
                 }
+                let mut key_locks = std::collections::BTreeMap::new();
+                let mut key_lock_param_ids = std::collections::BTreeMap::new();
+                for entry in slot.key_locks_sparse {
+                    if entry.param >= slot.defaults.len() {
+                        continue;
+                    }
+                    let row = key_locks
+                        .entry(entry.note)
+                        .or_insert_with(|| vec![None; slot.defaults.len()]);
+                    row[entry.param] = Some(entry.value);
+                    let id_row = key_lock_param_ids
+                        .entry(entry.note)
+                        .or_insert_with(|| vec![None; slot.defaults.len()]);
+                    id_row[entry.param] = entry.param_id;
+                }
                 Self {
                     num_params: slot.num_params,
                     defaults: slot.defaults,
                     plocks,
                     plock_param_ids,
+                    key_locks,
+                    key_lock_param_ids,
                     tensor_params: slot
                         .tensor_params
                         .into_iter()
@@ -1532,6 +1594,8 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 defaults: slot.defaults,
                 plocks: slot.plocks,
                 plock_param_ids: slot.plock_param_ids,
+                key_locks: slot.key_locks,
+                key_lock_param_ids: slot.key_lock_param_ids,
                 tensor_params: slot
                     .tensor_params
                     .into_iter()
@@ -1546,6 +1610,8 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 defaults: Vec::new(),
                 plocks: vec![Vec::new(); MAX_STEPS],
                 plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                key_locks: std::collections::BTreeMap::new(),
+                key_lock_param_ids: std::collections::BTreeMap::new(),
                 tensor_params: Vec::new(),
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
@@ -1707,6 +1773,8 @@ mod tests {
                         defaults: vec![0.1, 0.2],
                         plocks: vec![vec![None, Some(0.8)]; 256],
                         plock_param_ids: vec![vec![None, None]; 256],
+                        key_locks: std::collections::BTreeMap::new(),
+                        key_lock_param_ids: std::collections::BTreeMap::new(),
                         param_node_indices: vec![0, 1],
                         param_node_spans: vec![1, 1],
                         tensor_params: Vec::new(),
@@ -1717,6 +1785,8 @@ mod tests {
                         defaults: vec![],
                         plocks: vec![vec![]; 256],
                         plock_param_ids: vec![vec![]; 256],
+                        key_locks: std::collections::BTreeMap::new(),
+                        key_lock_param_ids: std::collections::BTreeMap::new(),
                         param_node_indices: vec![],
                         param_node_spans: vec![],
                         tensor_params: Vec::new(),
@@ -1834,6 +1904,7 @@ mod tests {
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
                 rack_tracks: vec![None, None],
                 plock_variant_registries: Vec::new(),
+                key_lock_variant_registries: Vec::new(),
             }],
         }
     }
@@ -2132,6 +2203,7 @@ mod tests {
             "num_params": 2,
             "defaults": [0.1, 0.2],
             "plocks_sparse": [{"step": 3, "param": 1, "value": 0.8}],
+            "key_locks_sparse": [{"note": 69, "param": 0, "value": 0.45, "param_id": {"logical_id": 42, "node_param_idx": 0}}],
             "param_node_indices": [0, 1]
         }"#;
 
@@ -2140,6 +2212,14 @@ mod tests {
         assert_eq!(slot.defaults, vec![0.1, 0.2]);
         assert_eq!(slot.plocks[3][1], Some(0.8));
         assert_eq!(slot.plocks[0][1], None);
+        assert_eq!(slot.key_locks[&69][0], Some(0.45));
+        assert_eq!(
+            slot.key_lock_param_ids[&69][0],
+            Some(ParamNodeId {
+                logical_id: 42,
+                node_param_idx: 0,
+            })
+        );
         // Slots saved before the IR field deserialize with ir = None.
         assert_eq!(slot.ir, None);
     }
@@ -2342,6 +2422,8 @@ mod tests {
             defaults: vec![0.35, 1.0],
             plocks: vec![Vec::new(); MAX_STEPS],
             plock_param_ids: vec![Vec::new(); MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![10, 11],
             param_node_spans: vec![1, 1],
             tensor_params: Vec::new(),
@@ -2354,6 +2436,49 @@ mod tests {
     }
 
     #[test]
+    fn effect_slot_roundtrips_sparse_key_locks() {
+        let mut key_locks = std::collections::BTreeMap::new();
+        key_locks.insert(69, vec![Some(0.45), None]);
+        let mut key_lock_param_ids = std::collections::BTreeMap::new();
+        key_lock_param_ids.insert(
+            69,
+            vec![
+                Some(ParamNodeId {
+                    logical_id: 42,
+                    node_param_idx: 0,
+                }),
+                None,
+            ],
+        );
+        let slot = ProjectEffectSlot {
+            num_params: 2,
+            defaults: vec![0.1, 0.2],
+            plocks: vec![Vec::new(); MAX_STEPS],
+            plock_param_ids: vec![Vec::new(); MAX_STEPS],
+            key_locks,
+            key_lock_param_ids,
+            param_node_indices: vec![10, 11],
+            param_node_spans: vec![1, 1],
+            tensor_params: Vec::new(),
+            ir: None,
+        };
+
+        let json = serde_json::to_string(&slot).expect("serialize key-lock slot");
+        assert!(json.contains("\"key_locks_sparse\""), "{json}");
+        assert!(!json.contains("\"key_locks\":{\""), "{json}");
+
+        let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip key-lock slot");
+        assert_eq!(back.key_locks[&69][0], Some(0.45));
+        assert_eq!(
+            back.key_lock_param_ids[&69][0],
+            Some(ParamNodeId {
+                logical_id: 42,
+                node_param_idx: 0,
+            })
+        );
+    }
+
+    #[test]
     fn effect_slot_roundtrips_tensor_defaults_and_sparse_whole_matrix_plocks() {
         let mut tensor_plocks = vec![None; MAX_STEPS];
         tensor_plocks[11] = Some(vec![0.0, 0.25, 0.75, 1.0]);
@@ -2362,6 +2487,8 @@ mod tests {
             defaults: Vec::new(),
             plocks: vec![Vec::new(); MAX_STEPS],
             plock_param_ids: vec![Vec::new(); MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: Vec::new(),
             param_node_spans: Vec::new(),
             tensor_params: vec![TensorParamSnapshot {

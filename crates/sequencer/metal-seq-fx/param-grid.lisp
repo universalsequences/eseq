@@ -23,7 +23,7 @@
                        (fx-toggle-effect-value fx p)
                        (fx-toggle-instrument-value p)))
               (if (get p :options)
-              (dropdown :value (get p :text-value)
+              (dropdown :value (fx-param-text-value-for fx p)
                 :options (get p :options)
                 :on-change (lambda (v) (param-set-option fx p v))
                 :plock-active (if (param-plock-active? fx p) 1 0)

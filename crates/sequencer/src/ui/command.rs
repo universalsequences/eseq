@@ -12,6 +12,7 @@
 
 use std::sync::atomic::Ordering;
 
+use crate::plock_variants::{PlockVariantDomain, PlockVariantKey};
 use crate::sequencer::{
     RackSlotParam, StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput,
     TrackSendSnapshot,
@@ -78,6 +79,38 @@ fn sync_instrument_mod_active_plock(
                 > f32::EPSILON
         });
     slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
+}
+
+fn sync_instrument_mod_active_key_lock(
+    app: &mut App,
+    track: usize,
+    note: u8,
+    changed_param_idx: usize,
+) {
+    let Some(desc) = app.graph.instrument_descriptors.get(track) else {
+        return;
+    };
+    let active_param_idx = desc
+        .instrument_modulation_targets
+        .iter()
+        .find(|target| target.depth_param_idx == changed_param_idx)
+        .and_then(|target| target.active_param_idx);
+    let Some(active_param_idx) = active_param_idx else {
+        return;
+    };
+    let slot = &app.state.pattern.instrument_slots[track];
+    let active = desc
+        .instrument_modulation_targets
+        .iter()
+        .filter(|target| target.active_param_idx == Some(active_param_idx))
+        .any(|target| {
+            slot.key_locks
+                .get(note, target.depth_param_idx)
+                .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
+                .abs()
+                > f32::EPSILON
+        });
+    slot.set_key_lock(note, active_param_idx, if active { 1.0 } else { 0.0 });
 }
 
 fn effect_mod_active_param_idx(
@@ -514,6 +547,48 @@ pub enum AppCommand {
         value: f32,
     },
 
+    /// Set a key lock on a single MIDI note for an instrument param.
+    SetInstrumentKeyLock {
+        track: usize,
+        note: u8,
+        param_idx: usize,
+        value: f32,
+    },
+
+    /// Set the same key lock on multiple MIDI notes.
+    SetInstrumentKeyLockMulti {
+        track: usize,
+        notes: Vec<u8>,
+        param_idx: usize,
+        value: f32,
+    },
+
+    /// Clear a key lock on a single MIDI note for an instrument param.
+    ClearInstrumentKeyLock {
+        track: usize,
+        note: u8,
+        param_idx: usize,
+    },
+
+    /// Clear all key locks from a single MIDI note.
+    ClearInstrumentKeyLocksForNote {
+        track: usize,
+        note: u8,
+    },
+
+    /// Stamp an existing key-lock variant onto multiple MIDI notes.
+    StampInstrumentKeyLockVariant {
+        track: usize,
+        notes: Vec<u8>,
+        key: PlockVariantKey,
+    },
+
+    /// Clear all key locks from multiple MIDI notes.
+    ClearInstrumentKeyLockVariantsForNotes {
+        track: usize,
+        notes: Vec<u8>,
+    },
+
     /// Edit one cell in an instrument tensor default.
     SetInstrumentTensorCell {
         track: usize,
@@ -672,6 +747,7 @@ mod tests {
         EffectDescriptor, EffectSlotSnapshot, InstrumentModulationTarget, ParamDescriptor,
         ParamKind, ParamScaling, TensorParamDescriptor,
     };
+    use crate::plock_variants::PlockVariantKey;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType, RackRouting,
@@ -933,6 +1009,35 @@ mod tests {
                 track: 0,
                 param_idx: 0,
                 value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetInstrumentKeyLock {
+                track: 0,
+                note: 69,
+                param_idx: 0,
+                value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetInstrumentKeyLockMulti {
+                track: 0,
+                notes: vec![69, 72],
+                param_idx: 0,
+                value: 0.6,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::StampInstrumentKeyLockVariant {
+                track: 0,
+                notes: vec![69, 72],
+                key: PlockVariantKey::default(),
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::ClearInstrumentKeyLockVariantsForNotes {
+                track: 0,
+                notes: vec![69, 72],
             }
         ));
         assert!(command_mutates_sequencer_state(
@@ -1333,6 +1438,56 @@ mod tests {
 
         let slot = &app.buses[0].effect_slots[0];
         assert_eq!(slot.plocks[step][1], Some(1.0));
+    }
+
+    #[test]
+    fn instrument_key_lock_variant_command_stamps_and_clears_notes() {
+        let desc = EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let mode_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "mode")
+            .expect("filter descriptor should include mode");
+        let mut app = test_app_with_instrument_descriptor(desc);
+        app.state.pattern.instrument_slots[0].set_key_lock(60, cutoff_idx, 900.0);
+        app.state.pattern.instrument_slots[0].set_key_lock(60, mode_idx, 2.0);
+        let assignment = app.state.reconcile_key_lock_variant_registry_for_track(0)[60]
+            .clone()
+            .expect("source note should have a key-lock variant");
+
+        apply_command(
+            &mut app,
+            AppCommand::StampInstrumentKeyLockVariant {
+                track: 0,
+                notes: vec![62],
+                key: assignment.key,
+            },
+        );
+
+        let slot = &app.state.pattern.instrument_slots[0];
+        assert_eq!(slot.key_locks.get(62, cutoff_idx), Some(900.0));
+        assert_eq!(slot.key_locks.get(62, mode_idx), Some(2.0));
+        assert!(
+            app.state.pattern.track_sound_state.lock().unwrap()[0].dirty,
+            "stamping a key-lock variant should mark the track sound dirty"
+        );
+
+        apply_command(
+            &mut app,
+            AppCommand::ClearInstrumentKeyLockVariantsForNotes {
+                track: 0,
+                notes: vec![62],
+            },
+        );
+
+        let slot = &app.state.pattern.instrument_slots[0];
+        assert_eq!(slot.key_locks.get(62, cutoff_idx), None);
+        assert_eq!(slot.key_locks.get(62, mode_idx), None);
     }
 }
 
@@ -1773,6 +1928,90 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             for step in steps {
                 app.state.pattern.instrument_slots[track].set_plock(step, param_idx, value);
                 sync_instrument_mod_active_plock(app, track, step, param_idx);
+            }
+        }
+
+        AppCommand::SetInstrumentKeyLock {
+            track,
+            note,
+            param_idx,
+            value,
+        } => {
+            app.state.pattern.instrument_slots[track].set_key_lock(note, param_idx, value);
+            sync_instrument_mod_active_key_lock(app, track, note, param_idx);
+            app.mark_track_sound_dirty(track);
+        }
+
+        AppCommand::SetInstrumentKeyLockMulti {
+            track,
+            notes,
+            param_idx,
+            value,
+        } => {
+            for note in notes {
+                app.state.pattern.instrument_slots[track].set_key_lock(note, param_idx, value);
+                sync_instrument_mod_active_key_lock(app, track, note, param_idx);
+            }
+            app.mark_track_sound_dirty(track);
+        }
+
+        AppCommand::ClearInstrumentKeyLock {
+            track,
+            note,
+            param_idx,
+        } => {
+            app.state.pattern.instrument_slots[track].clear_key_lock(note, param_idx);
+            sync_instrument_mod_active_key_lock(app, track, note, param_idx);
+            app.mark_track_sound_dirty(track);
+        }
+
+        AppCommand::ClearInstrumentKeyLocksForNote { track, note } => {
+            app.state.pattern.instrument_slots[track].clear_note_key_locks(note);
+            app.mark_track_sound_dirty(track);
+        }
+
+        AppCommand::StampInstrumentKeyLockVariant { track, notes, key } => {
+            if track < app.state.pattern.instrument_slots.len() {
+                for note in notes {
+                    app.state.pattern.instrument_slots[track].clear_note_key_locks(note);
+                    for entry in &key.entries {
+                        if entry.domain != PlockVariantDomain::InstrumentKeyLock
+                            || entry.slot != 0
+                            || entry.cell.is_some()
+                        {
+                            continue;
+                        }
+                        let param_count = app.state.pattern.instrument_slots[track]
+                            .num_params
+                            .load(Ordering::Relaxed)
+                            as usize;
+                        if entry.param >= param_count {
+                            continue;
+                        }
+                        app.state.pattern.instrument_slots[track].set_key_lock(
+                            note,
+                            entry.param,
+                            f32::from_bits(entry.value_bits),
+                        );
+                        sync_instrument_mod_active_key_lock(app, track, note, entry.param);
+                    }
+                }
+                let _ = app
+                    .state
+                    .reconcile_key_lock_variant_registry_for_track(track);
+                app.mark_track_sound_dirty(track);
+            }
+        }
+
+        AppCommand::ClearInstrumentKeyLockVariantsForNotes { track, notes } => {
+            if track < app.state.pattern.instrument_slots.len() {
+                for note in notes {
+                    app.state.pattern.instrument_slots[track].clear_note_key_locks(note);
+                }
+                let _ = app
+                    .state
+                    .reconcile_key_lock_variant_registry_for_track(track);
+                app.mark_track_sound_dirty(track);
             }
         }
 

@@ -397,11 +397,12 @@
               (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center :width :fill
                 (fx-panel-header-leading-spacer)
                 (fx-enabled-toggle (enabled-param (get inst :synth)) false "instrument-enabled")
-                (h-stack :v-align :center :height fx-panel-header-height :gap 2 :padding 0.1
+                (h-stack :v-align :center :height fx-panel-header-height :gap 1 :padding 0.1
                   (label (substring (get inst :display-name) 0 12)
                     :font-size 11  :color :white :bg :transparent)
                   (instrument-synth-button)
-                  (instrument-mods-toggle-button))
+                  (instrument-mods-toggle-button)
+                  (instrument-keys-button))
                 (box :flex 1 :height 0.15)
                 (v-stack
                   (button "edit"

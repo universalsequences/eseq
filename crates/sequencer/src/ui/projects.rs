@@ -161,6 +161,8 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
         defaults: desc.params.iter().map(|param| param.default).collect(),
         plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
         plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+        key_locks: std::collections::BTreeMap::new(),
+        key_lock_param_ids: std::collections::BTreeMap::new(),
         tensor_params: desc
             .tensor_params
             .iter()
@@ -488,6 +490,8 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     let mut plock_param_ids = (0..MAX_STEPS)
         .map(|_| vec![None; new_np])
         .collect::<Vec<_>>();
+    let mut key_locks = std::collections::BTreeMap::new();
+    let mut key_lock_param_ids = std::collections::BTreeMap::new();
     for step in 0..MAX_STEPS {
         for (new_idx, param) in desc.params.iter().enumerate() {
             let Some(old_idx) = old_idx_for(new_idx, param) else {
@@ -506,6 +510,20 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             }
         }
     }
+    for (&note, saved_row) in &slot.key_locks {
+        for (new_idx, param) in desc.params.iter().enumerate() {
+            let Some(old_idx) = old_idx_for(new_idx, param) else {
+                continue;
+            };
+            if let Some(value) = saved_row.get(old_idx).copied().flatten() {
+                key_locks.entry(note).or_insert_with(|| vec![None; new_np])[new_idx] = Some(value);
+                key_lock_param_ids
+                    .entry(note)
+                    .or_insert_with(|| vec![None; new_np])[new_idx] =
+                    ParamNodeId::from_slot_param(node_id, modulator_node_id, param.node_param_idx);
+            }
+        }
+    }
 
     let mut snapshot = crate::effects::EffectSlotSnapshot {
         node_id,
@@ -514,6 +532,8 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         defaults,
         plocks,
         plock_param_ids,
+        key_locks,
+        key_lock_param_ids,
         tensor_params: slot.tensor_params.clone(),
         param_node_indices: desc.params.iter().map(|p| p.node_param_idx).collect(),
         param_node_spans: desc
@@ -656,6 +676,8 @@ fn project_bus_pattern_snapshot_from_ui(
                     defaults,
                     plocks: plocks.clone(),
                     plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+                    key_locks: std::collections::BTreeMap::new(),
+                    key_lock_param_ids: std::collections::BTreeMap::new(),
                     tensor_params: Vec::new(),
                     param_node_indices: Vec::new(),
                     param_node_spans: Vec::new(),
@@ -2265,6 +2287,7 @@ impl App {
             sample_names: _,
             rack_tracks,
             plock_variant_registries,
+            key_lock_variant_registries,
         } = pattern;
         let bus_patterns = bus_patterns
             .into_iter()
@@ -2356,6 +2379,8 @@ impl App {
                                     defaults: Vec::new(),
                                     plocks: vec![Vec::new(); MAX_STEPS],
                                     plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                    key_locks: std::collections::BTreeMap::new(),
+                                    key_lock_param_ids: std::collections::BTreeMap::new(),
                                     tensor_params: Vec::new(),
                                     param_node_indices: Vec::new(),
                                     param_node_spans: Vec::new(),
@@ -2391,6 +2416,8 @@ impl App {
                                 defaults,
                                 plocks: vec![Vec::new(); MAX_STEPS],
                                 plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                key_locks: std::collections::BTreeMap::new(),
+                                key_lock_param_ids: std::collections::BTreeMap::new(),
                                 tensor_params: Vec::new(),
                                 param_node_indices: sampler_desc
                                     .params
@@ -2416,6 +2443,8 @@ impl App {
                                 defaults: Vec::new(),
                                 plocks: vec![Vec::new(); MAX_STEPS],
                                 plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                key_locks: std::collections::BTreeMap::new(),
+                                key_lock_param_ids: std::collections::BTreeMap::new(),
                                 tensor_params: Vec::new(),
                                 param_node_indices: Vec::new(),
                                 param_node_spans: Vec::new(),
@@ -2510,6 +2539,7 @@ impl App {
             graph_overrides,
             rack_tracks: self.rebind_project_rack_tracks_to_graph(rack_tracks, num_tracks),
             plock_variant_registries,
+            key_lock_variant_registries,
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
         refresh_neural_output_override_param_ids(&mut snapshot);
@@ -2632,6 +2662,8 @@ mod tests {
             defaults: vec![5.0],
             plocks: (0..MAX_STEPS).map(|_| vec![None]).collect(),
             plock_param_ids: (0..MAX_STEPS).map(|_| vec![None]).collect(),
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![0],
             param_node_spans: vec![1],
             tensor_params: Vec::new(),
@@ -2713,6 +2745,8 @@ mod tests {
             defaults: vec![0.0; num_params],
             plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
             plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices,
             param_node_spans: vec![1; num_params],
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
@@ -2892,6 +2926,7 @@ mod tests {
                 sample_names: Vec::new(),
                 rack_tracks: Vec::new(),
                 plock_variant_registries: Vec::new(),
+                key_lock_variant_registries: Vec::new(),
             }],
         }
     }
@@ -2932,6 +2967,8 @@ mod tests {
             defaults: vec![0.42],
             plocks: vec![vec![None]; MAX_STEPS],
             plock_param_ids: vec![vec![None]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![9],
             param_node_spans: vec![1],
             tensor_params: Vec::new(),
@@ -2971,6 +3008,8 @@ mod tests {
             defaults: vec![0.24],
             plocks: vec![vec![None]; MAX_STEPS],
             plock_param_ids: vec![vec![None]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![11],
             param_node_spans: vec![1],
             tensor_params: Vec::new(),
@@ -3012,6 +3051,8 @@ mod tests {
             defaults: vec![0.12, 0.34, 0.56, 0.78],
             plocks,
             plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![
                 (crate::lisp_host::HEADER_SLOTS - 1) as u32,
                 crate::lisp_host::HEADER_SLOTS as u32,
@@ -3075,6 +3116,8 @@ mod tests {
             defaults: vec![0.12, 0.34, 8.0, 9.0],
             plocks,
             plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![
                 crate::lisp_host::HEADER_SLOTS as u32,
                 crate::lisp_host::HEADER_SLOTS as u32 + 1,
@@ -3131,6 +3174,8 @@ mod tests {
             defaults: vec![0.12, 0.34, 0.56, 0.78],
             plocks,
             plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![10, 14, 18, 22],
             param_node_spans: vec![1, 1, 1, 1],
             tensor_params: Vec::new(),
@@ -3198,6 +3243,8 @@ mod tests {
             defaults: vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78],
             plocks,
             plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: desc
                 .params
                 .iter()
@@ -3253,6 +3300,8 @@ mod tests {
             defaults: vec![0.5, 7400.0, 0.0, 0.0],
             plocks: vec![vec![None; desc.params.len()]; MAX_STEPS],
             plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: desc
                 .params
                 .iter()
@@ -3297,6 +3346,8 @@ mod tests {
             defaults: vec![0.12, 1.0, 0.31, 2.0, -0.27],
             plocks,
             plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: desc
                 .params
                 .iter()

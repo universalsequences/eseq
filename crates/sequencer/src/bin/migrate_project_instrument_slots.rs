@@ -124,6 +124,8 @@ fn migrate_slot(slot: &ProjectEffectSlot, desc: &EffectDescriptor) -> ProjectEff
         defaults,
         plocks,
         plock_param_ids: vec![vec![None; new_param_count]; MAX_STEPS],
+        key_locks: std::collections::BTreeMap::new(),
+        key_lock_param_ids: std::collections::BTreeMap::new(),
         tensor_params: Vec::new(),
         param_node_indices: desc
             .params

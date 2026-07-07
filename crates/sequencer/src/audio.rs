@@ -1638,6 +1638,12 @@ fn custom_pitch_hz(transpose: f32, base_note_offset: f32) -> f32 {
     440.0 * 2f32.powf((transpose + base_note_offset) / 12.0)
 }
 
+fn custom_pitch_midi_note(transpose: f32, base_note_offset: f32) -> u8 {
+    (transpose + base_note_offset + 60.0)
+        .round()
+        .clamp(0.0, 127.0) as u8
+}
+
 fn track_accepts_scheduled_trigger(state: &SequencerState, track_idx: usize) -> bool {
     let Some(track_params) = state.pattern.track_params.get(track_idx) else {
         return false;
@@ -2047,6 +2053,312 @@ fn live_slot_default_node_param_value(
         return default;
     };
     slot.defaults.get(param_idx)
+}
+
+fn key_lock_identity_matches(
+    key_lock_ids: &std::collections::BTreeMap<u8, Vec<Option<crate::neural::ParamNodeId>>>,
+    note: u8,
+    param_idx: usize,
+    expected: Option<crate::neural::ParamNodeId>,
+) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    key_lock_ids
+        .get(&note)
+        .and_then(|row| row.get(param_idx))
+        .copied()
+        .flatten()
+        == Some(expected)
+}
+
+fn live_param_route(
+    slot: &EffectSlotState,
+    param_idx: usize,
+) -> Option<(ScheduledInstrumentParamTarget, u64, u32)> {
+    let raw_idx = slot.resolve_node_idx(param_idx);
+    if raw_idx == u32::MAX as u64 {
+        return None;
+    }
+    let span = slot.resolve_node_span(param_idx);
+    if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE as u64 {
+        Some((
+            ScheduledInstrumentParamTarget::Modulator,
+            raw_idx - crate::voice_modulator::MOD_PARAM_BASE as u64,
+            span,
+        ))
+    } else {
+        Some((ScheduledInstrumentParamTarget::Synth, raw_idx, span))
+    }
+}
+
+fn snapshot_param_route(
+    slot: &EffectSlotSnapshot,
+    param_idx: usize,
+) -> Option<(ScheduledInstrumentParamTarget, u64, u32)> {
+    let raw_idx = slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()
+        .unwrap_or(param_idx as u32);
+    if raw_idx == u32::MAX {
+        return None;
+    }
+    let span = slot
+        .param_node_spans
+        .get(param_idx)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        Some((
+            ScheduledInstrumentParamTarget::Modulator,
+            (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+            span,
+        ))
+    } else {
+        Some((ScheduledInstrumentParamTarget::Synth, raw_idx as u64, span))
+    }
+}
+
+fn live_step_has_valid_plock(
+    slot: &EffectSlotState,
+    step_idx: Option<usize>,
+    param_idx: usize,
+) -> bool {
+    let Some(step_idx) = step_idx else {
+        return false;
+    };
+    if slot.plocks.get(step_idx, param_idx).is_none() {
+        return false;
+    }
+    let expected_id = slot.param_node_id(param_idx);
+    expected_id.is_some() && slot.plocks.get_id(step_idx, param_idx) == expected_id
+}
+
+fn snapshot_step_has_valid_plock(
+    slot: &EffectSlotSnapshot,
+    step_idx: Option<usize>,
+    param_idx: usize,
+) -> bool {
+    let Some(step_idx) = step_idx else {
+        return false;
+    };
+    if slot
+        .plocks
+        .get(step_idx)
+        .and_then(|row| row.get(param_idx))
+        .copied()
+        .flatten()
+        .is_none()
+    {
+        return false;
+    }
+    let raw_idx = slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()
+        .unwrap_or(param_idx as u32);
+    let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
+    plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id)
+}
+
+fn upsert_instrument_param(
+    params: &mut ScheduledInstrumentParams,
+    target: ScheduledInstrumentParamTarget,
+    idx: u64,
+    span: u32,
+    value: f32,
+) {
+    if let Some(existing) = params
+        .iter_mut()
+        .find(|param| param.target == target && param.idx == idx)
+    {
+        existing.span = span;
+        existing.value = value;
+        return;
+    }
+    if params.is_full() {
+        return;
+    }
+    params.push(ScheduledInstrumentParam {
+        target,
+        idx,
+        span,
+        value,
+    });
+    params.sort_by_key(|param| match param.target {
+        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+    });
+}
+
+fn key_locked_live_instrument_params(
+    state: &SequencerState,
+    track_idx: usize,
+    transpose: f32,
+    base_note_offset: f32,
+    step_idx: Option<usize>,
+    base_params: &ScheduledInstrumentParams,
+) -> ScheduledInstrumentParams {
+    let Some(slot) = state.pattern.instrument_slots.get(track_idx) else {
+        return base_params.clone();
+    };
+    let note = custom_pitch_midi_note(transpose, base_note_offset);
+    if !slot
+        .key_locks
+        .note_has_any_lock(note, slot.num_params.load(Ordering::Relaxed) as usize)
+    {
+        return base_params.clone();
+    }
+
+    let mut params = base_params.clone();
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    for param_idx in 0..num_params.min(MAX_SLOT_PARAMS) {
+        if live_step_has_valid_plock(slot, step_idx, param_idx) {
+            continue;
+        }
+        let Some(value) = slot.key_locks.get(note, param_idx) else {
+            continue;
+        };
+        if !value.is_finite()
+            || slot.key_locks.get_id(note, param_idx) != slot.param_node_id(param_idx)
+        {
+            continue;
+        }
+        let Some((target, idx, span)) = live_param_route(slot, param_idx) else {
+            continue;
+        };
+        upsert_instrument_param(&mut params, target, idx, span, value);
+    }
+    params
+}
+
+fn key_locked_snapshot_instrument_params(
+    slot: &EffectSlotSnapshot,
+    transpose: f32,
+    base_note_offset: f32,
+    step_idx: Option<usize>,
+    base_params: &ScheduledInstrumentParams,
+) -> ScheduledInstrumentParams {
+    let note = custom_pitch_midi_note(transpose, base_note_offset);
+    let Some(row) = slot.key_locks.get(&note) else {
+        return base_params.clone();
+    };
+
+    let mut params = base_params.clone();
+    let num_params = (slot.num_params as usize).min(MAX_SLOT_PARAMS);
+    for param_idx in 0..num_params.min(row.len()) {
+        if snapshot_step_has_valid_plock(slot, step_idx, param_idx) {
+            continue;
+        }
+        let Some(value) = row[param_idx] else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+        let raw_idx = slot
+            .param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32);
+        let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
+        if !key_lock_identity_matches(&slot.key_lock_param_ids, note, param_idx, expected_id) {
+            continue;
+        }
+        let Some((target, idx, span)) = snapshot_param_route(slot, param_idx) else {
+            continue;
+        };
+        upsert_instrument_param(&mut params, target, idx, span, value);
+    }
+    params
+}
+
+fn resolve_live_instrument_defaults(
+    state: &SequencerState,
+    track_idx: usize,
+) -> ScheduledInstrumentParams {
+    let Some(slot) = state.pattern.instrument_slots.get(track_idx) else {
+        return ScheduledInstrumentParams::new();
+    };
+    let mut params = ScheduledInstrumentParams::new();
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    for param_idx in 0..num_params.min(MAX_SLOT_PARAMS) {
+        let Some((target, idx, span)) = live_param_route(slot, param_idx) else {
+            continue;
+        };
+        let value = slot.defaults.get(param_idx);
+        if !value.is_finite() {
+            continue;
+        }
+        params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
+    }
+    params.sort_by_key(|param| match param.target {
+        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+    });
+    params
+}
+
+fn resolve_live_instrument_tensor_defaults(
+    state: &SequencerState,
+    track_idx: usize,
+) -> ScheduledInstrumentTensorParams {
+    let Some(slot) = state.pattern.instrument_slots.get(track_idx) else {
+        return ScheduledInstrumentTensorParams::new();
+    };
+    let mut params = ScheduledInstrumentTensorParams::new();
+    let num_tensors = slot.tensor_params.num_params();
+    for tensor_idx in 0..num_tensors {
+        let Some(cell_offset) = slot.tensor_params.tensor_cell_offset(tensor_idx) else {
+            continue;
+        };
+        let Some(values) = slot.tensor_params.default_values(tensor_idx) else {
+            continue;
+        };
+        if values.iter().any(|value| !value.is_finite()) {
+            continue;
+        }
+        if params.is_full() {
+            break;
+        }
+        params.push(ScheduledInstrumentTensorParam {
+            cell_offset,
+            values,
+        });
+    }
+    params.sort_by_key(|param| param.cell_offset);
+    params
+}
+
+fn instrument_param_bundle_fingerprint(
+    engine_id: usize,
+    base_note_offset: f32,
+    instrument_params: &[ScheduledInstrumentParam],
+    instrument_tensor_params: &[ScheduledInstrumentTensorParam],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    engine_id.hash(&mut hasher);
+    base_note_offset.to_bits().hash(&mut hasher);
+    for param in instrument_params {
+        param.target.hash(&mut hasher);
+        param.idx.hash(&mut hasher);
+        param.span.hash(&mut hasher);
+        param.value.to_bits().hash(&mut hasher);
+    }
+    for tensor in instrument_tensor_params {
+        tensor.cell_offset.hash(&mut hasher);
+        for value in &tensor.values {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn resolve_rack_slot_instrument_params(
@@ -2630,6 +2942,7 @@ fn dispatch_scheduled_step(
         frame_offset,
         track_idx,
         step,
+        Some(step),
         samples_per_step as f64,
         resolved,
         chord,
@@ -2644,6 +2957,7 @@ fn dispatch_scheduled_network_step(
     data: &mut AudioCallbackData,
     frame_offset: u32,
     track_idx: usize,
+    key_lock_plock_step: Option<usize>,
     samples_per_step: f32,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
@@ -2661,6 +2975,7 @@ fn dispatch_scheduled_network_step(
         frame_offset,
         track_idx,
         0,
+        key_lock_plock_step,
         samples_per_step as f64,
         resolved,
         chord,
@@ -2731,12 +3046,14 @@ fn dispatch_scheduled_event(
             instrument_tensor_params,
             sampler_params,
             instrument_fingerprint,
+            seed,
             ..
         } => {
             dispatch_scheduled_network_step(
                 data,
                 frame_offset,
                 track,
+                seed.map(|(_, step)| step),
                 samples_per_step,
                 resolved,
                 chord,
@@ -4038,9 +4355,16 @@ fn fire_live_keyboard_rack_note(
                 if voice_lid == 0 || synth_id == 0 || modulator_id == 0 {
                     continue;
                 }
+                let key_locked_instrument_params = key_locked_snapshot_instrument_params(
+                    &slot.instrument_slot,
+                    playback_transpose,
+                    slot.instrument_base_note_offset,
+                    None,
+                    &instrument_params,
+                );
                 let instrument_fingerprint = rack_slot_sound_fingerprint(
                     slot,
-                    &instrument_params,
+                    &key_locked_instrument_params,
                     slot.instrument_base_note_offset,
                 );
                 let pitch_hz =
@@ -4065,7 +4389,7 @@ fn fire_live_keyboard_rack_note(
                             data.lg.0,
                             synth_id as u64,
                             modulator_id as u64,
-                            &instrument_params,
+                            &key_locked_instrument_params,
                         );
                     }
                     if allocation.stole_active_voice || slot.max_polyphony <= 1 || free_patch {
@@ -4325,6 +4649,7 @@ fn fire_rack_resolved(
     frame_offset: u32,
     track_idx: usize,
     step: usize,
+    key_lock_plock_step: Option<usize>,
     samples_per_step: f64,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
@@ -4385,8 +4710,6 @@ fn fire_rack_resolved(
         } else {
             None
         };
-        let instrument_fingerprint =
-            rack_slot_sound_fingerprint(slot, &instrument_params, slot_params.base_note_offset);
 
         if chord.count > 0 {
             for n in 0..chord.count {
@@ -4416,6 +4739,22 @@ fn fire_rack_resolved(
                     );
                 }
                 let playback_transpose = rack_slot_playback_transpose(rack.routing, transpose);
+                let note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
+                    key_locked_snapshot_instrument_params(
+                        &slot.instrument_slot,
+                        playback_transpose,
+                        slot_params.base_note_offset,
+                        key_lock_plock_step,
+                        &instrument_params,
+                    )
+                } else {
+                    instrument_params.clone()
+                };
+                let instrument_fingerprint = rack_slot_sound_fingerprint(
+                    slot,
+                    &note_instrument_params,
+                    slot_params.base_note_offset,
+                );
                 fire_rack_slot_note(
                     data,
                     frame_offset,
@@ -4428,7 +4767,7 @@ fn fire_rack_resolved(
                     resolved.speed,
                     note_gate,
                     gate_mode,
-                    &instrument_params,
+                    &note_instrument_params,
                     sampler_params,
                     instrument_fingerprint,
                 );
@@ -4448,6 +4787,22 @@ fn fire_rack_resolved(
                 );
             }
             let playback_transpose = rack_slot_playback_transpose(rack.routing, resolved.transpose);
+            let note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
+                key_locked_snapshot_instrument_params(
+                    &slot.instrument_slot,
+                    playback_transpose,
+                    slot_params.base_note_offset,
+                    key_lock_plock_step,
+                    &instrument_params,
+                )
+            } else {
+                instrument_params.clone()
+            };
+            let instrument_fingerprint = rack_slot_sound_fingerprint(
+                slot,
+                &note_instrument_params,
+                slot_params.base_note_offset,
+            );
             fire_rack_slot_note(
                 data,
                 frame_offset,
@@ -4460,7 +4815,7 @@ fn fire_rack_resolved(
                 resolved.speed,
                 rack_gate,
                 gate_mode,
-                &instrument_params,
+                &note_instrument_params,
                 sampler_params,
                 instrument_fingerprint,
             );
@@ -4495,6 +4850,7 @@ fn fire_resolved(
     frame_offset: u32,
     track_idx: usize,
     step: usize,
+    key_lock_plock_step: Option<usize>,
     samples_per_step: f64,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
@@ -4522,6 +4878,7 @@ fn fire_resolved(
                 frame_offset,
                 track_idx,
                 step,
+                key_lock_plock_step,
                 samples_per_step,
                 resolved,
                 chord,
@@ -4776,6 +5133,20 @@ fn fire_resolved(
                     data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
                 }
                 let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
+                let key_locked_params = key_locked_live_instrument_params(
+                    &data.state,
+                    track_idx,
+                    transpose,
+                    base_note_offset,
+                    key_lock_plock_step,
+                    &instrument_params,
+                );
+                let note_fingerprint = instrument_param_bundle_fingerprint(
+                    engine_id,
+                    base_note_offset,
+                    &key_locked_params,
+                    &instrument_tensor_params,
+                );
                 cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
                 if allocation.stole_active_voice || !track_polyphonic || free_patch {
                     let off_seq = next_event_sequence_from(&mut data.event_seq);
@@ -4789,13 +5160,13 @@ fn fire_resolved(
                             track_idx,
                         );
                         if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
-                            != instrument_fingerprint
+                            != note_fingerprint
                         {
                             dispatch_instrument_params_to_voice(
                                 data.lg.0,
                                 synth_id as u64,
                                 modulator_id as u64,
-                                &instrument_params,
+                                &key_locked_params,
                             );
                             dispatch_instrument_tensor_params_to_voice(
                                 data.lg.0,
@@ -4814,13 +5185,13 @@ fn fire_resolved(
                             track_idx,
                         );
                         if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
-                            != instrument_fingerprint
+                            != note_fingerprint
                         {
                             dispatch_instrument_params_to_voice(
                                 data.lg.0,
                                 synth_id as u64,
                                 modulator_id as u64,
-                                &instrument_params,
+                                &key_locked_params,
                             );
                             dispatch_instrument_tensor_params_to_voice(
                                 data.lg.0,
@@ -4831,7 +5202,7 @@ fn fire_resolved(
                     }
                 }
                 data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint =
-                    instrument_fingerprint;
+                    note_fingerprint;
                 let on_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
                     send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
@@ -4965,6 +5336,20 @@ fn fire_resolved(
                 data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
             }
             let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
+            let key_locked_params = key_locked_live_instrument_params(
+                &data.state,
+                track_idx,
+                transpose,
+                base_note_offset,
+                key_lock_plock_step,
+                &instrument_params,
+            );
+            let note_fingerprint = instrument_param_bundle_fingerprint(
+                engine_id,
+                base_note_offset,
+                &key_locked_params,
+                &instrument_tensor_params,
+            );
             cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
             if allocation.stole_active_voice || !track_polyphonic || free_patch {
                 let off_seq = next_event_sequence_from(&mut data.event_seq);
@@ -4978,13 +5363,13 @@ fn fire_resolved(
                         track_idx,
                     );
                     if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
-                        != instrument_fingerprint
+                        != note_fingerprint
                     {
                         dispatch_instrument_params_to_voice(
                             data.lg.0,
                             synth_id as u64,
                             modulator_id as u64,
-                            &instrument_params,
+                            &key_locked_params,
                         );
                         dispatch_instrument_tensor_params_to_voice(
                             data.lg.0,
@@ -5003,13 +5388,13 @@ fn fire_resolved(
                         track_idx,
                     );
                     if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
-                        != instrument_fingerprint
+                        != note_fingerprint
                     {
                         dispatch_instrument_params_to_voice(
                             data.lg.0,
                             synth_id as u64,
                             modulator_id as u64,
-                            &instrument_params,
+                            &key_locked_params,
                         );
                         dispatch_instrument_tensor_params_to_voice(
                             data.lg.0,
@@ -5019,8 +5404,7 @@ fn fire_resolved(
                     }
                 }
             }
-            data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint =
-                instrument_fingerprint;
+            data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint = note_fingerprint;
             let on_seq = next_event_sequence_from(&mut data.event_seq);
             unsafe {
                 send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
@@ -5495,8 +5879,23 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let voice_lid = allocation.logical_id;
-                let fingerprint =
-                    instrument_sound_fingerprint(&data.state, kt.track, engine_id, None);
+                let default_params = resolve_live_instrument_defaults(&data.state, kt.track);
+                let default_tensor_params =
+                    resolve_live_instrument_tensor_defaults(&data.state, kt.track);
+                let key_locked_params = key_locked_live_instrument_params(
+                    &data.state,
+                    kt.track,
+                    resolved_transpose,
+                    base_note_offset,
+                    None,
+                    &default_params,
+                );
+                let fingerprint = instrument_param_bundle_fingerprint(
+                    engine_id,
+                    base_note_offset,
+                    &key_locked_params,
+                    &default_tensor_params,
+                );
                 let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
                     .load(Ordering::Relaxed);
                 let modulator_id = data.state.runtime.engine_modulator_node_ids[engine_id]
@@ -5531,12 +5930,16 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
                         != fingerprint
                     {
-                        dispatch_instrument_defaults_to_voice(
+                        dispatch_instrument_params_to_voice(
                             data.lg.0,
-                            &data.state,
-                            kt.track,
                             synth_id as u64,
                             modulator_id as u64,
+                            &key_locked_params,
+                        );
+                        dispatch_instrument_tensor_params_to_voice(
+                            data.lg.0,
+                            synth_id as u64,
+                            &default_tensor_params,
                         );
                     }
                 }
@@ -6154,24 +6557,25 @@ mod tests {
         bus_gate_target_at, clear_active_keyboard_note_by_lid,
         collect_rack_choke_group_voice_releases, free_patch_transport_route_cache_is_fresh,
         free_patch_transport_route_target, instrument_sound_fingerprint,
-        mute_group_winner_for_block_events, rack_slot_matches_routing,
-        rack_slot_playback_transpose, resolve_live_keyboard_transpose, resolved_chord_transpose,
-        sampler_warp_runtime, select_output_channels, select_output_config,
-        store_active_keyboard_note, swing_delay_samples, take_active_keyboard_note,
-        track_accepts_scheduled_trigger, ActiveKeyboardNote, ActiveKeyboardVoice,
-        ActiveKeyboardVoiceTarget, BlockEvent, BlockEventKind, ChopEvent, CountdownEvent,
-        CountdownEventKind, CustomEnginePool, FreePatchTransportRouteState,
-        FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget, OutputDeviceConfig,
-        OutputFormatRange, RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
+        key_locked_live_instrument_params, mute_group_winner_for_block_events,
+        rack_slot_matches_routing, rack_slot_playback_transpose, resolve_live_instrument_defaults,
+        resolve_live_keyboard_transpose, resolved_chord_transpose, sampler_warp_runtime,
+        select_output_channels, select_output_config, store_active_keyboard_note,
+        swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
+        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
+        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
+        FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
+        OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
     use crate::analysis::{pack_ptr, OnsetTableShared};
     use crate::effects::{
-        EffectDescriptor, EffectSlotSnapshot, EffectSlotState, TensorParamDescriptor,
+        EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
+        ParamScaling, TensorParamDescriptor,
     };
     use crate::scheduled_event::{
-        ScheduledChordData, ScheduledEvent, ScheduledEventKind, ScheduledInstrumentParams,
-        ScheduledInstrumentTensorParams, ScheduledSamplerParams,
+        ScheduledChordData, ScheduledEvent, ScheduledEventKind, ScheduledInstrumentParamTarget,
+        ScheduledInstrumentParams, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
     };
     use crate::sequencer::{
         CustomInstrumentRunMode, InstrumentType, RackRouting, RackSlotParamPlocks,
@@ -6202,6 +6606,136 @@ mod tests {
             track_sound_state: TrackSoundState::default(),
             sample_id: None,
         }
+    }
+
+    fn audio_test_param(name: &str, default: f32, node_param_idx: u32) -> ParamDescriptor {
+        ParamDescriptor {
+            name: name.to_string(),
+            min: -20_000.0,
+            max: 20_000.0,
+            default,
+            kind: ParamKind::Continuous { unit: None },
+            scaling: ParamScaling::Linear,
+            node_param_idx,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        }
+    }
+
+    fn param_value(params: &ScheduledInstrumentParams, idx: u64) -> Option<f32> {
+        params
+            .iter()
+            .find(|param| param.target == ScheduledInstrumentParamTarget::Synth && param.idx == idx)
+            .map(|param| param.value)
+    }
+
+    #[test]
+    fn custom_pitch_midi_note_uses_c4_zero_and_base_offset() {
+        assert_eq!(super::custom_pitch_midi_note(0.0, 0.0), 60);
+        assert_eq!(super::custom_pitch_midi_note(2.0, 0.0), 62);
+        assert_eq!(super::custom_pitch_midi_note(0.0, 12.0), 72);
+    }
+
+    #[test]
+    fn key_locked_live_instrument_params_apply_per_note_after_base_offset() {
+        let state = SequencerState::new(1, Vec::new());
+        let desc = EffectDescriptor {
+            name: "key-lock-test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                audio_test_param("cutoff", 100.0, 0),
+                audio_test_param("detune", 0.0, 1),
+            ],
+        };
+        let slot = &state.pattern.instrument_slots[0];
+        slot.apply_descriptor(&desc, 42);
+        slot.defaults.set(0, 100.0);
+        slot.defaults.set(1, 0.0);
+        slot.set_key_lock(60, 1, -12.0);
+        slot.set_key_lock(62, 1, -7.0);
+        slot.set_key_lock(72, 1, 7.0);
+
+        let base_params = resolve_live_instrument_defaults(&state, 0);
+        let c4_params = key_locked_live_instrument_params(&state, 0, 0.0, 0.0, None, &base_params);
+        let d4_params = key_locked_live_instrument_params(&state, 0, 2.0, 0.0, None, &base_params);
+        let offset_params =
+            key_locked_live_instrument_params(&state, 0, 0.0, 12.0, None, &base_params);
+
+        assert_eq!(param_value(&c4_params, 1), Some(-12.0));
+        assert_eq!(param_value(&d4_params, 1), Some(-7.0));
+        assert_eq!(param_value(&offset_params, 1), Some(7.0));
+    }
+
+    #[test]
+    fn key_locked_live_instrument_params_keep_step_plocks_per_param() {
+        let state = SequencerState::new(1, Vec::new());
+        let desc = EffectDescriptor {
+            name: "key-lock-precedence-test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                audio_test_param("cutoff", 100.0, 0),
+                audio_test_param("detune", 0.0, 1),
+            ],
+        };
+        let slot = &state.pattern.instrument_slots[0];
+        slot.apply_descriptor(&desc, 42);
+        slot.defaults.set(0, 100.0);
+        slot.defaults.set(1, 0.0);
+        slot.set_key_lock(60, 0, 3_000.0);
+        slot.set_key_lock(60, 1, -40.0);
+        slot.set_plock(5, 0, 2_000.0);
+
+        let mut base_params = resolve_live_instrument_defaults(&state, 0);
+        for param in &mut base_params {
+            if param.target == ScheduledInstrumentParamTarget::Synth && param.idx == 0 {
+                param.value = 2_000.0;
+            }
+        }
+
+        let merged = key_locked_live_instrument_params(&state, 0, 0.0, 0.0, Some(5), &base_params);
+
+        assert_eq!(
+            param_value(&merged, 0),
+            Some(2_000.0),
+            "valid step p-lock should win for the same param"
+        );
+        assert_eq!(
+            param_value(&merged, 1),
+            Some(-40.0),
+            "step p-lock on cutoff must not suppress detune's key lock"
+        );
+    }
+
+    #[test]
+    fn key_locked_live_instrument_params_drop_stale_key_lock_identity() {
+        let state = SequencerState::new(1, Vec::new());
+        let desc = EffectDescriptor {
+            name: "key-lock-stale-id-test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![audio_test_param("cutoff", 100.0, 0)],
+        };
+        let slot = &state.pattern.instrument_slots[0];
+        slot.apply_descriptor(&desc, 42);
+        slot.defaults.set(0, 100.0);
+        slot.key_locks.set(60, 0, 3_000.0);
+
+        let base_params = resolve_live_instrument_defaults(&state, 0);
+        let merged = key_locked_live_instrument_params(&state, 0, 0.0, 0.0, None, &base_params);
+
+        assert_eq!(param_value(&merged, 0), Some(100.0));
     }
 
     #[test]

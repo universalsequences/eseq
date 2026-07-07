@@ -1764,6 +1764,8 @@ pub struct InstrumentPreset {
     pub name: String,
     pub base_note_offset: f32,
     pub params: std::collections::BTreeMap<String, f32>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub key_locks: std::collections::BTreeMap<u8, std::collections::BTreeMap<String, f32>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -12076,6 +12078,39 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     // ── graph-mode manifest parsing ──
+    #[test]
+    fn instrument_preset_key_locks_default_and_serialize_by_note_name_map() {
+        let legacy_json = r#"{
+            "id": "init",
+            "name": "Init",
+            "base_note_offset": 0.0,
+            "params": {"cutoff": 1200.0}
+        }"#;
+        let legacy: super::InstrumentPreset =
+            serde_json::from_str(legacy_json).expect("legacy preset");
+        assert!(legacy.key_locks.is_empty());
+
+        let mut key_locks = std::collections::BTreeMap::new();
+        key_locks.insert(
+            69,
+            std::collections::BTreeMap::from([("cutoff".to_string(), 3000.0)]),
+        );
+        let preset = super::InstrumentPreset {
+            id: "afx".to_string(),
+            name: "AFX".to_string(),
+            base_note_offset: 0.0,
+            params: std::collections::BTreeMap::from([("cutoff".to_string(), 1200.0)]),
+            key_locks,
+        };
+        let json = serde_json::to_string(&preset).expect("serialize preset");
+        assert!(json.contains("\"key_locks\""), "{json}");
+        assert!(json.contains("\"69\""), "{json}");
+
+        let restored: super::InstrumentPreset =
+            serde_json::from_str(&json).expect("roundtrip preset");
+        assert_eq!(restored.key_locks[&69]["cutoff"], 3000.0);
+    }
+
     fn gv_num(x: f64) -> Value {
         Value::Number(x)
     }
