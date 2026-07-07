@@ -317,6 +317,8 @@ pub struct ProjectPattern {
     #[serde(default)]
     pub rack_tracks: Vec<Option<ProjectRackTrackPattern>>,
     #[serde(default)]
+    pub process_chains: Vec<crate::process::TrackProcessChain>,
+    #[serde(default)]
     pub plock_variant_registries: Vec<PlockVariantRegistry>,
     #[serde(default)]
     pub key_lock_variant_registries: Vec<PlockVariantRegistry>,
@@ -616,6 +618,7 @@ impl ProjectPattern {
                 .cloned()
                 .map(|rack| rack.map(ProjectRackTrackPattern::from))
                 .collect(),
+            process_chains: snapshot.process_chains.clone(),
             plock_variant_registries: snapshot.plock_variant_registries.clone(),
             key_lock_variant_registries: snapshot.key_lock_variant_registries.clone(),
         }
@@ -1903,6 +1906,7 @@ mod tests {
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
                 rack_tracks: vec![None, None],
+                process_chains: Vec::new(),
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
             }],

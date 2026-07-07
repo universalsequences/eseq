@@ -1,5 +1,7 @@
-use std::collections::hash_map::DefaultHasher;
+use std::cell::RefCell;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -131,6 +133,7 @@ struct SnapshotTrigger {
     track: usize,
     step: usize,
     offset: usize,
+    cycle: u64,
     cycle_start_beats: f64,
     absolute_beats: f64,
     samples_per_step: f32,
@@ -335,6 +338,7 @@ impl SnapshotSequencerClock {
                                     track: t,
                                     step,
                                     offset,
+                                    cycle: (self.total_beats / cycle).floor().max(0.0) as u64,
                                     cycle_start_beats: tc.boundaries[step],
                                     absolute_beats: self.total_beats,
                                     samples_per_step,
@@ -2297,6 +2301,100 @@ fn enqueue_due_process_emissions<const QUEUE_CAP: usize>(
         }
     }
     true
+}
+
+fn invoke_process_cascade<F>(
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    initial: crate::process::ProcessRunInvocation,
+    debug_accum: bool,
+    mut apply_target_writes: F,
+) -> bool
+where
+    F: FnMut(&[crate::process::ProcessTargetWrite]),
+{
+    let mut pending_invocations = vec![initial];
+    let mut processed_invocations = 0usize;
+    while let Some(invocation) = pending_invocations.pop() {
+        processed_invocations += 1;
+        if processed_invocations > PROCESS_EVENT_CASCADE_LIMIT {
+            if debug_accum || debug_routing_enabled() {
+                eprintln!(
+                    "[process] listener cascade limit exceeded limit={}",
+                    PROCESS_EVENT_CASCADE_LIMIT
+                );
+            }
+            return false;
+        }
+        let invocation_beat = invocation.beat;
+        let process_runtime_id = invocation.runtime_id;
+        let Some(scratch) = scratch_runtime.as_mut() else {
+            return true;
+        };
+        match scratch.invoke_process_run(invocation) {
+            Ok(result) => {
+                apply_target_writes(&result.target_writes);
+                let mut followups = process_runtime.apply_run_result(result);
+                followups.reverse();
+                pending_invocations.extend(followups);
+            }
+            Err(err) => {
+                if debug_accum || debug_routing_enabled() {
+                    eprintln!(
+                        "[process] run error process={} beat={:.6} err={}",
+                        process_runtime_id, invocation_beat, err
+                    );
+                }
+            }
+        }
+    }
+    true
+}
+
+fn apply_process_target_writes_to_resolved(
+    resolved: &mut ResolvedStep,
+    writes: &[crate::process::ProcessTargetWrite],
+) {
+    for write in writes {
+        match &write.target {
+            crate::process::ProcessTargetDef::StepParam { param } if param == "transpose" => {
+                match write.op {
+                    crate::process::ProcessTargetOp::Set => resolved.transpose = write.value,
+                    crate::process::ProcessTargetOp::Add => resolved.transpose += write.value,
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn process_step_event_value(
+    track: usize,
+    step: usize,
+    cycle: u64,
+    beat: f64,
+    sample_time: u64,
+    resolved: ResolvedStep,
+) -> eseqlisp::vm::Value {
+    fn number(value: impl Into<f64>) -> Rc<RefCell<eseqlisp::vm::Value>> {
+        Rc::new(RefCell::new(eseqlisp::vm::Value::Number(value.into())))
+    }
+
+    let mut map = HashMap::new();
+    map.insert("track".to_string(), number(track as f64));
+    map.insert("step".to_string(), number(step as f64));
+    map.insert("cycle".to_string(), number(cycle as f64));
+    map.insert("beat".to_string(), number(beat));
+    map.insert("sample-time".to_string(), number(sample_time as f64));
+    map.insert("duration".to_string(), number(resolved.duration as f64));
+    map.insert("velocity".to_string(), number(resolved.velocity as f64));
+    map.insert("speed".to_string(), number(resolved.speed as f64));
+    map.insert("aux-a".to_string(), number(resolved.aux_a as f64));
+    map.insert("aux-b".to_string(), number(resolved.aux_b as f64));
+    map.insert("transpose".to_string(), number(resolved.transpose as f64));
+    map.insert("pan".to_string(), number(resolved.pan as f64));
+    map.insert("chop".to_string(), number(resolved.chop as f64));
+    eseqlisp::vm::Value::Map(map)
 }
 
 fn normalize_network_event_destination(
@@ -4351,7 +4449,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 sample_time = sample_time.saturating_add(swing_delay.max(0.0) as u64);
             }
 
-            let resolved = ResolvedStep {
+            let mut resolved = ResolvedStep {
                 duration: step_snapshot.params[StepParam::Duration.index()],
                 velocity: step_snapshot.params[StepParam::Velocity.index()],
                 speed: step_snapshot.params[StepParam::Speed.index()],
@@ -4361,6 +4459,90 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 pan: step_snapshot.params[StepParam::Pan.index()],
                 chop: step_snapshot.params[StepParam::Chop.index()],
             };
+            for slot in &track.process_chain.slots {
+                if !slot.enabled {
+                    continue;
+                }
+                let writes = process_runtime.step_process_writes(slot, trigger.step);
+                apply_process_target_writes_to_resolved(&mut resolved, &writes);
+                let event = process_step_event_value(
+                    trigger.track,
+                    trigger.step,
+                    trigger.cycle,
+                    trigger.absolute_beats,
+                    sample_time,
+                    resolved,
+                );
+                if let Some(invocation) = process_runtime.step_process_invocation(
+                    slot,
+                    crate::process::ProcessStepRunContext {
+                        track: trigger.track,
+                        step: trigger.step,
+                        cycle: trigger.cycle,
+                        beat: trigger.absolute_beats,
+                        sample_time,
+                        event,
+                    },
+                ) {
+                    if !invoke_process_cascade(
+                        scratch_runtime,
+                        process_runtime,
+                        invocation,
+                        debug_accum,
+                        |writes| apply_process_target_writes_to_resolved(&mut resolved, writes),
+                    ) {
+                        chunk_enqueued = false;
+                        break;
+                    }
+                }
+            }
+            if !chunk_enqueued {
+                break;
+            }
+            let track_fire_event = process_step_event_value(
+                trigger.track,
+                trigger.step,
+                trigger.cycle,
+                trigger.absolute_beats,
+                sample_time,
+                resolved,
+            );
+            for invocation in process_runtime.track_fires_at(
+                trigger.track,
+                track_fire_event.clone(),
+                trigger.absolute_beats,
+                sample_time,
+            ) {
+                if !invoke_process_cascade(
+                    scratch_runtime,
+                    process_runtime,
+                    invocation,
+                    debug_accum,
+                    |writes| apply_process_target_writes_to_resolved(&mut resolved, writes),
+                ) {
+                    chunk_enqueued = false;
+                    break;
+                }
+            }
+            if !chunk_enqueued
+                || !enqueue_due_process_emissions(
+                    queue,
+                    snapshot,
+                    &mut track_output_events,
+                    scratch_runtime,
+                    midi_fx_quantizer_state,
+                    process_runtime,
+                    pattern_epoch,
+                    chunk_start_beats,
+                    scheduled_until_sample,
+                    trigger.absolute_beats,
+                    samples_per_quarter,
+                    debug_accum,
+                )
+            {
+                chunk_enqueued = false;
+                break;
+            }
             let rs = &mut accumulator_states[trigger.track];
             let builtin_count = ACCUMULATOR_REGISTRY.len();
             let actions = if let Some(def) = ACCUMULATOR_REGISTRY.get(track.params.accumulator_idx)
@@ -7311,6 +7493,149 @@ mod tests {
             )
         });
         out
+    }
+
+    fn run_sparse_process_accumulator_fixture() -> (Arc<SequencerState>, Vec<ObservedTrigger>) {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(8);
+        for step in 0..8 {
+            state.pattern.patterns[0].set_step_active(step, true);
+        }
+
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new()],
+            vec![EffectDescriptor::builtin_sampler()],
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-accumulator sparse-transpose
+                  :target (step-param :transpose)
+                  :amount (amount :lane true :default 0)
+                  :range (-128 128)
+                  :mode :clip)
+                "#,
+            )
+            .expect("define process accumulator");
+
+        assert!(state.set_track_process_chain(
+            0,
+            crate::process::TrackProcessChain {
+                slots: vec![crate::process::TrackProcessSlot {
+                    instance_id: crate::process::ProcessInstanceId(1),
+                    class_name: "sparse-transpose".to_string(),
+                    enabled: true,
+                    inlets: std::collections::BTreeMap::new(),
+                    lanes: std::collections::BTreeMap::from([(
+                        "amount".to_string(),
+                        crate::process::ProcessLane {
+                            values: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                        },
+                    )]),
+                }],
+            },
+        ));
+
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<32>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        scheduler
+            .process_runtime
+            .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = Some(scratch);
+
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            54_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        (state, observed_triggers(&queue))
+    }
+
+    fn run_with_scheduler_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .name("scheduler-process-accumulator-harness".to_string())
+            .stack_size(super::SCHEDULER_THREAD_STACK_SIZE)
+            .spawn(f)
+            .expect("spawn scheduler process accumulator harness")
+            .join()
+            .expect("scheduler process accumulator harness panicked")
+    }
+
+    #[test]
+    fn scheduler_process_accumulator_folds_sparse_lane_into_transpose() {
+        let (_state, events) = run_with_scheduler_stack(run_sparse_process_accumulator_fixture);
+        let transposes = events
+            .iter()
+            .take(8)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(transposes, vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn scheduler_process_accumulator_replay_does_not_double_advance_fold() {
+        let (_first_state, first) =
+            run_with_scheduler_stack(run_sparse_process_accumulator_fixture);
+        let (_second_state, second) =
+            run_with_scheduler_stack(run_sparse_process_accumulator_fixture);
+        let first_transposes = first
+            .iter()
+            .take(8)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        let second_transposes = second
+            .iter()
+            .take(8)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(second_transposes, first_transposes);
+    }
+
+    #[test]
+    fn scheduler_process_target_writes_are_transient_step_param_writes() {
+        let (state, events) = run_with_scheduler_stack(run_sparse_process_accumulator_fixture);
+        assert_eq!(events[4].transpose, 2.0);
+        for step in 0..8 {
+            assert_eq!(
+                state.pattern.step_data[0].get(step, StepParam::Transpose),
+                StepParam::Transpose.default_value()
+            );
+        }
+        assert!(state
+            .pattern
+            .plock_variant_registries
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|registry| registry == &crate::plock_variants::PlockVariantRegistry::default()));
+        assert!(state
+            .pattern
+            .key_lock_variant_registries
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|registry| registry == &crate::plock_variants::PlockVariantRegistry::default()));
+        assert!(!state.pattern.instrument_slots[0].key_locks.has_any_lock());
     }
 
     #[test]

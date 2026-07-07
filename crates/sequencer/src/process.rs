@@ -4,9 +4,10 @@
 //! state: process instances, clocks, channels, patches, and pending process
 //! emissions. It deliberately does not evaluate Lisp.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use eseqlisp::vm::Value;
+use serde::{Deserialize, Serialize};
 
 use crate::lisp_host::EmittedAccumulatorEvent;
 use crate::neural::{process_grid_boundaries, GridBoundaryClock};
@@ -30,10 +31,111 @@ impl ProcessTimeExpr {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessInstanceId(pub u64);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessInletKind {
+    Float,
+    Int,
+    Gate,
+    Track,
+    Any,
+}
+
+impl Default for ProcessInletKind {
+    fn default() -> Self {
+        Self::Any
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessSeedPolicy {
+    #[default]
+    Locked,
+    PerCycle,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProcessTargetDef {
+    StepParam { param: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessTargetOp {
+    Set,
+    Add,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessTargetWrite {
+    pub target: ProcessTargetDef,
+    pub op: ProcessTargetOp,
+    pub value: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessAccumulatorMode {
+    Wrap,
+    Clip,
+    Bounce,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessAccumulatorSpec {
+    pub amount_inlet: String,
+    pub reset_inlet: Option<String>,
+    pub range: Option<(f32, f32)>,
+    pub mode: ProcessAccumulatorMode,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProcessLane {
+    pub values: Vec<f32>,
+}
+
+impl ProcessLane {
+    pub fn value_at(&self, step: usize, default: f32) -> f32 {
+        self.values.get(step).copied().unwrap_or(default)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrackProcessSlot {
+    pub instance_id: ProcessInstanceId,
+    pub class_name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub inlets: BTreeMap<String, ProcessLiteral>,
+    #[serde(default)]
+    pub lanes: BTreeMap<String, ProcessLane>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TrackProcessChain {
+    #[serde(default)]
+    pub slots: Vec<TrackProcessSlot>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProcessInletDef {
     pub name: String,
+    pub kind: ProcessInletKind,
+    pub min: Option<f32>,
+    pub max: Option<f32>,
     pub default: Value,
+    pub lane: bool,
+    pub doc: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -65,6 +167,8 @@ pub enum ProcessEventSource {
 impl ProcessEventSource {
     fn matches_process_source(&self, source: &ProcessSourceRef) -> bool {
         match (self, source) {
+            (Self::TrackFires(left), ProcessSourceRef::TrackFires(right)) => left == right,
+            (Self::SeqFires(left), ProcessSourceRef::SeqFires(right)) => left == right,
             (Self::Channel(left), ProcessSourceRef::Channel(right)) => left == right,
             (Self::Outlet(left), ProcessSourceRef::Outlet(right)) => left == right,
             _ => false,
@@ -80,6 +184,9 @@ pub struct ProcessDef {
     pub outlets: Vec<ProcessOutletDef>,
     pub state: Vec<ProcessStateDef>,
     pub every: Option<ProcessTimeExpr>,
+    pub seed_policy: ProcessSeedPolicy,
+    pub target: Option<ProcessTargetDef>,
+    pub accumulator: Option<ProcessAccumulatorSpec>,
     pub run_source: Option<String>,
     pub listens: Vec<ProcessListenDef>,
 }
@@ -134,6 +241,8 @@ pub struct ProcessOutletRef {
 pub enum ProcessSourceRef {
     Outlet(ProcessOutletRef),
     Channel(String),
+    TrackFires(usize),
+    SeqFires(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -159,7 +268,7 @@ pub struct ProcessAuthoringSnapshot {
     pub patches: Vec<AuthoredPatch>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProcessLiteral {
     Number(f64),
     Bool(bool),
@@ -246,6 +355,9 @@ pub struct PublishedProcessDef {
     pub outlets: Vec<ProcessOutletDef>,
     pub state: Vec<PublishedProcessStateDef>,
     pub every: Option<ProcessTimeExpr>,
+    pub seed_policy: ProcessSeedPolicy,
+    pub target: Option<ProcessTargetDef>,
+    pub accumulator: Option<ProcessAccumulatorSpec>,
     pub run_source: Option<String>,
     pub listens: Vec<ProcessListenDef>,
 }
@@ -253,7 +365,12 @@ pub struct PublishedProcessDef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublishedProcessInletDef {
     pub name: String,
+    pub kind: ProcessInletKind,
+    pub min: Option<f32>,
+    pub max: Option<f32>,
     pub default: ProcessLiteral,
+    pub lane: bool,
+    pub doc: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -306,7 +423,12 @@ impl ProcessAuthoringSnapshot {
                             .map(|inlet| {
                                 Ok(PublishedProcessInletDef {
                                     name: inlet.name.clone(),
+                                    kind: inlet.kind.clone(),
+                                    min: inlet.min,
+                                    max: inlet.max,
                                     default: ProcessLiteral::from_value(&inlet.default)?,
+                                    lane: inlet.lane,
+                                    doc: inlet.doc.clone(),
                                 })
                             })
                             .collect::<Result<Vec<_>, String>>()?,
@@ -322,6 +444,9 @@ impl ProcessAuthoringSnapshot {
                             })
                             .collect::<Result<Vec<_>, String>>()?,
                         every: def.every.clone(),
+                        seed_policy: def.seed_policy,
+                        target: def.target.clone(),
+                        accumulator: def.accumulator.clone(),
                         run_source: def.run_source.clone(),
                         listens: def.listens.clone(),
                     })
@@ -415,7 +540,12 @@ impl PublishedProcessAuthoringSnapshot {
                         .iter()
                         .map(|inlet| ProcessInletDef {
                             name: inlet.name.clone(),
+                            kind: inlet.kind.clone(),
+                            min: inlet.min,
+                            max: inlet.max,
                             default: inlet.default.to_value(),
+                            lane: inlet.lane,
+                            doc: inlet.doc.clone(),
                         })
                         .collect(),
                     outlets: def.outlets.clone(),
@@ -428,6 +558,9 @@ impl PublishedProcessAuthoringSnapshot {
                         })
                         .collect(),
                     every: def.every.clone(),
+                    seed_policy: def.seed_policy,
+                    target: def.target.clone(),
+                    accumulator: def.accumulator.clone(),
                     run_source: def.run_source.clone(),
                     listens: def.listens.clone(),
                 })
@@ -540,6 +673,8 @@ pub struct ProcessRunInvocation {
     pub inlets: HashMap<String, Value>,
     pub state: HashMap<String, Value>,
     pub event: Option<Value>,
+    pub target: Option<ProcessTargetDef>,
+    pub seed: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -550,6 +685,7 @@ pub struct ProcessRunResult {
     pub state: HashMap<String, Value>,
     pub outputs: Vec<ProcessOutput>,
     pub emissions: Vec<EmittedAccumulatorEvent>,
+    pub target_writes: Vec<ProcessTargetWrite>,
     pub transpose: Option<f32>,
 }
 
@@ -574,6 +710,8 @@ pub struct ProcessRuntime {
     channels: HashMap<String, ChannelState>,
     patches: Vec<AuthoredPatch>,
     pending_emissions: Vec<PendingProcessEmission>,
+    step_process_states: HashMap<ProcessInstanceId, HashMap<String, Value>>,
+    step_process_runtime_ids: HashSet<u64>,
     global_transpose: f32,
 }
 
@@ -751,6 +889,15 @@ impl ProcessRuntime {
             let Some(source) = instance.run_source.clone() else {
                 continue;
             };
+            let seed_policy = self
+                .defs
+                .get(&instance.class_name)
+                .map(|def| def.seed_policy)
+                .unwrap_or_default();
+            let target = self
+                .defs
+                .get(&instance.class_name)
+                .and_then(|def| def.target.clone());
             if instance.one_shot {
                 let Some(target_beat) = instance.one_shot_target_beat else {
                     continue;
@@ -774,6 +921,8 @@ impl ProcessRuntime {
                     ),
                     state: instance.state.clone(),
                     event: None,
+                    target: target.clone(),
+                    seed: process_rng_seed(instance.runtime_id, seed_policy, target_beat, None),
                 });
                 continue;
             }
@@ -781,6 +930,7 @@ impl ProcessRuntime {
                 continue;
             };
             let runtime_id = instance.runtime_id;
+            let class_seed_policy = seed_policy;
             let inlets = resolve_inlets(
                 &instance.inlets,
                 &channel_snapshot,
@@ -803,6 +953,8 @@ impl ProcessRuntime {
                         inlets: inlets.clone(),
                         state: state.clone(),
                         event: None,
+                        target: target.clone(),
+                        seed: process_rng_seed(runtime_id, class_seed_policy, beat, None),
                     });
                 },
             );
@@ -818,6 +970,19 @@ impl ProcessRuntime {
             .iter()
             .position(|instance| instance.runtime_id == result.runtime_id)
         else {
+            if self.step_process_runtime_ids.contains(&result.runtime_id) {
+                self.step_process_states
+                    .insert(ProcessInstanceId(result.runtime_id), result.state);
+                for mut event in result.emissions {
+                    let beat = result.beat + event.offset_beats.max(0.0) as f64;
+                    event.offset_beats = 0.0;
+                    self.pending_emissions.push(PendingProcessEmission {
+                        process_runtime_id: result.runtime_id,
+                        beat,
+                        event,
+                    });
+                }
+            }
             return invocations;
         };
         if let Some(transpose) = result.transpose {
@@ -1002,11 +1167,157 @@ impl ProcessRuntime {
                     ),
                     state: instance.state.clone(),
                     event: Some(value.clone()),
+                    target: self
+                        .defs
+                        .get(&instance.class_name)
+                        .and_then(|def| def.target.clone()),
+                    seed: process_rng_seed(
+                        instance.runtime_id,
+                        self.defs
+                            .get(&instance.class_name)
+                            .map(|def| def.seed_policy)
+                            .unwrap_or_default(),
+                        beat,
+                        None,
+                    ),
                 });
             }
         }
         invocations
     }
+
+    pub fn track_fires_at(
+        &self,
+        track: usize,
+        value: Value,
+        beat: f64,
+        sample_time: u64,
+    ) -> Vec<ProcessRunInvocation> {
+        self.listener_invocations_for_source(
+            ProcessSourceRef::TrackFires(track),
+            value,
+            beat,
+            sample_time,
+        )
+    }
+
+    pub fn step_process_writes(
+        &self,
+        slot: &TrackProcessSlot,
+        step: usize,
+    ) -> Vec<ProcessTargetWrite> {
+        if !slot.enabled {
+            return Vec::new();
+        }
+        let Some(def) = self.defs.get(&slot.class_name) else {
+            return Vec::new();
+        };
+        let Some(accumulator) = def.accumulator.as_ref() else {
+            return Vec::new();
+        };
+        let Some(target) = def.target.clone() else {
+            return Vec::new();
+        };
+        let amount_default = def
+            .inlets
+            .iter()
+            .find(|inlet| inlet.name == accumulator.amount_inlet)
+            .and_then(|inlet| match &inlet.default {
+                Value::Number(value) => Some(*value as f32),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let reset_default = accumulator
+            .reset_inlet
+            .as_ref()
+            .and_then(|name| {
+                def.inlets
+                    .iter()
+                    .find(|inlet| inlet.name == *name)
+                    .and_then(|inlet| match &inlet.default {
+                        Value::Number(value) => Some(*value as f32),
+                        Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+                        _ => None,
+                    })
+            })
+            .unwrap_or(0.0);
+        let mut acc = 0.0_f32;
+        for idx in 0..=step {
+            let reset = accumulator
+                .reset_inlet
+                .as_ref()
+                .and_then(|name| {
+                    slot.lanes
+                        .get(name)
+                        .map(|lane| lane.value_at(idx, reset_default))
+                })
+                .unwrap_or(reset_default);
+            if reset > 0.5 {
+                acc = 0.0;
+            } else {
+                let amount = slot
+                    .lanes
+                    .get(&accumulator.amount_inlet)
+                    .map(|lane| lane.value_at(idx, amount_default))
+                    .unwrap_or(amount_default);
+                acc += amount;
+            }
+            if let Some((lo, hi)) = accumulator.range {
+                acc = apply_accumulator_range(acc, lo, hi, accumulator.mode);
+            }
+        }
+        vec![ProcessTargetWrite {
+            target,
+            op: ProcessTargetOp::Add,
+            value: acc,
+        }]
+    }
+
+    pub fn step_process_invocation(
+        &mut self,
+        slot: &TrackProcessSlot,
+        ctx: ProcessStepRunContext,
+    ) -> Option<ProcessRunInvocation> {
+        if !slot.enabled {
+            return None;
+        }
+        let def = self.defs.get(&slot.class_name)?.clone();
+        if def.accumulator.is_some() {
+            return None;
+        }
+        let source = def.run_source.clone()?;
+        let target = def.target.clone();
+        let seed_policy = def.seed_policy;
+        let instance_id = slot.instance_id;
+        self.step_process_runtime_ids.insert(instance_id.0);
+        let existing_state = self
+            .step_process_states
+            .remove(&instance_id)
+            .unwrap_or_default();
+        let state = reconciled_state(existing_state, Some(&def));
+        self.step_process_states.insert(instance_id, state.clone());
+        Some(ProcessRunInvocation {
+            runtime_id: instance_id.0,
+            source,
+            beat: ctx.beat,
+            sample_time: ctx.sample_time,
+            inlets: resolve_step_process_inlets(&def, slot, ctx.step),
+            state,
+            event: Some(ctx.event),
+            target,
+            seed: process_rng_seed(instance_id.0, seed_policy, ctx.beat, Some(ctx.cycle)),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessStepRunContext {
+    pub track: usize,
+    pub step: usize,
+    pub cycle: u64,
+    pub beat: f64,
+    pub sample_time: u64,
+    pub event: Value,
 }
 
 fn defaulted_inlets(
@@ -1094,12 +1405,94 @@ fn resolve_inlets(
         .collect()
 }
 
+fn resolve_step_process_inlets(
+    def: &ProcessDef,
+    slot: &TrackProcessSlot,
+    step: usize,
+) -> HashMap<String, Value> {
+    let mut inlets = HashMap::new();
+    for inlet in &def.inlets {
+        let mut value = slot
+            .inlets
+            .get(&inlet.name)
+            .map(ProcessLiteral::to_value)
+            .unwrap_or_else(|| inlet.default.clone());
+        if inlet.lane {
+            if let Some(lane) = slot.lanes.get(&inlet.name) {
+                let fallback = match &value {
+                    Value::Number(value) => *value as f32,
+                    Value::Bool(value) => {
+                        if *value {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    _ => 0.0,
+                };
+                value = Value::Number(lane.value_at(step, fallback) as f64);
+            }
+        }
+        inlets.insert(inlet.name.clone(), value);
+    }
+    inlets
+}
+
+fn apply_accumulator_range(value: f32, lo: f32, hi: f32, mode: ProcessAccumulatorMode) -> f32 {
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
+        return value;
+    }
+    match mode {
+        ProcessAccumulatorMode::Clip => value.clamp(lo, hi),
+        ProcessAccumulatorMode::Wrap => {
+            let span = hi - lo;
+            let mut wrapped = (value - lo) % span;
+            if wrapped < 0.0 {
+                wrapped += span;
+            }
+            lo + wrapped
+        }
+        ProcessAccumulatorMode::Bounce => {
+            let span = hi - lo;
+            let period = span * 2.0;
+            let mut phase = (value - lo) % period;
+            if phase < 0.0 {
+                phase += period;
+            }
+            if phase <= span {
+                lo + phase
+            } else {
+                hi - (phase - span)
+            }
+        }
+    }
+}
+
+fn process_rng_seed(
+    runtime_id: u64,
+    seed_policy: ProcessSeedPolicy,
+    beat: f64,
+    cycle: Option<u64>,
+) -> u64 {
+    let mut seed = stable_mix64(runtime_id ^ 0xA2F7_0D64_3B1D_9A91);
+    if matches!(seed_policy, ProcessSeedPolicy::PerCycle) {
+        seed ^= stable_mix64(cycle.unwrap_or_else(|| beat.floor().max(0.0) as u64));
+    }
+    if seed == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        seed
+    }
+}
+
+fn stable_mix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
 fn runtime_instance_id(instance: &AuthoredProcessInstance) -> u64 {
-    instance
-        .name
-        .as_deref()
-        .map(stable_process_id)
-        .unwrap_or(instance.handle_id.0)
+    instance.handle_id.0
 }
 
 pub fn stable_process_id(name: &str) -> u64 {
@@ -1210,6 +1603,9 @@ mod tests {
                         }],
                         state: Vec::new(),
                         every: None,
+                        seed_policy: ProcessSeedPolicy::default(),
+                        target: None,
+                        accumulator: None,
                         run_source: None,
                         listens: Vec::new(),
                     },
@@ -1220,6 +1616,9 @@ mod tests {
                         outlets: Vec::new(),
                         state: Vec::new(),
                         every: None,
+                        seed_policy: ProcessSeedPolicy::default(),
+                        target: None,
+                        accumulator: None,
                         run_source: None,
                         listens: vec![ProcessListenDef {
                             name: "event".to_string(),
@@ -1286,5 +1685,113 @@ mod tests {
         assert_eq!(followups[0].beat, 12.0);
         assert_eq!(followups[0].sample_time, 1234);
         assert_eq!(followups[0].event, Some(Value::Number(7.0)));
+    }
+
+    #[test]
+    fn track_fires_listener_invocations_are_routed_by_track() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.sync_authoring(
+            ProcessAuthoringSnapshot {
+                defs: vec![ProcessDef {
+                    id: 1,
+                    name: "listener".to_string(),
+                    inlets: Vec::new(),
+                    outlets: Vec::new(),
+                    state: Vec::new(),
+                    every: None,
+                    seed_policy: ProcessSeedPolicy::default(),
+                    target: None,
+                    accumulator: None,
+                    run_source: None,
+                    listens: vec![ProcessListenDef {
+                        name: "fire".to_string(),
+                        source: ProcessEventSource::TrackFires(2),
+                        handler_source: "listener-body".to_string(),
+                    }],
+                }],
+                instances: vec![AuthoredProcessInstance {
+                    handle_id: AuthoredHandleId(11),
+                    name: None,
+                    class_name: "listener".to_string(),
+                    inlets: HashMap::new(),
+                    running: true,
+                    anonymous: false,
+                    one_shot: false,
+                    every: None,
+                    run_source: None,
+                }],
+                ..ProcessAuthoringSnapshot::default()
+            },
+            0.0,
+        );
+
+        assert!(runtime
+            .track_fires_at(1, Value::Number(1.0), 1.0, 48_000)
+            .is_empty());
+        let invocations = runtime.track_fires_at(2, Value::Number(7.0), 1.0, 48_000);
+        assert_eq!(invocations.len(), 1);
+        assert_eq!(invocations[0].runtime_id, 11);
+        assert_eq!(invocations[0].source, "listener-body");
+        assert_eq!(invocations[0].event, Some(Value::Number(7.0)));
+    }
+
+    #[test]
+    fn accumulator_fold_is_sparse_lane_replay_safe() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.sync_authoring(
+            ProcessAuthoringSnapshot {
+                defs: vec![ProcessDef {
+                    id: 1,
+                    name: "sparse".to_string(),
+                    inlets: vec![ProcessInletDef {
+                        name: "amount".to_string(),
+                        kind: ProcessInletKind::Float,
+                        min: None,
+                        max: None,
+                        default: Value::Number(0.0),
+                        lane: true,
+                        doc: None,
+                    }],
+                    outlets: Vec::new(),
+                    state: Vec::new(),
+                    every: None,
+                    seed_policy: ProcessSeedPolicy::default(),
+                    target: Some(ProcessTargetDef::StepParam {
+                        param: "transpose".to_string(),
+                    }),
+                    accumulator: Some(ProcessAccumulatorSpec {
+                        amount_inlet: "amount".to_string(),
+                        reset_inlet: None,
+                        range: None,
+                        mode: ProcessAccumulatorMode::Wrap,
+                    }),
+                    run_source: None,
+                    listens: Vec::new(),
+                }],
+                ..ProcessAuthoringSnapshot::default()
+            },
+            0.0,
+        );
+        let slot = TrackProcessSlot {
+            instance_id: ProcessInstanceId(55),
+            class_name: "sparse".to_string(),
+            enabled: true,
+            inlets: BTreeMap::new(),
+            lanes: BTreeMap::from([(
+                "amount".to_string(),
+                ProcessLane {
+                    values: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                },
+            )]),
+        };
+
+        let first = (0..8)
+            .map(|step| runtime.step_process_writes(&slot, step)[0].value)
+            .collect::<Vec<_>>();
+        let replay = (0..8)
+            .map(|step| runtime.step_process_writes(&slot, step)[0].value)
+            .collect::<Vec<_>>();
+        assert_eq!(first, vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
+        assert_eq!(replay, first);
     }
 }

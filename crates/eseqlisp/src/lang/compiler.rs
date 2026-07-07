@@ -1562,6 +1562,7 @@ impl Compiler {
             // here (in the UI/editor runtime) and shipped, not evaluated locally.
             let is_def_sequencer = matches!(op, Expression::Symbol(s) if s == "def-sequencer");
             let is_def_process = matches!(op, Expression::Symbol(s) if s == "def-process");
+            let is_def_accumulator = matches!(op, Expression::Symbol(s) if s == "def-accumulator");
             let is_defchan = matches!(op, Expression::Symbol(s) if s == "defchan");
             let is_process_sugar = matches!(op, Expression::Symbol(s)
                 if s == "every" || s == "after" || s == "on" || s == "tap");
@@ -1591,6 +1592,10 @@ impl Compiler {
                     quote_next = false;
                     continue;
                 }
+                if is_def_accumulator && list.len() == 3 && i == 1 {
+                    self.compile_quoted_expression(elem)?;
+                    continue;
+                }
                 if is_process_sugar {
                     self.compile_quoted_expression(elem)?;
                     continue;
@@ -1606,7 +1611,9 @@ impl Compiler {
                     }
                     Expression::Symbol(c) => match op {
                         Expression::Symbol(s) if s == "def" && i == 0 => continue,
-                        Expression::Symbol(_) if (is_def_process || is_defchan) && i == 0 => {
+                        Expression::Symbol(_)
+                            if (is_def_process || is_def_accumulator || is_defchan) && i == 0 =>
+                        {
                             let idx = self.use_string_constant(c);
                             self.emit(OpCode::PushSymbol(idx));
                         }
@@ -1633,9 +1640,23 @@ impl Compiler {
                                 || k == "every"
                                 || k == "phase"
                                 || k == "listen"
+                                || k == "target"
+                                || k == "seed"
+                                || k == "doc"
                                 || k == "run"
                                 || k == "init"
                                 || k.starts_with("on-"))
+                        {
+                            quote_next = true;
+                        }
+                        if is_def_accumulator
+                            && (k == "target"
+                                || k == "amount"
+                                || k == "reset"
+                                || k == "range"
+                                || k == "mode"
+                                || k == "seed"
+                                || k == "doc")
                         {
                             quote_next = true;
                         }

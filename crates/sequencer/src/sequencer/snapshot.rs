@@ -42,6 +42,7 @@ pub struct SequencerTrackSnapshot {
     pub instrument_base_note_offset: f32,
     pub engine_id: Option<usize>,
     pub rack_track: Option<RackTrackSnapshot>,
+    pub process_chain: crate::process::TrackProcessChain,
     pub effect_slots: Vec<EffectSlotSnapshot>,
     pub midi_fx_slots: Vec<EffectSlotSnapshot>,
     pub instrument_slot: EffectSlotSnapshot,
@@ -88,6 +89,7 @@ impl SequencerSnapshot {
         };
         let mut tracks = Vec::with_capacity(num_tracks);
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
+        let live_process_chains = state.pattern.process_chains.lock().unwrap();
 
         for track_idx in 0..num_tracks {
             let tp = &state.pattern.track_params[track_idx];
@@ -186,6 +188,10 @@ impl SequencerSnapshot {
                 instrument_base_note_offset,
                 engine_id,
                 rack_track: live_rack_tracks.get(track_idx).cloned().unwrap_or(None),
+                process_chain: live_process_chains
+                    .get(track_idx)
+                    .cloned()
+                    .unwrap_or_default(),
                 effect_slots,
                 midi_fx_slots,
                 instrument_slot,
@@ -287,6 +293,7 @@ fn track_snapshot_from_pattern_data(
         instrument_base_note_offset: data.instrument_base_note_offset,
         engine_id,
         rack_track: data.rack_track.clone(),
+        process_chain: data.process_chain.clone(),
         effect_slots: data.effect_slots.clone(),
         midi_fx_slots: data.midi_fx_slots.clone(),
         instrument_slot: data.instrument_slot.clone(),

@@ -347,6 +347,7 @@ pub struct PatternSnapshot {
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
     pub rack_tracks: Vec<Option<RackTrackSnapshot>>,
+    pub process_chains: Vec<crate::process::TrackProcessChain>,
     pub plock_variant_registries: Vec<PlockVariantRegistry>,
     pub key_lock_variant_registries: Vec<PlockVariantRegistry>,
 }
@@ -463,6 +464,7 @@ pub struct TrackPatternData {
     pub instrument_type: InstrumentType,
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub rack_track: Option<RackTrackSnapshot>,
+    pub process_chain: crate::process::TrackProcessChain,
     pub plock_variant_registry: PlockVariantRegistry,
     pub key_lock_variant_registry: PlockVariantRegistry,
 }
@@ -483,6 +485,7 @@ impl TrackPatternData {
             || track >= state.pattern.timebase_plocks.len()
             || track >= state.pattern.swing_plocks.len()
             || track >= state.pattern.swing_resolution_plocks.len()
+            || track >= state.pattern.process_chains.lock().unwrap().len()
             || track >= state.pattern.plock_variant_registries.lock().unwrap().len()
             || track
                 >= state
@@ -559,6 +562,12 @@ impl TrackPatternData {
             let mut rack_tracks = state.pattern.rack_tracks.lock().unwrap();
             if track < rack_tracks.len() {
                 rack_tracks[track] = self.rack_track.clone();
+            }
+        }
+        {
+            let mut process_chains = state.pattern.process_chains.lock().unwrap();
+            if track < process_chains.len() {
+                process_chains[track] = self.process_chain.clone();
             }
         }
         {
@@ -1371,6 +1380,7 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.instrument_types, track_idx);
         remove_track_lane_if_present(&mut self.instrument_run_modes, track_idx);
         remove_track_lane_if_present(&mut self.rack_tracks, track_idx);
+        remove_track_lane_if_present(&mut self.process_chains, track_idx);
         remove_track_lane_if_present(&mut self.plock_variant_registries, track_idx);
         remove_track_lane_if_present(&mut self.key_lock_variant_registries, track_idx);
         self.mod_connections = self
@@ -1537,6 +1547,8 @@ impl PatternSnapshot {
             self.instrument_run_modes
                 .push(CustomInstrumentRunMode::Instrument);
             self.rack_tracks.push(None);
+            self.process_chains
+                .push(crate::process::TrackProcessChain::default());
             self.plock_variant_registries
                 .push(PlockVariantRegistry::default());
             self.key_lock_variant_registries
@@ -1547,6 +1559,10 @@ impl PatternSnapshot {
         }
         while self.rack_tracks.len() < track_count {
             self.rack_tracks.push(None);
+        }
+        while self.process_chains.len() < track_count {
+            self.process_chains
+                .push(crate::process::TrackProcessChain::default());
         }
         while self.plock_variant_registries.len() < track_count {
             self.plock_variant_registries
@@ -1592,6 +1608,7 @@ impl PatternSnapshot {
         self.instrument_types.truncate(track_count);
         self.instrument_run_modes.truncate(track_count);
         self.rack_tracks.truncate(track_count);
+        self.process_chains.truncate(track_count);
         self.plock_variant_registries.truncate(track_count);
         self.key_lock_variant_registries.truncate(track_count);
         self.mod_connections.retain(|connection| {
@@ -1627,6 +1644,7 @@ impl PatternSnapshot {
         let mut inst_types = Vec::with_capacity(num_tracks);
         let mut instrument_run_modes = Vec::with_capacity(num_tracks);
         let mut rack_tracks = Vec::with_capacity(num_tracks);
+        let mut process_chains = Vec::with_capacity(num_tracks);
         let mut plock_variant_registries = Vec::with_capacity(num_tracks);
         let mut key_lock_variant_registries = Vec::with_capacity(num_tracks);
 
@@ -1722,6 +1740,16 @@ impl PatternSnapshot {
                     .cloned()
                     .unwrap_or(None),
             );
+            process_chains.push(
+                state
+                    .pattern
+                    .process_chains
+                    .lock()
+                    .unwrap()
+                    .get(t)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             let mut registry = state
                 .pattern
                 .plock_variant_registries
@@ -1776,6 +1804,7 @@ impl PatternSnapshot {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_tracks,
+            process_chains,
             plock_variant_registries,
             key_lock_variant_registries,
         }
@@ -1884,6 +1913,7 @@ impl PatternSnapshot {
                 .copied()
                 .unwrap_or(CustomInstrumentRunMode::Instrument),
             rack_track: self.rack_tracks.get(track).cloned().unwrap_or(None),
+            process_chain: self.process_chains.get(track).cloned().unwrap_or_default(),
             plock_variant_registry: self
                 .plock_variant_registries
                 .get(track)
@@ -1920,6 +1950,7 @@ impl PatternSnapshot {
         self.instrument_types[track] = data.instrument_type;
         self.instrument_run_modes[track] = data.instrument_run_mode;
         self.rack_tracks[track] = data.rack_track;
+        self.process_chains[track] = data.process_chain;
         self.plock_variant_registries[track] = data.plock_variant_registry;
         self.key_lock_variant_registries[track] = data.key_lock_variant_registry;
     }
@@ -1956,6 +1987,7 @@ impl PatternSnapshot {
         self.instrument_types[track] = instrument_type;
         self.instrument_run_modes[track] = CustomInstrumentRunMode::Instrument;
         self.rack_tracks[track] = None;
+        self.process_chains[track] = crate::process::TrackProcessChain::default();
         self.plock_variant_registries[track] = PlockVariantRegistry::default();
         self.key_lock_variant_registries[track] = PlockVariantRegistry::default();
     }
@@ -2017,6 +2049,8 @@ impl PatternSnapshot {
         self.instrument_run_modes
             .push(CustomInstrumentRunMode::Instrument);
         self.rack_tracks.push(None);
+        self.process_chains
+            .push(crate::process::TrackProcessChain::default());
         self.plock_variant_registries
             .push(PlockVariantRegistry::default());
         self.key_lock_variant_registries
@@ -2045,6 +2079,7 @@ impl PatternSnapshot {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_tracks: Vec::with_capacity(num_tracks),
+            process_chains: Vec::with_capacity(num_tracks),
             plock_variant_registries: Vec::with_capacity(num_tracks),
             key_lock_variant_registries: Vec::with_capacity(num_tracks),
         };
@@ -2087,6 +2122,7 @@ impl PatternSnapshot {
             && self.swing_resolution_plock_snapshots.len() == n
             && self.instrument_run_modes.len() == n
             && self.rack_tracks.len() == n
+            && self.process_chains.len() == n
             && self.plock_variant_registries.len() == n
             && self.key_lock_variant_registries.len() == n
             && self.step_data.iter().all(|steps| steps.len() == MAX_STEPS)
@@ -2393,6 +2429,7 @@ pub struct PatternState {
     pub instrument_run_modes: Vec<AtomicU32>,
     pub track_sound_state: Mutex<Vec<TrackSoundState>>,
     pub rack_tracks: Mutex<Vec<Option<RackTrackSnapshot>>>,
+    pub process_chains: Mutex<Vec<crate::process::TrackProcessChain>>,
     pub plock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
     pub key_lock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
 }
@@ -2646,6 +2683,11 @@ impl SequencerState {
                         .collect(),
                 ),
                 rack_tracks: Mutex::new((0..MAX_TRACKS).map(|_| None).collect()),
+                process_chains: Mutex::new(
+                    (0..MAX_TRACKS)
+                        .map(|_| crate::process::TrackProcessChain::default())
+                        .collect(),
+                ),
                 plock_variant_registries: Mutex::new(
                     (0..MAX_TRACKS)
                         .map(|_| PlockVariantRegistry::default())
@@ -3990,6 +4032,9 @@ impl SequencerState {
         if let Some(rack_track) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             *rack_track = None;
         }
+        if let Some(chain) = self.pattern.process_chains.lock().unwrap().get_mut(track) {
+            *chain = crate::process::TrackProcessChain::default();
+        }
         if let Some(registry) = self
             .pattern
             .plock_variant_registries
@@ -4379,6 +4424,68 @@ impl SequencerState {
     pub fn published_process_authoring_version(&self) -> u64 {
         self.published_process_authoring_version
             .load(Ordering::Acquire)
+    }
+    pub fn track_process_chain(&self, track: usize) -> Option<crate::process::TrackProcessChain> {
+        if track >= self.active_track_count() {
+            return None;
+        }
+        self.pattern
+            .process_chains
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+    }
+    pub fn set_track_process_chain(
+        &self,
+        track: usize,
+        chain: crate::process::TrackProcessChain,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+        let mut chains = self.pattern.process_chains.lock().unwrap();
+        let Some(slot) = chains.get_mut(track) else {
+            return false;
+        };
+        *slot = chain;
+        drop(chains);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        true
+    }
+    pub fn set_process_lane_value(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        inlet_name: impl Into<String>,
+        step: usize,
+        value: f32,
+    ) -> bool {
+        if track >= self.active_track_count() || step >= MAX_STEPS {
+            return false;
+        }
+        let inlet_name = inlet_name.into();
+        let mut chains = self.pattern.process_chains.lock().unwrap();
+        let Some(chain) = chains.get_mut(track) else {
+            return false;
+        };
+        let Some(slot) = chain
+            .slots
+            .iter_mut()
+            .find(|slot| slot.instance_id == instance_id)
+        else {
+            return false;
+        };
+        let lane = slot.lanes.entry(inlet_name).or_default();
+        if lane.values.len() <= step {
+            lane.values.resize(step + 1, 0.0);
+        }
+        lane.values[step] = value;
+        drop(chains);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        true
     }
     pub fn scratch_runtime_descriptors(
         &self,
@@ -6137,6 +6244,7 @@ mod tests {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_tracks: vec![None; num_tracks],
+            process_chains: vec![crate::process::TrackProcessChain::default(); num_tracks],
             plock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
             key_lock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
         }
@@ -7544,6 +7652,7 @@ mod tests {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_tracks: vec![None; 4],
+            process_chains: vec![crate::process::TrackProcessChain::default(); 4],
             plock_variant_registries: vec![PlockVariantRegistry::default(); 4],
             key_lock_variant_registries: vec![PlockVariantRegistry::default(); 4],
         };
@@ -7663,6 +7772,76 @@ mod tests {
                 .map(|_| default_empty_effect_chain())
                 .collect(),
         )
+    }
+
+    fn sample_process_chain() -> crate::process::TrackProcessChain {
+        crate::process::TrackProcessChain {
+            slots: vec![crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(7),
+                class_name: "sparse".to_string(),
+                enabled: true,
+                inlets: std::collections::BTreeMap::new(),
+                lanes: std::collections::BTreeMap::from([(
+                    "amount".to_string(),
+                    crate::process::ProcessLane {
+                        values: vec![0.0, 1.0],
+                    },
+                )]),
+            }],
+        }
+    }
+
+    #[test]
+    fn process_chain_and_lane_values_survive_snapshots_and_project_save() {
+        let state = make_state_with_tracks(1);
+        let mut expected = sample_process_chain();
+
+        assert!(state.set_track_process_chain(0, expected.clone()));
+        assert!(state.set_process_lane_value(
+            0,
+            crate::process::ProcessInstanceId(7),
+            "amount",
+            4,
+            2.0,
+        ));
+        expected.slots[0]
+            .lanes
+            .get_mut("amount")
+            .unwrap()
+            .values
+            .resize(5, 0.0);
+        expected.slots[0].lanes.get_mut("amount").unwrap().values[4] = 2.0;
+
+        assert_eq!(state.track_process_chain(0), Some(expected.clone()));
+        assert_eq!(
+            SequencerSnapshot::capture(&state).tracks[0].process_chain,
+            expected
+        );
+
+        let snapshot = PatternSnapshot::capture(
+            &state,
+            1,
+            &[-1],
+            &[44_100],
+            &[String::new()],
+            &[InstrumentType::Sampler],
+        );
+        assert_eq!(snapshot.process_chains[0], expected);
+        let project_pattern = crate::project::ProjectPattern::from_snapshot(
+            &snapshot,
+            vec![None],
+            vec![String::new()],
+            Vec::new(),
+        );
+        assert_eq!(project_pattern.process_chains[0], expected);
+
+        assert!(state.set_track_process_chain(0, crate::process::TrackProcessChain::default()));
+        assert_eq!(
+            state.track_process_chain(0),
+            Some(crate::process::TrackProcessChain::default())
+        );
+        assert!(snapshot.restore_track(&state, 0));
+        assert_eq!(state.track_process_chain(0), Some(expected));
     }
 
     #[test]

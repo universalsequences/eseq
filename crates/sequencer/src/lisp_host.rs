@@ -3492,9 +3492,12 @@ pub(crate) struct ProcessEvalContext {
     inlets: HashMap<String, EValue>,
     state: HashMap<String, EValue>,
     event: Option<EValue>,
+    target: Option<crate::process::ProcessTargetDef>,
     outputs: Vec<crate::process::ProcessOutput>,
     emissions: Vec<EmittedAccumulatorEvent>,
+    target_writes: Vec<crate::process::ProcessTargetWrite>,
     transpose: Option<f32>,
+    random_state: u64,
 }
 
 pub struct ScratchControlRuntime {
@@ -3559,6 +3562,12 @@ impl ScratchControlRuntime {
             Arc::clone(&process_eval),
             None,
             true,
+        );
+        register_def_accumulator_dispatch_native(
+            &mut runtime,
+            Arc::clone(&accumulators),
+            Arc::clone(&process_authoring),
+            None,
         );
         graph_update::register_graph_node_natives(&mut runtime, Arc::clone(&graph_node));
         register_process_graph_emit_native(&mut runtime, Arc::clone(&process_eval));
@@ -3640,15 +3649,7 @@ impl ScratchControlRuntime {
         );
     }
 
-    fn install_accumulator_macro(&mut self) {
-        let _ = self.runtime.eval_str(
-            r#"
-            (defmacro def-accumulator (name body)
-              `(__register-accumulator ,name
-                 (lambda (acc-step acc-value) ,body)))
-            "#,
-        );
-    }
+    fn install_accumulator_macro(&mut self) {}
 
     fn install_midi_fx_macro(&mut self) {
         let _ = self.runtime.eval_str(
@@ -4116,9 +4117,12 @@ impl ScratchControlRuntime {
                 inlets: invocation.inlets,
                 state: invocation.state,
                 event: invocation.event,
+                target: invocation.target,
                 outputs: Vec::new(),
                 emissions: Vec::new(),
+                target_writes: Vec::new(),
                 transpose: None,
+                random_state: invocation.seed,
             });
         }
         self.runtime
@@ -4137,6 +4141,7 @@ impl ScratchControlRuntime {
             state: ctx.state,
             outputs: ctx.outputs,
             emissions: ctx.emissions,
+            target_writes: ctx.target_writes,
             transpose: ctx.transpose,
         })
     }
@@ -4196,6 +4201,25 @@ fn register_process_natives(
             Ok(value) => value,
             Err(error) => {
                 eprintln!("[process] def-process error: {error}");
+                EValue::Bool(false)
+            }
+        },
+    );
+
+    let process_authoring_for_def_acc = Arc::clone(&process_authoring);
+    let publish_for_def_acc = publish.clone();
+    runtime.register_vm_native_with_docs(
+        "def-accumulator",
+        "(def-accumulator name :target (step-param :transpose) :amount (...) :reset :lane :range (lo hi) :mode :wrap)",
+        "Define a replay-safe lane-folding step process accumulator.",
+        move |args, _vm| match register_process_accumulator_def(
+            args,
+            &process_authoring_for_def_acc,
+            publish_for_def_acc.clone(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("[process] def-accumulator error: {error}");
                 EValue::Bool(false)
             }
         },
@@ -4545,6 +4569,132 @@ fn register_process_natives(
         },
     );
 
+    let process_eval_for_target_add = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "target-add!",
+        "(target-add! value)",
+        "Add a value to this process run's typed target.",
+        move |args, _ctx| {
+            let value = process_number_arg(args.first(), "target-add!")? as f32;
+            push_process_target_write(
+                &process_eval_for_target_add,
+                crate::process::ProcessTargetOp::Add,
+                value,
+            )?;
+            Ok(EValue::Number(value as f64))
+        },
+    );
+
+    let process_eval_for_target_set = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "target-set!",
+        "(target-set! value)",
+        "Set this process run's typed target.",
+        move |args, _ctx| {
+            let value = process_number_arg(args.first(), "target-set!")? as f32;
+            push_process_target_write(
+                &process_eval_for_target_set,
+                crate::process::ProcessTargetOp::Set,
+                value,
+            )?;
+            Ok(EValue::Number(value as f64))
+        },
+    );
+
+    let process_eval_for_rand = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "rand",
+        "(rand)",
+        "Deterministic process-scoped pseudo-random float in [0,1).",
+        move |_args, _ctx| {
+            let mut guard = process_eval_for_rand
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("rand called outside process execution".to_string());
+            };
+            ctx.random_state = ctx.random_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let bits = gen_splitmix64(ctx.random_state);
+            let unit = ((bits >> 11) as f64) * (1.0 / ((1u64 << 53) as f64));
+            Ok(EValue::Number(unit))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "clip",
+        "(clip value low high)",
+        "Clamp value to the inclusive numeric range.",
+        move |args, _ctx| {
+            let value = process_number_arg(args.first(), "clip")?;
+            let low = process_number_arg(args.get(1), "clip")?;
+            let high = process_number_arg(args.get(2), "clip")?;
+            if !value.is_finite() || !low.is_finite() || !high.is_finite() || low > high {
+                return Ok(EValue::Number(f64::NAN));
+            }
+            Ok(EValue::Number(value.clamp(low, high)))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "wrap",
+        "(wrap value low high)",
+        "Wrap value into the half-open numeric range [low, high).",
+        move |args, _ctx| {
+            let value = process_number_arg(args.first(), "wrap")?;
+            let low = process_number_arg(args.get(1), "wrap")?;
+            let high = process_number_arg(args.get(2), "wrap")?;
+            if !value.is_finite() || !low.is_finite() || !high.is_finite() || high <= low {
+                return Ok(EValue::Number(f64::NAN));
+            }
+            let span = high - low;
+            let mut wrapped = (value - low) % span;
+            if wrapped < 0.0 {
+                wrapped += span;
+            }
+            Ok(EValue::Number(low + wrapped))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "bounce",
+        "(bounce value low high)",
+        "Fold value into a ping-pong numeric range.",
+        move |args, _ctx| {
+            let value = process_number_arg(args.first(), "bounce")?;
+            let low = process_number_arg(args.get(1), "bounce")?;
+            let high = process_number_arg(args.get(2), "bounce")?;
+            if !value.is_finite() || !low.is_finite() || !high.is_finite() || high <= low {
+                return Ok(EValue::Number(f64::NAN));
+            }
+            let span = high - low;
+            let period = span * 2.0;
+            let mut phase = (value - low) % period;
+            if phase < 0.0 {
+                phase += period;
+            }
+            let folded = if phase <= span {
+                low + phase
+            } else {
+                high - (phase - span)
+            };
+            Ok(EValue::Number(folded))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "gate?",
+        "(gate? value)",
+        "Return true when a gate-like value is active.",
+        move |args, _ctx| {
+            Ok(EValue::Bool(match args.first() {
+                Some(EValue::Bool(value)) => *value,
+                Some(EValue::Number(value)) => *value > 0.5,
+                Some(EValue::Nil) | None => false,
+                _ => true,
+            }))
+        },
+    );
+
     let process_authoring_for_ps = Arc::clone(&process_authoring);
     runtime.register_native_with_docs(
         "ps",
@@ -4555,6 +4705,58 @@ fn register_process_natives(
                 .lock()
                 .map_err(|_| "failed to lock process registry".to_string())?;
             Ok(process_status_value(&registry))
+        },
+    );
+}
+
+fn register_def_accumulator_dispatch_native(
+    runtime: &mut Runtime,
+    accumulators: SharedRegisteredAccumulators,
+    process_authoring: SharedProcessAuthoring,
+    publish: Option<ProcessPublishHook>,
+) {
+    runtime.register_native_with_docs(
+        "def-accumulator",
+        "(def-accumulator name body) | (def-accumulator name :target (step-param :transpose) :amount (...))",
+        "Define either a legacy script accumulator or a process accumulator, depending on the argument shape.",
+        move |args, ctx| {
+            let is_legacy_script_form =
+                args.len() == 2 && !matches!(args.get(1), Some(EValue::Keyword(_)));
+            if !is_legacy_script_form {
+                return register_process_accumulator_def(
+                    args,
+                    &process_authoring,
+                    publish.clone(),
+                );
+            }
+            let name = process_symbol_name(
+                args.first()
+                    .ok_or_else(|| "expected accumulator name".to_string())?,
+            )?;
+            let callback = args
+                .get(1)
+                .ok_or_else(|| "expected accumulator callback".to_string())?;
+            let callback = match callback {
+                EValue::Closure(_, _) => RegisteredAccumulatorCallback::Closure(callback.clone()),
+                EValue::String(source) => RegisteredAccumulatorCallback::Source(source.clone()),
+                other => {
+                    RegisteredAccumulatorCallback::Source(eseqlisp::vm::format_lisp_source(other))
+                }
+            };
+            let mut registry = accumulators
+                .lock()
+                .map_err(|_| "failed to lock accumulator registry".to_string())?;
+            if let Some(existing) = registry.iter_mut().find(|entry| entry.name == name) {
+                existing.callback = callback.clone();
+            } else {
+                registry.push(RegisteredAccumulator {
+                    name: name.clone(),
+                    callback: callback.clone(),
+                    params: Vec::new(),
+                });
+            }
+            ctx.set_status(format!("registered accumulator '{name}'"));
+            Ok(EValue::Bool(true))
         },
     );
 }
@@ -4652,6 +4854,97 @@ fn register_process_def(
     Ok(EValue::String(name))
 }
 
+fn register_process_accumulator_def(
+    args: Vec<EValue>,
+    process_authoring: &SharedProcessAuthoring,
+    publish: Option<ProcessPublishHook>,
+) -> Result<EValue, String> {
+    let name = process_symbol_name(
+        args.first()
+            .ok_or_else(|| "def-accumulator expects a process name".to_string())?,
+    )?;
+    let def = parse_process_accumulator_def(&name, &args[1..])?;
+    process_authoring
+        .lock()
+        .map_err(|_| "failed to lock process registry".to_string())?
+        .upsert_def(def);
+    publish_process_authoring(process_authoring, &publish);
+    Ok(EValue::String(name))
+}
+
+fn parse_process_accumulator_def(
+    name: &str,
+    args: &[EValue],
+) -> Result<crate::process::ProcessDef, String> {
+    let mut target = None;
+    let mut amount = None;
+    let mut reset_lane = false;
+    let mut range = None;
+    let mut mode = crate::process::ProcessAccumulatorMode::Wrap;
+    let mut seed_policy = crate::process::ProcessSeedPolicy::Locked;
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = process_symbol_name(&args[idx])?.to_ascii_lowercase();
+        idx += 1;
+        let Some(value) = args.get(idx) else {
+            return Err(format!("def-accumulator missing value for :{key}"));
+        };
+        match key.as_str() {
+            "target" => target = Some(parse_process_target_def(value)?),
+            "amount" => amount = Some(parse_process_accumulator_amount_inlet(value)?),
+            "reset" => {
+                let reset = process_symbol_name(value)?.to_ascii_lowercase();
+                reset_lane = reset == "lane";
+                if !reset_lane && reset != "none" {
+                    return Err("def-accumulator :reset supports :lane or :none".to_string());
+                }
+            }
+            "range" => range = Some(parse_process_accumulator_range(value)?),
+            "mode" => mode = parse_process_accumulator_mode(value)?,
+            "seed" => seed_policy = parse_process_seed_policy(value)?,
+            "doc" => {}
+            other => return Err(format!("def-accumulator unknown key :{other}")),
+        }
+        idx += 1;
+    }
+    let target = target.ok_or_else(|| "def-accumulator requires :target".to_string())?;
+    let amount = amount.ok_or_else(|| "def-accumulator requires :amount".to_string())?;
+    let mut inlets = vec![amount.clone()];
+    let reset_inlet = if reset_lane {
+        let inlet = crate::process::ProcessInletDef {
+            name: "reset".to_string(),
+            kind: crate::process::ProcessInletKind::Gate,
+            min: Some(0.0),
+            max: Some(1.0),
+            default: EValue::Number(0.0),
+            lane: true,
+            doc: None,
+        };
+        inlets.push(inlet);
+        Some("reset".to_string())
+    } else {
+        None
+    };
+    Ok(crate::process::ProcessDef {
+        id: crate::process::stable_process_id(name),
+        name: name.to_string(),
+        inlets,
+        outlets: Vec::new(),
+        state: Vec::new(),
+        every: None,
+        seed_policy,
+        target: Some(target),
+        accumulator: Some(crate::process::ProcessAccumulatorSpec {
+            amount_inlet: amount.name,
+            reset_inlet,
+            range,
+            mode,
+        }),
+        run_source: None,
+        listens: Vec::new(),
+    })
+}
+
 fn process_symbol_name(value: &EValue) -> Result<String, String> {
     match value {
         EValue::String(name) | EValue::Symbol(name) | EValue::Keyword(name) => Ok(name
@@ -4666,11 +4959,39 @@ fn process_key_arg(value: Option<&EValue>, native: &str) -> Result<String, Strin
     process_symbol_name(value.ok_or_else(|| format!("{native} expects a key"))?)
 }
 
+fn process_number_arg(value: Option<&EValue>, native: &str) -> Result<f64, String> {
+    match value {
+        Some(EValue::Number(value)) => Ok(*value),
+        _ => Err(format!("{native} expects a number")),
+    }
+}
+
+fn push_process_target_write(
+    process_eval: &SharedProcessEvalContext,
+    op: crate::process::ProcessTargetOp,
+    value: f32,
+) -> Result<(), String> {
+    let mut guard = process_eval
+        .lock()
+        .map_err(|_| "failed to lock process eval context".to_string())?;
+    let Some(ctx) = guard.as_mut() else {
+        return Err("target write called outside process execution".to_string());
+    };
+    let Some(target) = ctx.target.clone() else {
+        return Err("process target write requires :target".to_string());
+    };
+    ctx.target_writes
+        .push(crate::process::ProcessTargetWrite { target, op, value });
+    Ok(())
+}
+
 fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::ProcessDef, String> {
     let mut inlets = Vec::new();
     let mut outlets = Vec::new();
     let mut state = Vec::new();
     let mut every = None;
+    let mut seed_policy = crate::process::ProcessSeedPolicy::default();
+    let mut target = None;
     let mut run_value = None;
     let mut listen_value = None;
     let mut handlers: HashMap<String, EValue> = HashMap::new();
@@ -4686,12 +5007,14 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
             "out" => outlets = parse_process_outlets(value)?,
             "state" => state = parse_process_state(value)?,
             "every" => every = Some(parse_process_time_expr(value)?),
+            "seed" => seed_policy = parse_process_seed_policy(value)?,
+            "target" => target = Some(parse_process_target_def(value)?),
             "run" => run_value = Some(value.clone()),
             "listen" => listen_value = Some(value.clone()),
             other if other.starts_with("on-") => {
                 handlers.insert(other.trim_start_matches("on-").to_string(), value.clone());
             }
-            "phase" | "init" => {}
+            "phase" | "init" | "doc" => {}
             other => return Err(format!("def-process unknown key :{other}")),
         }
         idx += 1;
@@ -4700,12 +5023,17 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
         .iter()
         .map(|entry| entry.name.clone())
         .collect::<Vec<_>>();
+    let inlet_names = inlets
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
     let run_source = run_value
         .as_ref()
-        .map(|value| wrap_process_body_source(&state_names, value));
+        .map(|value| wrap_process_body_source(&state_names, &inlet_names, value))
+        .transpose()?;
     let listens = listen_value
         .as_ref()
-        .map(|value| parse_process_listens(value, &handlers, &state_names))
+        .map(|value| parse_process_listens(value, &handlers, &state_names, &inlet_names))
         .transpose()?
         .unwrap_or_default();
     Ok(crate::process::ProcessDef {
@@ -4715,6 +5043,9 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
         outlets,
         state,
         every,
+        seed_policy,
+        target,
+        accumulator: None,
         run_source,
         listens,
     })
@@ -4739,10 +5070,163 @@ fn parse_process_inlets(value: &EValue) -> Result<Vec<crate::process::ProcessInl
                     .first()
                     .ok_or_else(|| "inlet declaration missing name".to_string())?,
             )?;
+            let (kind, min, max) = parse_process_inlet_kind_and_range(&items)?;
             let default = keyword_value(&items, "default").unwrap_or(EValue::Number(0.0));
-            Ok(crate::process::ProcessInletDef { name, default })
+            let lane = keyword_value(&items, "lane")
+                .map(|value| process_truthy(&value))
+                .unwrap_or(false);
+            let doc = keyword_value(&items, "doc").and_then(|value| match value {
+                EValue::String(value) => Some(value),
+                _ => None,
+            });
+            Ok(crate::process::ProcessInletDef {
+                name,
+                kind,
+                min,
+                max,
+                default,
+                lane,
+                doc,
+            })
         })
         .collect()
+}
+
+fn process_truthy(value: &EValue) -> bool {
+    !matches!(value, EValue::Nil | EValue::Bool(false))
+}
+
+fn parse_process_inlet_kind_and_range(
+    items: &[EValue],
+) -> Result<(crate::process::ProcessInletKind, Option<f32>, Option<f32>), String> {
+    let Some(kind_value) = items.get(1) else {
+        return Ok((crate::process::ProcessInletKind::Any, None, None));
+    };
+    let Ok(kind_name) = process_symbol_name(kind_value) else {
+        return Ok((crate::process::ProcessInletKind::Any, None, None));
+    };
+    if matches!(
+        kind_name.as_str(),
+        "default" | "lane" | "doc" | "min" | "max"
+    ) {
+        return Ok((crate::process::ProcessInletKind::Any, None, None));
+    }
+    let kind = match kind_name.as_str() {
+        "float" => crate::process::ProcessInletKind::Float,
+        "int" | "integer" => crate::process::ProcessInletKind::Int,
+        "gate" | "bool" | "boolean" => crate::process::ProcessInletKind::Gate,
+        "track" => crate::process::ProcessInletKind::Track,
+        "any" => crate::process::ProcessInletKind::Any,
+        other => return Err(format!("unknown process inlet kind :{other}")),
+    };
+    let positional_min = items.get(2).and_then(|value| match value {
+        EValue::Number(value) => Some(*value as f32),
+        _ => None,
+    });
+    let positional_max = items.get(3).and_then(|value| match value {
+        EValue::Number(value) => Some(*value as f32),
+        _ => None,
+    });
+    let min = keyword_value(items, "min")
+        .and_then(|value| match value {
+            EValue::Number(value) => Some(value as f32),
+            _ => None,
+        })
+        .or(positional_min);
+    let max = keyword_value(items, "max")
+        .and_then(|value| match value {
+            EValue::Number(value) => Some(value as f32),
+            _ => None,
+        })
+        .or(positional_max);
+    Ok((kind, min, max))
+}
+
+fn parse_process_seed_policy(value: &EValue) -> Result<crate::process::ProcessSeedPolicy, String> {
+    let name = process_symbol_name(value)?.to_ascii_lowercase();
+    match name.as_str() {
+        "locked" => Ok(crate::process::ProcessSeedPolicy::Locked),
+        "per-cycle" | "per_cycle" => Ok(crate::process::ProcessSeedPolicy::PerCycle),
+        other => Err(format!("unknown process seed policy :{other}")),
+    }
+}
+
+fn parse_process_target_def(value: &EValue) -> Result<crate::process::ProcessTargetDef, String> {
+    let items = value_list(value).ok_or_else(|| "process target must be a list".to_string())?;
+    let head = process_symbol_name(
+        items
+            .first()
+            .ok_or_else(|| "process target missing head".to_string())?,
+    )?;
+    match head.as_str() {
+        "step-param" => {
+            let param = process_symbol_name(
+                items
+                    .get(1)
+                    .ok_or_else(|| "(step-param :name) expects a param".to_string())?,
+            )?;
+            if param != "transpose" {
+                return Err(format!(
+                    "only (step-param :transpose) process targets are supported in this slice, got :{param}"
+                ));
+            }
+            Ok(crate::process::ProcessTargetDef::StepParam { param })
+        }
+        other => Err(format!("unsupported process target {other}")),
+    }
+}
+
+fn parse_process_accumulator_amount_inlet(
+    value: &EValue,
+) -> Result<crate::process::ProcessInletDef, String> {
+    let items =
+        value_list(value).ok_or_else(|| ":amount expects an inlet declaration".to_string())?;
+    let name = process_symbol_name(
+        items
+            .first()
+            .ok_or_else(|| ":amount declaration missing name".to_string())?,
+    )?;
+    let (kind, min, max) = parse_process_inlet_kind_and_range(&items)?;
+    let default = keyword_value(&items, "default").unwrap_or(EValue::Number(0.0));
+    let doc = keyword_value(&items, "doc").and_then(|value| match value {
+        EValue::String(value) => Some(value),
+        _ => None,
+    });
+    Ok(crate::process::ProcessInletDef {
+        name,
+        kind,
+        min,
+        max,
+        default,
+        lane: true,
+        doc,
+    })
+}
+
+fn parse_process_accumulator_range(value: &EValue) -> Result<(f32, f32), String> {
+    let items = value_list(value).ok_or_else(|| ":range expects (lo hi)".to_string())?;
+    let Some(EValue::Number(lo)) = items.first() else {
+        return Err(":range expects numeric lo".to_string());
+    };
+    let Some(EValue::Number(hi)) = items.get(1) else {
+        return Err(":range expects numeric hi".to_string());
+    };
+    if hi <= lo {
+        return Err(":range high must be greater than low".to_string());
+    }
+    Ok((*lo as f32, *hi as f32))
+}
+
+fn parse_process_accumulator_mode(
+    value: &EValue,
+) -> Result<crate::process::ProcessAccumulatorMode, String> {
+    let name = process_symbol_name(value)?.to_ascii_lowercase();
+    match name.as_str() {
+        "wrap" => Ok(crate::process::ProcessAccumulatorMode::Wrap),
+        "clip" => Ok(crate::process::ProcessAccumulatorMode::Clip),
+        "bounce" => Ok(crate::process::ProcessAccumulatorMode::Bounce),
+        other => Err(format!("unknown def-accumulator mode :{other}")),
+    }
 }
 
 fn parse_process_outlets(value: &EValue) -> Result<Vec<crate::process::ProcessOutletDef>, String> {
@@ -4784,6 +5268,7 @@ fn parse_process_listens(
     value: &EValue,
     handlers: &HashMap<String, EValue>,
     state_names: &[String],
+    inlet_names: &[String],
 ) -> Result<Vec<crate::process::ProcessListenDef>, String> {
     let entries = value_list(value).ok_or_else(|| ":listen expects a list".to_string())?;
     entries
@@ -4806,7 +5291,7 @@ fn parse_process_listens(
             Ok(crate::process::ProcessListenDef {
                 name,
                 source,
-                handler_source: wrap_process_handler_source(state_names, handler)?,
+                handler_source: wrap_process_handler_source(state_names, inlet_names, handler)?,
             })
         })
         .collect()
@@ -4917,29 +5402,74 @@ fn parse_process_time_expr(value: &EValue) -> Result<crate::process::ProcessTime
     }
 }
 
-fn wrap_process_source_with_state(state_names: &[String], body_source: String) -> String {
-    if state_names.is_empty() {
-        return body_source;
+fn wrap_process_source_with_bindings(
+    state_names: &[String],
+    inlet_names: &[String],
+    extra_bindings: Vec<(String, String)>,
+    body_source: String,
+) -> Result<String, String> {
+    let mut seen = BTreeSet::new();
+    let mut params = Vec::new();
+    let mut args = Vec::new();
+    for name in state_names {
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate process binding `{name}`"));
+        }
+        params.push(name.clone());
+        args.push(format!("(__process-state-get :{name})"));
     }
-    let params = state_names.join(" ");
-    let args = state_names
-        .iter()
-        .map(|name| format!("(__process-state-get :{name})"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    for name in inlet_names {
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate process binding `{name}`"));
+        }
+        params.push(name.clone());
+        args.push(format!("(in :{name})"));
+    }
+    for (name, expr) in extra_bindings {
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate process binding `{name}`"));
+        }
+        params.push(name);
+        args.push(expr);
+    }
+    if params.is_empty() {
+        return Ok(body_source);
+    }
     let stores = state_names
         .iter()
         .map(|name| format!("(__process-state-set! :{name} {name})"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("((lambda ({params}) (do {body_source} {stores})) {args})")
+        .collect::<Vec<_>>();
+    let body_with_stores = if stores.is_empty() {
+        body_source
+    } else {
+        format!("(do {body_source} {})", stores.join(" "))
+    };
+    Ok(format!(
+        "((lambda ({}) {}) {})",
+        params.join(" "),
+        body_with_stores,
+        args.join(" ")
+    ))
 }
 
-fn wrap_process_body_source(state_names: &[String], body: &EValue) -> String {
-    wrap_process_source_with_state(state_names, eseqlisp::vm::format_lisp_source(body))
+fn wrap_process_body_source(
+    state_names: &[String],
+    inlet_names: &[String],
+    body: &EValue,
+) -> Result<String, String> {
+    wrap_process_source_with_bindings(
+        state_names,
+        inlet_names,
+        Vec::new(),
+        eseqlisp::vm::format_lisp_source(body),
+    )
 }
 
-fn wrap_process_handler_source(state_names: &[String], handler: &EValue) -> Result<String, String> {
+fn wrap_process_handler_source(
+    state_names: &[String],
+    inlet_names: &[String],
+    handler: &EValue,
+) -> Result<String, String> {
     let items =
         value_list(handler).ok_or_else(|| "process event handler expects a lambda".to_string())?;
     let head = process_symbol_name(
@@ -4964,28 +5494,12 @@ fn wrap_process_handler_source(state_names: &[String], handler: &EValue) -> Resu
         .get(2..)
         .ok_or_else(|| "process event handler lambda missing body".to_string())?;
     let body_source = process_body_source(body)?;
-    let mut params = state_names.to_vec();
-    params.push(event_arg);
-    let mut call_args = state_names
-        .iter()
-        .map(|name| format!("(__process-state-get :{name})"))
-        .collect::<Vec<_>>();
-    call_args.push("(__process-event-value)".to_string());
-    let stores = state_names
-        .iter()
-        .map(|name| format!("(__process-state-set! :{name} {name})"))
-        .collect::<Vec<_>>();
-    let body_with_stores = if stores.is_empty() {
-        body_source
-    } else {
-        format!("(do {body_source} {})", stores.join(" "))
-    };
-    Ok(format!(
-        "((lambda ({}) {}) {})",
-        params.join(" "),
-        body_with_stores,
-        call_args.join(" ")
-    ))
+    wrap_process_source_with_bindings(
+        state_names,
+        inlet_names,
+        vec![(event_arg, "(__process-event-value)".to_string())],
+        body_source,
+    )
 }
 
 fn process_body_source(body: &[EValue]) -> Result<String, String> {
@@ -5044,7 +5558,7 @@ fn construct_anonymous_listener_process(
     handler: &EValue,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
-    let handler_source = wrap_process_handler_source(&[], handler)?;
+    let handler_source = wrap_process_handler_source(&[], &[], handler)?;
     let mut registry = process_authoring
         .lock()
         .map_err(|_| "failed to lock process registry".to_string())?;
@@ -5057,6 +5571,9 @@ fn construct_anonymous_listener_process(
         outlets: Vec::new(),
         state: Vec::new(),
         every: None,
+        seed_policy: crate::process::ProcessSeedPolicy::default(),
+        target: None,
+        accumulator: None,
         run_source: None,
         listens: vec![crate::process::ProcessListenDef {
             name: "event".to_string(),
@@ -5351,6 +5868,12 @@ fn parse_process_event_source_ref(
             }
             crate::process::ProcessSourceRef::Outlet(outlet) => {
                 crate::process::ProcessEventSource::Outlet(outlet)
+            }
+            crate::process::ProcessSourceRef::TrackFires(track) => {
+                crate::process::ProcessEventSource::TrackFires(track)
+            }
+            crate::process::ProcessSourceRef::SeqFires(name) => {
+                crate::process::ProcessEventSource::SeqFires(name)
             }
         });
     }
@@ -19558,6 +20081,149 @@ mod tests {
         assert_eq!(outlet_values, vec![1.0, 2.0, 3.0, 4.0]);
         assert_eq!(processes.global_transpose(), 4.0);
         assert_eq!(processes.take_due_emissions(4.0).len(), 1);
+    }
+
+    #[test]
+    fn def_process_preserves_inlet_metadata_and_auto_binds_inlets() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (def-process lane-transpose
+                  :target (step-param :transpose)
+                  :seed :locked
+                  :in ((delta :float -12 12 :default 0 :lane true :doc "Delta"))
+                  :run (target-add! delta))
+                "#,
+            )
+            .expect("define process with inlet metadata");
+
+        let authored = scratch.process_authoring_snapshot();
+        let def = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "lane-transpose")
+            .expect("process definition");
+        assert_eq!(def.seed_policy, crate::process::ProcessSeedPolicy::Locked);
+        assert_eq!(
+            def.target,
+            Some(crate::process::ProcessTargetDef::StepParam {
+                param: "transpose".to_string()
+            })
+        );
+        let inlet = &def.inlets[0];
+        assert_eq!(inlet.name, "delta");
+        assert_eq!(inlet.kind, crate::process::ProcessInletKind::Float);
+        assert_eq!(inlet.min, Some(-12.0));
+        assert_eq!(inlet.max, Some(12.0));
+        assert!(inlet.lane);
+        assert_eq!(inlet.doc.as_deref(), Some("Delta"));
+
+        let roundtrip = authored
+            .to_published()
+            .expect("publish process authoring")
+            .to_runtime();
+        let roundtrip_def = roundtrip
+            .defs
+            .iter()
+            .find(|def| def.name == "lane-transpose")
+            .expect("round-tripped process definition");
+        assert_eq!(roundtrip_def.inlets[0], *inlet);
+
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 77,
+                source: def.run_source.clone().expect("run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::from([("delta".to_string(), Value::Number(5.0))]),
+                state: HashMap::new(),
+                event: None,
+                target: def.target.clone(),
+                seed: 123,
+            })
+            .expect("invoke process");
+        assert_eq!(
+            result.target_writes,
+            vec![crate::process::ProcessTargetWrite {
+                target: crate::process::ProcessTargetDef::StepParam {
+                    param: "transpose".to_string()
+                },
+                op: crate::process::ProcessTargetOp::Add,
+                value: 5.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn process_vm_helpers_and_rand_are_deterministic_per_seed() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (def-process helper-check
+                  :target (step-param :transpose)
+                  :seed :locked
+                  :run (target-set!
+                    (+ (clip 15 0 10)
+                       (wrap -1 0 8)
+                       (bounce 10 0 6)
+                       (floor (pow 2 3))
+                       (if (gate? 0.75) 1 0)
+                       (rand))))
+                "#,
+            )
+            .expect("define helper process");
+
+        let authored = scratch.process_authoring_snapshot();
+        let def = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "helper-check")
+            .expect("process definition");
+        let invoke = |scratch: &mut ScratchControlRuntime, seed| {
+            scratch
+                .invoke_process_run(crate::process::ProcessRunInvocation {
+                    runtime_id: 99,
+                    source: def.run_source.clone().expect("run source"),
+                    beat: 0.0,
+                    sample_time: 0,
+                    inlets: HashMap::new(),
+                    state: HashMap::new(),
+                    event: None,
+                    target: def.target.clone(),
+                    seed,
+                })
+                .expect("invoke helper process")
+                .target_writes[0]
+                .value
+        };
+
+        let first = invoke(&mut scratch, 1234);
+        let second = invoke(&mut scratch, 1234);
+        let different_seed = invoke(&mut scratch, 4321);
+        assert_eq!(first, second);
+        assert_ne!(first, different_seed);
+        assert!(
+            (28.0..29.0).contains(&first),
+            "helper sum plus rand: {first}"
+        );
     }
 
     #[test]

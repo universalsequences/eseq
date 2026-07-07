@@ -2286,6 +2286,7 @@ impl App {
             sample_paths: _,
             sample_names: _,
             rack_tracks,
+            process_chains,
             plock_variant_registries,
             key_lock_variant_registries,
         } = pattern;
@@ -2538,6 +2539,7 @@ impl App {
             neural_networks,
             graph_overrides,
             rack_tracks: self.rebind_project_rack_tracks_to_graph(rack_tracks, num_tracks),
+            process_chains,
             plock_variant_registries,
             key_lock_variant_registries,
         };
@@ -2925,6 +2927,7 @@ mod tests {
                 sample_paths: Vec::new(),
                 sample_names: Vec::new(),
                 rack_tracks: Vec::new(),
+                process_chains: Vec::new(),
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
             }],
