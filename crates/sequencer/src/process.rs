@@ -1205,6 +1205,8 @@ impl ProcessRuntime {
         &self,
         slot: &TrackProcessSlot,
         step: usize,
+        cycle: u64,
+        cycle_len: usize,
     ) -> Vec<ProcessTargetWrite> {
         if !slot.enabled {
             return Vec::new();
@@ -1241,31 +1243,15 @@ impl ProcessRuntime {
                     })
             })
             .unwrap_or(0.0);
-        let mut acc = 0.0_f32;
-        for idx in 0..=step {
-            let reset = accumulator
-                .reset_inlet
-                .as_ref()
-                .and_then(|name| {
-                    slot.lanes
-                        .get(name)
-                        .map(|lane| lane.value_at(idx, reset_default))
-                })
-                .unwrap_or(reset_default);
-            if reset > 0.5 {
-                acc = 0.0;
-            } else {
-                let amount = slot
-                    .lanes
-                    .get(&accumulator.amount_inlet)
-                    .map(|lane| lane.value_at(idx, amount_default))
-                    .unwrap_or(amount_default);
-                acc += amount;
-            }
-            if let Some((lo, hi)) = accumulator.range {
-                acc = apply_accumulator_range(acc, lo, hi, accumulator.mode);
-            }
-        }
+        let acc = process_accumulator_value_at(
+            slot,
+            accumulator,
+            amount_default,
+            reset_default,
+            step,
+            cycle,
+            cycle_len,
+        );
         vec![ProcessTargetWrite {
             target,
             op: ProcessTargetOp::Add,
@@ -1436,6 +1422,218 @@ fn resolve_step_process_inlets(
         inlets.insert(inlet.name.clone(), value);
     }
     inlets
+}
+
+fn process_accumulator_value_at(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    amount_default: f32,
+    reset_default: f32,
+    step: usize,
+    cycle: u64,
+    cycle_len: usize,
+) -> f32 {
+    let cycle_len = cycle_len.max(step.saturating_add(1)).max(1);
+    let step = step.min(cycle_len - 1);
+    if accumulator_cycle_has_reset(slot, accumulator, reset_default, cycle_len) {
+        let start = if cycle == 0 {
+            0.0
+        } else {
+            fold_process_accumulator_steps(
+                slot,
+                accumulator,
+                amount_default,
+                reset_default,
+                0.0,
+                0..cycle_len,
+            )
+        };
+        return fold_process_accumulator_steps(
+            slot,
+            accumulator,
+            amount_default,
+            reset_default,
+            start,
+            0..(step + 1),
+        );
+    }
+
+    if accumulator_can_use_linear_cycle_fold(slot, accumulator, amount_default, cycle_len) {
+        let cycle_total =
+            process_accumulator_amount_sum(slot, accumulator, amount_default, 0..cycle_len);
+        let prefix_total =
+            process_accumulator_amount_sum(slot, accumulator, amount_default, 0..(step + 1));
+        let value = ((cycle as f64) * (cycle_total as f64) + prefix_total as f64) as f32;
+        return apply_process_accumulator_range(value, accumulator);
+    }
+
+    let start = process_accumulator_cycle_start_fallback(
+        slot,
+        accumulator,
+        amount_default,
+        reset_default,
+        cycle,
+        cycle_len,
+    );
+    fold_process_accumulator_steps(
+        slot,
+        accumulator,
+        amount_default,
+        reset_default,
+        start,
+        0..(step + 1),
+    )
+}
+
+fn accumulator_cycle_has_reset(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    reset_default: f32,
+    cycle_len: usize,
+) -> bool {
+    (0..cycle_len)
+        .any(|idx| process_accumulator_reset_at(slot, accumulator, reset_default, idx) > 0.5)
+}
+
+fn accumulator_can_use_linear_cycle_fold(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    amount_default: f32,
+    cycle_len: usize,
+) -> bool {
+    match accumulator.range {
+        None => true,
+        Some(_) if accumulator.mode == ProcessAccumulatorMode::Wrap => true,
+        Some(_) if accumulator.mode == ProcessAccumulatorMode::Clip => {
+            let mut saw_positive = false;
+            let mut saw_negative = false;
+            for idx in 0..cycle_len {
+                let amount = process_accumulator_amount_at(slot, accumulator, amount_default, idx);
+                saw_positive |= amount > 0.0;
+                saw_negative |= amount < 0.0;
+                if saw_positive && saw_negative {
+                    return false;
+                }
+            }
+            true
+        }
+        Some(_) => false,
+    }
+}
+
+fn process_accumulator_cycle_start_fallback(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    amount_default: f32,
+    reset_default: f32,
+    cycle: u64,
+    cycle_len: usize,
+) -> f32 {
+    let mut acc = 0.0_f32;
+    let mut completed = 0_u64;
+    let mut seen = HashMap::new();
+    while completed < cycle {
+        // Mixed-sign clip and bounce modes are not reducible to a simple sum
+        // because clamping/reflection happens after each lane step. Fold full
+        // cycles exactly, skipping repeats when the bounded state cycles.
+        let key = canonical_accumulator_bits(acc);
+        if let Some(previous) = seen.insert(key, completed) {
+            let period = completed.saturating_sub(previous);
+            if period > 0 {
+                let remaining = cycle - completed;
+                let skips = remaining / period;
+                if skips > 0 {
+                    completed += skips * period;
+                    continue;
+                }
+            }
+        }
+        acc = fold_process_accumulator_steps(
+            slot,
+            accumulator,
+            amount_default,
+            reset_default,
+            acc,
+            0..cycle_len,
+        );
+        completed += 1;
+    }
+    acc
+}
+
+fn canonical_accumulator_bits(value: f32) -> u32 {
+    if value == 0.0 {
+        0.0_f32.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn fold_process_accumulator_steps(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    amount_default: f32,
+    reset_default: f32,
+    mut acc: f32,
+    steps: std::ops::Range<usize>,
+) -> f32 {
+    for idx in steps {
+        let reset = process_accumulator_reset_at(slot, accumulator, reset_default, idx);
+        if reset > 0.5 {
+            acc = 0.0;
+        } else {
+            acc += process_accumulator_amount_at(slot, accumulator, amount_default, idx);
+        }
+        acc = apply_process_accumulator_range(acc, accumulator);
+    }
+    acc
+}
+
+fn process_accumulator_amount_sum(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    amount_default: f32,
+    steps: std::ops::Range<usize>,
+) -> f32 {
+    steps
+        .map(|idx| process_accumulator_amount_at(slot, accumulator, amount_default, idx))
+        .sum()
+}
+
+fn process_accumulator_amount_at(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    amount_default: f32,
+    step: usize,
+) -> f32 {
+    slot.lanes
+        .get(&accumulator.amount_inlet)
+        .map(|lane| lane.value_at(step, amount_default))
+        .unwrap_or(amount_default)
+}
+
+fn process_accumulator_reset_at(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    reset_default: f32,
+    step: usize,
+) -> f32 {
+    accumulator
+        .reset_inlet
+        .as_ref()
+        .and_then(|name| {
+            slot.lanes
+                .get(name)
+                .map(|lane| lane.value_at(step, reset_default))
+        })
+        .unwrap_or(reset_default)
+}
+
+fn apply_process_accumulator_range(value: f32, accumulator: &ProcessAccumulatorSpec) -> f32 {
+    match accumulator.range {
+        Some((lo, hi)) => apply_accumulator_range(value, lo, hi, accumulator.mode),
+        None => value,
+    }
 }
 
 fn apply_accumulator_range(value: f32, lo: f32, hi: f32, mode: ProcessAccumulatorMode) -> f32 {
@@ -1786,12 +1984,16 @@ mod tests {
         };
 
         let first = (0..8)
-            .map(|step| runtime.step_process_writes(&slot, step)[0].value)
+            .map(|step| runtime.step_process_writes(&slot, step, 0, 8)[0].value)
             .collect::<Vec<_>>();
         let replay = (0..8)
-            .map(|step| runtime.step_process_writes(&slot, step)[0].value)
+            .map(|step| runtime.step_process_writes(&slot, step, 0, 8)[0].value)
+            .collect::<Vec<_>>();
+        let second_cycle = (0..8)
+            .map(|step| runtime.step_process_writes(&slot, step, 1, 8)[0].value)
             .collect::<Vec<_>>();
         assert_eq!(first, vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
         assert_eq!(replay, first);
+        assert_eq!(second_cycle, vec![2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0]);
     }
 }

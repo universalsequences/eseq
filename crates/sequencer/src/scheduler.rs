@@ -4463,7 +4463,12 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 if !slot.enabled {
                     continue;
                 }
-                let writes = process_runtime.step_process_writes(slot, trigger.step);
+                let writes = process_runtime.step_process_writes(
+                    slot,
+                    trigger.step,
+                    trigger.cycle,
+                    track.params.num_steps,
+                );
                 apply_process_target_writes_to_resolved(&mut resolved, &writes);
                 let event = process_step_event_value(
                     trigger.track,
@@ -7541,9 +7546,7 @@ mod tests {
                     "#,
                 )
                 .expect("attach process chain via lisp");
-            let chain = state
-                .track_process_chain(0)
-                .expect("track 0 process chain");
+            let chain = state.track_process_chain(0).expect("track 0 process chain");
             assert_eq!(chain.slots.len(), 1);
             assert_eq!(chain.slots[0].class_name, "sparse-transpose");
         } else {
@@ -7586,7 +7589,7 @@ mod tests {
             &live_midi_fx_tracks,
             snapshot.transport.pattern_epoch,
             0,
-            54_000,
+            102_000,
             48_000,
             6_000,
             24_000.0,
@@ -7629,6 +7632,20 @@ mod tests {
             .map(|event| event.transpose)
             .collect::<Vec<_>>();
         assert_eq!(transposes, vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn scheduler_process_accumulator_carries_across_pattern_cycles() {
+        let (_state, events) = run_with_scheduler_stack(run_sparse_process_accumulator_fixture);
+        let transposes = events
+            .iter()
+            .take(10)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transposes,
+            vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0]
+        );
     }
 
     #[test]

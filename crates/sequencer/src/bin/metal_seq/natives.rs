@@ -53,6 +53,51 @@ fn trace_ui_enabled() -> bool {
     std::env::var_os("ESEQLISP_TRACE_UI").is_some()
 }
 
+fn register_ui_def_accumulator_dispatch(
+    runtime: &mut Runtime,
+    accumulator_names: Arc<Mutex<Vec<String>>>,
+    process_authoring: sequencer::lisp_host::PublishedProcessAuthoringNatives,
+    debug_accum: bool,
+) {
+    runtime.register_vm_native_with_docs(
+        "def-accumulator",
+        "(def-accumulator name body) | (def-accumulator name :target (step-param :transpose) :amount (...))",
+        "Define either a legacy script accumulator preview or a published process accumulator.",
+        move |args, vm| {
+            let is_legacy_script_form =
+                args.len() == 2 && !matches!(args.get(1), Some(Value::Keyword(_)));
+            if is_legacy_script_form {
+                let label = match args.first() {
+                    Some(Value::String(name) | Value::Symbol(name) | Value::Keyword(name)) => name
+                        .trim_start_matches(':')
+                        .trim_start_matches('@')
+                        .to_string(),
+                    _ => {
+                        eprintln!("[accum-ui] def-accumulator error: expected accumulator name");
+                        return Value::Bool(false);
+                    }
+                };
+                let mut names = accumulator_names.lock().unwrap();
+                if !names.iter().any(|name| name.eq_ignore_ascii_case(&label)) {
+                    names.push(label.clone());
+                }
+                if debug_accum {
+                    eprintln!("[accum-ui] preview register label={label} names={names:?}");
+                }
+                return Value::String(label);
+            }
+
+            match process_authoring.define_process_accumulator(args, vm) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("[process] def-accumulator error: {error}");
+                    Value::Bool(false)
+                }
+            }
+        },
+    );
+}
+
 fn toggle_master_recording_capture(
     master_recording: &AtomicBool,
     master_recorder: &sequencer::recorder::MasterRecorder,
@@ -333,11 +378,12 @@ pub(crate) fn init_runtime(
         Arc::clone(&selected_neural_neurons),
     );
     sequencer::lisp_host::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-    sequencer::lisp_host::register_published_process_authoring_natives(
-        &mut runtime,
-        Arc::clone(&state),
-        Arc::clone(&ui_epoch),
-    );
+    let process_authoring_natives =
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::clone(&ui_epoch),
+        );
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -2812,11 +2858,12 @@ pub(crate) fn init_runtime(
         }
         Ok(Value::String(label))
     });
-    let _ = runtime.eval_str(
-        r#"
-        (defmacro def-accumulator (name body)
-          `(__register-accumulator-preview ,name))
-        "#,
+
+    register_ui_def_accumulator_dispatch(
+        &mut runtime,
+        Arc::clone(&accumulator_names),
+        process_authoring_natives,
+        debug_accum_preview,
     );
 
     let midi_fx_names_for_native = midi_fx_names.clone();
@@ -4440,6 +4487,58 @@ mod tests {
                 _guard: guard,
             }
         }
+    }
+
+    #[test]
+    fn ui_def_accumulator_dispatch_keeps_process_form_after_preview_layer() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut runtime = Runtime::new();
+        let process_authoring = sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let accumulator_names = Arc::new(Mutex::new(Vec::new()));
+        register_ui_def_accumulator_dispatch(
+            &mut runtime,
+            Arc::clone(&accumulator_names),
+            process_authoring,
+            false,
+        );
+
+        runtime
+            .eval_str(
+                r#"
+                (def-accumulator sparse-transpose
+                  :target (step-param :transpose)
+                  :amount (amount :lane true :default 0)
+                  :range (-24 24)
+                  :mode :clip)
+                "#,
+            )
+            .expect("main UI runtime should accept process accumulator form");
+        runtime
+            .eval_str(
+                r#"(def-accumulator "legacy-preview"
+                    (acc-add-step-param :transpose acc-value))"#,
+            )
+            .expect("main UI runtime should keep legacy accumulator preview form");
+
+        let published = state.published_process_authoring().to_runtime();
+        assert!(
+            published
+                .defs
+                .iter()
+                .any(|def| def.name == "sparse-transpose"),
+            "process accumulator definition should publish from the UI runtime"
+        );
+        assert_eq!(
+            accumulator_names.lock().unwrap().as_slice(),
+            &["legacy-preview".to_string()]
+        );
     }
 
     impl Drop for TempCwdGuard {

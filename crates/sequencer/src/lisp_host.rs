@@ -3383,6 +3383,22 @@ type SharedGeneratorTickContext = Arc<Mutex<Option<GeneratorTickContext>>>;
 type SharedProcessAuthoring = Arc<Mutex<ProcessAuthoringRegistry>>;
 type SharedProcessEvalContext = Arc<Mutex<Option<ProcessEvalContext>>>;
 type ProcessPublishHook = Arc<dyn Fn(crate::process::PublishedProcessAuthoringSnapshot) + 'static>;
+
+#[derive(Clone)]
+pub struct PublishedProcessAuthoringNatives {
+    process_authoring: SharedProcessAuthoring,
+    publish: Option<ProcessPublishHook>,
+}
+
+impl PublishedProcessAuthoringNatives {
+    pub fn define_process_accumulator(
+        &self,
+        args: Vec<eseqlisp::vm::Value>,
+        vm: &mut eseqlisp::vm::VM,
+    ) -> Result<eseqlisp::vm::Value, String> {
+        register_process_accumulator_def(args, vm, &self.process_authoring, self.publish.clone())
+    }
+}
 const UI_PROCESS_HANDLE_BASE: u64 = 1_u64 << 48;
 /// A lisp `def-sequencer` definition as held by the scheduler-side VM: its id
 /// (stable hash of the name, for hot-reload matching), display name, `:resolution`
@@ -4749,8 +4765,7 @@ fn def_accumulator_dispatch(
     process_authoring: &SharedProcessAuthoring,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
-    let is_legacy_script_form =
-        args.len() == 2 && !matches!(args.get(1), Some(EValue::Keyword(_)));
+    let is_legacy_script_form = args.len() == 2 && !matches!(args.get(1), Some(EValue::Keyword(_)));
     if !is_legacy_script_form {
         return register_process_accumulator_def(args, vm, process_authoring, publish);
     }
@@ -4808,7 +4823,7 @@ pub fn register_published_process_authoring_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
     ui_epoch: Arc<AtomicUsize>,
-) {
+) -> PublishedProcessAuthoringNatives {
     let process_authoring = Arc::new(Mutex::new(ProcessAuthoringRegistry::with_handle_base(
         UI_PROCESS_HANDLE_BASE,
     )));
@@ -4822,10 +4837,14 @@ pub fn register_published_process_authoring_natives(
         runtime,
         Arc::clone(&process_authoring),
         process_eval,
-        Some(publish),
+        Some(Arc::clone(&publish)),
         false,
     );
-    register_process_chain_natives(runtime, state, process_authoring);
+    register_process_chain_natives(runtime, state, Arc::clone(&process_authoring));
+    PublishedProcessAuthoringNatives {
+        process_authoring,
+        publish: Some(publish),
+    }
 }
 
 const PROCESS_LANE_TAG: &str = "__process-lane";
@@ -4855,10 +4874,7 @@ fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, String>> {
     Some(Ok(values))
 }
 
-fn parse_process_track_spec(
-    value: &EValue,
-    active_tracks: usize,
-) -> Result<Vec<usize>, String> {
+fn parse_process_track_spec(value: &EValue, active_tracks: usize) -> Result<Vec<usize>, String> {
     let parse_index = |number: f64| -> Result<usize, String> {
         if number < 0.0 || number.fract() != 0.0 {
             return Err("processes expects non-negative integer track indices".to_string());
@@ -4871,9 +4887,7 @@ fn parse_process_track_spec(
     };
     match value {
         EValue::Number(number) => Ok(vec![parse_index(*number)?]),
-        EValue::Keyword(name) | EValue::Symbol(name)
-            if name.trim_start_matches(':') == "all" =>
-        {
+        EValue::Keyword(name) | EValue::Symbol(name) if name.trim_start_matches(':') == "all" => {
             Ok((0..active_tracks).collect())
         }
         EValue::List(items) => {
@@ -20294,6 +20308,51 @@ mod tests {
                 .is_empty(),
             "rejected attach must not modify the chain"
         );
+    }
+
+    #[test]
+    fn process_chain_demo_publishes_from_regular_runtime() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(8);
+        let mut authoring = Runtime::new();
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::clone(&ui_epoch),
+        );
+
+        let script_path = format!(
+            "{}/scripts/process-chain-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read process chain demo script");
+        authoring
+            .eval_source_at_path(script_path.into(), &source)
+            .expect("evaluate process chain demo in regular runtime");
+
+        assert!(
+            ui_epoch.load(Ordering::Acquire) > 0,
+            "regular runtime process chain demo should publish process authoring"
+        );
+        let chain = state.track_process_chain(0).expect("track 0 chain");
+        assert_eq!(chain.slots.len(), 1);
+        assert_eq!(chain.slots[0].class_name, "sparse-transpose");
+        assert_eq!(
+            chain.slots[0].lanes.get("amount").map(|lane| &lane.values),
+            Some(&vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+        );
+
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(state.published_process_authoring().to_runtime(), 0.0);
+        let first_cycle = (0..8)
+            .map(|step| processes.step_process_writes(&chain.slots[0], step, 0, 8)[0].value)
+            .collect::<Vec<_>>();
+        let second_cycle = (0..8)
+            .map(|step| processes.step_process_writes(&chain.slots[0], step, 1, 8)[0].value)
+            .collect::<Vec<_>>();
+        assert_eq!(first_cycle, vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
+        assert_eq!(second_cycle, vec![2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0]);
     }
 
     #[test]
