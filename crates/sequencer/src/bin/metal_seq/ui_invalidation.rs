@@ -49,6 +49,9 @@ pub(crate) enum UiInvalidation {
     TrackParamPanel {
         track: usize,
     },
+    ProcessChain {
+        track: usize,
+    },
     Instrument {
         track: usize,
         change: InstrumentInvalidation,
@@ -330,6 +333,7 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackRoute { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackParam { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackParamPanel { .. })
+        | (UiInvalidation::TrackTopology(_), UiInvalidation::ProcessChain { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Step { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepSelection { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::ExpandedStepViewport { .. })

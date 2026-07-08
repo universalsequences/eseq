@@ -180,6 +180,7 @@ impl ProcessEventSource {
 pub struct ProcessDef {
     pub id: u64,
     pub name: String,
+    pub doc: Option<String>,
     pub inlets: Vec<ProcessInletDef>,
     pub outlets: Vec<ProcessOutletDef>,
     pub state: Vec<ProcessStateDef>,
@@ -351,6 +352,7 @@ pub struct PublishedProcessAuthoringSnapshot {
 pub struct PublishedProcessDef {
     pub id: u64,
     pub name: String,
+    pub doc: Option<String>,
     pub inlets: Vec<PublishedProcessInletDef>,
     pub outlets: Vec<ProcessOutletDef>,
     pub state: Vec<PublishedProcessStateDef>,
@@ -417,6 +419,7 @@ impl ProcessAuthoringSnapshot {
                     Ok(PublishedProcessDef {
                         id: def.id,
                         name: def.name.clone(),
+                        doc: def.doc.clone(),
                         inlets: def
                             .inlets
                             .iter()
@@ -535,6 +538,7 @@ impl PublishedProcessAuthoringSnapshot {
                 .map(|def| ProcessDef {
                     id: def.id,
                     name: def.name.clone(),
+                    doc: def.doc.clone(),
                     inlets: def
                         .inlets
                         .iter()
@@ -1795,6 +1799,7 @@ mod tests {
                     ProcessDef {
                         id: 1,
                         name: "source".to_string(),
+                        doc: None,
                         inlets: Vec::new(),
                         outlets: vec![ProcessOutletDef {
                             name: "value".to_string(),
@@ -1810,6 +1815,7 @@ mod tests {
                     ProcessDef {
                         id: 2,
                         name: "listener".to_string(),
+                        doc: None,
                         inlets: Vec::new(),
                         outlets: Vec::new(),
                         state: Vec::new(),
@@ -1893,6 +1899,7 @@ mod tests {
                 defs: vec![ProcessDef {
                     id: 1,
                     name: "listener".to_string(),
+                    doc: None,
                     inlets: Vec::new(),
                     outlets: Vec::new(),
                     state: Vec::new(),
@@ -1941,6 +1948,7 @@ mod tests {
                 defs: vec![ProcessDef {
                     id: 1,
                     name: "sparse".to_string(),
+                    doc: None,
                     inlets: vec![ProcessInletDef {
                         name: "amount".to_string(),
                         kind: ProcessInletKind::Float,

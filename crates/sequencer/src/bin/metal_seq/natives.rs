@@ -28,6 +28,15 @@ fn value_string_field(value: &Value, field: &str) -> Option<String> {
     })
 }
 
+fn value_symbol_name(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) | Value::Symbol(value) | Value::Keyword(value) => {
+            Some(value.trim_start_matches(':').to_string())
+        }
+        _ => None,
+    }
+}
+
 fn value_string_list(value: Option<&Value>) -> Vec<String> {
     let Some(Value::List(items)) = value else {
         return Vec::new();
@@ -560,6 +569,31 @@ pub(crate) fn init_runtime(
                         build_param_list(&state, 0, StepParam::Delay)
                     },
                 ),
+                (
+                    "process-lanes",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_process_lanes_value(&state, 0)
+                    },
+                ),
+                (
+                    "track-process-lanes",
+                    build_all_track_process_lanes_value(&state, track_count),
+                ),
+                (
+                    "process-slots",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_process_slots_value(&state, 0)
+                    },
+                ),
+                (
+                    "track-process-slots",
+                    build_all_track_process_slots_value(&state, track_count),
+                ),
+                ("process-library", build_process_library_value(&state)),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
                 (
@@ -1568,6 +1602,89 @@ pub(crate) fn init_runtime(
             });
         }
         Ok(Value::Number(val as f64))
+    });
+
+    let st = state.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-set-process-lane-step", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(instance_id)),
+            Some(inlet),
+            Some(Value::Number(step)),
+            Some(Value::Number(value)),
+        ) = (
+            args.first(),
+            args.get(1),
+            args.get(2),
+            args.get(3),
+            args.get(4),
+        )
+        else {
+            return Err(
+                "seq-set-process-lane-step: expected (track instance-id inlet step value)".into(),
+            );
+        };
+        let track = *track as usize;
+        let instance_id = *instance_id as u64;
+        let inlet = value_symbol_name(inlet)
+            .ok_or_else(|| "seq-set-process-lane-step: inlet must be a name".to_string())?;
+        let step = *step as usize;
+        let value = *value as f32;
+        if !st.set_process_lane_value(
+            track,
+            sequencer::process::ProcessInstanceId(instance_id),
+            inlet,
+            step,
+            value,
+        ) {
+            return Err("seq-set-process-lane-step: no matching attached process lane".into());
+        }
+        ui_inv.push(UiInvalidation::ProcessChain { track });
+        Ok(Value::Number(value as f64))
+    });
+
+    let st = state.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-set-process-inlet", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(instance_id)),
+            Some(inlet),
+            Some(value),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err("seq-set-process-inlet: expected (track instance-id inlet value)".into());
+        };
+        let track = *track as usize;
+        let instance_id = *instance_id as u64;
+        let inlet = value_symbol_name(inlet)
+            .ok_or_else(|| "seq-set-process-inlet: inlet must be a name".to_string())?;
+        let literal = match value {
+            Value::Number(value) => sequencer::process::ProcessLiteral::Number(*value),
+            Value::Bool(value) => sequencer::process::ProcessLiteral::Bool(*value),
+            Value::String(value) => sequencer::process::ProcessLiteral::String(value.clone()),
+            Value::Keyword(value) => sequencer::process::ProcessLiteral::Keyword(value.clone()),
+            Value::Symbol(value) => sequencer::process::ProcessLiteral::Symbol(value.clone()),
+            Value::Nil => sequencer::process::ProcessLiteral::Nil,
+            other => {
+                return Err(format!(
+                    "seq-set-process-inlet: unsupported literal {}",
+                    eseqlisp::vm::format_lisp_value(other)
+                )
+                .into())
+            }
+        };
+        let updated = st.set_process_inlet_value(
+            sequencer::process::ProcessInstanceId(instance_id),
+            &inlet,
+            literal,
+        );
+        if updated == 0 {
+            return Err("seq-set-process-inlet: no matching attached process slot".into());
+        }
+        ui_inv.push(UiInvalidation::ProcessChain { track });
+        Ok(Value::Number(updated as f64))
     });
 
     let st = state.clone();
@@ -4095,6 +4212,16 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-step-param",
             "(seq-set-step-param step :param value)",
             "Set a per-step parameter on the current track.",
+        ),
+        (
+            "seq-set-process-lane-step",
+            "(seq-set-process-lane-step track instance-id inlet step value)",
+            "Set one value in an attached process lane.",
+        ),
+        (
+            "seq-set-process-inlet",
+            "(seq-set-process-inlet track instance-id inlet value)",
+            "Set a scalar inlet on an attached process slot.",
         ),
         (
             "seq-piano-roll-action",

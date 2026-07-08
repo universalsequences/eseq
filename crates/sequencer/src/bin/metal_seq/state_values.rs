@@ -505,6 +505,386 @@ pub(crate) fn track_step_param_haptic_field(track: usize, mode: usize, step: usi
     format!("seq-track-step-param-haptic-{track}-{mode}-{step}")
 }
 
+pub(crate) const PROCESS_LANE_MODE_OFFSET: usize = 7;
+
+#[derive(Clone, Debug)]
+struct ProcessLaneUiEntry {
+    instance_id: sequencer::process::ProcessInstanceId,
+    slot_index: usize,
+    class_name: String,
+    inlet_name: String,
+    label: String,
+    short_label: String,
+    kind: String,
+    min: f32,
+    max: f32,
+    default: f32,
+    decimals: u8,
+    target: String,
+    values: Vec<f32>,
+}
+
+fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral) -> Option<f32> {
+    match value {
+        sequencer::process::ProcessLiteral::Number(value) => Some(*value as f32),
+        sequencer::process::ProcessLiteral::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+fn process_inlet_kind_name(kind: &sequencer::process::ProcessInletKind) -> &'static str {
+    match kind {
+        sequencer::process::ProcessInletKind::Float => "float",
+        sequencer::process::ProcessInletKind::Int => "int",
+        sequencer::process::ProcessInletKind::Gate => "gate",
+        sequencer::process::ProcessInletKind::Track => "track",
+        sequencer::process::ProcessInletKind::Any => "any",
+    }
+}
+
+fn process_target_label(target: Option<&sequencer::process::ProcessTargetDef>) -> String {
+    match target {
+        Some(sequencer::process::ProcessTargetDef::StepParam { param }) => {
+            format!("step-param:{param}")
+        }
+        None => String::new(),
+    }
+}
+
+fn process_short_label(name: &str) -> String {
+    let short = name.chars().take(7).collect::<String>();
+    if short.is_empty() {
+        "lane".to_string()
+    } else {
+        short
+    }
+}
+
+fn process_inlet_decimals(kind: Option<&sequencer::process::ProcessInletKind>) -> u8 {
+    match kind {
+        Some(sequencer::process::ProcessInletKind::Int)
+        | Some(sequencer::process::ProcessInletKind::Gate)
+        | Some(sequencer::process::ProcessInletKind::Track) => 0,
+        _ => 2,
+    }
+}
+
+fn process_inlet_range(
+    def: Option<&sequencer::process::PublishedProcessDef>,
+    inlet: Option<&sequencer::process::PublishedProcessInletDef>,
+    default: f32,
+) -> (f32, f32) {
+    if let (Some(min), Some(max)) = (
+        inlet.and_then(|entry| entry.min),
+        inlet.and_then(|entry| entry.max),
+    ) {
+        return (min, max);
+    }
+    match inlet.map(|entry| &entry.kind) {
+        Some(sequencer::process::ProcessInletKind::Gate) => (0.0, 1.0),
+        Some(sequencer::process::ProcessInletKind::Track) => (0.0, 127.0),
+        Some(sequencer::process::ProcessInletKind::Int) => {
+            let center = default.round();
+            (center - 24.0, center + 24.0)
+        }
+        _ => def
+            .and_then(|def| def.accumulator.as_ref())
+            .and_then(|acc| acc.range)
+            .unwrap_or((default - 1.0, default + 1.0)),
+    }
+}
+
+fn process_lane_entries_for_track(
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> Vec<ProcessLaneUiEntry> {
+    let Some(chain) = state.track_process_chain(track) else {
+        return Vec::new();
+    };
+    let published = state.published_process_authoring();
+    let mut entries = Vec::new();
+    for (slot_index, slot) in chain.slots.iter().enumerate() {
+        let def = published
+            .defs
+            .iter()
+            .find(|def| def.name == slot.class_name);
+        let mut lane_names = def
+            .map(|def| {
+                def.inlets
+                    .iter()
+                    .filter(|inlet| inlet.lane)
+                    .map(|inlet| inlet.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for name in slot.lanes.keys() {
+            if !lane_names.iter().any(|entry| entry == name) {
+                lane_names.push(name.clone());
+            }
+        }
+        for inlet_name in lane_names {
+            let inlet =
+                def.and_then(|def| def.inlets.iter().find(|entry| entry.name == inlet_name));
+            let default = slot
+                .inlets
+                .get(&inlet_name)
+                .and_then(process_literal_as_f32)
+                .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
+                .unwrap_or(0.0);
+            let (min, max) = process_inlet_range(def, inlet, default);
+            let lane = slot.lanes.get(&inlet_name);
+            let values = (0..MAX_STEPS)
+                .map(|step| {
+                    lane.map(|lane| lane.value_at(step, default))
+                        .unwrap_or(default)
+                })
+                .collect::<Vec<_>>();
+            entries.push(ProcessLaneUiEntry {
+                instance_id: slot.instance_id,
+                slot_index,
+                class_name: slot.class_name.clone(),
+                inlet_name: inlet_name.clone(),
+                label: format!("{} {}", slot.class_name, inlet_name),
+                short_label: process_short_label(&inlet_name),
+                kind: inlet
+                    .map(|entry| process_inlet_kind_name(&entry.kind).to_string())
+                    .unwrap_or_else(|| "float".to_string()),
+                min,
+                max,
+                default,
+                decimals: process_inlet_decimals(inlet.map(|entry| &entry.kind)),
+                target: process_target_label(def.and_then(|def| def.target.as_ref())),
+                values,
+            });
+        }
+    }
+    entries
+}
+
+fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) -> Value {
+    map_value([
+        ("mode", Value::Number(mode as f64)),
+        (
+            "lane-index",
+            Value::Number((mode - PROCESS_LANE_MODE_OFFSET) as f64),
+        ),
+        ("slot-index", Value::Number(entry.slot_index as f64)),
+        ("instance-id", Value::Number(entry.instance_id.0 as f64)),
+        ("class", Value::String(entry.class_name.clone())),
+        ("process", Value::String(entry.class_name.clone())),
+        ("inlet", Value::String(entry.inlet_name.clone())),
+        ("name", Value::String(entry.inlet_name.clone())),
+        ("label", Value::String(entry.label.clone())),
+        ("short-label", Value::String(entry.short_label.clone())),
+        ("kind", Value::String(entry.kind.clone())),
+        ("min", Value::Number(entry.min as f64)),
+        ("max", Value::Number(entry.max as f64)),
+        ("default", Value::Number(entry.default as f64)),
+        ("decimals", Value::Number(entry.decimals as f64)),
+        ("target", Value::String(entry.target.clone())),
+        (
+            "values",
+            list_value(
+                entry
+                    .values
+                    .iter()
+                    .map(|value| Value::Number(*value as f64)),
+            ),
+        ),
+    ])
+}
+
+pub(crate) fn build_process_lanes_value(state: &Arc<SequencerState>, track: usize) -> Value {
+    list_value(
+        process_lane_entries_for_track(state, track)
+            .iter()
+            .enumerate()
+            .map(|(lane_index, entry)| {
+                process_lane_entry_value(entry, PROCESS_LANE_MODE_OFFSET + lane_index)
+            }),
+    )
+}
+
+pub(crate) fn build_all_track_process_lanes_value(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+) -> Value {
+    list_value((0..track_count).map(|track| build_process_lanes_value(state, track)))
+}
+
+fn process_lane_value_for_mode(
+    state: &Arc<SequencerState>,
+    track: usize,
+    mode: usize,
+    step: usize,
+) -> Option<f32> {
+    let lane_index = mode.checked_sub(PROCESS_LANE_MODE_OFFSET)?;
+    process_lane_entries_for_track(state, track)
+        .get(lane_index)
+        .and_then(|entry| entry.values.get(step).copied())
+}
+
+fn process_scalar_inlet_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    inlet: Option<&sequencer::process::PublishedProcessInletDef>,
+    inlet_name: &str,
+) -> Option<f32> {
+    slot.inlets
+        .get(inlet_name)
+        .and_then(process_literal_as_f32)
+        .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
+}
+
+fn process_scalar_inlet_entry_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+    inlet_name: &str,
+    inlet: Option<&sequencer::process::PublishedProcessInletDef>,
+) -> Option<Value> {
+    let value = process_scalar_inlet_value(slot, inlet, inlet_name)?;
+    let default = inlet
+        .and_then(|entry| process_literal_as_f32(&entry.default))
+        .unwrap_or(value);
+    let (min, max) = process_inlet_range(def, inlet, value);
+    Some(map_value([
+        ("name", Value::String(inlet_name.to_string())),
+        ("label", Value::String(inlet_name.to_string())),
+        (
+            "kind",
+            Value::String(
+                inlet
+                    .map(|entry| process_inlet_kind_name(&entry.kind))
+                    .unwrap_or("float")
+                    .to_string(),
+            ),
+        ),
+        ("value", Value::Number(value as f64)),
+        ("default", Value::Number(default as f64)),
+        ("min", Value::Number(min as f64)),
+        ("max", Value::Number(max as f64)),
+        (
+            "decimals",
+            Value::Number(process_inlet_decimals(inlet.map(|entry| &entry.kind)) as f64),
+        ),
+        (
+            "doc",
+            Value::String(
+                inlet
+                    .and_then(|entry| entry.doc.clone())
+                    .unwrap_or_default(),
+            ),
+        ),
+    ]))
+}
+
+pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usize) -> Value {
+    let Some(chain) = state.track_process_chain(track) else {
+        return list_value(Vec::<Value>::new());
+    };
+    let published = state.published_process_authoring();
+    list_value(chain.slots.iter().enumerate().map(|(slot_index, slot)| {
+        let def = published
+            .defs
+            .iter()
+            .find(|def| def.name == slot.class_name);
+        let mut scalar_names = def
+            .map(|def| {
+                def.inlets
+                    .iter()
+                    .filter(|inlet| !inlet.lane)
+                    .map(|inlet| inlet.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for name in slot.inlets.keys() {
+            if !scalar_names.iter().any(|entry| entry == name) && !slot.lanes.contains_key(name) {
+                scalar_names.push(name.clone());
+            }
+        }
+        let inlet_values = scalar_names.into_iter().filter_map(|name| {
+            let inlet = def.and_then(|def| def.inlets.iter().find(|entry| entry.name == name));
+            process_scalar_inlet_entry_value(slot, def, &name, inlet)
+        });
+        map_value([
+            ("slot-index", Value::Number(slot_index as f64)),
+            ("instance-id", Value::Number(slot.instance_id.0 as f64)),
+            ("class", Value::String(slot.class_name.clone())),
+            ("process", Value::String(slot.class_name.clone())),
+            (
+                "label",
+                Value::String(
+                    def.and_then(|def| def.doc.clone())
+                        .filter(|doc| !doc.is_empty())
+                        .unwrap_or_else(|| slot.class_name.clone()),
+                ),
+            ),
+            ("enabled", Value::Bool(slot.enabled)),
+            (
+                "target",
+                Value::String(process_target_label(
+                    def.and_then(|def| def.target.as_ref()),
+                )),
+            ),
+            ("inlets", list_value(inlet_values)),
+        ])
+    }))
+}
+
+pub(crate) fn build_all_track_process_slots_value(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+) -> Value {
+    list_value((0..track_count).map(|track| build_process_slots_value(state, track)))
+}
+
+pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value {
+    let published = state.published_process_authoring();
+    list_value(published.defs.iter().map(|def| {
+        map_value([
+            ("name", Value::String(def.name.clone())),
+            ("label", Value::String(def.name.clone())),
+            ("doc", Value::String(def.doc.clone().unwrap_or_default())),
+            (
+                "target",
+                Value::String(process_target_label(def.target.as_ref())),
+            ),
+            (
+                "lane-count",
+                Value::Number(def.inlets.iter().filter(|inlet| inlet.lane).count() as f64),
+            ),
+        ])
+    }))
+}
+
+pub(crate) fn sync_process_chain_state(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track_count: usize,
+    current_track: usize,
+) {
+    rt.set_reactive(
+        "SEQ",
+        "track-process-lanes",
+        build_all_track_process_lanes_value(state, track_count),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "process-lanes",
+        build_process_lanes_value(state, current_track),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "process-slots",
+        build_process_slots_value(state, current_track),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-process-slots",
+        build_all_track_process_slots_value(state, track_count),
+    );
+    rt.set_reactive("SEQ", "process-library", build_process_library_value(state));
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ExpandedStepViewport {
     pub(crate) track: usize,
@@ -616,16 +996,16 @@ pub(crate) fn visible_slot_for_step(viewport: ExpandedStepViewport, step: usize)
     (slot < PAGE_SIZE).then_some(slot)
 }
 
-fn expanded_step_param_for_mode(mode: usize) -> StepParam {
+fn expanded_step_param_for_mode(mode: usize) -> Option<StepParam> {
     match mode {
-        0 => StepParam::Velocity,
-        1 => StepParam::Duration,
-        2 => StepParam::AuxA,
-        3 => StepParam::Transpose,
-        4 => StepParam::Pan,
-        5 => StepParam::Sync,
-        6 => StepParam::Delay,
-        _ => StepParam::Velocity,
+        0 => Some(StepParam::Velocity),
+        1 => Some(StepParam::Duration),
+        2 => Some(StepParam::AuxA),
+        3 => Some(StepParam::Transpose),
+        4 => Some(StepParam::Pan),
+        5 => Some(StepParam::Sync),
+        6 => Some(StepParam::Delay),
+        _ => None,
     }
 }
 
@@ -651,16 +1031,22 @@ pub(crate) fn sync_expanded_step_param_slot(
     let visible = step < num_steps;
     let param = expanded_step_param_for_mode(mode);
     let value = if visible {
-        state.pattern.step_data[viewport.track].get(step, param)
+        param
+            .map(|param| state.pattern.step_data[viewport.track].get(step, param))
+            .or_else(|| process_lane_value_for_mode(state, viewport.track, mode, step))
+            .unwrap_or(0.0)
     } else {
         0.0
     };
+    let slider_value = param
+        .map(|param| expanded_step_param_slider_value(param, value))
+        .unwrap_or(value);
     let mut dirty = false;
     dirty |= rt
         .set_reactive(
             "SEQ",
             &expanded_step_slot_param_slider_field(viewport.track_id, mode, slot),
-            Value::Number(expanded_step_param_slider_value(param, value) as f64),
+            Value::Number(slider_value as f64),
         )
         .effects_dirty;
     dirty |= rt
@@ -1992,6 +2378,11 @@ fn sync_all_track_sequencer_state_inner(
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_delays = started.expect("profile timer").elapsed();
     }
+    rt.set_reactive(
+        "SEQ",
+        "track-process-lanes",
+        build_all_track_process_lanes_value(state, app.tracks.len()),
+    );
 
     if let Some(profile) = profile.as_deref_mut() {
         profile.step_bindings = sync_all_track_step_binding_fields_profiled(
@@ -2107,6 +2498,7 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
         "track-delays",
         build_all_active_track_param_lists_value(state, StepParam::Delay),
     );
+    sync_process_chain_state(rt, state, state.active_track_count(), track);
 }
 
 pub(crate) fn build_accumulator_names(app: &ui::App) -> Vec<String> {
@@ -3491,6 +3883,11 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-delays", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-process-lanes", Value::List(vec![]));
+        rt.set_reactive("SEQ", "process-lanes", Value::List(vec![]));
+        rt.set_reactive("SEQ", "process-slots", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-process-slots", Value::List(vec![]));
+        rt.set_reactive("SEQ", "process-library", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plocks", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plock-variants", Value::List(vec![]));
@@ -17892,6 +18289,14 @@ mod tests {
             .register_native("seq-set-step-param", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
+            .register_native("seq-set-process-lane-step", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-set-process-inlet", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
             .register_native("seq-set-step-param-plock", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
@@ -18050,6 +18455,11 @@ mod tests {
                 ("transposes", test_number_list(&[0.0; 16])),
                 ("pans", test_number_list(&[0.0; 16])),
                 ("syncs", test_number_list(&[0.0; 16])),
+                ("process-lanes", test_list(vec![])),
+                ("track-process-lanes", test_list(vec![test_list(vec![])])),
+                ("process-slots", test_list(vec![])),
+                ("track-process-slots", test_list(vec![test_list(vec![])])),
+                ("process-library", test_list(vec![])),
                 ("step-has-plocks", empty_plocks.clone()),
                 ("step-plock-kinds", test_number_list(&[0.0; 16])),
                 ("step-variant-r", test_number_list(&[0.0; 16])),
@@ -19761,6 +20171,85 @@ mod tests {
         assert!(
             scratch.contains("process-ui-control-demo.lisp"),
             "picker load should persist the process UI demo load form; scratch={scratch:?}"
+        );
+    }
+
+    #[test]
+    fn process_chain_manifests_publish_lane_slots_and_library_defs() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut runtime = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        runtime
+            .eval_str(
+                r#"
+                (def-accumulator sparse-transpose
+                  :doc "Sparse transpose accumulator"
+                  :target (step-param :transpose)
+                  :amount (amount :lane true :default 0)
+                  :range (-24 24)
+                  :mode :clip)
+
+                (def climb
+                  (processes :track 0
+                    (sparse-transpose :amount (lane 0 1 0 0))))
+                "#,
+            )
+            .expect("define and attach process accumulator");
+
+        let Value::List(lanes) = build_process_lanes_value(&state, 0) else {
+            panic!("process lanes should be a list");
+        };
+        assert_eq!(lanes.len(), 1);
+        let Value::Map(lane) = &*lanes[0].borrow() else {
+            panic!("process lane should be a map");
+        };
+        assert_eq!(
+            lane.get("process").map(|cell| cell.borrow().clone()),
+            Some(Value::String("sparse-transpose".to_string()))
+        );
+        assert_eq!(
+            lane.get("inlet").map(|cell| cell.borrow().clone()),
+            Some(Value::String("amount".to_string()))
+        );
+        assert_eq!(
+            lane.get("min").map(|cell| cell.borrow().clone()),
+            Some(Value::Number(-24.0))
+        );
+        assert_eq!(
+            lane.get("max").map(|cell| cell.borrow().clone()),
+            Some(Value::Number(24.0))
+        );
+        let values = lane
+            .get("values")
+            .map(|cell| cell.borrow().clone())
+            .expect("lane values");
+        let Value::List(values) = values else {
+            panic!("lane values should be a list");
+        };
+        assert_eq!(*values[0].borrow(), Value::Number(0.0));
+        assert_eq!(*values[1].borrow(), Value::Number(1.0));
+
+        let Value::List(slots) = build_process_slots_value(&state, 0) else {
+            panic!("process slots should be a list");
+        };
+        assert_eq!(slots.len(), 1);
+
+        let Value::List(library) = build_process_library_value(&state) else {
+            panic!("process library should be a list");
+        };
+        let Value::Map(def) = &*library[0].borrow() else {
+            panic!("process library item should be a map");
+        };
+        assert_eq!(
+            def.get("doc").map(|cell| cell.borrow().clone()),
+            Some(Value::String("Sparse transpose accumulator".to_string()))
         );
     }
 
@@ -22617,6 +23106,105 @@ mod tests {
             first_tab.rect.col < track_name.rect.col,
             "expanded editor should start from the row's left edge, not after the track header"
         );
+    }
+
+    #[test]
+    fn metal_seq_process_lanes_render_as_expanded_step_tabs_and_knobs() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let lane = map_value([
+            ("mode", Value::Number(7.0)),
+            ("lane-index", Value::Number(0.0)),
+            ("slot-index", Value::Number(0.0)),
+            ("instance-id", Value::Number(42.0)),
+            ("class", Value::String("sparse-transpose".to_string())),
+            ("process", Value::String("sparse-transpose".to_string())),
+            ("inlet", Value::String("amount".to_string())),
+            ("name", Value::String("amount".to_string())),
+            (
+                "label",
+                Value::String("sparse-transpose amount".to_string()),
+            ),
+            ("short-label", Value::String("amount".to_string())),
+            ("kind", Value::String("float".to_string())),
+            ("min", Value::Number(-24.0)),
+            ("max", Value::Number(24.0)),
+            ("default", Value::Number(0.0)),
+            ("decimals", Value::Number(0.0)),
+            ("target", Value::String("step-param:transpose".to_string())),
+            (
+                "values",
+                test_number_list(&[
+                    0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                ]),
+            ),
+        ]);
+        let slot = map_value([
+            ("slot-index", Value::Number(0.0)),
+            ("instance-id", Value::Number(42.0)),
+            ("class", Value::String("sparse-transpose".to_string())),
+            ("process", Value::String("sparse-transpose".to_string())),
+            ("label", Value::String("sparse-transpose".to_string())),
+            ("enabled", Value::Bool(true)),
+            ("target", Value::String("step-param:transpose".to_string())),
+            (
+                "inlets",
+                test_list(vec![map_value([
+                    ("name", Value::String("limit".to_string())),
+                    ("label", Value::String("limit".to_string())),
+                    ("kind", Value::String("float".to_string())),
+                    ("value", Value::Number(6.0)),
+                    ("default", Value::Number(3.0)),
+                    ("min", Value::Number(-24.0)),
+                    ("max", Value::Number(24.0)),
+                    ("decimals", Value::Number(0.0)),
+                    ("doc", Value::String(String::new())),
+                ])]),
+            ),
+        ]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-lanes", test_list(vec![lane.clone()]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-lanes",
+            test_list(vec![test_list(vec![lane])]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-slots", test_list(vec![slot.clone()]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-slots",
+            test_list(vec![test_list(vec![slot])]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (seqv-set-track-expanded 0 true)
+                (seqv-set-param-mode 0 7)
+                "#,
+            )
+            .expect("expand track and select process lane");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        let process_tab = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-7")
+            .expect("process lane tab should render");
+        assert_finite_nonzero_rect(process_tab, "process lane tab");
+        let knob = find_layout_node_by_stable_key(&layout, "seqv-process-inlet-0-0-limit")
+            .expect("process inlet knob should render");
+        assert_finite_nonzero_rect(knob, "process inlet knob");
     }
 
     #[test]

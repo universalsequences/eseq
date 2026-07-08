@@ -4487,6 +4487,36 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
         true
     }
+    /// Replace a scalar inlet on every current-pattern chain slot owned by
+    /// `instance_id`. This is the durable counterpart to authoring-handle knob
+    /// edits like `(climb :limit 6)`: it updates pattern-scoped attachment
+    /// state without touching step data or p-lock storage.
+    pub fn set_process_inlet_value(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+        inlet_name: &str,
+        value: crate::process::ProcessLiteral,
+    ) -> usize {
+        let mut updated = 0;
+        {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            for chain in chains.iter_mut() {
+                for slot in chain
+                    .slots
+                    .iter_mut()
+                    .filter(|slot| slot.instance_id == instance_id)
+                {
+                    slot.inlets.insert(inlet_name.to_string(), value.clone());
+                    updated += 1;
+                }
+            }
+        }
+        if updated > 0 {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            self.publish_scheduler_snapshot();
+        }
+        updated
+    }
     /// Replace a lane wholesale on every current-pattern chain slot owned by
     /// `instance_id` (a handle can be attached to several tracks). Returns the
     /// number of slots updated; publishes only when at least one matched.
@@ -4520,6 +4550,24 @@ impl SequencerState {
             self.publish_scheduler_snapshot();
         }
         updated
+    }
+    pub fn process_instance_attachment_count(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+    ) -> usize {
+        self.pattern
+            .process_chains
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|chain| {
+                chain
+                    .slots
+                    .iter()
+                    .filter(|slot| slot.instance_id == instance_id)
+                    .count()
+            })
+            .sum()
     }
     pub fn scratch_runtime_descriptors(
         &self,

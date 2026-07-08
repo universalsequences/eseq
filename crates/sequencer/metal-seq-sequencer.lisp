@@ -284,7 +284,9 @@
               4
               (if (or (= key "s") (= key "S"))
                 5
-                -1))))))))
+                (if (or (= key "x") (= key "X"))
+                  (if (> (len SEQ.process-lanes) 0) seqv-process-lane-mode-offset -1)
+                  -1)))))))))
 
 (def seqv-select-all-current-track-steps ()
   (do
@@ -1036,20 +1038,32 @@
     (seqv-activate-track-for-edit track)
     (cool-off-follow)
     (seqv-set-expanded-cursor track track-id step)
-    (seq-set-step-param-from-step
-      step
-      (seqv-param-keyword mode)
-      (seqv-step-slider-param-value mode slider-value))))
+    (if (seqv-process-lane-mode? mode)
+      (seq-set-process-lane-from-step
+        track
+        mode
+        step
+        (seqv-step-slider-param-value mode slider-value))
+      (seq-set-step-param-from-step
+        step
+        (seqv-param-keyword mode)
+        (seqv-step-slider-param-value mode slider-value)))))
 
 (def seqv-set-expanded-current-param (track track-id mode value)
   (do
     (seqv-activate-track-for-edit track)
     (cool-off-follow)
     (set-track-cursor-step (seqv-current-step track track-id))
-    (seq-set-step-param-from-step
-      (seqv-current-step track track-id)
-      (seqv-param-keyword mode)
-      (seqv-step-param-value mode value))))
+    (if (seqv-process-lane-mode? mode)
+      (seq-set-process-lane-from-step
+        track
+        mode
+        (seqv-current-step track track-id)
+        (seqv-step-param-value mode value))
+      (seq-set-step-param-from-step
+        (seqv-current-step track track-id)
+        (seqv-param-keyword mode)
+        (seqv-step-param-value mode value)))))
 
 (def seqv-set-expanded-timebase (track label)
   (let ((plock-selected
@@ -1146,6 +1160,39 @@
                       :color :dim
                       :bg :transparent)))))))))))
 
+(def seqv-process-inlet-editor (track slot inlet)
+  (h-stack :gap 0.35 :align :center
+    (label (get inlet :label)
+      :font-size 10 :width 5.6 :color :dim :bg :transparent)
+    (number-picker
+      :key (str "seqv-process-inlet-" track "-" (get slot :slot-index) "-" (get inlet :name))
+      :value (get inlet :value)
+      :min (get inlet :min)
+      :max (get inlet :max)
+      :decimals (get inlet :decimals)
+      :on-change (lambda (v)
+        (seq-set-process-inlet
+          track
+          (get slot :instance-id)
+          (get inlet :name)
+          v))
+      :width 6.2 :height 1.2 :font-size 10)))
+
+(def seqv-process-slot-editor (track track-id)
+  (let ((slots (seqv-track-process-slots track)))
+    (if (> (len slots) 0)
+      (v-stack :gap 0.18
+        (each slots |slot|
+          (let ((inlets (get slot :inlets)))
+            (if (> (len inlets) 0)
+              (h-stack :gap 0.45 :align :center
+                (label (get slot :process)
+                  :font-size 10 :width 8.6 :color :white :bg :transparent)
+                (each inlets |inlet|
+                  (seqv-process-inlet-editor track slot inlet)))
+              (box :width 0.1 :height 0.1 :bg :transparent)))))
+      (box :width 0.1 :height 0.1 :bg :transparent))))
+
 (def seqv-expanded-track-editor (track track-id)
   (let ((mode (seqv-param-mode track-id)))
     (box :padding 0.25
@@ -1161,6 +1208,13 @@
             (seqv-param-tab track track-id 4 "pan")
             (seqv-param-tab track track-id 5 "syn")
             (seqv-param-tab track track-id 6 "dly")
+            (each (range 0 (len (seqv-track-process-lanes track))) |lane-idx|
+              (let ((lane (nth (seqv-track-process-lanes track) lane-idx)))
+                (seqv-param-tab
+                  track
+                  track-id
+                  (+ seqv-process-lane-mode-offset lane-idx)
+                  (get lane :short-label))))
             (h-stack :align :center :gap 0.35
               (dropdown :value (seqv-track-timebase track)
                 :key (str "seqv-expanded-timebase-" track-id)
@@ -1248,7 +1302,8 @@
                     :color :dim)
                   (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                     (step-playhead-dot
-                      :active (seqv-slot-playhead-binding track-id i))))))))))
+                      :active (seqv-slot-playhead-binding track-id i)))))))
+          (seqv-process-slot-editor track track-id))))
     )
   )
 

@@ -2152,6 +2152,7 @@ fn apply_ui_invalidations(
             | UiInvalidation::TrackRoute { track }
             | UiInvalidation::TrackParam { track, .. }
             | UiInvalidation::TrackParamPanel { track }
+            | UiInvalidation::ProcessChain { track }
             | UiInvalidation::Instrument { track, .. }
             | UiInvalidation::TrackFx { track, .. }
             | UiInvalidation::MidiFx { track, .. }
@@ -2515,6 +2516,22 @@ fn apply_ui_invalidations(
                         selected_steps,
                         Some(selected_neural_neurons),
                     );
+                    needs_reactive_cycle = true;
+                }
+            }
+            UiInvalidation::ProcessChain { track } => {
+                sync_process_chain_state(rt, state, app.tracks.len(), current_track_idx);
+                if sequencer_visible {
+                    let _ = sync_all_expanded_step_viewports(
+                        rt,
+                        state,
+                        app,
+                        selected_steps,
+                        current_track_idx,
+                        expanded_step_projection,
+                    );
+                }
+                if track == current_track_idx {
                     needs_reactive_cycle = true;
                 }
             }

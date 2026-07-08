@@ -865,6 +865,15 @@
       (if (seq-has-selection?) (seq-clear-selection) nil)
       (seq-set-step-param step param value))))
 
+(def seq-set-process-lane-from-step (track mode step value)
+  (let ((lane (seqv-track-process-lane track mode)))
+    (seq-set-process-lane-step
+      track
+      (get lane :instance-id)
+      (get lane :inlet)
+      step
+      value)))
+
 (def select-all-steps ()
   (do
     (cool-off-follow)
@@ -918,30 +927,77 @@
     (step-param-value v)))
 
 (def param-decimals ()
-  (if (= param-mode 3) 0 2))
+  (seqv-param-decimals param-mode))
 
 (def seqv-track-list (lists track)
   (if (< track (len lists))
     (nth lists track)
     '()))
 
+(def seqv-process-lane-mode-offset 7)
+
+(def seqv-process-lane-mode? (mode)
+  (>= mode seqv-process-lane-mode-offset))
+
+(def seqv-process-lane-index (mode)
+  (- mode seqv-process-lane-mode-offset))
+
+(def seqv-empty-process-lane ()
+  (dict
+    :values '()
+    :min 0
+    :max 1
+    :default 0
+    :decimals 2
+    :label "Process"
+    :short-label "proc"
+    :instance-id 0
+    :inlet ""))
+
+(def seqv-list-ref (items idx fallback)
+  (if (and (>= idx 0) (< idx (len items)))
+    (nth items idx)
+    fallback))
+
+(def seqv-track-process-lanes (track)
+  (seqv-list-ref SEQ.track-process-lanes track '()))
+
+(def seqv-track-process-slots (track)
+  (seqv-list-ref SEQ.track-process-slots track '()))
+
+(def seqv-current-process-lane (mode)
+  (seqv-list-ref
+    SEQ.process-lanes
+    (seqv-process-lane-index mode)
+    (seqv-empty-process-lane)))
+
+(def seqv-track-process-lane (track mode)
+  (seqv-list-ref
+    (seqv-track-process-lanes track)
+    (seqv-process-lane-index mode)
+    (seqv-empty-process-lane)))
+
 (def seqv-current-param-values (mode)
-  (if (= mode 0) SEQ.velocities
-    (if (= mode 1) SEQ.durations
-      (if (= mode 2) SEQ.auxas
-        (if (= mode 3) SEQ.transposes
-          (if (= mode 4) SEQ.pans
-            (if (= mode 5) SEQ.syncs
-              SEQ.delays)))))))
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-current-process-lane mode) :values)
+    (if (= mode 0) SEQ.velocities
+      (if (= mode 1) SEQ.durations
+        (if (= mode 2) SEQ.auxas
+          (if (= mode 3) SEQ.transposes
+            (if (= mode 4) SEQ.pans
+              (if (= mode 5) SEQ.syncs
+                SEQ.delays))))))))
 
 (def seqv-track-param-values (track mode)
-  (if (= mode 0) (seqv-track-list SEQ.track-velocities track)
-    (if (= mode 1) (seqv-track-list SEQ.track-durations track)
-      (if (= mode 2) (seqv-track-list SEQ.track-auxas track)
-        (if (= mode 3) (seqv-track-list SEQ.track-transposes track)
-          (if (= mode 4) (seqv-track-list SEQ.track-pans track)
-            (if (= mode 5) (seqv-track-list SEQ.track-syncs track)
-              (seqv-track-list SEQ.track-delays track))))))))
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-track-process-lane track mode) :values)
+    (if (= mode 0) (seqv-track-list SEQ.track-velocities track)
+      (if (= mode 1) (seqv-track-list SEQ.track-durations track)
+        (if (= mode 2) (seqv-track-list SEQ.track-auxas track)
+          (if (= mode 3) (seqv-track-list SEQ.track-transposes track)
+            (if (= mode 4) (seqv-track-list SEQ.track-pans track)
+              (if (= mode 5) (seqv-track-list SEQ.track-syncs track)
+                (seqv-track-list SEQ.track-delays track)))))))))
 
 (def seqv-param-values (track mode)
   (if (= track SEQ.current-track)
@@ -955,21 +1011,25 @@
       0)))
 
 (def seqv-param-min (mode)
-  (if (= mode 0) 0
-    (if (= mode 1) 0
-      (if (= mode 2) 0
-        (if (= mode 3) -12
-          (if (= mode 4) -1
-            0))))))
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-current-process-lane mode) :min)
+    (if (= mode 0) 0
+      (if (= mode 1) 0
+        (if (= mode 2) 0
+          (if (= mode 3) -12
+            (if (= mode 4) -1
+              0)))))))
 
 (def seqv-param-max (mode)
-  (if (= mode 0) 1
-    (if (= mode 1) 32
-      (if (= mode 2) 16
-        (if (= mode 3) 12
-          (if (= mode 4) 1
-            (if (= mode 5) (- (len SEQ.sync-labels) 1)
-              1)))))))
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-current-process-lane mode) :max)
+    (if (= mode 0) 1
+      (if (= mode 1) 32
+        (if (= mode 2) 16
+          (if (= mode 3) 12
+            (if (= mode 4) 1
+              (if (= mode 5) (- (len SEQ.sync-labels) 1)
+                1))))))))
 
 (def seqv-param-slider-min (mode)
   (if (= mode 1) 0 (seqv-param-min mode)))
@@ -992,43 +1052,51 @@
   (if (= mode 1) 4 1))
 
 (def seqv-param-keyword (mode)
-  (if (= mode 0) :velocity
-    (if (= mode 1) :duration
-      (if (= mode 2) :aux-a
-        (if (= mode 3) :transpose
-          (if (= mode 4) :pan
-            (if (= mode 5) :sync
-              :delay)))))))
+  (if (seqv-process-lane-mode? mode) :process-lane
+    (if (= mode 0) :velocity
+      (if (= mode 1) :duration
+        (if (= mode 2) :aux-a
+          (if (= mode 3) :transpose
+            (if (= mode 4) :pan
+              (if (= mode 5) :sync
+                :delay))))))))
 
 (def seqv-param-color (mode)
-  (if (= mode 0) :blue
-    (if (= mode 1) :green
-      (if (= mode 2) :magenta
-        (if (= mode 3) :yellow
-          (if (= mode 4) :red
-            (if (= mode 5) :green
-              :cyan)))))))
+  (if (seqv-process-lane-mode? mode) :orange
+    (if (= mode 0) :blue
+      (if (= mode 1) :green
+        (if (= mode 2) :magenta
+          (if (= mode 3) :yellow
+            (if (= mode 4) :red
+              (if (= mode 5) :green
+                :cyan))))))))
 
 (def seqv-param-name (mode)
-  (if (= mode 0) "Velocity"
-    (if (= mode 1) "Duration"
-      (if (= mode 2) "Aux A"
-        (if (= mode 3) "Transpose"
-          (if (= mode 4) "Pan"
-            (if (= mode 5) "Sync"
-              "Delay")))))))
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-current-process-lane mode) :label)
+    (if (= mode 0) "Velocity"
+      (if (= mode 1) "Duration"
+        (if (= mode 2) "Aux A"
+          (if (= mode 3) "Transpose"
+            (if (= mode 4) "Pan"
+              (if (= mode 5) "Sync"
+                "Delay"))))))))
 
 (def seqv-param-origin (mode)
-  (if (= mode 3) 0
-    (if (= mode 4) 0
-      (if (= mode 5) 0
-        (seqv-param-min mode)))))
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-current-process-lane mode) :default)
+    (if (= mode 3) 0
+      (if (= mode 4) 0
+        (if (= mode 5) 0
+          (seqv-param-min mode))))))
 
 (def seqv-param-decimals (mode)
-  (if (= mode 3) 0 2))
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-current-process-lane mode) :decimals)
+    (if (= mode 3) 0 2)))
 
 (def seqv-step-param-value (mode value)
-  (if (= mode 3)
+  (if (or (= mode 3) (= (seqv-param-decimals mode) 0))
     (round value)
     value))
 
@@ -1093,33 +1161,21 @@
 (mode-bind-key "seq-grid-mode" "s" "set-sync-mode")
 (def set-delay-mode () (set! param-mode 6))
 (mode-bind-key "seq-grid-mode" "l" "set-delay-mode")
+(def set-process-lane-mode ()
+  (if (> (len SEQ.process-lanes) 0)
+    (set! param-mode seqv-process-lane-mode-offset)
+    nil))
+(mode-bind-key "seq-grid-mode" "x" "set-process-lane-mode")
 
 
 (def param-values ()
-  (if (= param-mode 0) SEQ.velocities
-    (if (= param-mode 1) SEQ.durations
-      (if (= param-mode 2) SEQ.auxas
-        (if (= param-mode 3) SEQ.transposes
-          (if (= param-mode 4) SEQ.pans
-            (if (= param-mode 5) SEQ.syncs
-              SEQ.delays)))))))
+  (seqv-current-param-values param-mode))
 
 (def param-min ()
-  (if (= param-mode 0) 0
-    (if (= param-mode 1) 0
-      (if (= param-mode 2) 0
-        (if (= param-mode 3) -12
-          (if (= param-mode 4) -1
-            0))))))
+  (seqv-param-min param-mode))
 
 (def param-max ()
-  (if (= param-mode 0) 1
-    (if (= param-mode 1) 32
-      (if (= param-mode 2) 16
-        (if (= param-mode 3) 12
-          (if (= param-mode 4) 1
-            (if (= param-mode 5) (- (len SEQ.sync-labels) 1)
-              1)))))))
+  (seqv-param-max param-mode))
 
 (def param-slider-min ()
   (if (= param-mode 1) 0 (param-min)))
@@ -1142,37 +1198,16 @@
   (if (= param-mode 1) 4 1))
 
 (def param-keyword ()
-  (if (= param-mode 0) :velocity
-    (if (= param-mode 1) :duration
-      (if (= param-mode 2) :aux-a
-        (if (= param-mode 3) :transpose
-          (if (= param-mode 4) :pan
-            (if (= param-mode 5) :sync
-              :delay)))))))
+  (seqv-param-keyword param-mode))
 
 (def param-color ()
-  (if (= param-mode 0) :blue
-    (if (= param-mode 1) :green
-      (if (= param-mode 2) :magenta
-        (if (= param-mode 3) :yellow
-          (if (= param-mode 4) :red
-            (if (= param-mode 5) :green
-              :cyan)))))))
+  (seqv-param-color param-mode))
 
 (def param-name ()
-  (if (= param-mode 0) "Velocity"
-    (if (= param-mode 1) "Duration"
-      (if (= param-mode 2) "Aux A"
-        (if (= param-mode 3) "Transpose"
-          (if (= param-mode 4) "Pan"
-            (if (= param-mode 5) "Sync"
-              "Delay")))))))
+  (seqv-param-name param-mode))
 
 (def param-origin ()
-  (if (= param-mode 3) 0
-    (if (= param-mode 4) 0
-      (if (= param-mode 5) 0
-        (param-min)))))
+  (seqv-param-origin param-mode))
 
 (def sync-current-label ()
   (nth SEQ.sync-labels (floor (+ 0.5 (nth SEQ.syncs (current-step))))))

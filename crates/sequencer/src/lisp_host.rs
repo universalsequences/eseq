@@ -3387,6 +3387,7 @@ type ProcessPublishHook = Arc<dyn Fn(crate::process::PublishedProcessAuthoringSn
 #[derive(Clone)]
 pub struct PublishedProcessAuthoringNatives {
     process_authoring: SharedProcessAuthoring,
+    process_chain_state: Arc<crate::sequencer::SequencerState>,
     publish: Option<ProcessPublishHook>,
 }
 
@@ -3396,7 +3397,13 @@ impl PublishedProcessAuthoringNatives {
         args: Vec<eseqlisp::vm::Value>,
         vm: &mut eseqlisp::vm::VM,
     ) -> Result<eseqlisp::vm::Value, String> {
-        register_process_accumulator_def(args, vm, &self.process_authoring, self.publish.clone())
+        register_process_accumulator_def(
+            args,
+            vm,
+            &self.process_authoring,
+            Some(Arc::clone(&self.process_chain_state)),
+            self.publish.clone(),
+        )
     }
 }
 const UI_PROCESS_HANDLE_BASE: u64 = 1_u64 << 48;
@@ -3577,13 +3584,20 @@ impl ScratchControlRuntime {
             Arc::clone(&process_authoring),
             Arc::clone(&process_eval),
             None,
+            Some(Arc::clone(&state)),
             true,
         );
-        register_process_chain_natives(&mut runtime, state, Arc::clone(&process_authoring));
+        register_process_chain_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::clone(&process_authoring),
+            None,
+        );
         register_def_accumulator_dispatch_native(
             &mut runtime,
             Arc::clone(&accumulators),
             Arc::clone(&process_authoring),
+            Some(Arc::clone(&state)),
             None,
         );
         graph_update::register_graph_node_natives(&mut runtime, Arc::clone(&graph_node));
@@ -4184,6 +4198,7 @@ fn register_process_natives(
     process_authoring: SharedProcessAuthoring,
     process_eval: SharedProcessEvalContext,
     publish: Option<ProcessPublishHook>,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     register_execution_natives: bool,
 ) {
     let process_authoring_for_hook = Arc::clone(&process_authoring);
@@ -4205,6 +4220,7 @@ fn register_process_natives(
 
     let process_authoring_for_def = Arc::clone(&process_authoring);
     let publish_for_def = publish.clone();
+    let chain_state_for_def = process_chain_state.clone();
     runtime.register_vm_native_with_docs(
         "def-process",
         "(def-process name :in (...) :out (...) :state (...) :every (beats n) :run body)",
@@ -4213,6 +4229,7 @@ fn register_process_natives(
             args,
             vm,
             &process_authoring_for_def,
+            chain_state_for_def.clone(),
             publish_for_def.clone(),
         ) {
             Ok(value) => value,
@@ -4225,6 +4242,7 @@ fn register_process_natives(
 
     let process_authoring_for_def_acc = Arc::clone(&process_authoring);
     let publish_for_def_acc = publish.clone();
+    let chain_state_for_def_acc = process_chain_state.clone();
     runtime.register_vm_native_with_docs(
         "def-accumulator",
         "(def-accumulator name :target (step-param :transpose) :amount (...) :reset :lane :range (lo hi) :mode :wrap)",
@@ -4233,6 +4251,7 @@ fn register_process_natives(
             args,
             vm,
             &process_authoring_for_def_acc,
+            chain_state_for_def_acc.clone(),
             publish_for_def_acc.clone(),
         ) {
             Ok(value) => value,
@@ -4302,6 +4321,7 @@ fn register_process_natives(
 
     let process_authoring_for_every = Arc::clone(&process_authoring);
     let publish_for_every = publish.clone();
+    let chain_state_for_every = process_chain_state.clone();
     runtime.register_native_with_docs(
         "every",
         "(every time body...)",
@@ -4324,6 +4344,7 @@ fn register_process_natives(
                 Some(interval),
                 Some(run_source),
                 false,
+                chain_state_for_every.clone(),
                 publish_for_every.clone(),
             )?;
             publish_process_authoring(&process_authoring_for_every, &publish_for_every);
@@ -4333,6 +4354,7 @@ fn register_process_natives(
 
     let process_authoring_for_after = Arc::clone(&process_authoring);
     let publish_for_after = publish.clone();
+    let chain_state_for_after = process_chain_state.clone();
     runtime.register_native_with_docs(
         "after",
         "(after time body...)",
@@ -4355,6 +4377,7 @@ fn register_process_natives(
                 Some(delay),
                 Some(run_source),
                 true,
+                chain_state_for_after.clone(),
                 publish_for_after.clone(),
             )?;
             publish_process_authoring(&process_authoring_for_after, &publish_for_after);
@@ -4731,6 +4754,7 @@ fn register_def_accumulator_dispatch_native(
     runtime: &mut Runtime,
     accumulators: SharedRegisteredAccumulators,
     process_authoring: SharedProcessAuthoring,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) {
     // A vm native (not a plain native) so the process-accumulator branch can
@@ -4745,6 +4769,7 @@ fn register_def_accumulator_dispatch_native(
                 vm,
                 &accumulators,
                 &process_authoring,
+                process_chain_state.clone(),
                 publish.clone(),
             );
             match result {
@@ -4763,11 +4788,18 @@ fn def_accumulator_dispatch(
     vm: &mut eseqlisp::vm::VM,
     accumulators: &SharedRegisteredAccumulators,
     process_authoring: &SharedProcessAuthoring,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
     let is_legacy_script_form = args.len() == 2 && !matches!(args.get(1), Some(EValue::Keyword(_)));
     if !is_legacy_script_form {
-        return register_process_accumulator_def(args, vm, process_authoring, publish);
+        return register_process_accumulator_def(
+            args,
+            vm,
+            process_authoring,
+            process_chain_state,
+            publish,
+        );
     }
     let name = process_symbol_name(
         args.first()
@@ -4838,11 +4870,18 @@ pub fn register_published_process_authoring_natives(
         Arc::clone(&process_authoring),
         process_eval,
         Some(Arc::clone(&publish)),
+        Some(Arc::clone(&state)),
         false,
     );
-    register_process_chain_natives(runtime, state, Arc::clone(&process_authoring));
+    register_process_chain_natives(
+        runtime,
+        Arc::clone(&state),
+        Arc::clone(&process_authoring),
+        Some(Arc::clone(&publish)),
+    );
     PublishedProcessAuthoringNatives {
         process_authoring,
+        process_chain_state: state,
         publish: Some(publish),
     }
 }
@@ -4872,6 +4911,12 @@ fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, String>> {
         }
     }
     Some(Ok(values))
+}
+
+fn process_lane_literal(values: &[f32]) -> EValue {
+    let mut items = vec![EValue::Keyword(PROCESS_LANE_TAG.to_string())];
+    items.extend(values.iter().map(|value| EValue::Number(*value as f64)));
+    process_list(items)
 }
 
 fn parse_process_track_spec(value: &EValue, active_tracks: usize) -> Result<Vec<usize>, String> {
@@ -4966,6 +5011,7 @@ fn register_process_chain_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
     process_authoring: SharedProcessAuthoring,
+    publish: Option<ProcessPublishHook>,
 ) {
     runtime.register_native_with_docs(
         "lane",
@@ -4990,6 +5036,7 @@ fn register_process_chain_natives(
 
     let state_for_processes = Arc::clone(&state);
     let authoring_for_processes = Arc::clone(&process_authoring);
+    let publish_for_processes = publish.clone();
     runtime.register_native_with_docs(
         "processes",
         "(processes :track <index | :all | (list ...)> instance...)",
@@ -5035,6 +5082,7 @@ fn register_process_chain_natives(
                     return Err(format!("track {track} out of range"));
                 }
             }
+            publish_process_authoring(&authoring_for_processes, &publish_for_processes);
             match handles.len() {
                 0 => Ok(EValue::Bool(true)),
                 1 => Ok(handles.remove(0)),
@@ -5045,6 +5093,7 @@ fn register_process_chain_natives(
 
     let state_for_lane = Arc::clone(&state);
     let authoring_for_lane = Arc::clone(&process_authoring);
+    let publish_for_lane = publish;
     runtime.register_native_with_docs(
         "lane!",
         "(lane! instance :inlet v1 v2 ...)",
@@ -5102,7 +5151,7 @@ fn register_process_chain_natives(
             let updated = state_for_lane.set_process_lane_values(
                 crate::process::ProcessInstanceId(*id),
                 &inlet,
-                values,
+                values.clone(),
             );
             if updated == 0 {
                 return Err(
@@ -5110,6 +5159,21 @@ fn register_process_chain_natives(
                         .to_string(),
                 );
             }
+            {
+                let mut registry = authoring_for_lane
+                    .lock()
+                    .map_err(|_| "failed to lock process registry".to_string())?;
+                let instance = registry
+                    .instances
+                    .iter_mut()
+                    .find(|entry| entry.handle_id.0 == *id)
+                    .ok_or_else(|| "unknown process handle".to_string())?;
+                instance.inlets.insert(
+                    inlet.clone(),
+                    crate::process::ProcessInletValue::Literal(process_lane_literal(&values)),
+                );
+            }
+            publish_process_authoring(&authoring_for_lane, &publish_for_lane);
             Ok(EValue::Number(updated as f64))
         },
     );
@@ -5119,6 +5183,7 @@ fn register_process_def(
     args: Vec<EValue>,
     vm: &mut eseqlisp::vm::VM,
     process_authoring: &SharedProcessAuthoring,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
     let name = process_symbol_name(
@@ -5131,7 +5196,7 @@ fn register_process_def(
         .map_err(|_| "failed to lock process registry".to_string())?
         .upsert_def(def.clone());
     publish_process_authoring(process_authoring, &publish);
-    register_process_constructor_native(vm, &name, process_authoring, publish);
+    register_process_constructor_native(vm, &name, process_authoring, process_chain_state, publish);
     Ok(EValue::String(name))
 }
 
@@ -5139,9 +5204,11 @@ fn register_process_constructor_native(
     vm: &mut eseqlisp::vm::VM,
     name: &str,
     process_authoring: &SharedProcessAuthoring,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) {
     let process_authoring_for_constructor = Arc::clone(process_authoring);
+    let chain_state_for_constructor = process_chain_state;
     let publish_for_constructor = publish;
     let class_name = name.to_string();
     vm.register_native_with_vm(
@@ -5155,6 +5222,7 @@ fn register_process_constructor_native(
             None,
             None,
             false,
+            chain_state_for_constructor.clone(),
             publish_for_constructor.clone(),
         ) {
             Ok(value) => {
@@ -5176,6 +5244,7 @@ fn register_process_accumulator_def(
     args: Vec<EValue>,
     vm: &mut eseqlisp::vm::VM,
     process_authoring: &SharedProcessAuthoring,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
     let name = process_symbol_name(
@@ -5188,7 +5257,7 @@ fn register_process_accumulator_def(
         .map_err(|_| "failed to lock process registry".to_string())?
         .upsert_def(def);
     publish_process_authoring(process_authoring, &publish);
-    register_process_constructor_native(vm, &name, process_authoring, publish);
+    register_process_constructor_native(vm, &name, process_authoring, process_chain_state, publish);
     Ok(EValue::String(name))
 }
 
@@ -5202,6 +5271,7 @@ fn parse_process_accumulator_def(
     let mut range = None;
     let mut mode = crate::process::ProcessAccumulatorMode::Wrap;
     let mut seed_policy = crate::process::ProcessSeedPolicy::Locked;
+    let mut doc = None;
     let mut idx = 0;
     while idx < args.len() {
         let key = process_symbol_name(&args[idx])?.to_ascii_lowercase();
@@ -5222,7 +5292,11 @@ fn parse_process_accumulator_def(
             "range" => range = Some(parse_process_accumulator_range(value)?),
             "mode" => mode = parse_process_accumulator_mode(value)?,
             "seed" => seed_policy = parse_process_seed_policy(value)?,
-            "doc" => {}
+            "doc" => {
+                if let EValue::String(value) = value {
+                    doc = Some(value.clone());
+                }
+            }
             other => return Err(format!("def-accumulator unknown key :{other}")),
         }
         idx += 1;
@@ -5248,6 +5322,7 @@ fn parse_process_accumulator_def(
     Ok(crate::process::ProcessDef {
         id: crate::process::stable_process_id(name),
         name: name.to_string(),
+        doc,
         inlets,
         outlets: Vec::new(),
         state: Vec::new(),
@@ -5312,6 +5387,7 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
     let mut every = None;
     let mut seed_policy = crate::process::ProcessSeedPolicy::default();
     let mut target = None;
+    let mut doc = None;
     let mut run_value = None;
     let mut listen_value = None;
     let mut handlers: HashMap<String, EValue> = HashMap::new();
@@ -5334,7 +5410,12 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
             other if other.starts_with("on-") => {
                 handlers.insert(other.trim_start_matches("on-").to_string(), value.clone());
             }
-            "phase" | "init" | "doc" => {}
+            "doc" => {
+                if let EValue::String(value) = value {
+                    doc = Some(value.clone());
+                }
+            }
+            "phase" | "init" => {}
             other => return Err(format!("def-process unknown key :{other}")),
         }
         idx += 1;
@@ -5359,6 +5440,7 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
     Ok(crate::process::ProcessDef {
         id: crate::process::stable_process_id(name),
         name: name.to_string(),
+        doc,
         inlets,
         outlets,
         state,
@@ -5846,6 +5928,7 @@ fn construct_process_instance(
     every: Option<crate::process::ProcessTimeExpr>,
     run_source: Option<String>,
     one_shot: bool,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
     let inlets = parse_process_constructor_inlets(process_authoring, &args)?;
@@ -5867,6 +5950,7 @@ fn construct_process_instance(
     Ok(process_instance_handle(
         Arc::clone(process_authoring),
         handle_id,
+        process_chain_state,
         publish,
     ))
 }
@@ -5887,6 +5971,7 @@ fn construct_anonymous_listener_process(
     registry.upsert_def(crate::process::ProcessDef {
         id: crate::process::stable_process_id(&class_name),
         name: class_name.clone(),
+        doc: None,
         inlets: Vec::new(),
         outlets: Vec::new(),
         state: Vec::new(),
@@ -5916,6 +6001,7 @@ fn construct_anonymous_listener_process(
     Ok(process_instance_handle(
         Arc::clone(process_authoring),
         handle_id,
+        None,
         publish,
     ))
 }
@@ -5972,6 +6058,7 @@ fn parse_inlet_value(
 fn process_instance_handle(
     process_authoring: SharedProcessAuthoring,
     handle_id: crate::process::AuthoredHandleId,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) -> EValue {
     EValue::HostHandle {
@@ -5979,7 +6066,12 @@ fn process_instance_handle(
         id: handle_id.0,
         callable: Rc::new(move |args, _vm| {
             let publish_after_call = args.len() == 2;
-            match process_handle_call(&process_authoring, handle_id, args) {
+            match process_handle_call(
+                &process_authoring,
+                process_chain_state.as_ref(),
+                handle_id,
+                args,
+            ) {
                 Ok(value) => {
                     if publish_after_call {
                         publish_process_authoring(&process_authoring, &publish);
@@ -6022,8 +6114,36 @@ fn process_outlet_handle(
     })
 }
 
+enum DurableProcessHandleUpdate {
+    Scalar(crate::process::ProcessLiteral),
+    Lane(Vec<f32>),
+    None,
+}
+
+fn process_instance_lane_backed_inlet(
+    registry: &ProcessAuthoringRegistry,
+    handle_id: crate::process::AuthoredHandleId,
+    inlet: &str,
+) -> Result<bool, String> {
+    let instance = registry
+        .instances
+        .iter()
+        .find(|entry| entry.handle_id == handle_id)
+        .ok_or_else(|| "unknown process handle".to_string())?;
+    let def = registry
+        .defs
+        .iter()
+        .find(|def| def.name == instance.class_name)
+        .ok_or_else(|| format!("unknown process class '{}'", instance.class_name))?;
+    Ok(def
+        .inlets
+        .iter()
+        .any(|entry| entry.name == inlet && entry.lane))
+}
+
 fn process_handle_call(
     process_authoring: &SharedProcessAuthoring,
+    process_chain_state: Option<&Arc<crate::sequencer::SequencerState>>,
     handle_id: crate::process::AuthoredHandleId,
     args: Vec<EValue>,
 ) -> Result<EValue, String> {
@@ -6041,15 +6161,65 @@ fn process_handle_call(
         [key, value] => {
             let inlet = process_symbol_name(key)?;
             let value = parse_inlet_value(process_authoring, value)?;
+            let attachment_count = process_chain_state
+                .map(|state| {
+                    state.process_instance_attachment_count(crate::process::ProcessInstanceId(
+                        handle_id.0,
+                    ))
+                })
+                .unwrap_or(0);
+            let durable_update = match &value {
+                crate::process::ProcessInletValue::Literal(literal) => {
+                    if let Some(values) = process_lane_values(literal) {
+                        DurableProcessHandleUpdate::Lane(values?)
+                    } else {
+                        DurableProcessHandleUpdate::Scalar(
+                            crate::process::ProcessLiteral::from_value(literal)?,
+                        )
+                    }
+                }
+                _ if attachment_count > 0 => {
+                    return Err(
+                        "attached process chain inlets must be literals; use process graphs outside `processes` for outlet/channel wiring"
+                            .to_string(),
+                    );
+                }
+                _ => DurableProcessHandleUpdate::None,
+            };
             let mut registry = process_authoring
                 .lock()
                 .map_err(|_| "failed to lock process registry".to_string())?;
+            if matches!(durable_update, DurableProcessHandleUpdate::Lane(_))
+                && !process_instance_lane_backed_inlet(&registry, handle_id, &inlet)?
+            {
+                return Err(format!("inlet '{inlet}' is not lane-backed (:lane true)"));
+            }
             let instance = registry
                 .instances
                 .iter_mut()
                 .find(|entry| entry.handle_id == handle_id)
                 .ok_or_else(|| "unknown process handle".to_string())?;
-            instance.inlets.insert(inlet, value);
+            instance.inlets.insert(inlet.clone(), value);
+            drop(registry);
+            if let Some(state) = process_chain_state {
+                match durable_update {
+                    DurableProcessHandleUpdate::Scalar(literal) => {
+                        state.set_process_inlet_value(
+                            crate::process::ProcessInstanceId(handle_id.0),
+                            &inlet,
+                            literal,
+                        );
+                    }
+                    DurableProcessHandleUpdate::Lane(values) => {
+                        state.set_process_lane_values(
+                            crate::process::ProcessInstanceId(handle_id.0),
+                            &inlet,
+                            values,
+                        );
+                    }
+                    DurableProcessHandleUpdate::None => {}
+                }
+            }
             Ok(EValue::Bool(true))
         }
         _ => Err("process handle expects :outlet or :inlet value".to_string()),
@@ -20307,6 +20477,47 @@ mod tests {
                 .slots
                 .is_empty(),
             "rejected attach must not modify the chain"
+        );
+    }
+
+    #[test]
+    fn process_handle_call_writes_through_to_attached_chain_slot() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process knobbed-transpose
+                  :target (step-param :transpose)
+                  :in ((limit :float -24 24 :default 3 :doc "scalar limit")
+                       (amount :float -12 12 :lane true :default 0))
+                  :run (target-add! limit))
+
+                (def climb
+                  (processes :track 0
+                    (knobbed-transpose :limit 3 :amount (lane 0 1 0 0))))
+
+                (climb :limit 6)
+                (climb :amount (lane 0 2 0 0))
+                "#,
+            )
+            .expect("attach and mutate process chain");
+
+        let chain = state.track_process_chain(0).expect("track 0 chain");
+        assert_eq!(chain.slots.len(), 1);
+        assert_eq!(
+            chain.slots[0].inlets.get("limit"),
+            Some(&crate::process::ProcessLiteral::Number(6.0))
+        );
+        assert_eq!(
+            chain.slots[0].lanes.get("amount").map(|lane| &lane.values),
+            Some(&vec![0.0, 2.0, 0.0, 0.0])
         );
     }
 
