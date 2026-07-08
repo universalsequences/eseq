@@ -3566,6 +3566,12 @@ impl ScratchControlRuntime {
         let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::new();
         runtime.set_theme_sync_enabled(false);
+        runtime.register_native_with_docs(
+            "seq-register-script-source-tab",
+            "(seq-register-script-source-tab label)",
+            "No-op outside the Metal Seq UI; lets source-tab scripts load in scratch/scheduler runtimes.",
+            |_args, _ctx| Ok(EValue::Nil),
+        );
         register_sequencer_natives_with_accumulators(
             &mut runtime,
             Arc::clone(&state),
@@ -18841,6 +18847,16 @@ mod tests {
             }
             other => panic!("expected ref list, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scratch_runtime_accepts_source_tab_script_contract_as_noop() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+
+        runtime
+            .eval(r#"(seq-register-script-source-tab "Source Only")"#)
+            .expect("source-tab script contract should be a scratch-runtime no-op");
     }
 
     #[test]

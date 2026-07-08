@@ -1111,7 +1111,7 @@
     (seqv-param-name mode)))
 
 (def seqv-param-header-width (mode)
-  (if (seqv-process-lane-mode? mode) 13.8 6.4))
+  (if (seqv-process-lane-mode? mode) 17.8 6.4))
 
 (def seqv-param-tab (track track-id mode tab-label)
   (box :width (seqv-param-tab-width mode) :height 2

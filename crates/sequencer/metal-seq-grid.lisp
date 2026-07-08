@@ -185,10 +185,13 @@
 
 ;; ── Script picker ──────────────────────────────────────────────────────────
 ;; Scripts can expose this lightweight contract. The picker resets it before each
-;; load, then calls script-init-fn once after a successful load.
+;; load, then calls script-init-fn once after a successful load. Scripts that
+;; don't register a UI tab are opened as source tabs by default.
 (def script-buffer-name "")
 (def script-tab-label "")
 (def script-sequencer-name "")
+(def script-source-tab-label "")
+(def script-source-tab-requested false)
 (def script-init-fn () false)
 
 (def seq-script-reset-contract ()
@@ -196,7 +199,14 @@
     (set! script-buffer-name "")
     (set! script-tab-label "")
     (set! script-sequencer-name "")
+    (set! script-source-tab-label "")
+    (set! script-source-tab-requested false)
     (def script-init-fn () false)))
+
+(def seq-register-script-source-tab (label)
+  (do
+    (set! script-source-tab-label label)
+    (set! script-source-tab-requested true)))
 
 (def seq-script-default-dir ()
   (if (directory? "scripts")
@@ -312,6 +322,14 @@
       path)
     false))
 
+(def seq-script-register-source-tab-from-path (path)
+  (if (or script-source-tab-requested (= script-buffer-name ""))
+    (host-command "open-script-source-tab"
+      (dict
+        :path path
+        :label (if (= script-source-tab-label "") (path-filename path) script-source-tab-label)))
+    false))
+
 (def seq-script-tab-matches-sequencer? (tab name)
   (= (seq-step-tab-sequencer-name tab) name))
 
@@ -382,6 +400,7 @@
           (seq-script-append-to-scratch path)
           (script-init-fn)
           (seq-script-register-loaded-tab-from-path path)
+          (seq-script-register-source-tab-from-path path)
           (seq-script-return-to-source-buffer)
           (status (fmt "Loaded script {}" (path-filename path))))))))
 

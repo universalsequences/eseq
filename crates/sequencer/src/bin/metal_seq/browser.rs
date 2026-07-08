@@ -30,6 +30,13 @@ pub(crate) struct InstrumentTreeNode {
     children: Vec<InstrumentTreeNode>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ScriptTreeNode {
+    label: String,
+    path: Option<String>,
+    children: Vec<ScriptTreeNode>,
+}
+
 struct BuiltinInstrumentDescriptor {
     label: &'static str,
     name: &'static str,
@@ -666,6 +673,144 @@ pub(crate) fn build_instrument_tree_value(query: &str) -> Value {
         items.extend(custom);
     }
     list_value(items)
+}
+
+pub(crate) fn script_root_dir() -> std::path::PathBuf {
+    let local = std::path::PathBuf::from("scripts");
+    if local.is_dir() {
+        local
+    } else {
+        std::path::PathBuf::from("crates/sequencer/scripts")
+    }
+}
+
+fn build_script_tree_nodes(dir: &std::path::Path, root: &std::path::Path) -> Vec<ScriptTreeNode> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            dirs.push((name, path));
+        } else if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
+            let label = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let stable_path = path
+                .strip_prefix(root)
+                .ok()
+                .map(|rel| script_root_dir().join(rel))
+                .unwrap_or_else(|| path.clone())
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((label, stable_path));
+        }
+    }
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+    let mut items = Vec::new();
+    for (label, path) in dirs {
+        let children = build_script_tree_nodes(&path, root);
+        if !children.is_empty() {
+            items.push(ScriptTreeNode {
+                label,
+                path: None,
+                children,
+            });
+        }
+    }
+    for (label, path) in files {
+        items.push(ScriptTreeNode {
+            label,
+            path: Some(path),
+            children: Vec::new(),
+        });
+    }
+    items
+}
+
+fn script_tree_nodes_to_value(items: &[ScriptTreeNode]) -> Value {
+    Value::List(
+        items
+            .iter()
+            .map(|item| {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "label".to_string(),
+                    Rc::new(RefCell::new(Value::String(item.label.clone()))),
+                );
+                if let Some(path) = &item.path {
+                    map.insert(
+                        "path".to_string(),
+                        Rc::new(RefCell::new(Value::String(path.clone()))),
+                    );
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("script".to_string()))),
+                    );
+                } else {
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("folder".to_string()))),
+                    );
+                }
+                if !item.children.is_empty() {
+                    map.insert(
+                        "children".to_string(),
+                        Rc::new(RefCell::new(script_tree_nodes_to_value(&item.children))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
+
+fn filter_script_tree_nodes(items: &[ScriptTreeNode], query_lower: &str) -> Vec<ScriptTreeNode> {
+    if query_lower.is_empty() {
+        return items.to_vec();
+    }
+
+    items
+        .iter()
+        .filter_map(|item| {
+            let children = filter_script_tree_nodes(&item.children, query_lower);
+            let label_matches = item.label.to_lowercase().contains(query_lower);
+            let path_matches = item
+                .path
+                .as_ref()
+                .map(|path| path.to_lowercase().contains(query_lower))
+                .unwrap_or(false);
+            if label_matches || path_matches || !children.is_empty() {
+                let mut filtered = item.clone();
+                filtered.children = children;
+                Some(filtered)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn build_script_tree(query: &str) -> Value {
+    let query_lower = query.trim().to_lowercase();
+    let root = script_root_dir();
+    let top = build_script_tree_nodes(&root, &root);
+    script_tree_nodes_to_value(&filter_script_tree_nodes(&top, &query_lower))
 }
 
 pub(crate) fn filter_sample_tree_nodes(

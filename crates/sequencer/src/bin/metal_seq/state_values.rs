@@ -11333,6 +11333,15 @@ mod tests {
             .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));
         editor
             .runtime_mut()
+            .register_native("seq-script-tree", |args, _ctx| {
+                let query = match args.first() {
+                    Some(Value::String(s)) => s.as_str(),
+                    _ => "",
+                };
+                Ok(build_script_tree(query))
+            });
+        editor
+            .runtime_mut()
             .register_native("seq-preset-tree", |_args, _ctx| Ok(test_list(vec![])));
         editor
             .runtime_mut()
@@ -11685,6 +11694,29 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_script_tree_lists_lisp_scripts() {
+        let tree = build_script_tree("");
+        assert!(
+            value_contains_string(&tree, "process-chain-demo.lisp"),
+            "script tree should include checked-in Lisp scripts: {tree:?}"
+        );
+        assert!(
+            !value_contains_string(&tree, "generate_dgenlisp_api.py"),
+            "script tree should exclude non-Lisp files: {tree:?}"
+        );
+
+        let filtered = build_script_tree("process-chain");
+        assert!(
+            value_contains_string(&filtered, "process-chain-demo.lisp"),
+            "script tree search should keep matching scripts: {filtered:?}"
+        );
+        assert!(
+            !value_contains_string(&filtered, "graph-neural-8x8-demo.lisp"),
+            "script tree search should drop non-matching scripts: {filtered:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_browser_audio_fx_tab_renders_new_effect_button_outside_tree() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
@@ -11719,6 +11751,90 @@ mod tests {
             }
             other => panic!("expected enter-new-effect-editor host command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn metal_seq_browser_scripts_tab_renders_visible_new_script_button_and_tree() {
+        fn node_text(node: &eseqlisp::layout::LayoutNode) -> Option<&str> {
+            match node.props.get("text") {
+                Some(Value::String(text)) => Some(text.as_str()),
+                _ => None,
+            }
+        }
+
+        fn find_button_by_text<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            text: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "button" && node_text(node) == Some(text) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_button_by_text(child, text))
+        }
+
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"scripts\")")
+            .expect("select scripts tab");
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(72, 60);
+
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
+        assert!(value_contains_string(tree, "New Script"));
+        assert!(value_contains_string(tree, "process-chain-demo.lisp"));
+
+        let layout = editor.widget_layout().expect("browser layout");
+        let rendered = render_layout_cells(&layout, 72, 60);
+        let button = find_button_by_text(&layout, "New Script")
+            .unwrap_or_else(|| panic!("new script button layout node; rendered:\n{rendered}"));
+        assert!(
+            button.rect.width > 1.0
+                && button.rect.height > 0.4
+                && button.rect.col >= 0.0
+                && button.rect.row >= 0.0
+                && button.rect.col + button.rect.width <= 72.0
+                && button.rect.row + button.rect.height <= 60.0,
+            "new script button should have a finite visible rect, got {:?}; rendered:\n{rendered}",
+            button.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_new_script_button_queues_host_command() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-enter-new-script)")
+            .expect("invoke new script action");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "new-script");
+                assert!(
+                    matches!(payload, Value::Map(map) if map.is_empty()),
+                    "new script payload should be an empty dict: {payload:?}"
+                );
+            }
+            other => panic!("expected new-script host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-script-save-mode")
+                .expect("read script save mode"),
+            Some(Value::String("new-script".to_string()))
+        );
     }
 
     #[test]
@@ -18312,6 +18428,15 @@ mod tests {
             .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));
         editor
             .runtime_mut()
+            .register_native("seq-script-tree", |args, _ctx| {
+                let query = match args.first() {
+                    Some(Value::String(s)) => s.as_str(),
+                    _ => "",
+                };
+                Ok(build_script_tree(query))
+            });
+        editor
+            .runtime_mut()
             .register_native("seq-preset-tree", |_args, _ctx| Ok(test_list(vec![])));
         editor
             .runtime_mut()
@@ -20185,6 +20310,193 @@ mod tests {
             ],
             "loading through the picker should register the script buffer tab on the first load"
         );
+    }
+
+    #[test]
+    fn metal_seq_script_source_tab_contract_enqueues_host_command() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let script_path = std::env::temp_dir().join(format!(
+            "eseq-script-source-tab-test-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script_path,
+            r#"
+            (seq-register-script-source-tab "Source Only")
+            "#,
+        )
+        .expect("write source-tab script fixture");
+
+        let load_form = format!(
+            "(seq-script-load-file {:?})",
+            script_path.display().to_string()
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&load_form)
+            .expect("load source-tab script through script picker");
+        let _ = std::fs::remove_file(&script_path);
+
+        let commands = editor.drain_host_commands();
+        let source_tab_command = commands
+            .iter()
+            .find(|command| {
+                matches!(
+                    command,
+                    eseqlisp::host::HostCommand::Custom { name, .. }
+                        if name == "open-script-source-tab"
+                )
+            })
+            .unwrap_or_else(|| panic!("expected open-script-source-tab command, got {commands:?}"));
+        match source_tab_command {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "open-script-source-tab");
+                assert_eq!(
+                    extract_string_from_payload(payload, "label"),
+                    Some("Source Only".to_string())
+                );
+                assert_eq!(
+                    extract_string_from_payload(payload, "path"),
+                    Some(script_path.display().to_string())
+                );
+            }
+            other => panic!("expected open-script-source-tab host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_script_without_ui_contract_opens_source_tab_by_default() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let script_path = std::env::temp_dir().join(format!(
+            "eseq-script-without-ui-test-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(&script_path, "(def source-only-script-loaded true)\n")
+            .expect("write source-only script fixture");
+
+        let load_form = format!(
+            "(seq-script-load-file {:?})",
+            script_path.display().to_string()
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&load_form)
+            .expect("load source-only script through script picker");
+        let _ = std::fs::remove_file(&script_path);
+
+        let commands = editor.drain_host_commands();
+        let source_tab_command = commands
+            .iter()
+            .find(|command| {
+                matches!(
+                    command,
+                    eseqlisp::host::HostCommand::Custom { name, .. }
+                        if name == "open-script-source-tab"
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!("expected source-only script source-tab command, got {commands:?}")
+            });
+        match source_tab_command {
+            eseqlisp::host::HostCommand::Custom { payload, .. } => {
+                assert_eq!(
+                    extract_string_from_payload(payload, "label"),
+                    script_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.to_string())
+                );
+                assert_eq!(
+                    extract_string_from_payload(payload, "path"),
+                    Some(script_path.display().to_string())
+                );
+            }
+            other => panic!("expected open-script-source-tab host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_register_script_source_tab_uses_file_backed_buffer() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let script_path = std::env::temp_dir().join(format!(
+            "eseq-script-source-buffer-test-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(&script_path, "(def source-buffer-test 1)\n")
+            .expect("write source buffer fixture");
+
+        let source_path = script_path.display().to_string();
+        let buffer_name =
+            register_script_source_tab(&mut editor, &script_path, "Source Buffer", &source_path)
+                .expect("register script source tab");
+        let _ = std::fs::remove_file(&script_path);
+
+        let buffer = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == buffer_name)
+            .expect("script source buffer should exist");
+        assert_eq!(buffer.path.as_ref(), Some(&script_path));
+        assert_eq!(buffer.mode, eseqlisp::BufferMode::ESeqLisp);
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Source Buffer".to_string(), buffer_name)
+            ]
+        );
+    }
+
+    #[test]
+    fn metal_seq_process_chain_demo_script_picker_opens_source_tab_when_no_ui() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let process_state = Arc::new(SequencerState::new(
+            16,
+            (0..16)
+                .map(|_| sequencer::sequencer::default_empty_effect_chain())
+                .collect(),
+        ));
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            editor.runtime_mut(),
+            process_state,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seq-script-load-file
+                    (path-join (seq-script-default-dir) "process-chain-demo.lisp"))"#,
+            )
+            .expect("load process chain demo through script picker path");
+
+        let commands = editor.drain_host_commands();
+        let source_tab_command = commands
+            .iter()
+            .find(|command| {
+                matches!(
+                    command,
+                    eseqlisp::host::HostCommand::Custom { name, .. }
+                        if name == "open-script-source-tab"
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!("expected process-chain demo source-tab command, got {commands:?}")
+            });
+        match source_tab_command {
+            eseqlisp::host::HostCommand::Custom { payload, .. } => {
+                assert_eq!(
+                    extract_string_from_payload(payload, "label"),
+                    Some("process-chain-demo.lisp".to_string())
+                );
+                assert!(
+                    extract_string_from_payload(payload, "path")
+                        .is_some_and(|path| path.ends_with("process-chain-demo.lisp")),
+                    "source-tab command should include the loaded process-chain demo path"
+                );
+            }
+            other => panic!("expected open-script-source-tab host command, got {other:?}"),
+        }
     }
 
     #[test]
@@ -32885,6 +33197,154 @@ mod tests {
             "penv_mode",
             "opa_env_mode",
             "env_sync_div",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_flute_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let flute_ui =
+            std::fs::read_to_string("instruments/woodwinds/flute/ui.lisp").expect("read flute ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/woodwinds/flute/ui.lisp".to_string(),
+            flute_ui,
+        )));
+        let mut flute_inst = test_instrument_map();
+        flute_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("attack", 0, 35.0, 1.0, 500.0)),
+                Value::Map(test_param_map("release", 1, 180.0, 5.0, 2000.0)),
+                Value::Map(test_param_map("pressure", 2, 0.72, 0.2, 1.4)),
+                Value::Map(test_param_map("breath", 3, 0.25, 0.0, 1.0)),
+                Value::Map(test_param_map("chiff", 4, 0.35, 0.0, 1.0)),
+                Value::Map(test_param_map("vib_rate", 5, 4.8, 0.1, 12.0)),
+                Value::Map(test_param_map("vib_depth", 6, 8.0, 0.0, 60.0)),
+                Value::Map(test_param_map("jet_ratio", 7, 0.5, 0.2, 0.8)),
+                Value::Map(test_param_map("brightness", 8, 0.55, 0.0, 1.0)),
+                Value::Map(test_param_map("lock", 9, 0.5, 0.0, 1.0)),
+                Value::Map(test_param_map("refl", 10, 0.55, 0.3, 0.8)),
+                Value::Map(test_param_map("chaos", 11, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("chaos_rate", 12, 3.5, 0.1, 25.0)),
+                Value::Map(test_param_map("overblow", 13, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("growl", 14, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("growl_ratio", 15, 1.5, 0.25, 3.0)),
+                Value::Map(test_param_map("flutter", 16, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("tune", 17, 0.0, -100.0, 100.0)),
+                Value::Map(test_param_map("vel_to_press", 18, 0.5, 0.0, 1.0)),
+                Value::Map(test_param_map("gain", 19, 0.4, 0.0, 1.0)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(flute_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load flute custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("flute fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("flute layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 40.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        for suffix in [
+            "pressure",
+            "breath",
+            "chiff",
+            "brightness",
+            "lock",
+            "refl",
+            "jet_ratio",
+            "vib_rate",
+            "chaos",
+            "overblow",
+            "growl",
+            "chaos_rate",
+            "flutter",
+            "gain",
         ] {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));

@@ -541,6 +541,18 @@ fn effect_patcher_buffer_source(buffer_name: &str, path: &Path) -> String {
 
 const NEW_INSTRUMENT_DRAFT_NAME: &str = "new-instrument-draft/";
 const NEW_EFFECT_DRAFT_NAME: &str = "new-effect-draft/";
+const NEW_SCRIPT_TAB_LABEL: &str = "New Script";
+const NEW_SCRIPT_TEMPLATE: &str = r#"; ESeqLisp script
+; Source-only scripts can still appear as sequencer tabs.
+(seq-register-script-source-tab "Untitled Script")
+
+"#;
+
+#[derive(Debug, Clone)]
+struct ScriptDraftSession {
+    temp_path: PathBuf,
+    buffer_name: String,
+}
 
 const NEW_INSTRUMENT_STARTER_DSP: &str = r#"(def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
@@ -587,6 +599,19 @@ fn create_new_effect_draft_dir() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("Failed to create draft effect directory: {error}"))?;
     Ok(dir)
+}
+
+fn create_new_script_draft_path() -> Result<PathBuf, String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("System clock is before UNIX epoch: {error}"))?
+        .as_nanos();
+    let dir = std::env::temp_dir()
+        .join("eseq-script-drafts")
+        .join(format!("draft-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Failed to create draft script directory: {error}"))?;
+    Ok(dir.join("untitled.lisp"))
 }
 
 fn instrument_run_mode_label(run_mode: CustomInstrumentRunMode) -> &'static str {
@@ -643,6 +668,119 @@ fn escape_lisp_string(value: &str) -> String {
             _ => vec![ch],
         })
         .collect()
+}
+
+fn script_source_buffer_name(path: &Path) -> String {
+    let key = path.to_string_lossy().replace('\\', "/").replace('/', ":");
+    format!("*script:{key}*")
+}
+
+fn script_file_name_from_input(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stem = trimmed.trim_end_matches(".lisp");
+    let mut normalized = String::new();
+    let mut previous_dash = false;
+    for ch in stem.chars() {
+        let out = if ch.is_ascii_alphanumeric() || ch == '_' {
+            Some(ch.to_ascii_lowercase())
+        } else if ch == '-' || ch.is_whitespace() {
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(out) = out {
+            if out == '-' {
+                if !previous_dash && !normalized.is_empty() {
+                    normalized.push(out);
+                }
+                previous_dash = true;
+            } else {
+                normalized.push(out);
+                previous_dash = false;
+            }
+        }
+    }
+    while normalized.ends_with('-') {
+        normalized.pop();
+    }
+    (!normalized.is_empty()).then(|| format!("{normalized}.lisp"))
+}
+
+fn open_script_source_buffer(editor: &mut Editor, path: &Path) -> Result<String, String> {
+    if let Some(existing) = editor.buffers.iter().find(|buffer| {
+        buffer
+            .path
+            .as_ref()
+            .is_some_and(|existing| existing == path)
+    }) {
+        return Ok(existing.name.clone());
+    }
+
+    let internal_name = script_source_buffer_name(path);
+    if let Some(existing) = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == internal_name)
+    {
+        if existing
+            .path
+            .as_ref()
+            .is_some_and(|existing| existing == path)
+        {
+            return Ok(existing.name.clone());
+        }
+        editor.remove_buffer_by_name(&internal_name);
+    }
+
+    editor
+        .create_file_buffer(path, BufferMode::ESeqLisp)
+        .map_err(|error| {
+            format!(
+                "Failed to open script source '{}': {error:?}",
+                path.display()
+            )
+        })?;
+    let idx = editor
+        .buffers
+        .iter()
+        .rposition(|buffer| {
+            buffer
+                .path
+                .as_ref()
+                .is_some_and(|existing| existing == path)
+        })
+        .ok_or_else(|| {
+            format!(
+                "Opened script source '{}' but no buffer was created",
+                path.display()
+            )
+        })?;
+    editor.buffers[idx].name = internal_name.clone();
+    Ok(internal_name)
+}
+
+fn register_script_source_tab(
+    editor: &mut Editor,
+    path: &Path,
+    label: &str,
+    source_path_for_project: &str,
+) -> Result<String, String> {
+    let buffer_name = open_script_source_buffer(editor, path)?;
+    let label = escape_lisp_string(label);
+    let buffer = escape_lisp_string(&buffer_name);
+    let source_path = escape_lisp_string(source_path_for_project);
+    let form = format!(
+        "(seq-register-script-step-sequencer-tab \"{label}\" \"{buffer}\" \"\" \"{source_path}\")"
+    );
+    editor
+        .runtime_mut()
+        .eval_str(&form)
+        .map_err(|error| format!("Failed to register script source tab: {error:?}"))?;
+    editor.refresh_runtime_side_effects();
+    Ok(buffer_name)
 }
 
 fn preserve_sample_browser_context_for_loaded_sample(editor: &mut Editor, path: &str) {
@@ -5162,6 +5300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut effect_edit_session: Option<EffectEditSession> = None;
     let mut pending_effect_preview: Option<PendingEffectPreview> = None;
     let mut pending_effect_cancel_restore: Option<PendingEffectCancelRestore> = None;
+    let mut script_draft_session: Option<ScriptDraftSession> = None;
     let mut pending_agentic_bubbles: HashMap<String, PendingAgenticBubble> = HashMap::new();
     let mut prev_editor_macro_action: (String, String) = (String::new(), String::new());
     let mut prev_playing = false;
@@ -6983,6 +7122,234 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 )));
                             }
                         }
+                    }
+                    "open-script-source-tab" => {
+                        let Some(path_str) = extract_string_from_payload(&payload, "path")
+                            .filter(|path| !path.trim().is_empty())
+                        else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Error opening script source: missing path".to_string(),
+                            ));
+                            continue;
+                        };
+                        let label = extract_string_from_payload(&payload, "label")
+                            .filter(|label| !label.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                Path::new(&path_str)
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("Script")
+                                    .to_string()
+                            });
+                        match register_script_source_tab(
+                            &mut editor,
+                            Path::new(&path_str),
+                            &label,
+                            &path_str,
+                        ) {
+                            Ok(_) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Opened script source: {label}"
+                                )));
+                            }
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error opening script source: {error}"
+                                )));
+                            }
+                        }
+                    }
+                    "new-script" => {
+                        if script_draft_session.is_some() {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Finish the current script draft before creating another"
+                                    .to_string(),
+                            ));
+                            continue;
+                        }
+                        let path = match create_new_script_draft_path() {
+                            Ok(path) => path,
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Status(error));
+                                continue;
+                            }
+                        };
+                        if let Err(error) = std::fs::write(&path, NEW_SCRIPT_TEMPLATE) {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Failed to write starter script: {error}"
+                            )));
+                            continue;
+                        }
+                        match register_script_source_tab(
+                            &mut editor,
+                            &path,
+                            NEW_SCRIPT_TAB_LABEL,
+                            "",
+                        ) {
+                            Ok(buffer_name) => {
+                                script_draft_session = Some(ScriptDraftSession {
+                                    temp_path: path,
+                                    buffer_name,
+                                });
+                                let rt = editor.runtime_mut();
+                                let _ = rt.eval_str(
+                                    r#"
+                                    (set! sbrowser-script-save-mode "new-script")
+                                    (set! sbrowser-script-name "")
+                                    (set! sbrowser-tab "scripts")
+                                    "#,
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                let _ = refresh_sample_browser_buffer(&mut editor);
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Created script draft".to_string(),
+                                ));
+                            }
+                            Err(error) => {
+                                let _ = std::fs::remove_file(&path);
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error creating script draft: {error}"
+                                )));
+                            }
+                        }
+                    }
+                    "save-new-script" => {
+                        let requested_name =
+                            extract_string_from_payload(&payload, "name").unwrap_or_default();
+                        let Some(filename) = script_file_name_from_input(&requested_name) else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Enter a script name".to_string(),
+                            ));
+                            continue;
+                        };
+                        let Some(session) = script_draft_session.clone() else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "No script draft is active".to_string(),
+                            ));
+                            continue;
+                        };
+                        let root = script_root_dir();
+                        if let Err(error) = std::fs::create_dir_all(&root) {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Failed to create script directory '{}': {error}",
+                                root.display()
+                            )));
+                            continue;
+                        }
+                        let target = root.join(&filename);
+                        if target.exists() {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Script already exists: {filename}"
+                            )));
+                            continue;
+                        }
+                        let Some(buffer_idx) = editor
+                            .buffers
+                            .iter()
+                            .position(|buffer| buffer.name == session.buffer_name)
+                        else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Script draft buffer is no longer open".to_string(),
+                            ));
+                            continue;
+                        };
+                        let display_label = filename.trim_end_matches(".lisp").to_string();
+                        let mut source = editor.buffers[buffer_idx].text();
+                        if source.trim() == NEW_SCRIPT_TEMPLATE.trim() {
+                            let escaped_label = escape_lisp_string(&display_label);
+                            source = format!(
+                                "; ESeqLisp script\n; Source-only scripts can still appear as sequencer tabs.\n(seq-register-script-source-tab \"{escaped_label}\")\n\n"
+                            );
+                            editor.buffers[buffer_idx].set_text(&source);
+                        }
+                        let tmp_path = target.with_file_name(format!(
+                            ".{}.tmp",
+                            target
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("script.lisp")
+                        ));
+                        if let Err(error) = std::fs::write(&tmp_path, &source).and_then(|_| {
+                            std::fs::rename(&tmp_path, &target).or_else(|error| {
+                                let _ = std::fs::remove_file(&tmp_path);
+                                Err(error)
+                            })
+                        }) {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Failed to save script: {error}"
+                            )));
+                            continue;
+                        }
+                        editor.buffers[buffer_idx].path = Some(target.clone());
+                        editor.buffers[buffer_idx].dirty = false;
+                        if let Some(parent) = session.temp_path.parent() {
+                            let _ = std::fs::remove_dir_all(parent);
+                        }
+
+                        let target_str = target.to_string_lossy().replace('\\', "/");
+                        let load_form = format!(
+                            "(seq-script-load-file \"{}\")",
+                            escape_lisp_string(&target_str)
+                        );
+                        if let Err(error) = editor.runtime_mut().eval_str(&load_form) {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Saved script but failed to load it: {error:?}"
+                            )));
+                        }
+                        if let Err(error) = register_script_source_tab(
+                            &mut editor,
+                            &target,
+                            &display_label,
+                            &target_str,
+                        ) {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Saved script but failed to register source tab: {error}"
+                            )));
+                        }
+                        script_draft_session = None;
+                        let rt = editor.runtime_mut();
+                        let _ = rt.eval_str(
+                            r#"
+                            (set! sbrowser-script-save-mode "")
+                            (set! sbrowser-script-name "")
+                            (set! sbrowser-tab "scripts")
+                            "#,
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        let _ = refresh_sample_browser_buffer(&mut editor);
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Saved script: {display_label}"
+                        )));
+                    }
+                    "cancel-new-script" => {
+                        if let Some(session) = script_draft_session.take() {
+                            let unregister = format!(
+                                "(seq-unregister-step-sequencer-tab \"{}\")",
+                                escape_lisp_string(&session.buffer_name)
+                            );
+                            let _ = editor.runtime_mut().eval_str(&unregister);
+                            editor.refresh_runtime_side_effects();
+                            editor.remove_buffer_by_name(&session.buffer_name);
+                            if let Some(parent) = session.temp_path.parent() {
+                                let _ = std::fs::remove_dir_all(parent);
+                            }
+                        }
+                        let rt = editor.runtime_mut();
+                        let _ = rt.eval_str(
+                            r#"
+                            (set! sbrowser-script-save-mode "")
+                            (set! sbrowser-script-name "")
+                            (set! sbrowser-tab "scripts")
+                            "#,
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        let _ = refresh_sample_browser_buffer(&mut editor);
+                        editor.handle_host_event(HostEvent::Status(
+                            "Cancelled script draft".to_string(),
+                        ));
                     }
                     "select-rack-slot" => {
                         if let Value::Map(ref map) = payload {

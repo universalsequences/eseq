@@ -3546,6 +3546,13 @@ pub(crate) fn init_runtime(
         };
         Ok(build_project_tree(&query))
     });
+    runtime.register_native("seq-script-tree", move |args, _ctx| {
+        let query = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        Ok(build_script_tree(query))
+    });
     runtime.register_native("seq-preset-tree", move |args, _ctx| {
         let query = match args.get(1) {
             Some(Value::String(s)) => s.as_str(),
@@ -4534,6 +4541,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-project-tree",
             "(seq-project-tree query)",
             "Return the project browser tree filtered by query.",
+        ),
+        (
+            "seq-script-tree",
+            "(seq-script-tree query)",
+            "Return the script browser tree filtered by query.",
         ),
         (
             "seq-preset-tree",

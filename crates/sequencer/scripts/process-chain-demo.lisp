@@ -19,8 +19,8 @@
   :target (step-param :transpose)
   :amount (amount :lane true :default 0)
   :range (-24 24)
-  :mode :clip)
+  :mode :wrap)
 
 (def climb
   (processes :track 0
-    (sparse-transpose :amount (lane 0 1 0 0 1 0 0 0))))
+    (sparse-transpose )))

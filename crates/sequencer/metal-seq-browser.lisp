@@ -21,6 +21,8 @@
 (defstate sbrowser-preset-name "")
 (defstate sbrowser-preset-save-mode "")  ;; "" or "save-preset"
 (defstate sbrowser-preset-filter "")
+(defstate sbrowser-script-name "")
+(defstate sbrowser-script-save-mode "")  ;; "" or "new-script"
 
 (defwidget editor-spinner
   :width 3.0 :height 1.25
@@ -323,8 +325,9 @@
     (if (= sbrowser-tab "instruments") "audio-fx"
       (if (= sbrowser-tab "audio-fx") "midi-fx"
         (if (= sbrowser-tab "midi-fx") "presets"
-          (if (= sbrowser-tab "presets") "projects"
-            "samples"))))))
+          (if (= sbrowser-tab "presets") "scripts"
+            (if (= sbrowser-tab "scripts") "projects"
+              "samples")))))))
 
 (def sbrowser-next-tab ()
   (sbrowser-select-tab (sbrowser-next-tab-name)))
@@ -335,7 +338,8 @@
       (if (= sbrowser-tab "audio-fx") "audio-fx-tab-tree"
         (if (= sbrowser-tab "midi-fx") "midi-fx-tab-tree"
           (if (= sbrowser-tab "presets") "presets-tab-tree"
-            "projects-tab-tree"))))))
+            (if (= sbrowser-tab "scripts") "scripts-tab-tree"
+              "projects-tab-tree")))))))
 
 (def sbrowser-list-contains? (items value)
   (> (len (filter (lambda (item) (= item value)) items)) 0))
@@ -380,7 +384,8 @@
       (if (= sbrowser-tab "audio-fx") "Search audio effects..."
         (if (= sbrowser-tab "midi-fx") "Search MIDI effects..."
           (if (= sbrowser-tab "presets") "Search presets..."
-            "Search projects..."))))))
+            (if (= sbrowser-tab "scripts") "Search scripts..."
+              "Search projects...")))))))
 
 (def sbrowser-empty-message (message)
   (box :width :fill :height :fill :padding 1
@@ -436,6 +441,48 @@
 (def sbrowser-load-preset (name)
   (host-command "load-instrument-preset" (dict :name name))
   (status (str "Load preset: " name)))
+
+(def sbrowser-enter-new-script ()
+  (host-command "new-script" (dict))
+  (set! sbrowser-script-name "")
+  (set! sbrowser-script-save-mode "new-script")
+  (set! sbrowser-filter "")
+  (set! sbrowser-tab "scripts")
+  (status "New script"))
+
+(def sbrowser-script-save-mode? ()
+  (= sbrowser-script-save-mode "new-script"))
+
+(def sbrowser-save-new-script ()
+  (if (= (len sbrowser-script-name) 0)
+    (status "Enter a script name")
+    (host-command "save-new-script" (dict :name sbrowser-script-name))))
+
+(def sbrowser-cancel-new-script ()
+  (do
+    (host-command "cancel-new-script" (dict))
+    (set! sbrowser-script-name "")
+    (set! sbrowser-script-save-mode "")
+    (set! sbrowser-tab "scripts")))
+
+(def sbrowser-select-script (item)
+  (let ((kind (get item :kind))
+        (label (get item :label)))
+    (if (= kind "script")
+      (status (str label))
+      (if (= kind "folder")
+        (status (str "Folder: " label))
+        (status "Choose a script")))))
+
+(def sbrowser-activate-script (item)
+  (let ((kind (get item :kind))
+        (path (get item :path)))
+    (if (and (= kind "script") path)
+      (do
+        (set! seq-script-picker-source-buffer (current-buffer-name))
+        (seq-script-load-file path)
+        (status (str "Load script: " (get item :label))))
+      (status "Choose a script file"))))
 
 (def sbrowser-save-project ()
   (if (= (len sbrowser-project-name) 0)
@@ -525,6 +572,40 @@
         :on-click |x y r| (sbrowser-save-project)
         :color :white))))
 
+(def sbrowser-script-save-header ()
+  (box :width :fill :padding 0.25
+    (v-stack :width :fill :gap 0.4
+      (h-stack :width :fill :gap 0.5 :align :center
+        (label "Save Script"
+          :font-size 12
+          :color :white
+          :bg :transparent)
+        (button "Cancel"
+          :variant :ghost
+          :width 5.8
+          :height 1.2
+          :font-size 9
+          :on-click |x y r| (sbrowser-cancel-new-script)
+          :color :gray))
+      (text-input
+        :width :fill
+        :value sbrowser-script-name
+        :placeholder "script name..."
+        :on-change (lambda (v) (set! sbrowser-script-name v))
+        :height 1.5
+        :font-size 12
+        (mag-glass))
+      (button "Save Script"
+        :variant :primary
+        :width 10
+        :height 1.2
+        :font-size 11
+        :on-click |x y r| (sbrowser-save-new-script)
+        :color :white))))
+
+(def sbrowser-script-save-panel ()
+  (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
+
 (def sbrowser-create-items ()
   (seq-saved-instrument-tree sbrowser-filter))
 
@@ -613,6 +694,7 @@
     (dict :name "audio-fx" :label "Audio FX" :icon :sliders)
     (dict :name "midi-fx" :label "MIDI FX" :icon :note-arrow)
     (dict :name "presets" :label "Presets" :icon :dial)
+    (dict :name "scripts" :label "Scripts" :icon :folder)
     (dict :name "projects" :label "Projects" :icon :folder)))
 
 (def sbrowser-tab-button (name label icon)
@@ -777,6 +859,43 @@
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (sbrowser-empty-message "Presets are available for instrument tracks.")))))
 
+(def sbrowser-scripts-toolbar ()
+  (box :width :fill :padding 0.25
+    (h-stack :width :fill :gap 0.5 :align :center
+      (button "New Script"
+        :key "script-new-button"
+        :variant :secondary
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-enter-new-script)
+        :color :white))))
+
+(def sbrowser-scripts-tab-panel ()
+  (let ((items (seq-script-tree sbrowser-filter)))
+    (v-stack :key "scripts-tab-panel" :width :fill :gap 0.5 :flex 1
+      (sbrowser-scripts-toolbar)
+      (box :width :fill :padding 0.25
+        (label "Scripts"
+          :font-size 10
+          :color :gray
+          :bg :transparent))
+      (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+        (if (= (len items) 0)
+          (sbrowser-empty-message "No scripts found.")
+          (scroll :key "scripts-tab-scroll" :width :fill :flex 1
+            (tree
+              :key "scripts-tab-tree"
+              :width :fill
+              :background-color :buffer-bg
+              :items items
+              :expand-all (not (= sbrowser-filter ""))
+              :focusable true
+              :on-select (lambda (item) (sbrowser-select-script item))
+              :on-cursor-change (lambda (item) (sbrowser-select-script item))
+              :on-activate (lambda (item) (sbrowser-activate-script item))
+              :on-modified-activate (lambda (item) (sbrowser-activate-script item)))))))))
+
 (def sbrowser-projects-tab-panel ()
   (let ((items (seq-project-tree sbrowser-filter)))
     (v-stack :key "projects-tab-panel" :width :fill :gap 0.5 :flex 1
@@ -816,7 +935,8 @@
       (if (= sbrowser-tab "audio-fx") (sbrowser-audio-fx-panel)
         (if (= sbrowser-tab "midi-fx") (sbrowser-midi-fx-panel)
           (if (= sbrowser-tab "presets") (sbrowser-presets-tab-panel)
-            (sbrowser-projects-tab-panel)))))))
+            (if (= sbrowser-tab "scripts") (sbrowser-scripts-tab-panel)
+              (sbrowser-projects-tab-panel))))))))
 
 (def sbrowser-tabbed-content ()
   (h-stack :key "browser-tabbed-content" :width :fill :gap 0.5 :flex 1 :align :stretch
@@ -1125,8 +1245,12 @@
           (list
             (sbrowser-project-save-header)
             (sbrowser-project-save-panel))
-          (list
-            (sbrowser-tabbed-content)))))))
+          (if (sbrowser-script-save-mode?)
+            (list
+              (sbrowser-script-save-header)
+              (sbrowser-script-save-panel))
+            (list
+              (sbrowser-tabbed-content))))))))
 
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──
 
