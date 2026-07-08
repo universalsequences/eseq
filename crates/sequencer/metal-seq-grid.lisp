@@ -865,14 +865,29 @@
       (if (seq-has-selection?) (seq-clear-selection) nil)
       (seq-set-step-param step param value))))
 
+(def seq-selected-step-indexes ()
+  (filter
+    (lambda (step) (nth SEQ.selected-steps step))
+    (range 0 (len SEQ.selected-steps))))
+
+(def seq-set-process-lane-step-value (track lane step value)
+  (seq-set-process-lane-step
+    track
+    (get lane :instance-id)
+    (get lane :inlet)
+    step
+    value))
+
 (def seq-set-process-lane-from-step (track mode step value)
   (let ((lane (seqv-track-process-lane track mode)))
-    (seq-set-process-lane-step
-      track
-      (get lane :instance-id)
-      (get lane :inlet)
-      step
-      value)))
+    (if (step-selected? step)
+      (for-each
+        (lambda (selected-step)
+          (seq-set-process-lane-step-value track lane selected-step value))
+        (seq-selected-step-indexes))
+      (do
+        (if (seq-has-selection?) (seq-clear-selection) nil)
+        (seq-set-process-lane-step-value track lane step value)))))
 
 (def select-all-steps ()
   (do
@@ -1095,6 +1110,40 @@
     (get (seqv-current-process-lane mode) :decimals)
     (if (= mode 3) 0 2)))
 
+(def seqv-track-param-min (track mode)
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-track-process-lane track mode) :min)
+    (seqv-param-min mode)))
+
+(def seqv-track-param-max (track mode)
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-track-process-lane track mode) :max)
+    (seqv-param-max mode)))
+
+(def seqv-track-param-name (track mode)
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-track-process-lane track mode) :label)
+    (seqv-param-name mode)))
+
+(def seqv-track-param-origin (track mode)
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-track-process-lane track mode) :default)
+    (seqv-param-origin mode)))
+
+(def seqv-track-param-decimals (track mode)
+  (if (seqv-process-lane-mode? mode)
+    (get (seqv-track-process-lane track mode) :decimals)
+    (seqv-param-decimals mode)))
+
+(def seqv-track-param-slider-min (track mode)
+  (if (= mode 1) 0 (seqv-track-param-min track mode)))
+
+(def seqv-track-param-slider-max (track mode)
+  (if (= mode 1) 1 (seqv-track-param-max track mode)))
+
+(def seqv-track-param-haptic-pivot-value (track mode)
+  (if (= mode 1) 2 (seqv-track-param-max track mode)))
+
 (def seqv-step-param-value (mode value)
   (if (or (= mode 3) (= (seqv-param-decimals mode) 0))
     (round value)
@@ -1104,6 +1153,16 @@
   (if (= mode 1)
     (duration-slider-value value)
     (seqv-step-param-value mode value)))
+
+(def seqv-track-step-param-value (track mode value)
+  (if (or (= mode 3) (= (seqv-track-param-decimals track mode) 0))
+    (round value)
+    value))
+
+(def seqv-track-step-slider-param-value (track mode value)
+  (if (= mode 1)
+    (duration-slider-value value)
+    (seqv-track-step-param-value track mode value)))
 
 (def seq-grid-handle-key (key text)
   (if (= (current-buffer-name) "*sequencer*")

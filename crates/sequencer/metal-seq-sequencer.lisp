@@ -1043,7 +1043,7 @@
         track
         mode
         step
-        (seqv-step-slider-param-value mode slider-value))
+        (seqv-track-step-slider-param-value track mode slider-value))
       (seq-set-step-param-from-step
         step
         (seqv-param-keyword mode)
@@ -1059,7 +1059,7 @@
         track
         mode
         (seqv-current-step track track-id)
-        (seqv-step-param-value mode value))
+        (seqv-track-step-param-value track mode value))
       (seq-set-step-param-from-step
         (seqv-current-step track track-id)
         (seqv-param-keyword mode)
@@ -1105,9 +1105,9 @@
       (str (substring s 0 (- max-chars 2)) "..")
       s)))
 
-(def seqv-param-header-name (mode)
+(def seqv-param-header-name (track mode)
   (if (seqv-process-lane-mode? mode)
-    (seqv-clip-label (seqv-param-name mode) 28)
+    (seqv-clip-label (seqv-track-param-name track mode) 28)
     (seqv-param-name mode)))
 
 (def seqv-param-header-width (mode)
@@ -1129,7 +1129,7 @@
       (h-stack :gap 0.55 :align :center
         (box :width (seqv-param-header-width mode) :height 1.3
           :key (str "seqv-expanded-step-summary-" track-id)
-          (label (seqv-param-header-name mode)
+          (label (seqv-param-header-name track mode)
             :font-size 11 :width (seqv-param-header-width mode) :color :white :bg :transparent))
         (if (= mode 5)
           (box :width 8 :height 1.3
@@ -1139,7 +1139,7 @@
           (number-picker :key (str "seqv-expanded-param-number-picker-" track-id)
             :border-color :white
             :value (seqv-param-value-at track mode (seqv-current-step track track-id))
-            :min (seqv-param-min mode) :max (seqv-param-max mode) :decimals (seqv-param-decimals mode)
+            :min (seqv-track-param-min track mode) :max (seqv-track-param-max track mode) :decimals (seqv-track-param-decimals track mode)
             :on-change (lambda (v) (seqv-set-expanded-current-param track track-id mode v))
             :width 8 :height 1.3 :font-size 11))
         (h-stack :gap 0.4 :align :center
@@ -1265,14 +1265,14 @@
                       (vslider :height seqv-expanded-step-slider-height
                         :key (str "seqv-expanded-step-slider-" track-id "-" i)
                         :width (if (= mode 5) 2 1)
-                        :min (seqv-param-slider-min mode) :max (seqv-param-slider-max mode)
-                        :origin (seqv-param-origin mode)
+                        :min (seqv-track-param-slider-min track mode) :max (seqv-track-param-slider-max track mode)
+                        :origin (seqv-track-param-origin track mode)
                         :value (seqv-slot-param-slider-binding track-id mode i)
                         :haptic-value (seqv-slot-param-haptic-binding track-id mode i)
-                        :haptic-min (seqv-param-min mode)
-                        :haptic-max (seqv-param-max mode)
+                        :haptic-min (seqv-track-param-min track mode)
+                        :haptic-max (seqv-track-param-max track mode)
                         :haptic-pivot-position (seqv-param-haptic-pivot-position mode)
-                        :haptic-pivot-value (seqv-param-haptic-pivot-value mode)
+                        :haptic-pivot-value (seqv-track-param-haptic-pivot-value track mode)
                         :haptic-exponent (seqv-param-haptic-exponent mode)
                         :items (if (= mode 5) SEQ.sync-labels '())
                         :font-size 11

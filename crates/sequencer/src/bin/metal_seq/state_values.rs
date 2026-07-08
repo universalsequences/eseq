@@ -23172,10 +23172,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn metal_seq_process_lanes_render_as_expanded_step_tabs_and_knobs() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        let lane = map_value([
+    fn sparse_transpose_process_lane_value() -> Value {
+        map_value([
             ("mode", Value::Number(7.0)),
             ("lane-index", Value::Number(0.0)),
             ("slot-index", Value::Number(0.0)),
@@ -23201,8 +23199,11 @@ mod tests {
                     0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                 ]),
             ),
-        ]);
-        let slot = map_value([
+        ])
+    }
+
+    fn sparse_transpose_process_slot_value() -> Value {
+        map_value([
             ("slot-index", Value::Number(0.0)),
             ("instance-id", Value::Number(42.0)),
             ("class", Value::String("sparse-transpose".to_string())),
@@ -23224,7 +23225,12 @@ mod tests {
                     ("doc", Value::String(String::new())),
                 ])]),
             ),
-        ]);
+        ])
+    }
+
+    fn install_sparse_transpose_process_lane_fixture(editor: &mut eseqlisp::Editor) {
+        let lane = sparse_transpose_process_lane_value();
+        let slot = sparse_transpose_process_slot_value();
         editor
             .runtime_mut()
             .set_reactive("SEQ", "process-lanes", test_list(vec![lane.clone()]));
@@ -23241,6 +23247,12 @@ mod tests {
             "track-process-slots",
             test_list(vec![test_list(vec![slot])]),
         );
+    }
+
+    #[test]
+    fn metal_seq_process_lanes_render_as_expanded_step_tabs_and_knobs() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        install_sparse_transpose_process_lane_fixture(&mut editor);
         editor
             .runtime_mut()
             .eval_str(
@@ -23284,6 +23296,230 @@ mod tests {
         let knob = find_layout_node_by_stable_key(&layout, "seqv-process-inlet-0-0-limit")
             .expect("process inlet knob should render");
         assert_finite_nonzero_rect(knob, "process inlet knob");
+    }
+
+    #[test]
+    fn metal_seq_process_lane_expanded_row_keeps_track_metadata_after_track_switch() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        let lane = sparse_transpose_process_lane_value();
+        let slot = sparse_transpose_process_slot_value();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-lanes",
+            test_list(vec![test_list(vec![lane]), test_list(vec![])]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-slots",
+            test_list(vec![test_list(vec![slot]), test_list(vec![])]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-lanes", test_list(vec![]));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-slots", test_list(vec![]));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (seqv-set-track-expanded 0 true)
+                (seqv-set-param-mode 0 7)
+                "#,
+            )
+            .expect("expand track 0 and select its process lane after selecting track 1");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        assert!(
+            find_layout_node_by_text(&layout, "sparse-transpose / amount").is_some(),
+            "expanded track 0 header should use track 0 process-lane metadata, not current track 1"
+        );
+        let picker = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-number-picker-0")
+            .expect("expanded process lane picker should render");
+        assert_eq!(
+            layout_prop_number(picker, "min"),
+            Some(-24.0),
+            "process lane picker min should come from track 0 metadata"
+        );
+        assert_eq!(
+            layout_prop_number(picker, "max"),
+            Some(24.0),
+            "process lane picker max should come from track 0 metadata"
+        );
+    }
+
+    #[test]
+    fn metal_seq_process_lane_slider_edits_all_selected_steps() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        install_sparse_transpose_process_lane_fixture(&mut editor);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_bool_list(&[
+                true, false, false, false, true, false, false, false, false, false, false, false,
+                false, false, false, false,
+            ]),
+        );
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-process-lane-step", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(value)) => *value as usize,
+                        _ => usize::MAX,
+                    };
+                    let inlet = match args.get(2) {
+                        Some(Value::String(value))
+                        | Some(Value::Symbol(value))
+                        | Some(Value::Keyword(value)) => value.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    let step = match args.get(3) {
+                        Some(Value::Number(value)) => *value as usize,
+                        _ => usize::MAX,
+                    };
+                    let value = match args.get(4) {
+                        Some(Value::Number(value)) => *value,
+                        _ => f64::NAN,
+                    };
+                    calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("lane:{track}:{inlet}:{step}:{value}"));
+                    Ok(Value::Number(value))
+                });
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (seqv-set-track-expanded 0 true)
+                (seqv-set-param-mode 0 7)
+                "#,
+            )
+            .expect("expand track and select process lane");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+            .expect("process lane slider should render");
+        editor
+            .runtime_mut()
+            .invoke(
+                slider
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("process lane slider on-change"),
+                vec![Value::Number(2.0)],
+            )
+            .expect("change selected process lane slider");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["lane:0:amount:0:2", "lane:0:amount:4:2"],
+            "process lane slider should bulk-edit the selected steps"
+        );
+    }
+
+    #[test]
+    fn metal_seq_process_lane_number_picker_commits_to_cursor_step() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        install_sparse_transpose_process_lane_fixture(&mut editor);
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-process-lane-step", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(value)) => *value as usize,
+                        _ => usize::MAX,
+                    };
+                    let step = match args.get(3) {
+                        Some(Value::Number(value)) => *value as usize,
+                        _ => usize::MAX,
+                    };
+                    let value = match args.get(4) {
+                        Some(Value::Number(value)) => *value,
+                        _ => f64::NAN,
+                    };
+                    calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("lane:{track}:{step}:{value}"));
+                    Ok(Value::Number(value))
+                });
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (seqv-set-track-expanded 0 true)
+                (seqv-set-param-mode 0 7)
+                (set-track-cursor-step 3)
+                "#,
+            )
+            .expect("expand track, select process lane, and move cursor");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        let _ = editor
+            .widget_layout()
+            .expect("sequencer layout should build");
+        assert!(
+            editor.focus_widget_by_stable_key(
+                "seqv-expanded-param-number-picker-0",
+                Some("number-picker")
+            ),
+            "process lane number picker should be focusable"
+        );
+        editor.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["lane:0:3:2"],
+            "focused process lane number picker should commit to the cursor step"
+        );
     }
 
     #[test]
