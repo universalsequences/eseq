@@ -551,12 +551,35 @@ fn process_target_label(target: Option<&sequencer::process::ProcessTargetDef>) -
     }
 }
 
-fn process_short_label(name: &str) -> String {
-    let short = name.chars().take(7).collect::<String>();
-    if short.is_empty() {
-        "lane".to_string()
+fn process_name_initials(name: &str) -> String {
+    let initials = name
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.chars().next())
+        .take(4)
+        .collect::<String>();
+    if initials.len() >= 2 {
+        initials
     } else {
-        short
+        name.chars().take(4).collect::<String>()
+    }
+}
+
+fn process_abbrev(name: &str, max_chars: usize) -> String {
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    let keep = max_chars.saturating_sub(2);
+    format!("{}..", name.chars().take(keep).collect::<String>())
+}
+
+fn process_short_label(class_name: &str, inlet_name: &str) -> String {
+    let class = process_name_initials(class_name);
+    let inlet = process_abbrev(inlet_name, 6);
+    match (class.is_empty(), inlet.is_empty()) {
+        (_, true) => "lane".to_string(),
+        (true, false) => inlet,
+        (false, false) => format!("{class}/{inlet}"),
     }
 }
 
@@ -644,8 +667,8 @@ fn process_lane_entries_for_track(
                 slot_index,
                 class_name: slot.class_name.clone(),
                 inlet_name: inlet_name.clone(),
-                label: format!("{} {}", slot.class_name, inlet_name),
-                short_label: process_short_label(&inlet_name),
+                label: format!("{} / {}", slot.class_name, inlet_name),
+                short_label: process_short_label(&slot.class_name, &inlet_name),
                 kind: inlet
                     .map(|entry| process_inlet_kind_name(&entry.kind).to_string())
                     .unwrap_or_else(|| "float".to_string()),
@@ -20219,6 +20242,14 @@ mod tests {
             Some(Value::String("amount".to_string()))
         );
         assert_eq!(
+            lane.get("label").map(|cell| cell.borrow().clone()),
+            Some(Value::String("sparse-transpose / amount".to_string()))
+        );
+        assert_eq!(
+            lane.get("short-label").map(|cell| cell.borrow().clone()),
+            Some(Value::String("st/amount".to_string()))
+        );
+        assert_eq!(
             lane.get("min").map(|cell| cell.borrow().clone()),
             Some(Value::Number(-24.0))
         );
@@ -20235,6 +20266,39 @@ mod tests {
         };
         assert_eq!(*values[0].borrow(), Value::Number(0.0));
         assert_eq!(*values[1].borrow(), Value::Number(1.0));
+
+        let mut ui_runtime = Runtime::new();
+        ui_runtime.register_reactive("SEQ", vec![], true);
+        let viewport = ExpandedStepViewport {
+            track: 0,
+            track_id: 0,
+            page: 0,
+            mode: PROCESS_LANE_MODE_OFFSET,
+            cursor_step: 0,
+        };
+        sync_expanded_step_param_slot(
+            &mut ui_runtime,
+            &state,
+            viewport,
+            PROCESS_LANE_MODE_OFFSET,
+            1,
+        );
+        assert_eq!(
+            reactive_number(
+                &ui_runtime,
+                "SEQ",
+                &expanded_step_slot_param_slider_field(0, PROCESS_LANE_MODE_OFFSET, 1),
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            reactive_number(
+                &ui_runtime,
+                "SEQ",
+                &expanded_step_slot_param_haptic_field(0, PROCESS_LANE_MODE_OFFSET, 1),
+            ),
+            Some(1.0)
+        );
 
         let Value::List(slots) = build_process_slots_value(&state, 0) else {
             panic!("process slots should be a list");
@@ -23122,9 +23186,9 @@ mod tests {
             ("name", Value::String("amount".to_string())),
             (
                 "label",
-                Value::String("sparse-transpose amount".to_string()),
+                Value::String("sparse-transpose / amount".to_string()),
             ),
-            ("short-label", Value::String("amount".to_string())),
+            ("short-label", Value::String("st/amount".to_string())),
             ("kind", Value::String("float".to_string())),
             ("min", Value::Number(-24.0)),
             ("max", Value::Number(24.0)),
@@ -23202,6 +23266,21 @@ mod tests {
         let process_tab = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-7")
             .expect("process lane tab should render");
         assert_finite_nonzero_rect(process_tab, "process lane tab");
+        assert!(
+            find_layout_node_by_text(&layout, "st/amount").is_some(),
+            "process lane tab should identify both process and inlet"
+        );
+        let summary = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-summary-0")
+            .expect("process lane summary should render");
+        assert!(
+            summary.rect.width >= 13.0,
+            "process lane summary should reserve room for the selected lane label: {:?}",
+            summary.rect
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "sparse-transpose / amount").is_some(),
+            "selected process lane header should render the full process/inlet label"
+        );
         let knob = find_layout_node_by_stable_key(&layout, "seqv-process-inlet-0-0-limit")
             .expect("process inlet knob should render");
         assert_finite_nonzero_rect(knob, "process inlet knob");

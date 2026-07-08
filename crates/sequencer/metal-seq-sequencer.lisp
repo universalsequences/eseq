@@ -1096,8 +1096,25 @@
     (seq-halve-track-pattern)
     (seqv-sync-all-track-cursors-to-global)))
 
+(def seqv-param-tab-width (mode)
+  (if (seqv-process-lane-mode? mode) 9.4 8))
+
+(def seqv-clip-label (text max-chars)
+  (let ((s (str text)))
+    (if (> (len s) max-chars)
+      (str (substring s 0 (- max-chars 2)) "..")
+      s)))
+
+(def seqv-param-header-name (mode)
+  (if (seqv-process-lane-mode? mode)
+    (seqv-clip-label (seqv-param-name mode) 28)
+    (seqv-param-name mode)))
+
+(def seqv-param-header-width (mode)
+  (if (seqv-process-lane-mode? mode) 13.8 6.4))
+
 (def seqv-param-tab (track track-id mode tab-label)
-  (box :width 8 :height 2
+  (box :width (seqv-param-tab-width mode) :height 2
     :key (str "seqv-expanded-param-tab-" track-id "-" mode)
     :bg (if (= (seqv-param-mode track-id) mode) (seqv-param-color mode) :dark-gray)
     :on-click |x y r| (do (seqv-activate-track-for-edit track) (seqv-set-param-mode track-id mode))
@@ -1110,10 +1127,10 @@
     (v-stack 
       (box :height 0.4 :width 1)
       (h-stack :gap 0.55 :align :center
-        (box :width 6.4 :height 1.3
+        (box :width (seqv-param-header-width mode) :height 1.3
           :key (str "seqv-expanded-step-summary-" track-id)
-          (label (seqv-param-name mode)
-            :font-size 11 :width 6.4 :color :white :bg :transparent))
+          (label (seqv-param-header-name mode)
+            :font-size 11 :width (seqv-param-header-width mode) :color :white :bg :transparent))
         (if (= mode 5)
           (box :width 8 :height 1.3
             :key (str "seqv-expanded-sync-label-" track-id)

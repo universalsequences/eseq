@@ -37,6 +37,32 @@ fn value_symbol_name(value: &Value) -> Option<String> {
     }
 }
 
+fn nonnegative_usize_arg(name: &str, value: f64) -> Result<usize, String> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+        return Err(format!("{name} must be a non-negative integer"));
+    }
+    Ok(value as usize)
+}
+
+fn expanded_step_viewport_from_numbers(
+    track: f64,
+    track_id: f64,
+    page: f64,
+    mode: f64,
+    cursor_step: f64,
+) -> Result<ExpandedStepViewport, String> {
+    let max_page = MAX_STEPS.saturating_sub(1) / PAGE_SIZE;
+    Ok(ExpandedStepViewport {
+        track: nonnegative_usize_arg("track", track)?
+            .min(sequencer::sequencer::MAX_TRACKS.saturating_sub(1)),
+        track_id: nonnegative_usize_arg("track-id", track_id)?,
+        page: nonnegative_usize_arg("page", page)?.min(max_page),
+        mode: nonnegative_usize_arg("mode", mode)?,
+        cursor_step: nonnegative_usize_arg("cursor-step", cursor_step)?
+            .min(MAX_STEPS.saturating_sub(1)),
+    })
+}
+
 fn value_string_list(value: Option<&Value>) -> Vec<String> {
     let Some(Value::List(items)) = value else {
         return Vec::new();
@@ -1131,17 +1157,8 @@ pub(crate) fn init_runtime(
                     .into(),
             );
         };
-        if *track < 0.0 || *track_id < 0.0 || *page < 0.0 || *mode < 0.0 || *cursor_step < 0.0 {
-            return Err("seqv-sync-expanded-step-slots: numeric args must be non-negative".into());
-        }
-        let max_page = MAX_STEPS.saturating_sub(1) / PAGE_SIZE;
-        let viewport = ExpandedStepViewport {
-            track: (*track as usize).min(sequencer::sequencer::MAX_TRACKS.saturating_sub(1)),
-            track_id: *track_id as usize,
-            page: (*page as usize).min(max_page),
-            mode: (*mode as usize).min(6),
-            cursor_step: (*cursor_step as usize).min(MAX_STEPS.saturating_sub(1)),
-        };
+        let viewport =
+            expanded_step_viewport_from_numbers(*track, *track_id, *page, *mode, *cursor_step)?;
         if projection.set_viewport(viewport) {
             ui_inv.push(UiInvalidation::ExpandedStepViewport {
                 track: viewport.track,
@@ -4666,6 +4683,21 @@ mod tests {
             accumulator_names.lock().unwrap().as_slice(),
             &["legacy-preview".to_string()]
         );
+    }
+
+    #[test]
+    fn expanded_step_viewport_parser_preserves_dynamic_process_modes() {
+        let viewport =
+            expanded_step_viewport_from_numbers(0.0, 12.0, 0.0, 7.0, 3.0).expect("viewport");
+        assert_eq!(viewport.track, 0);
+        assert_eq!(viewport.track_id, 12);
+        assert_eq!(viewport.page, 0);
+        assert_eq!(viewport.mode, 7);
+        assert_eq!(viewport.cursor_step, 3);
+
+        let err = expanded_step_viewport_from_numbers(0.0, 12.0, 0.0, 7.5, 3.0)
+            .expect_err("fractional mode should be rejected");
+        assert!(err.contains("mode"), "unexpected error: {err}");
     }
 
     impl Drop for TempCwdGuard {
