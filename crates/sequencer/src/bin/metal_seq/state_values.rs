@@ -747,6 +747,55 @@ fn process_lane_value_for_mode(
         .and_then(|entry| entry.values.get(step).copied())
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ProcessLaneEditInfo {
+    pub(crate) instance_id: sequencer::process::ProcessInstanceId,
+    pub(crate) inlet_name: String,
+    pub(crate) value: f32,
+    pub(crate) min: f32,
+    pub(crate) max: f32,
+    pub(crate) decimals: u8,
+}
+
+pub(crate) fn process_lane_edit_info_for_mode(
+    state: &Arc<SequencerState>,
+    track: usize,
+    mode: usize,
+    step: usize,
+) -> Option<ProcessLaneEditInfo> {
+    let lane_index = mode.checked_sub(PROCESS_LANE_MODE_OFFSET)?;
+    process_lane_entries_for_track(state, track)
+        .get(lane_index)
+        .and_then(|entry| process_lane_edit_info_from_entry(entry, step))
+}
+
+pub(crate) fn process_lane_edit_info_for_target(
+    state: &Arc<SequencerState>,
+    track: usize,
+    instance_id: sequencer::process::ProcessInstanceId,
+    inlet_name: &str,
+    step: usize,
+) -> Option<ProcessLaneEditInfo> {
+    process_lane_entries_for_track(state, track)
+        .iter()
+        .find(|entry| entry.instance_id == instance_id && entry.inlet_name == inlet_name)
+        .and_then(|entry| process_lane_edit_info_from_entry(entry, step))
+}
+
+fn process_lane_edit_info_from_entry(
+    entry: &ProcessLaneUiEntry,
+    step: usize,
+) -> Option<ProcessLaneEditInfo> {
+    Some(ProcessLaneEditInfo {
+        instance_id: entry.instance_id,
+        inlet_name: entry.inlet_name.clone(),
+        value: *entry.values.get(step)?,
+        min: entry.min,
+        max: entry.max,
+        decimals: entry.decimals,
+    })
+}
+
 fn process_scalar_inlet_value(
     slot: &sequencer::process::TrackProcessSlot,
     inlet: Option<&sequencer::process::PublishedProcessInletDef>,

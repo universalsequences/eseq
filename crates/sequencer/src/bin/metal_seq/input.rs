@@ -498,11 +498,28 @@ fn metal_mode_for_step_param(param: StepParam) -> Option<usize> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SoftStepParamEditKind {
+    StepParam(StepParam),
+    ProcessLane {
+        instance_id: sequencer::process::ProcessInstanceId,
+        inlet_name: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct SoftStepParamEditTarget {
     track: usize,
     step: usize,
-    param: StepParam,
+    kind: SoftStepParamEditKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SoftStepParamEditSpec {
+    value: f32,
+    min: f32,
+    max: f32,
+    decimals: u8,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -527,8 +544,120 @@ impl SoftStepParamEdit {
     }
 }
 
+fn soft_step_param_edit_spec(
+    state: &Arc<SequencerState>,
+    target: &SoftStepParamEditTarget,
+) -> Option<SoftStepParamEditSpec> {
+    match &target.kind {
+        SoftStepParamEditKind::StepParam(param) => Some(SoftStepParamEditSpec {
+            value: state.pattern.step_data[target.track].get(target.step, *param),
+            min: param.min(),
+            max: param.max(),
+            decimals: if *param == StepParam::Transpose { 0 } else { 2 },
+        }),
+        SoftStepParamEditKind::ProcessLane {
+            instance_id,
+            inlet_name,
+        } => {
+            let lane = process_lane_edit_info_for_target(
+                state,
+                target.track,
+                *instance_id,
+                inlet_name,
+                target.step,
+            )?;
+            Some(SoftStepParamEditSpec {
+                value: lane.value,
+                min: lane.min,
+                max: lane.max,
+                decimals: lane.decimals,
+            })
+        }
+    }
+}
+
+fn sync_soft_process_lane_commit(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    target: &SoftStepParamEditTarget,
+) {
+    let runtime = editor.runtime_mut();
+    sync_process_chain_state(
+        runtime,
+        state,
+        state.active_track_count(),
+        current_track.load(Ordering::Relaxed),
+    );
+    for viewport in expanded_step_projection.viewports_for_track(target.track) {
+        if let Some(slot) = visible_slot_for_step(viewport, target.step) {
+            let _ = sync_expanded_step_param_slot(runtime, state, viewport, viewport.mode, slot);
+        }
+    }
+}
+
+fn sync_soft_step_param_commit(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    target: &SoftStepParamEditTarget,
+    param: StepParam,
+) {
+    let runtime = editor.runtime_mut();
+    sync_step_param_lists(runtime, state, target.track);
+    if let Some(mode) = metal_mode_for_step_param(param) {
+        for viewport in expanded_step_projection.viewports_for_track(target.track) {
+            if let Some(slot) = visible_slot_for_step(viewport, target.step) {
+                let _ = sync_expanded_step_param_slot(runtime, state, viewport, mode, slot);
+            }
+        }
+    }
+}
+
+fn commit_soft_step_param_edit(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    target: &SoftStepParamEditTarget,
+    value: f64,
+) -> bool {
+    match &target.kind {
+        SoftStepParamEditKind::StepParam(param) => {
+            state.pattern.step_data[target.track].set(target.step, *param, value as f32);
+            state.publish_scheduler_snapshot();
+            sync_soft_step_param_commit(editor, state, expanded_step_projection, target, *param);
+            true
+        }
+        SoftStepParamEditKind::ProcessLane {
+            instance_id,
+            inlet_name,
+        } => {
+            if !state.set_process_lane_value(
+                target.track,
+                *instance_id,
+                inlet_name.clone(),
+                target.step,
+                value as f32,
+            ) {
+                return false;
+            }
+            sync_soft_process_lane_commit(
+                editor,
+                state,
+                current_track,
+                expanded_step_projection,
+                target,
+            );
+            true
+        }
+    }
+}
+
 fn current_soft_step_param_target(
     editor: &mut Editor,
+    state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
 ) -> Option<SoftStepParamEditTarget> {
     if metal_has_selected_bus(editor) {
@@ -546,12 +675,26 @@ fn current_soft_step_param_target(
         ),
         _ => return None,
     };
-    let param = metal_step_param_for_mode(mode)?;
-    Some(SoftStepParamEditTarget {
-        track: current_track.load(Ordering::Relaxed),
-        step,
-        param,
-    })
+    if let Some(param) = metal_step_param_for_mode(mode) {
+        return Some(SoftStepParamEditTarget {
+            track: current_track.load(Ordering::Relaxed),
+            step,
+            kind: SoftStepParamEditKind::StepParam(param),
+        });
+    }
+    let track = current_track.load(Ordering::Relaxed);
+    if buffer_name == "*sequencer*" {
+        let lane = process_lane_edit_info_for_mode(state, track, mode, step)?;
+        return Some(SoftStepParamEditTarget {
+            track,
+            step,
+            kind: SoftStepParamEditKind::ProcessLane {
+                instance_id: lane.instance_id,
+                inlet_name: lane.inlet_name,
+            },
+        });
+    }
+    None
 }
 
 fn current_step_param_number_picker_key(editor: &mut Editor) -> Option<String> {
@@ -614,7 +757,8 @@ fn starts_unarmed_number_picker_edit(key: &crossterm::event::KeyEvent) -> bool {
     numeric_edit_char(key).is_some()
 }
 
-/// Route only numeric text-editing keys to the current Metal step parameter.
+/// Route only numeric text-editing keys to the current Metal step parameter or
+/// expanded sequencer process lane.
 ///
 /// This deliberately avoids real widget focus so arrow keys can keep their
 /// sequencer meaning. The edit buffer mirrors number-picker semantics: first
@@ -642,7 +786,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         let pending_edit_key = number_picker_pending_edit_key(key);
         if pending_edit_key {
             if let (Some(target), Some(widget_id)) = (
-                current_soft_step_param_target(editor, current_track),
+                current_soft_step_param_target(editor, state, current_track),
                 current_step_param_number_picker_id(editor),
             ) {
                 if number_picker_edit_state(widget_id).editing {
@@ -666,13 +810,13 @@ pub(crate) fn handle_metal_soft_step_param_key(
         if !edit.is_active() && !starts_unarmed_number_picker_edit(key) {
             return false;
         }
-        let Some(target) = current_soft_step_param_target(editor, current_track) else {
+        let Some(target) = current_soft_step_param_target(editor, state, current_track) else {
             return false;
         };
         let Some(widget_id) = current_step_param_number_picker_id(editor) else {
             return false;
         };
-        if edit.target != Some(target) || edit.widget_id != Some(widget_id) {
+        if edit.target.as_ref() != Some(&target) || edit.widget_id != Some(widget_id) {
             edit.clear();
             edit.target = Some(target);
             edit.widget_id = Some(widget_id);
@@ -680,17 +824,16 @@ pub(crate) fn handle_metal_soft_step_param_key(
         }
     }
 
-    let Some(target) = edit.target else {
+    let Some(target) = edit.target.clone() else {
         return false;
     };
     let Some(widget_id) = edit.widget_id else {
         return false;
     };
-    let current_value = state.pattern.step_data[target.track].get(target.step, target.param);
-    let decimals = if target.param == StepParam::Transpose {
-        0
-    } else {
-        2
+    let Some(spec) = soft_step_param_edit_spec(state, &target) else {
+        edit.clear();
+        editor.mark_needs_redraw();
+        return true;
     };
     let outcome = handle_number_picker_edit_key_for_widget(
         widget_id,
@@ -698,10 +841,10 @@ pub(crate) fn handle_metal_soft_step_param_key(
             code: key.code,
             modifiers: key.modifiers,
         },
-        current_value as f64,
-        target.param.min() as f64,
-        target.param.max() as f64,
-        decimals,
+        spec.value as f64,
+        spec.min as f64,
+        spec.max as f64,
+        u32::from(spec.decimals),
     );
 
     match outcome {
@@ -714,16 +857,17 @@ pub(crate) fn handle_metal_soft_step_param_key(
             true
         }
         Some(NumberPickerEditOutcome::Commit(value)) => {
-            state.pattern.step_data[target.track].set(target.step, target.param, value as f32);
-            state.publish_scheduler_snapshot();
-            let runtime = editor.runtime_mut();
-            sync_step_param_lists(runtime, state, target.track);
-            if let Some(mode) = metal_mode_for_step_param(target.param) {
-                for viewport in expanded_step_projection.viewports_for_track(target.track) {
-                    if let Some(slot) = visible_slot_for_step(viewport, target.step) {
-                        let _ = sync_expanded_step_param_slot(runtime, state, viewport, mode, slot);
-                    }
-                }
+            if !commit_soft_step_param_edit(
+                editor,
+                state,
+                current_track,
+                expanded_step_projection,
+                &target,
+                value,
+            ) {
+                edit.clear();
+                editor.mark_needs_redraw();
+                return true;
             }
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -1321,7 +1465,7 @@ mod live_keyboard_tests {
         build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
         held_note_for_key, note_from_key, ExpandedStepProjectionRegistry, ExpandedStepViewport,
-        HeldKeyboardNote, SoftStepParamEdit,
+        HeldKeyboardNote, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -3007,6 +3151,132 @@ mod live_keyboard_tests {
                 .unwrap(),
             Some(Value::Number(0.5)),
             "soft edit commit should update the visible expanded slider slot immediately"
+        );
+    }
+
+    #[test]
+    fn sequencer_soft_number_entry_edits_current_process_lane_step() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.set_layout_viewport(80, 20);
+        editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("process-lanes", Value::List(vec![])),
+                ("track-process-lanes", Value::List(vec![])),
+                ("process-slots", Value::List(vec![])),
+                ("track-process-slots", Value::List(vec![])),
+                ("process-library", Value::List(vec![])),
+            ],
+            true,
+        );
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            editor.runtime_mut(),
+            Arc::clone(&state),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selected-bus? () false)
+                (def seqv-current-selected-step () 2)
+                (def seqv-current-param-mode () 7)
+                (def seqv-current-number-picker-key () "seqv-expanded-param-number-picker-0")
+                (defstate cursor-toggle-count 0)
+                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+
+                (def-accumulator sparse-transpose
+                  :target (step-param :transpose)
+                  :amount (amount :lane true :default 0)
+                  :range (-24 24)
+                  :mode :clip)
+
+                (def climb
+                  (processes :track 0
+                    (sparse-transpose :amount (lane 0 1 0 0))))
+                "#,
+            )
+            .expect("install process lane soft edit fixture");
+        let tree = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(number-picker :key "seqv-expanded-param-number-picker-0"
+                    :value 0 :min -24 :max 24 :decimals 0
+                    :width 8 :height 1.3 :font-size 11)"#,
+            )
+            .expect("build process lane number picker")
+            .expect("number picker should produce a widget tree");
+        editor
+            .active_buffer_mut()
+            .set_widget_tree(Some(tree.clone()), None);
+        editor.runtime_mut().set_widget_tree(tree);
+        editor
+            .widget_layout()
+            .expect("process lane number picker should lay out");
+
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        expanded_step_projection.set_viewport(ExpandedStepViewport {
+            track: 0,
+            track_id: 0,
+            page: 0,
+            mode: PROCESS_LANE_MODE_OFFSET,
+            cursor_step: 2,
+        });
+        let mut edit = SoftStepParamEdit::default();
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            assert!(
+                handle_metal_soft_step_param_key(
+                    &mut editor,
+                    &key,
+                    &state,
+                    &current_track,
+                    &expanded_step_projection,
+                    &mut edit,
+                ),
+                "process lane soft edit should consume {key:?}"
+            );
+        }
+
+        let chain = state
+            .track_process_chain(0)
+            .expect("track 0 process chain should exist");
+        let amount_lane = chain.slots[0]
+            .lanes
+            .get("amount")
+            .expect("amount lane should exist");
+        assert_eq!(
+            amount_lane.values.get(2).copied(),
+            Some(2.0),
+            "sequencer numeric entry should update the process lane at the cursor step"
+        );
+        assert_eq!(
+            state.pattern.step_data[0].get(2, StepParam::Transpose),
+            0.0,
+            "process lane soft edits must not mutate built-in step data"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-7-2")"#)
+                .unwrap(),
+            Some(Value::Number(2.0)),
+            "soft edit commit should update the visible process lane slider slot immediately"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("cursor-toggle-count")
+                .unwrap(),
+            Some(Value::Number(0.0)),
+            "soft Enter commit should not fall through to the step gate toggle"
         );
     }
 
