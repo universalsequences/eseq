@@ -22,8 +22,8 @@ use crate::scheduled_event::{
     ScheduledInstrumentTensorParams, ScheduledSamplerParams, StepEvent,
 };
 use crate::sequencer::{
-    sync_beats, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState, StepParam,
-    SwingResolution, TrackOutputEvent, MAX_STEPS, MAX_TRACKS,
+    sync_beats, InstrumentType, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState,
+    StepParam, SwingResolution, TrackOutputEvent, MAX_STEPS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
@@ -893,7 +893,22 @@ fn resolve_midi_fx_slot_param(
     if param_idx >= slot.num_params as usize {
         return None;
     }
-    Some(resolved_slot_param_value(slot, step_idx, param_idx, 0.0))
+    Some(midi_fx_slot_param_value(slot, step_idx, param_idx, 0.0))
+}
+
+fn midi_fx_slot_param_value(
+    slot: &crate::effects::EffectSlotSnapshot,
+    step_idx: usize,
+    param_idx: usize,
+    default: f32,
+) -> f32 {
+    slot.plocks
+        .get(step_idx)
+        .and_then(|step| step.get(param_idx))
+        .copied()
+        .flatten()
+        .or_else(|| slot.defaults.get(param_idx).copied())
+        .unwrap_or(default)
 }
 
 const MIDI_FX_CLOCK_RATE_ROLE: &str = "clock-rate";
@@ -1022,6 +1037,23 @@ fn midi_fx_timebase_param_beats(
     step_idx: usize,
 ) -> Option<f32> {
     let raw_idx = resolve_midi_fx_slot_param(snapshot, track_idx, slot_idx, param_idx, step_idx)?;
+    let timebase_idx = raw_idx.round().max(0.0) as usize;
+    let timebase = crate::sequencer::Timebase::ALL.get(timebase_idx).copied()?;
+    let beats = timebase.step_beats(snapshot.tracks[track_idx].params.num_steps) as f32;
+    (beats > 0.0).then_some(beats)
+}
+
+fn midi_fx_timebase_param_beats_from_slot(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    slot: &crate::effects::EffectSlotSnapshot,
+    param_idx: usize,
+    step_idx: usize,
+) -> Option<f32> {
+    if param_idx >= slot.num_params as usize {
+        return None;
+    }
+    let raw_idx = midi_fx_slot_param_value(slot, step_idx, param_idx, 0.0);
     let timebase_idx = raw_idx.round().max(0.0) as usize;
     let timebase = crate::sequencer::Timebase::ALL.get(timebase_idx).copied()?;
     let beats = timebase.step_beats(snapshot.tracks[track_idx].params.num_steps) as f32;
@@ -1644,11 +1676,17 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
-    sampler_params: ScheduledSamplerParams,
+    mut sampler_params: ScheduledSamplerParams,
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
     let resolved =
         apply_global_transpose_to_resolved(snapshot, track_idx, global_transpose, resolved);
+    apply_sampler_instrument_param_overrides(
+        snapshot,
+        track_idx,
+        &mut sampler_params,
+        &instrument_params,
+    );
     let instrument_fingerprint = instrument_sound_fingerprint(
         snapshot,
         track_idx,
@@ -2303,6 +2341,630 @@ fn enqueue_due_process_emissions<const QUEUE_CAP: usize>(
     true
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ProcessMidiFxParamOverride {
+    slot: usize,
+    fx: String,
+    param: String,
+    param_idx: usize,
+    value: f32,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessTargetOverlay {
+    effect_params: Vec<ScheduledEffectParam>,
+    instrument_params: ScheduledInstrumentParams,
+    midi_fx_params: Vec<ProcessMidiFxParamOverride>,
+}
+
+impl Default for ProcessTargetOverlay {
+    fn default() -> Self {
+        Self {
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            midi_fx_params: Vec::new(),
+        }
+    }
+}
+
+fn process_step_param_from_name(name: &str) -> Option<StepParam> {
+    let normalized = name
+        .trim_start_matches(':')
+        .replace('_', "-")
+        .to_ascii_lowercase();
+    [
+        StepParam::Duration,
+        StepParam::Velocity,
+        StepParam::Speed,
+        StepParam::AuxA,
+        StepParam::AuxB,
+        StepParam::Transpose,
+        StepParam::Pan,
+        StepParam::Chop,
+    ]
+    .into_iter()
+    .find(|param| {
+        param.short_label().eq_ignore_ascii_case(&normalized)
+            || param
+                .label()
+                .replace(' ', "-")
+                .eq_ignore_ascii_case(&normalized)
+            || match param {
+                StepParam::Duration => normalized == "duration",
+                StepParam::Velocity => normalized == "velocity",
+                StepParam::Speed => normalized == "speed",
+                StepParam::AuxA => normalized == "aux-a",
+                StepParam::AuxB => normalized == "aux-b",
+                StepParam::Transpose => normalized == "transpose",
+                StepParam::Pan => normalized == "pan",
+                StepParam::Chop => normalized == "chop",
+                StepParam::Sync | StepParam::Delay => false,
+            }
+    })
+}
+
+fn resolved_step_param(resolved: &ResolvedStep, param: StepParam) -> f32 {
+    match param {
+        StepParam::Duration => resolved.duration,
+        StepParam::Velocity => resolved.velocity,
+        StepParam::Speed => resolved.speed,
+        StepParam::AuxA => resolved.aux_a,
+        StepParam::AuxB => resolved.aux_b,
+        StepParam::Transpose => resolved.transpose,
+        StepParam::Pan => resolved.pan,
+        StepParam::Chop => resolved.chop,
+        StepParam::Sync => 0.0,
+        StepParam::Delay => 0.0,
+    }
+}
+
+fn set_resolved_step_param(resolved: &mut ResolvedStep, param: StepParam, value: f32) {
+    let value = value.clamp(param.min(), param.max());
+    match param {
+        StepParam::Duration => resolved.duration = value,
+        StepParam::Velocity => resolved.velocity = value,
+        StepParam::Speed => resolved.speed = value,
+        StepParam::AuxA => resolved.aux_a = value,
+        StepParam::AuxB => resolved.aux_b = value,
+        StepParam::Transpose => resolved.transpose = value,
+        StepParam::Pan => resolved.pan = value,
+        StepParam::Chop => resolved.chop = value,
+        StepParam::Sync | StepParam::Delay => unreachable!("unsupported process step param"),
+    }
+}
+
+fn process_apply_step_param_write(
+    resolved: &mut ResolvedStep,
+    param_name: &str,
+    op: crate::process::ProcessTargetOp,
+    value: f32,
+) {
+    let Some(param) = process_step_param_from_name(param_name) else {
+        return;
+    };
+    let next = match op {
+        crate::process::ProcessTargetOp::Set => value,
+        crate::process::ProcessTargetOp::Add => resolved_step_param(resolved, param) + value,
+    };
+    set_resolved_step_param(resolved, param, next);
+}
+
+fn process_param_index_by_tag_or_name(
+    descriptor: &EffectDescriptor,
+    tag_or_name: &str,
+) -> Option<usize> {
+    descriptor
+        .params
+        .iter()
+        .position(|param| param.has_tag_or_name(tag_or_name))
+}
+
+fn process_slot_param_identity(
+    slot: &crate::effects::EffectSlotSnapshot,
+    param_idx: usize,
+) -> Option<ParamNodeId> {
+    let raw_idx = slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()
+        .unwrap_or(param_idx as u32);
+    slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx)
+}
+
+fn process_scheduled_instrument_param(
+    slot: &crate::effects::EffectSlotSnapshot,
+    param_idx: usize,
+    value: f32,
+) -> Option<ScheduledInstrumentParam> {
+    if param_idx >= slot.num_params as usize || !value.is_finite() {
+        return None;
+    }
+    let raw_idx = slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()
+        .unwrap_or(param_idx as u32);
+    if raw_idx == u32::MAX {
+        return None;
+    }
+    let span = slot
+        .param_node_spans
+        .get(param_idx)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        (
+            ScheduledInstrumentParamTarget::Modulator,
+            (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+        )
+    } else {
+        (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
+    };
+    Some(ScheduledInstrumentParam {
+        target,
+        idx,
+        span,
+        value,
+    })
+}
+
+fn process_scheduled_effect_param(
+    slot: &crate::effects::EffectSlotSnapshot,
+    param_idx: usize,
+    value: f32,
+) -> Option<ScheduledEffectParam> {
+    let identity = process_slot_param_identity(slot, param_idx)?;
+    value.is_finite().then_some(ScheduledEffectParam {
+        logical_id: identity.logical_id,
+        idx: identity.node_param_idx as u64,
+        value,
+    })
+}
+
+fn process_device_write_value(
+    descriptor: &crate::effects::ParamDescriptor,
+    current_stored: f32,
+    op: crate::process::ProcessTargetOp,
+    value: f32,
+) -> f32 {
+    match op {
+        crate::process::ProcessTargetOp::Set => descriptor.denormalize(value),
+        crate::process::ProcessTargetOp::Add => {
+            descriptor.denormalize((descriptor.normalize(current_stored) + value).clamp(0.0, 1.0))
+        }
+    }
+}
+
+fn process_instrument_overlay_value(
+    overlay: &ProcessTargetOverlay,
+    param: &ScheduledInstrumentParam,
+    fallback: f32,
+) -> f32 {
+    overlay
+        .instrument_params
+        .iter()
+        .find(|existing| existing.target == param.target && existing.idx == param.idx)
+        .map(|existing| existing.value)
+        .unwrap_or(fallback)
+}
+
+fn process_effect_overlay_value(
+    overlay: &ProcessTargetOverlay,
+    param: &ScheduledEffectParam,
+    fallback: f32,
+) -> f32 {
+    overlay
+        .effect_params
+        .iter()
+        .find(|existing| existing.logical_id == param.logical_id && existing.idx == param.idx)
+        .map(|existing| existing.value)
+        .unwrap_or(fallback)
+}
+
+fn process_midi_fx_overlay_value(
+    overlay: &ProcessTargetOverlay,
+    slot: usize,
+    fx: &str,
+    param_idx: usize,
+    fallback: f32,
+) -> f32 {
+    overlay
+        .midi_fx_params
+        .iter()
+        .rev()
+        .find(|existing| {
+            existing.slot == slot
+                && existing.param_idx == param_idx
+                && existing.fx.eq_ignore_ascii_case(fx)
+        })
+        .map(|existing| existing.value)
+        .unwrap_or(fallback)
+}
+
+fn process_apply_instrument_write(
+    snapshot: &SequencerSnapshot,
+    track: usize,
+    step: usize,
+    param_idx: usize,
+    op: crate::process::ProcessTargetOp,
+    value: f32,
+    overlay: &mut ProcessTargetOverlay,
+) {
+    let Some(track_snapshot) = snapshot.tracks.get(track) else {
+        return;
+    };
+    let Some(param_desc) = track_snapshot.instrument_descriptor.params.get(param_idx) else {
+        return;
+    };
+    let current = resolved_slot_param_value(&track_snapshot.instrument_slot, step, param_idx, 0.0);
+    let Some(mut scheduled) =
+        process_scheduled_instrument_param(&track_snapshot.instrument_slot, param_idx, current)
+    else {
+        return;
+    };
+    let current = process_instrument_overlay_value(overlay, &scheduled, current);
+    scheduled.value = process_device_write_value(param_desc, current, op, value);
+    upsert_instrument_params(&mut overlay.instrument_params, [scheduled]);
+}
+
+fn process_apply_effect_write(
+    snapshot: &SequencerSnapshot,
+    track: usize,
+    step: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    op: crate::process::ProcessTargetOp,
+    value: f32,
+    overlay: &mut ProcessTargetOverlay,
+) {
+    let Some(track_snapshot) = snapshot.tracks.get(track) else {
+        return;
+    };
+    let Some(slot) = track_snapshot.effect_slots.get(slot_idx) else {
+        return;
+    };
+    let Some(param_desc) = track_snapshot
+        .effect_descriptors
+        .get(slot_idx)
+        .and_then(|desc| desc.params.get(param_idx))
+    else {
+        return;
+    };
+    let current = resolved_slot_param_value(slot, step, param_idx, 0.0);
+    let Some(mut scheduled) = process_scheduled_effect_param(slot, param_idx, current) else {
+        return;
+    };
+    let current = process_effect_overlay_value(overlay, &scheduled, current);
+    scheduled.value = process_device_write_value(param_desc, current, op, value);
+    upsert_effect_params(&mut overlay.effect_params, [scheduled]);
+}
+
+fn process_apply_midi_fx_write(
+    snapshot: &SequencerSnapshot,
+    midi_fx_descriptors: &[EffectDescriptor],
+    track: usize,
+    step: usize,
+    slot_idx: usize,
+    fx: &str,
+    param_idx: usize,
+    op: crate::process::ProcessTargetOp,
+    value: f32,
+    overlay: &mut ProcessTargetOverlay,
+) {
+    let Some(track_snapshot) = snapshot.tracks.get(track) else {
+        return;
+    };
+    let Some(chain_fx) = track_snapshot.params.midi_fx_chain.get(slot_idx) else {
+        return;
+    };
+    if !chain_fx.eq_ignore_ascii_case(fx) {
+        return;
+    }
+    let Some(desc) = midi_fx_descriptors
+        .iter()
+        .find(|desc| desc.name.eq_ignore_ascii_case(fx))
+    else {
+        return;
+    };
+    let Some(param_desc) = desc.params.get(param_idx) else {
+        return;
+    };
+    let Some(slot) = track_snapshot.midi_fx_slots.get(slot_idx) else {
+        return;
+    };
+    let current = resolved_slot_param_value(slot, step, param_idx, 0.0);
+    let current = process_midi_fx_overlay_value(overlay, slot_idx, fx, param_idx, current);
+    let value = process_device_write_value(param_desc, current, op, value);
+    if let Some(existing) = overlay.midi_fx_params.iter_mut().find(|existing| {
+        existing.slot == slot_idx
+            && existing.param_idx == param_idx
+            && existing.fx.eq_ignore_ascii_case(fx)
+    }) {
+        existing.value = value;
+        existing.param = param_desc.name.clone();
+    } else {
+        overlay.midi_fx_params.push(ProcessMidiFxParamOverride {
+            slot: slot_idx,
+            fx: chain_fx.clone(),
+            param: param_desc.name.clone(),
+            param_idx,
+            value,
+        });
+    }
+}
+
+fn process_resolve_hint_to_target(
+    snapshot: &SequencerSnapshot,
+    midi_fx_descriptors: &[EffectDescriptor],
+    track: usize,
+    hint: &crate::process::ProcessTargetHint,
+) -> Option<crate::process::ParamTarget> {
+    match hint {
+        crate::process::ProcessTargetHint::StepParam { param } => {
+            process_step_param_from_name(param)?;
+            Some(crate::process::ParamTarget::StepParam {
+                param: param.clone(),
+            })
+        }
+        crate::process::ProcessTargetHint::InstrumentParam { param } => {
+            let track_snapshot = snapshot.tracks.get(track)?;
+            let param_idx =
+                process_param_index_by_tag_or_name(&track_snapshot.instrument_descriptor, param)?;
+            Some(crate::process::ParamTarget::InstrumentParam {
+                param: track_snapshot.instrument_descriptor.params[param_idx]
+                    .name
+                    .clone(),
+                param_id: process_slot_param_identity(&track_snapshot.instrument_slot, param_idx),
+            })
+        }
+        crate::process::ProcessTargetHint::EffectParam { effect, param } => {
+            let track_snapshot = snapshot.tracks.get(track)?;
+            for (slot_idx, desc) in track_snapshot.effect_descriptors.iter().enumerate() {
+                if !desc.name.eq_ignore_ascii_case(effect) {
+                    continue;
+                }
+                let param_idx = process_param_index_by_tag_or_name(desc, param)?;
+                let slot = track_snapshot.effect_slots.get(slot_idx)?;
+                return Some(crate::process::ParamTarget::EffectParam {
+                    slot: slot_idx,
+                    effect: desc.name.clone(),
+                    param: desc.params[param_idx].name.clone(),
+                    param_id: process_slot_param_identity(slot, param_idx),
+                });
+            }
+            None
+        }
+        crate::process::ProcessTargetHint::MidiFxParam { fx, param } => {
+            let track_snapshot = snapshot.tracks.get(track)?;
+            for (slot_idx, chain_fx) in track_snapshot.params.midi_fx_chain.iter().enumerate() {
+                if !chain_fx.eq_ignore_ascii_case(fx) {
+                    continue;
+                }
+                let desc = midi_fx_descriptors
+                    .iter()
+                    .find(|desc| desc.name.eq_ignore_ascii_case(chain_fx))?;
+                let param_idx = process_param_index_by_tag_or_name(desc, param)?;
+                return Some(crate::process::ParamTarget::MidiFxParam {
+                    slot: slot_idx,
+                    fx: chain_fx.clone(),
+                    param: desc.params[param_idx].name.clone(),
+                });
+            }
+            None
+        }
+        crate::process::ProcessTargetHint::ParamTag { tag } => {
+            let track_snapshot = snapshot.tracks.get(track)?;
+            if let Some(param_idx) =
+                process_param_index_by_tag_or_name(&track_snapshot.instrument_descriptor, tag)
+            {
+                return Some(crate::process::ParamTarget::InstrumentParam {
+                    param: track_snapshot.instrument_descriptor.params[param_idx]
+                        .name
+                        .clone(),
+                    param_id: process_slot_param_identity(
+                        &track_snapshot.instrument_slot,
+                        param_idx,
+                    ),
+                });
+            }
+            for (slot_idx, desc) in track_snapshot.effect_descriptors.iter().enumerate() {
+                if let Some(param_idx) = process_param_index_by_tag_or_name(desc, tag) {
+                    let slot = track_snapshot.effect_slots.get(slot_idx)?;
+                    return Some(crate::process::ParamTarget::EffectParam {
+                        slot: slot_idx,
+                        effect: desc.name.clone(),
+                        param: desc.params[param_idx].name.clone(),
+                        param_id: process_slot_param_identity(slot, param_idx),
+                    });
+                }
+            }
+            for (slot_idx, chain_fx) in track_snapshot.params.midi_fx_chain.iter().enumerate() {
+                let Some(desc) = midi_fx_descriptors
+                    .iter()
+                    .find(|desc| desc.name.eq_ignore_ascii_case(chain_fx))
+                else {
+                    continue;
+                };
+                if let Some(param_idx) = process_param_index_by_tag_or_name(desc, tag) {
+                    return Some(crate::process::ParamTarget::MidiFxParam {
+                        slot: slot_idx,
+                        fx: chain_fx.clone(),
+                        param: desc.params[param_idx].name.clone(),
+                    });
+                }
+            }
+            None
+        }
+    }
+}
+
+fn process_apply_concrete_target_write(
+    snapshot: &SequencerSnapshot,
+    midi_fx_descriptors: &[EffectDescriptor],
+    track: usize,
+    step: usize,
+    resolved: &mut ResolvedStep,
+    overlay: &mut ProcessTargetOverlay,
+    target: &crate::process::ParamTarget,
+    write: &crate::process::ProcessTargetWrite,
+) {
+    match target {
+        crate::process::ParamTarget::StepParam { param } => {
+            process_apply_step_param_write(resolved, param, write.op, write.value);
+        }
+        crate::process::ParamTarget::InstrumentParam { param, param_id } => {
+            let Some(track_snapshot) = snapshot.tracks.get(track) else {
+                return;
+            };
+            let Some(param_idx) =
+                process_param_index_by_tag_or_name(&track_snapshot.instrument_descriptor, param)
+            else {
+                return;
+            };
+            if let Some(expected) = param_id {
+                if process_slot_param_identity(&track_snapshot.instrument_slot, param_idx)
+                    != Some(*expected)
+                {
+                    return;
+                }
+            }
+            process_apply_instrument_write(
+                snapshot,
+                track,
+                step,
+                param_idx,
+                write.op,
+                write.value,
+                overlay,
+            );
+        }
+        crate::process::ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            param_id,
+        } => {
+            let Some(track_snapshot) = snapshot.tracks.get(track) else {
+                return;
+            };
+            let Some(desc) = track_snapshot.effect_descriptors.get(*slot) else {
+                return;
+            };
+            if !desc.name.eq_ignore_ascii_case(effect) {
+                return;
+            }
+            let Some(param_idx) = process_param_index_by_tag_or_name(desc, param) else {
+                return;
+            };
+            let Some(slot_snapshot) = track_snapshot.effect_slots.get(*slot) else {
+                return;
+            };
+            if let Some(expected) = param_id {
+                if process_slot_param_identity(slot_snapshot, param_idx) != Some(*expected) {
+                    return;
+                }
+            }
+            process_apply_effect_write(
+                snapshot,
+                track,
+                step,
+                *slot,
+                param_idx,
+                write.op,
+                write.value,
+                overlay,
+            );
+        }
+        crate::process::ParamTarget::MidiFxParam { slot, fx, param } => {
+            let Some(desc) = midi_fx_descriptors
+                .iter()
+                .find(|desc| desc.name.eq_ignore_ascii_case(fx))
+            else {
+                return;
+            };
+            let Some(param_idx) = process_param_index_by_tag_or_name(desc, param) else {
+                return;
+            };
+            process_apply_midi_fx_write(
+                snapshot,
+                midi_fx_descriptors,
+                track,
+                step,
+                *slot,
+                fx,
+                param_idx,
+                write.op,
+                write.value,
+                overlay,
+            );
+        }
+        crate::process::ParamTarget::RackSlotParam { .. }
+        | crate::process::ParamTarget::RackSlotInstrumentParam { .. } => {}
+    }
+}
+
+fn apply_process_target_writes(
+    snapshot: &SequencerSnapshot,
+    midi_fx_descriptors: &[EffectDescriptor],
+    track: usize,
+    step: usize,
+    resolved: &mut ResolvedStep,
+    overlay: &mut ProcessTargetOverlay,
+    slot: Option<&crate::process::TrackProcessSlot>,
+    writes: &[crate::process::ProcessTargetWrite],
+) {
+    for write in writes {
+        let target = slot
+            .and_then(|slot| slot.bindings.get(&write.port))
+            .and_then(|binding| binding.as_ref().cloned())
+            .or_else(|| {
+                write.target.as_ref().and_then(|hint| {
+                    process_resolve_hint_to_target(snapshot, midi_fx_descriptors, track, hint)
+                })
+            });
+        let Some(target) = target else {
+            continue;
+        };
+        process_apply_concrete_target_write(
+            snapshot,
+            midi_fx_descriptors,
+            track,
+            step,
+            resolved,
+            overlay,
+            &target,
+            write,
+        );
+    }
+}
+
+fn apply_process_midi_fx_overrides_to_slot(
+    slot: &mut crate::effects::EffectSlotSnapshot,
+    step: usize,
+    stage_idx: usize,
+    fx_name: &str,
+    descriptor: &EffectDescriptor,
+    overrides: &[ProcessMidiFxParamOverride],
+) {
+    for override_param in overrides {
+        if override_param.slot != stage_idx
+            || override_param.param_idx >= slot.num_params as usize
+            || !override_param.fx.eq_ignore_ascii_case(fx_name)
+            || !override_param.value.is_finite()
+        {
+            continue;
+        }
+        let Some(desc_param) = descriptor.params.get(override_param.param_idx) else {
+            continue;
+        };
+        if !desc_param.name.eq_ignore_ascii_case(&override_param.param) {
+            continue;
+        }
+        slot.set_plock(step, override_param.param_idx, override_param.value);
+    }
+}
+
 fn invoke_process_cascade<F>(
     scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
     process_runtime: &mut crate::process::ProcessRuntime,
@@ -2349,23 +3011,6 @@ where
         }
     }
     true
-}
-
-fn apply_process_target_writes_to_resolved(
-    resolved: &mut ResolvedStep,
-    writes: &[crate::process::ProcessTargetWrite],
-) {
-    for write in writes {
-        match &write.target {
-            crate::process::ProcessTargetDef::StepParam { param } if param == "transpose" => {
-                match write.op {
-                    crate::process::ProcessTargetOp::Set => resolved.transpose = write.value,
-                    crate::process::ProcessTargetOp::Add => resolved.transpose += write.value,
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 fn process_step_event_value(
@@ -2728,6 +3373,55 @@ fn apply_sampler_param_override(params: &mut ScheduledSamplerParams, idx: u64, v
     }
 }
 
+fn apply_sampler_node_param_override(params: &mut ScheduledSamplerParams, idx: u64, value: f32) {
+    match idx {
+        idx if idx == crate::sampler::PARAM_ATTACK_SAMPLES => params.attack_ms = value,
+        idx if idx == crate::sampler::PARAM_RELEASE_SAMPLES => params.release_ms = value,
+        idx if idx == crate::sampler::PARAM_START_POINT => params.start_point = value,
+        idx if idx == crate::sampler::PARAM_END_POINT => params.end_point = value,
+        idx if idx == crate::sampler::PARAM_ENABLED => params.instrument_enabled = value,
+        idx if idx == crate::sampler::PARAM_REVERSE => params.reverse = value,
+        idx if idx == crate::sampler::PARAM_LOOP_MODE => params.loop_mode = value,
+        idx if idx == crate::sampler::PARAM_LOOP_XFADE_SAMPLES => params.loop_xfade_ms = value,
+        idx if idx == crate::sampler::PARAM_SR_HZ => params.sr_hz = value,
+        idx if idx == crate::sampler::PARAM_WARP_ENABLED => params.warp_enabled = value,
+        idx if idx == crate::sampler::PARAM_WARP_MODE => params.warp_mode = value,
+        idx if idx == crate::sampler::PARAM_WARP_SAMPLE_BPM => params.sample_bpm = value,
+        idx if idx == crate::sampler::PARAM_SPEED => params.playback_speed = value,
+        idx if idx == crate::sampler::PARAM_SCRUB_OFFSET => params.scrub = value,
+        idx if idx == crate::sampler::PARAM_WARP_PRESERVE => params.warp_preserve = value,
+        idx if idx == crate::sampler::PARAM_WARP_SEG_LOOP_MODE => {
+            params.warp_seg_loop_mode = value;
+        }
+        idx if idx == crate::sampler::PARAM_WARP_SEG_ENVELOPE => {
+            params.warp_seg_envelope = value;
+        }
+        _ => {}
+    }
+}
+
+fn apply_sampler_instrument_param_overrides(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    sampler_params: &mut ScheduledSamplerParams,
+    instrument_params: &ScheduledInstrumentParams,
+) {
+    if !matches!(
+        snapshot
+            .tracks
+            .get(track_idx)
+            .map(|track| track.instrument_type),
+        Some(InstrumentType::Sampler)
+    ) {
+        return;
+    }
+    for param in instrument_params {
+        if matches!(param.target, ScheduledInstrumentParamTarget::Synth) {
+            apply_sampler_node_param_override(sampler_params, param.idx, param.value);
+        }
+    }
+}
+
 fn apply_fit_to_scale_to_trigger(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
@@ -2793,12 +3487,18 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
-    sampler_params: ScheduledSamplerParams,
+    mut sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
     let resolved =
         apply_global_transpose_to_resolved(snapshot, track_idx, global_transpose, resolved);
+    apply_sampler_instrument_param_overrides(
+        snapshot,
+        track_idx,
+        &mut sampler_params,
+        &instrument_params,
+    );
     if chord.count > 0 {
         let max_delay = chord.delays[..chord.count]
             .iter()
@@ -2903,6 +3603,7 @@ struct MidiFxEvent {
     chord_step_transpose: f32,
     note_spans: Option<Vec<AccumulatorNoteSpan>>,
     arp_phase_beats: f32,
+    midi_fx_params: Vec<ProcessMidiFxParamOverride>,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
@@ -3019,6 +3720,7 @@ fn midi_fx_event_from_step(
         chord_step_transpose: step.params[StepParam::Transpose.index()],
         note_spans: Some(track_note_spans_for_trigger(snapshot, track_idx, step_idx)),
         arp_phase_beats,
+        midi_fx_params: Vec::new(),
         effect_params,
         instrument_params,
         instrument_tensor_params,
@@ -3074,6 +3776,7 @@ fn midi_fx_event_from_step_event(
         chord_step_transpose: event.chord.step_transpose,
         note_spans: None,
         arp_phase_beats,
+        midi_fx_params: Vec::new(),
         effect_params: event.effect_params,
         instrument_params: event.instrument_params,
         instrument_tensor_params: event.instrument_tensor_params,
@@ -3135,6 +3838,7 @@ fn rebind_midi_fx_event_to_track(
     let target_step = midi_fx_event_step_for_track(snapshot, target_track, event.step);
     event.track = target_track;
     event.step = target_step;
+    event.midi_fx_params.clear();
     event.effect_params = resolve_effect_params(snapshot, target_track, target_step);
     event.instrument_params = resolve_instrument_params(snapshot, target_track, target_step);
     event.instrument_tensor_params =
@@ -3303,6 +4007,7 @@ fn midi_fx_window_events_from_step(
             chord_step_transpose: 0.0,
             note_spans: Some(window_spans),
             arp_phase_beats: arp_phase_beats + window_start,
+            midi_fx_params: Vec::new(),
             effect_params: effect_params.clone(),
             instrument_params: instrument_params.clone(),
             instrument_tensor_params: instrument_tensor_params.clone(),
@@ -3428,11 +4133,24 @@ fn run_midi_fx_chain_for_track_inner(
                 ));
                 continue;
             }
-            let slot_snapshot = snapshot.tracks[event.track]
+            let mut slot_snapshot = snapshot.tracks[event.track]
                 .midi_fx_slots
                 .get(stage_idx)
                 .cloned()
                 .unwrap_or_else(crate::effects::EffectSlotSnapshot::new_empty);
+            if let Some(desc) = descriptors.get(fx_idx) {
+                if slot_snapshot.num_params == 0 && !desc.params.is_empty() {
+                    slot_snapshot = crate::effects::EffectSlotSnapshot::new_default(desc, 0);
+                }
+                apply_process_midi_fx_overrides_to_slot(
+                    &mut slot_snapshot,
+                    event.step,
+                    stage_idx,
+                    &fx_name,
+                    desc,
+                    &event.midi_fx_params,
+                );
+            }
             let enabled = descriptors
                 .get(fx_idx)
                 .and_then(|desc| {
@@ -3441,13 +4159,12 @@ fn run_midi_fx_chain_for_track_inner(
                         .position(|param| param.name.eq_ignore_ascii_case("enabled"))
                 })
                 .and_then(|param_idx| {
-                    slot_snapshot
-                        .plocks
-                        .get(event.step)
-                        .and_then(|step| step.get(param_idx))
-                        .copied()
-                        .flatten()
-                        .or_else(|| slot_snapshot.defaults.get(param_idx).copied())
+                    Some(midi_fx_slot_param_value(
+                        &slot_snapshot,
+                        event.step,
+                        param_idx,
+                        1.0,
+                    ))
                 })
                 .unwrap_or(1.0);
             if enabled <= 0.5 {
@@ -3470,10 +4187,10 @@ fn run_midi_fx_chain_for_track_inner(
                 .and_then(midi_fx_quantizer_grid_param)
             {
                 if let Some(state) = quantizer_state.as_deref_mut() {
-                    let grid_beats = midi_fx_timebase_param_beats(
+                    let grid_beats = midi_fx_timebase_param_beats_from_slot(
                         snapshot,
                         event.track,
-                        stage_idx,
+                        &slot_snapshot,
                         grid_param_idx,
                         event.step,
                     )
@@ -3621,6 +4338,7 @@ fn run_midi_fx_chain_for_track_inner(
                             chord_step_transpose: emitted.chord_step_transpose,
                             note_spans: None,
                             arp_phase_beats: event.arp_phase_beats,
+                            midi_fx_params: event.midi_fx_params.clone(),
                             effect_params,
                             instrument_params,
                             instrument_tensor_params: event.instrument_tensor_params.clone(),
@@ -3989,6 +4707,7 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 chord_step_transpose: 0.0,
                 note_spans: Some(note_spans),
                 arp_phase_beats: rendered_total_beats as f32,
+                midi_fx_params: Vec::new(),
                 effect_params: resolve_effect_params(snapshot, track_idx, step),
                 instrument_params: resolve_instrument_params(snapshot, track_idx, step),
                 instrument_tensor_params: resolve_instrument_tensor_params(
@@ -4112,6 +4831,7 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 chord_step_transpose: 0.0,
                 note_spans: Some(note_spans),
                 arp_phase_beats: (rendered_total_beats + tick_offset_beats) as f32,
+                midi_fx_params: Vec::new(),
                 effect_params: resolve_effect_params(snapshot, track_idx, step),
                 instrument_params: resolve_instrument_params(snapshot, track_idx, step),
                 instrument_tensor_params: resolve_instrument_tensor_params(
@@ -4245,7 +4965,7 @@ fn build_scheduler_scratch_runtime(
         return None;
     }
 
-    let mut runtime = lisp_host::scratch_runtime_with_fallbacks(state, 0, 0);
+    let mut runtime = lisp_host::scheduler_scratch_runtime_with_fallbacks(state, 0, 0);
     let mut keep_runtime = false;
     if !midi_fx_source.trim().is_empty() {
         match runtime.eval(&midi_fx_source) {
@@ -4459,6 +5179,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 pan: step_snapshot.params[StepParam::Pan.index()],
                 chop: step_snapshot.params[StepParam::Chop.index()],
             };
+            let mut process_overlay = ProcessTargetOverlay::default();
             for slot in &track.process_chain.slots {
                 if !slot.enabled {
                     continue;
@@ -4469,7 +5190,16 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     trigger.cycle,
                     track.params.num_steps,
                 );
-                apply_process_target_writes_to_resolved(&mut resolved, &writes);
+                apply_process_target_writes(
+                    snapshot,
+                    &midi_fx_descriptors_for_scheduling,
+                    trigger.track,
+                    trigger.step,
+                    &mut resolved,
+                    &mut process_overlay,
+                    Some(slot),
+                    &writes,
+                );
                 let event = process_step_event_value(
                     trigger.track,
                     trigger.step,
@@ -4494,7 +5224,18 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         process_runtime,
                         invocation,
                         debug_accum,
-                        |writes| apply_process_target_writes_to_resolved(&mut resolved, writes),
+                        |writes| {
+                            apply_process_target_writes(
+                                snapshot,
+                                &midi_fx_descriptors_for_scheduling,
+                                trigger.track,
+                                trigger.step,
+                                &mut resolved,
+                                &mut process_overlay,
+                                Some(slot),
+                                writes,
+                            )
+                        },
                     ) {
                         chunk_enqueued = false;
                         break;
@@ -4523,7 +5264,18 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     process_runtime,
                     invocation,
                     debug_accum,
-                    |writes| apply_process_target_writes_to_resolved(&mut resolved, writes),
+                    |writes| {
+                        apply_process_target_writes(
+                            snapshot,
+                            &midi_fx_descriptors_for_scheduling,
+                            trigger.track,
+                            trigger.step,
+                            &mut resolved,
+                            &mut process_overlay,
+                            None,
+                            writes,
+                        )
+                    },
                 ) {
                     chunk_enqueued = false;
                     break;
@@ -4574,9 +5326,15 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     AccumMode::from_u32(track.params.accum_mode),
                     &mut rs.reversed,
                 );
-                let effect_params = resolve_effect_params(snapshot, trigger.track, trigger.step);
-                let instrument_params =
+                let mut effect_params =
+                    resolve_effect_params(snapshot, trigger.track, trigger.step);
+                let mut instrument_params =
                     resolve_instrument_params(snapshot, trigger.track, trigger.step);
+                upsert_effect_params(&mut effect_params, process_overlay.effect_params.clone());
+                upsert_instrument_params(
+                    &mut instrument_params,
+                    process_overlay.instrument_params.clone(),
+                );
                 let script_idx = if let Some(runtime) = scratch_runtime.as_ref() {
                     if let Some(name) = track.params.script_accumulator_name.as_ref() {
                         runtime
@@ -4669,6 +5427,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                         [StepParam::Transpose.index()],
                                     note_spans: Some(note_spans.clone()),
                                     arp_phase_beats: trigger.absolute_beats as f32,
+                                    midi_fx_params: process_overlay.midi_fx_params.clone(),
                                     effect_params: output.effect_params.clone(),
                                     instrument_params: scheduled_instrument_params_from_vec(
                                         output.instrument_params.clone(),
@@ -4709,6 +5468,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                     chord_step_transpose: emitted.chord_step_transpose,
                                     note_spans: None,
                                     arp_phase_beats: trigger.absolute_beats as f32,
+                                    midi_fx_params: process_overlay.midi_fx_params.clone(),
                                     effect_params: emitted.effect_params,
                                     instrument_params: scheduled_instrument_params_from_vec(
                                         emitted.instrument_params,
@@ -4828,9 +5588,20 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 ) {
                     continue;
                 }
-                let effect_params = resolve_effect_params(snapshot, target_track, trigger.step);
-                let instrument_params =
+                let same_track_process_targets = target_track == trigger.track;
+                let mut effect_params = resolve_effect_params(snapshot, target_track, trigger.step);
+                let mut instrument_params =
                     resolve_instrument_params(snapshot, target_track, trigger.step);
+                let midi_fx_params = if same_track_process_targets {
+                    upsert_effect_params(&mut effect_params, process_overlay.effect_params.clone());
+                    upsert_instrument_params(
+                        &mut instrument_params,
+                        process_overlay.instrument_params.clone(),
+                    );
+                    process_overlay.midi_fx_params.clone()
+                } else {
+                    Vec::new()
+                };
                 let instrument_tensor_params =
                     resolve_instrument_tensor_params(snapshot, target_track, trigger.step);
                 let samples_per_quarter = sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
@@ -4854,7 +5625,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             instrument_params.clone(),
                             instrument_tensor_params.clone(),
                         );
-                        let events = midi_fx_window_events_from_step(
+                        let mut events = midi_fx_window_events_from_step(
                             snapshot,
                             &midi_fx_descriptors_for_scheduling,
                             target_track,
@@ -4868,6 +5639,9 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             instrument_params,
                             instrument_tensor_params,
                         );
+                        for event in &mut events {
+                            event.midi_fx_params = midi_fx_params.clone();
+                        }
                         let events = run_midi_fx_chain_for_track(
                             runtime,
                             snapshot,
@@ -5520,7 +6294,7 @@ pub fn spawn_scheduler_thread(
                         let runtime = scratch_runtime.get_or_insert_with(|| {
                             build_scheduler_scratch_runtime(Arc::clone(&state), "", debug_accum)
                                 .unwrap_or_else(|| {
-                                    lisp_host::scratch_runtime_with_fallbacks(
+                                    lisp_host::scheduler_scratch_runtime_with_fallbacks(
                                         Arc::clone(&state),
                                         0,
                                         0,
@@ -6957,6 +7731,7 @@ mod tests {
             chord_step_transpose: 0.0,
             note_spans: None,
             arp_phase_beats: beat,
+            midi_fx_params: Vec::new(),
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
@@ -7564,6 +8339,7 @@ mod tests {
                                 values: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
                             },
                         )]),
+                        bindings: std::collections::BTreeMap::new(),
                     }],
                 },
             ));
@@ -7687,6 +8463,53 @@ mod tests {
             .expect("scheduler process accumulator harness panicked")
     }
 
+    fn schedule_process_fixture(
+        state: &Arc<SequencerState>,
+        scratch: lisp_host::ScratchControlRuntime,
+    ) -> Vec<ScheduledEventKind> {
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<64>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        scheduler
+            .process_runtime
+            .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = Some(scratch);
+
+        schedule_playing_lookahead(
+            &mut scheduler,
+            state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            24_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        let mut events = Vec::new();
+        while let Some(event) = queue.pop() {
+            events.push(event.kind);
+        }
+        events
+    }
+
+    fn first_resolved_trigger(events: &[ScheduledEventKind]) -> &ScheduledEventKind {
+        events
+            .iter()
+            .find(|event| matches!(event, ScheduledEventKind::ResolvedTrigger { .. }))
+            .expect("resolved trigger event")
+    }
+
     #[test]
     fn scheduler_process_accumulator_folds_sparse_lane_into_transpose() {
         let (_state, events) = run_with_scheduler_stack(run_sparse_process_accumulator_fixture);
@@ -7781,6 +8604,313 @@ mod tests {
             .iter()
             .all(|registry| registry == &crate::plock_variants::PlockVariantRegistry::default()));
         assert!(!state.pattern.instrument_slots[0].key_locks.has_any_lock());
+    }
+
+    #[test]
+    fn scheduler_process_named_ports_accumulate_ordered_step_writes() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(1);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process pitch-a
+                      :targets '((pitch (step-param :transpose)))
+                      :run (target-add! :pitch 3))
+                    (def-process pitch-b
+                      :target (step-param :transpose)
+                      :run (target-add! 4))
+                    (processes :track 0 (pitch-a) (pitch-b))
+                    "#,
+                )
+                .expect("define process chain");
+
+            let events = schedule_process_fixture(&state, scratch);
+            match first_resolved_trigger(&events) {
+                ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
+                    assert_eq!(resolved.transpose, 7.0);
+                }
+                other => panic!("expected resolved trigger, got {other:?}"),
+            }
+            assert_eq!(
+                state.pattern.step_data[0].get(0, StepParam::Transpose),
+                StepParam::Transpose.default_value()
+            );
+        });
+    }
+
+    #[test]
+    fn scheduler_process_stale_midi_fx_target_is_noop_without_blocking_other_ports() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(1);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process stale-port
+                      :targets '((pitch (step-param :transpose))
+                                 (gate (fx-param :beat-repeat :gate)))
+                      :run (do
+                        (target-add! :pitch 5)
+                        (target-set! :gate 0)))
+                    (processes :track 0 (stale-port))
+                    "#,
+                )
+                .expect("define stale-port process");
+
+            let events = schedule_process_fixture(&state, scratch);
+            match first_resolved_trigger(&events) {
+                ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
+                    assert_eq!(resolved.transpose, 5.0);
+                }
+                other => panic!("expected resolved trigger, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn scheduler_process_midi_fx_param_write_applies_to_temporary_slot_snapshot() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(1);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            let source = format!(
+                "{}\n{}",
+                lisp_host::load_midi_fx_library_source(),
+                r#"
+                (def-process close-repeat-gate
+                  :target (fx-param :beat-repeat :gate)
+                  :run (target-set! 0.0))
+                (seq-use-midi-fx 0 "beat-repeat")
+                (processes :track 0 (close-repeat-gate))
+                "#
+            );
+            scratch
+                .eval(&source)
+                .expect("define MIDI FX process fixture");
+
+            let gate_idx = scratch
+                .midi_fx_descriptors()
+                .iter()
+                .find(|desc| desc.name == "beat-repeat")
+                .and_then(|desc| {
+                    desc.params
+                        .iter()
+                        .position(|param| param.name.eq_ignore_ascii_case("gate"))
+                })
+                .expect("beat-repeat gate param");
+            let stored_default = state.pattern.midi_fx_slots[0][0].defaults.get(gate_idx);
+            assert!((stored_default - 0.90).abs() < 1e-6);
+
+            let events = schedule_process_fixture(&state, scratch);
+            match first_resolved_trigger(&events) {
+                ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
+                    assert!((resolved.duration - 0.05).abs() < 1e-6, "{resolved:?}");
+                }
+                other => panic!("expected resolved trigger, got {other:?}"),
+            }
+            assert_eq!(
+                state.pattern.midi_fx_slots[0][0].plocks.get(0, gate_idx),
+                None
+            );
+            assert!((state.pattern.midi_fx_slots[0][0].defaults.get(gate_idx) - 0.90).abs() < 1e-6);
+        });
+    }
+
+    #[test]
+    fn scheduler_process_device_param_writes_upsert_transient_event_payloads() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(1);
+            state.pattern.patterns[0].set_step_active(0, true);
+
+            let sampler_desc = EffectDescriptor::builtin_sampler();
+            let filter_desc = EffectDescriptor::builtin_filter();
+            let speed_param_idx = sampler_desc
+                .params
+                .iter()
+                .position(|param| param.name == "speed")
+                .expect("sampler speed param");
+            let filter_mode_param_idx = filter_desc
+                .params
+                .iter()
+                .position(|param| param.name == "mode")
+                .expect("filter mode param");
+
+            state.pattern.instrument_slots[0].apply_descriptor(&sampler_desc, 12);
+            state.pattern.instrument_slots[0].set_plock(0, speed_param_idx, 0.0);
+            state.pattern.effect_chains[0][0].apply_descriptor(&filter_desc, 42);
+            state.pattern.effect_chains[0][0].set_plock(0, filter_mode_param_idx, 1.0);
+            let mut effect_descriptors = EffectDescriptor::default_full_chain();
+            effect_descriptors[0] = filter_desc.clone();
+            state.set_scratch_runtime_descriptors(
+                vec![effect_descriptors.clone()],
+                vec![sampler_desc.clone()],
+            );
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![effect_descriptors],
+                vec![sampler_desc],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process device-writes
+                      :targets '((inst (instrument-param :speed))
+                                 (mode (effect-param "Filter" :mode)))
+                      :run (do
+                        (target-set! :inst 1.0)
+                        (target-set! :mode 1.0)))
+                    (processes :track 0 (device-writes))
+                    "#,
+                )
+                .expect("define device process fixture");
+
+            let events = schedule_process_fixture(&state, scratch);
+            match first_resolved_trigger(&events) {
+                ScheduledEventKind::ResolvedTrigger {
+                    effect_params,
+                    instrument_params,
+                    sampler_params,
+                    ..
+                } => {
+                    assert!(instrument_params.iter().any(|param| {
+                        param.target == ScheduledInstrumentParamTarget::Synth
+                            && param.idx == crate::sampler::PARAM_SPEED
+                            && (param.value - 4.0).abs() < 1e-6
+                    }));
+                    assert!(
+                        (sampler_params.playback_speed - 4.0).abs() < 1e-6,
+                        "{sampler_params:?}"
+                    );
+                    assert!(effect_params.iter().any(|param| {
+                        param.logical_id == 42
+                            && param.idx == crate::filter::FILTER_PARAM_MODE as u64
+                            && (param.value - 3.0).abs() < 1e-6
+                    }));
+                }
+                other => panic!("expected resolved trigger, got {other:?}"),
+            }
+            assert_eq!(
+                state.pattern.instrument_slots[0]
+                    .plocks
+                    .get(0, speed_param_idx),
+                Some(0.0)
+            );
+            assert_eq!(
+                state.pattern.effect_chains[0][0]
+                    .plocks
+                    .get(0, filter_mode_param_idx),
+                Some(1.0)
+            );
+        });
+    }
+
+    #[test]
+    fn scheduler_phase3a_demo_live_edits_drive_pitch_and_sampler_speed() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(1);
+            state.pattern.patterns[0].set_step_active(0, true);
+
+            let sampler_desc = EffectDescriptor::builtin_sampler();
+            let speed_param_idx = sampler_desc
+                .params
+                .iter()
+                .position(|param| param.name == "speed")
+                .expect("sampler speed param");
+            state.pattern.instrument_slots[0].apply_descriptor(&sampler_desc, 12);
+            state.set_scratch_runtime_descriptors(vec![Vec::new()], vec![sampler_desc.clone()]);
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![sampler_desc],
+                0,
+                0,
+            );
+            let script_path = format!(
+                "{}/scripts/process-phase3a-ports-demo.lisp",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
+            scratch
+                .eval_source_at_path(script_path, &source)
+                .expect("load Phase 3A process demo");
+            scratch
+                .eval("(phase3a-port-writer-h :pitch 4)")
+                .expect("live edit pitch inlet");
+            scratch
+                .eval("(phase3a-port-writer-h :speed 0.75)")
+                .expect("live edit speed inlet");
+
+            let events = schedule_process_fixture(&state, scratch);
+            match first_resolved_trigger(&events) {
+                ScheduledEventKind::ResolvedTrigger {
+                    resolved,
+                    instrument_params,
+                    sampler_params,
+                    ..
+                } => {
+                    assert!((resolved.transpose - 4.0).abs() < 1e-6, "{resolved:?}");
+                    assert!(instrument_params.iter().any(|param| {
+                        param.target == ScheduledInstrumentParamTarget::Synth
+                            && param.idx == crate::sampler::PARAM_SPEED
+                            && (param.value - 2.0).abs() < 1e-6
+                    }));
+                    assert!(
+                        (sampler_params.playback_speed - 2.0).abs() < 1e-6,
+                        "{sampler_params:?}"
+                    );
+                }
+                other => panic!("expected resolved trigger, got {other:?}"),
+            }
+
+            assert_eq!(
+                state.pattern.step_data[0].get(0, StepParam::Transpose),
+                StepParam::Transpose.default_value()
+            );
+            assert_eq!(
+                state.pattern.instrument_slots[0]
+                    .plocks
+                    .get(0, speed_param_idx),
+                None
+            );
+            assert!(
+                (state.pattern.instrument_slots[0]
+                    .defaults
+                    .get(speed_param_idx)
+                    - 1.0)
+                    .abs()
+                    < 1e-6
+            );
+        });
     }
 
     #[test]
@@ -8263,6 +9393,7 @@ mod tests {
             chord_step_transpose: 0.0,
             note_spans: None,
             arp_phase_beats: 0.0,
+            midi_fx_params: Vec::new(),
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
@@ -8359,6 +9490,7 @@ mod tests {
             chord_step_transpose: 0.0,
             note_spans: None,
             arp_phase_beats: 0.0,
+            midi_fx_params: Vec::new(),
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),

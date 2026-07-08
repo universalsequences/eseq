@@ -7869,6 +7869,7 @@ mod tests {
                         values: vec![0.0, 1.0],
                     },
                 )]),
+                bindings: std::collections::BTreeMap::new(),
             }],
         }
     }

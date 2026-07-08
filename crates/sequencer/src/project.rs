@@ -1919,6 +1919,7 @@ mod tests {
                                     values: vec![0.0, 1.0, 0.0, 2.0],
                                 },
                             )]),
+                            bindings: std::collections::BTreeMap::new(),
                         }],
                     },
                     crate::process::TrackProcessChain::default(),

@@ -3515,7 +3515,7 @@ pub(crate) struct ProcessEvalContext {
     inlets: HashMap<String, EValue>,
     state: HashMap<String, EValue>,
     event: Option<EValue>,
-    target: Option<crate::process::ProcessTargetDef>,
+    ports: Vec<crate::process::ProcessPortDef>,
     outputs: Vec<crate::process::ProcessOutput>,
     emissions: Vec<EmittedAccumulatorEvent>,
     target_writes: Vec<crate::process::ProcessTargetWrite>,
@@ -3549,6 +3549,41 @@ impl ScratchControlRuntime {
         track: usize,
         cursor_step: usize,
     ) -> Self {
+        Self::new_with_process_chain_writes(
+            state,
+            effect_descriptors,
+            instrument_descriptors,
+            track,
+            cursor_step,
+            true,
+        )
+    }
+
+    pub fn new_scheduler(
+        state: Arc<crate::sequencer::SequencerState>,
+        effect_descriptors: Vec<Vec<EffectDescriptor>>,
+        instrument_descriptors: Vec<EffectDescriptor>,
+        track: usize,
+        cursor_step: usize,
+    ) -> Self {
+        Self::new_with_process_chain_writes(
+            state,
+            effect_descriptors,
+            instrument_descriptors,
+            track,
+            cursor_step,
+            false,
+        )
+    }
+
+    fn new_with_process_chain_writes(
+        state: Arc<crate::sequencer::SequencerState>,
+        effect_descriptors: Vec<Vec<EffectDescriptor>>,
+        instrument_descriptors: Vec<EffectDescriptor>,
+        track: usize,
+        cursor_step: usize,
+        write_process_chain_state: bool,
+    ) -> Self {
         let context = Arc::new(Mutex::new(SequencerEvalContext { track, cursor_step }));
         let metadata = Arc::new(Mutex::new(SequencerNativeMetadata {
             effect_descriptors,
@@ -3564,6 +3599,7 @@ impl ScratchControlRuntime {
         let process_authoring = Arc::new(Mutex::new(ProcessAuthoringRegistry::default()));
         let process_eval = Arc::new(Mutex::new(None));
         let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
+        let process_chain_state = write_process_chain_state.then(|| Arc::clone(&state));
         let mut runtime = Runtime::new();
         runtime.set_theme_sync_enabled(false);
         runtime.register_native_with_docs(
@@ -3590,7 +3626,7 @@ impl ScratchControlRuntime {
             Arc::clone(&process_authoring),
             Arc::clone(&process_eval),
             None,
-            Some(Arc::clone(&state)),
+            process_chain_state.clone(),
             true,
         );
         register_process_chain_natives(
@@ -3598,12 +3634,13 @@ impl ScratchControlRuntime {
             Arc::clone(&state),
             Arc::clone(&process_authoring),
             None,
+            write_process_chain_state,
         );
         register_def_accumulator_dispatch_native(
             &mut runtime,
             Arc::clone(&accumulators),
             Arc::clone(&process_authoring),
-            Some(Arc::clone(&state)),
+            process_chain_state,
             None,
         );
         graph_update::register_graph_node_natives(&mut runtime, Arc::clone(&graph_node));
@@ -4154,7 +4191,7 @@ impl ScratchControlRuntime {
                 inlets: invocation.inlets,
                 state: invocation.state,
                 event: invocation.event,
-                target: invocation.target,
+                ports: invocation.ports,
                 outputs: Vec::new(),
                 emissions: Vec::new(),
                 target_writes: Vec::new(),
@@ -4619,13 +4656,14 @@ fn register_process_natives(
     let process_eval_for_target_add = Arc::clone(&process_eval);
     runtime.register_native_with_docs(
         "target-add!",
-        "(target-add! value)",
-        "Add a value to this process run's typed target.",
+        "(target-add! value) | (target-add! :port value)",
+        "Add a value to one of this process run's typed target ports.",
         move |args, _ctx| {
-            let value = process_number_arg(args.first(), "target-add!")? as f32;
+            let (port, value) = process_target_write_args(&args, "target-add!")?;
             push_process_target_write(
                 &process_eval_for_target_add,
                 crate::process::ProcessTargetOp::Add,
+                port,
                 value,
             )?;
             Ok(EValue::Number(value as f64))
@@ -4635,13 +4673,14 @@ fn register_process_natives(
     let process_eval_for_target_set = Arc::clone(&process_eval);
     runtime.register_native_with_docs(
         "target-set!",
-        "(target-set! value)",
-        "Set this process run's typed target.",
+        "(target-set! value) | (target-set! :port value)",
+        "Set one of this process run's typed target ports.",
         move |args, _ctx| {
-            let value = process_number_arg(args.first(), "target-set!")? as f32;
+            let (port, value) = process_target_write_args(&args, "target-set!")?;
             push_process_target_write(
                 &process_eval_for_target_set,
                 crate::process::ProcessTargetOp::Set,
+                port,
                 value,
             )?;
             Ok(EValue::Number(value as f64))
@@ -4884,6 +4923,7 @@ pub fn register_published_process_authoring_natives(
         Arc::clone(&state),
         Arc::clone(&process_authoring),
         Some(Arc::clone(&publish)),
+        true,
     );
     PublishedProcessAuthoringNatives {
         process_authoring,
@@ -5010,6 +5050,11 @@ fn process_chain_slot_from_handle(
         enabled: true,
         inlets,
         lanes,
+        bindings: def
+            .ports
+            .iter()
+            .map(|port| (port.name.clone(), None))
+            .collect(),
     })
 }
 
@@ -5018,6 +5063,7 @@ fn register_process_chain_natives(
     state: Arc<crate::sequencer::SequencerState>,
     process_authoring: SharedProcessAuthoring,
     publish: Option<ProcessPublishHook>,
+    write_process_chain_state: bool,
 ) {
     runtime.register_native_with_docs(
         "lane",
@@ -5083,12 +5129,14 @@ fn register_process_chain_natives(
                 }
             }
             let chain = crate::process::TrackProcessChain { slots };
-            for track in &tracks {
-                if !state_for_processes.set_track_process_chain(*track, chain.clone()) {
-                    return Err(format!("track {track} out of range"));
+            if write_process_chain_state {
+                for track in &tracks {
+                    if !state_for_processes.set_track_process_chain(*track, chain.clone()) {
+                        return Err(format!("track {track} out of range"));
+                    }
                 }
+                publish_process_authoring(&authoring_for_processes, &publish_for_processes);
             }
-            publish_process_authoring(&authoring_for_processes, &publish_for_processes);
             match handles.len() {
                 0 => Ok(EValue::Bool(true)),
                 1 => Ok(handles.remove(0)),
@@ -5154,17 +5202,22 @@ fn register_process_chain_natives(
                     ));
                 }
             }
-            let updated = state_for_lane.set_process_lane_values(
-                crate::process::ProcessInstanceId(*id),
-                &inlet,
-                values.clone(),
-            );
-            if updated == 0 {
-                return Err(
-                    "process instance is not attached to any track (use `processes` first)"
-                        .to_string(),
+            let updated = if write_process_chain_state {
+                let updated = state_for_lane.set_process_lane_values(
+                    crate::process::ProcessInstanceId(*id),
+                    &inlet,
+                    values.clone(),
                 );
-            }
+                if updated == 0 {
+                    return Err(
+                        "process instance is not attached to any track (use `processes` first)"
+                            .to_string(),
+                    );
+                }
+                updated
+            } else {
+                0
+            };
             {
                 let mut registry = authoring_for_lane
                     .lock()
@@ -5179,7 +5232,9 @@ fn register_process_chain_natives(
                     crate::process::ProcessInletValue::Literal(process_lane_literal(&values)),
                 );
             }
-            publish_process_authoring(&authoring_for_lane, &publish_for_lane);
+            if write_process_chain_state {
+                publish_process_authoring(&authoring_for_lane, &publish_for_lane);
+            }
             Ok(EValue::Number(updated as f64))
         },
     );
@@ -5271,7 +5326,7 @@ fn parse_process_accumulator_def(
     name: &str,
     args: &[EValue],
 ) -> Result<crate::process::ProcessDef, String> {
-    let mut target = None;
+    let mut ports = None;
     let mut amount = None;
     let mut reset_lane = false;
     let mut range = None;
@@ -5286,7 +5341,16 @@ fn parse_process_accumulator_def(
             return Err(format!("def-accumulator missing value for :{key}"));
         };
         match key.as_str() {
-            "target" => target = Some(parse_process_target_def(value)?),
+            "target" => {
+                if ports.is_some() {
+                    return Err(
+                        "def-accumulator cannot specify both :target and :targets".to_string()
+                    );
+                }
+                ports = Some(vec![crate::process::ProcessPortDef::default_with_target(
+                    parse_process_target_hint(value)?,
+                )]);
+            }
             "amount" => amount = Some(parse_process_accumulator_amount_inlet(value)?),
             "reset" => {
                 let reset = process_symbol_name(value)?.to_ascii_lowercase();
@@ -5307,7 +5371,7 @@ fn parse_process_accumulator_def(
         }
         idx += 1;
     }
-    let target = target.ok_or_else(|| "def-accumulator requires :target".to_string())?;
+    let ports = ports.ok_or_else(|| "def-accumulator requires :target".to_string())?;
     let amount = amount.ok_or_else(|| "def-accumulator requires :amount".to_string())?;
     let mut inlets = vec![amount.clone()];
     let reset_inlet = if reset_lane {
@@ -5334,7 +5398,7 @@ fn parse_process_accumulator_def(
         state: Vec::new(),
         every: None,
         seed_policy,
-        target: Some(target),
+        ports,
         accumulator: Some(crate::process::ProcessAccumulatorSpec {
             amount_inlet: amount.name,
             reset_inlet,
@@ -5367,9 +5431,21 @@ fn process_number_arg(value: Option<&EValue>, native: &str) -> Result<f64, Strin
     }
 }
 
+fn process_target_write_args(
+    args: &[EValue],
+    native: &str,
+) -> Result<(Option<String>, f32), String> {
+    match args {
+        [EValue::Number(value)] => Ok((None, *value as f32)),
+        [port, EValue::Number(value)] => Ok((Some(process_symbol_name(port)?), *value as f32)),
+        _ => Err(format!("{native} expects (value) or (:port value)")),
+    }
+}
+
 fn push_process_target_write(
     process_eval: &SharedProcessEvalContext,
     op: crate::process::ProcessTargetOp,
+    port: Option<String>,
     value: f32,
 ) -> Result<(), String> {
     let mut guard = process_eval
@@ -5378,11 +5454,28 @@ fn push_process_target_write(
     let Some(ctx) = guard.as_mut() else {
         return Err("target write called outside process execution".to_string());
     };
-    let Some(target) = ctx.target.clone() else {
-        return Err("process target write requires :target".to_string());
+    let port = match port {
+        Some(port) => port,
+        None => match ctx.ports.as_slice() {
+            [only] => only.name.clone(),
+            [] => return Err("process target write requires :target or :targets".to_string()),
+            _ => {
+                return Err(
+                    "process has multiple target ports; target write requires an explicit port"
+                        .to_string(),
+                )
+            }
+        },
     };
-    ctx.target_writes
-        .push(crate::process::ProcessTargetWrite { target, op, value });
+    let Some(port_def) = ctx.ports.iter().find(|entry| entry.name == port).cloned() else {
+        return Err(format!("unknown process target port '{port}'"));
+    };
+    ctx.target_writes.push(crate::process::ProcessTargetWrite {
+        port: port_def.name,
+        target: port_def.target,
+        op,
+        value,
+    });
     Ok(())
 }
 
@@ -5392,7 +5485,7 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
     let mut state = Vec::new();
     let mut every = None;
     let mut seed_policy = crate::process::ProcessSeedPolicy::default();
-    let mut target = None;
+    let mut ports: Option<Vec<crate::process::ProcessPortDef>> = None;
     let mut doc = None;
     let mut run_value = None;
     let mut listen_value = None;
@@ -5410,7 +5503,20 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
             "state" => state = parse_process_state(value)?,
             "every" => every = Some(parse_process_time_expr(value)?),
             "seed" => seed_policy = parse_process_seed_policy(value)?,
-            "target" => target = Some(parse_process_target_def(value)?),
+            "target" => {
+                if ports.is_some() {
+                    return Err("def-process cannot specify both :target and :targets".to_string());
+                }
+                ports = Some(vec![crate::process::ProcessPortDef::default_with_target(
+                    parse_process_target_hint(value)?,
+                )]);
+            }
+            "targets" => {
+                if ports.is_some() {
+                    return Err("def-process cannot specify both :target and :targets".to_string());
+                }
+                ports = Some(parse_process_ports(value)?);
+            }
             "run" => run_value = Some(value.clone()),
             "listen" => listen_value = Some(value.clone()),
             other if other.starts_with("on-") => {
@@ -5452,7 +5558,7 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
         state,
         every,
         seed_policy,
-        target,
+        ports: ports.unwrap_or_default(),
         accumulator: None,
         run_source,
         listens,
@@ -5559,13 +5665,46 @@ fn parse_process_seed_policy(value: &EValue) -> Result<crate::process::ProcessSe
     }
 }
 
-fn parse_process_target_def(value: &EValue) -> Result<crate::process::ProcessTargetDef, String> {
+fn parse_process_ports(value: &EValue) -> Result<Vec<crate::process::ProcessPortDef>, String> {
+    let entries = value_list(value).ok_or_else(|| ":targets expects a list".to_string())?;
+    let mut ports = Vec::new();
+    for entry in entries {
+        let items = value_list(&entry)
+            .ok_or_else(|| "target port declaration must be a list".to_string())?;
+        let name = process_symbol_name(
+            items
+                .first()
+                .ok_or_else(|| "target port declaration missing name".to_string())?,
+        )?;
+        if name == crate::process::DEFAULT_PROCESS_PORT {
+            return Err(format!(
+                "'{name}' is reserved for internal default target ports"
+            ));
+        }
+        if ports
+            .iter()
+            .any(|port: &crate::process::ProcessPortDef| port.name == name)
+        {
+            return Err(format!("duplicate target port '{name}'"));
+        }
+        let target = match items.get(1) {
+            None => None,
+            Some(value) if value_list(value).is_some() => Some(parse_process_target_hint(value)?),
+            Some(_) => None,
+        };
+        ports.push(crate::process::ProcessPortDef { name, target });
+    }
+    Ok(ports)
+}
+
+fn parse_process_target_hint(value: &EValue) -> Result<crate::process::ProcessTargetHint, String> {
     let items = value_list(value).ok_or_else(|| "process target must be a list".to_string())?;
     let head = process_symbol_name(
         items
             .first()
             .ok_or_else(|| "process target missing head".to_string())?,
-    )?;
+    )?
+    .to_ascii_lowercase();
     match head.as_str() {
         "step-param" => {
             let param = process_symbol_name(
@@ -5573,12 +5712,48 @@ fn parse_process_target_def(value: &EValue) -> Result<crate::process::ProcessTar
                     .get(1)
                     .ok_or_else(|| "(step-param :name) expects a param".to_string())?,
             )?;
-            if param != "transpose" {
-                return Err(format!(
-                    "only (step-param :transpose) process targets are supported in this slice, got :{param}"
-                ));
-            }
-            Ok(crate::process::ProcessTargetDef::StepParam { param })
+            Ok(crate::process::ProcessTargetHint::StepParam { param })
+        }
+        "param-tag" => {
+            let tag = process_symbol_name(
+                items
+                    .get(1)
+                    .ok_or_else(|| "(param-tag :tag) expects a tag".to_string())?,
+            )?;
+            Ok(crate::process::ProcessTargetHint::ParamTag { tag })
+        }
+        "instrument-param" => {
+            let param = process_symbol_name(
+                items
+                    .get(1)
+                    .ok_or_else(|| "(instrument-param :name) expects a param".to_string())?,
+            )?;
+            Ok(crate::process::ProcessTargetHint::InstrumentParam { param })
+        }
+        "effect-param" => {
+            let effect =
+                process_symbol_name(items.get(1).ok_or_else(|| {
+                    "(effect-param :effect :param) expects an effect".to_string()
+                })?)?;
+            let param = process_symbol_name(
+                items
+                    .get(2)
+                    .ok_or_else(|| "(effect-param :effect :param) expects a param".to_string())?,
+            )?;
+            Ok(crate::process::ProcessTargetHint::EffectParam { effect, param })
+        }
+        "fx-param" | "midi-fx-param" => {
+            let fx = process_symbol_name(
+                items
+                    .get(1)
+                    .ok_or_else(|| "(fx-param :fx :param) expects an fx name".to_string())?,
+            )?;
+            let param = process_symbol_name(
+                items
+                    .get(2)
+                    .ok_or_else(|| "(fx-param :fx :param) expects a param".to_string())?,
+            )?;
+            Ok(crate::process::ProcessTargetHint::MidiFxParam { fx, param })
         }
         other => Err(format!("unsupported process target {other}")),
     }
@@ -5983,7 +6158,7 @@ fn construct_anonymous_listener_process(
         state: Vec::new(),
         every: None,
         seed_policy: crate::process::ProcessSeedPolicy::default(),
-        target: None,
+        ports: Vec::new(),
         accumulator: None,
         run_source: None,
         listens: vec![crate::process::ProcessListenDef {
@@ -10695,6 +10870,15 @@ fn midi_fx_attr_name(value: &EValue) -> Option<String> {
     }
 }
 
+fn midi_fx_known_param_attr_name(value: &EValue) -> Option<String> {
+    let name = midi_fx_attr_name(value)?;
+    matches!(
+        name.as_str(),
+        "default" | "min" | "max" | "unit" | "role" | "tags" | "enum"
+    )
+    .then_some(name)
+}
+
 fn midi_fx_attr_number(args: &[EValue], idx: usize, attr: &str) -> Result<f32, String> {
     match args.get(idx) {
         Some(EValue::Number(value)) => Ok(*value as f32),
@@ -10711,6 +10895,7 @@ fn parse_midi_fx_param_descriptor(
     let mut max = 1.0_f32;
     let mut unit = None;
     let mut role = None;
+    let mut tags = Vec::new();
     let mut labels: Option<Vec<String>> = None;
     let mut idx = 0;
     while idx < args.len() {
@@ -10749,9 +10934,20 @@ fn parse_midi_fx_param_descriptor(
                 };
                 idx += 1;
             }
+            "tags" => {
+                while idx < args.len() && midi_fx_known_param_attr_name(&args[idx]).is_none() {
+                    match &args[idx] {
+                        EValue::String(value) | EValue::Keyword(value) | EValue::Symbol(value) => {
+                            tags.push(value.clone())
+                        }
+                        _ => return Err("midi-fx-param :tags values must be strings".to_string()),
+                    }
+                    idx += 1;
+                }
+            }
             "enum" => {
                 let mut enum_labels = Vec::new();
-                while idx < args.len() && midi_fx_attr_name(&args[idx]).is_none() {
+                while idx < args.len() && midi_fx_known_param_attr_name(&args[idx]).is_none() {
                     match &args[idx] {
                         EValue::String(value) | EValue::Keyword(value) | EValue::Symbol(value) => {
                             enum_labels.push(value.clone())
@@ -10785,7 +10981,7 @@ fn parse_midi_fx_param_descriptor(
         node_param_idx: 0,
         node_param_span: 1,
         host_control: None,
-        ui_metadata: crate::effects::ParamUiMetadata::new(None, None, role),
+        ui_metadata: crate::effects::ParamUiMetadata::with_tags(None, None, role, tags),
     })
 }
 
@@ -12594,6 +12790,23 @@ pub fn scratch_runtime_with_fallbacks(
     track: usize,
     cursor_step: usize,
 ) -> ScratchControlRuntime {
+    scratch_runtime_with_fallbacks_inner(state, track, cursor_step, true)
+}
+
+pub fn scheduler_scratch_runtime_with_fallbacks(
+    state: Arc<crate::sequencer::SequencerState>,
+    track: usize,
+    cursor_step: usize,
+) -> ScratchControlRuntime {
+    scratch_runtime_with_fallbacks_inner(state, track, cursor_step, false)
+}
+
+fn scratch_runtime_with_fallbacks_inner(
+    state: Arc<crate::sequencer::SequencerState>,
+    track: usize,
+    cursor_step: usize,
+    write_process_chain_state: bool,
+) -> ScratchControlRuntime {
     let track_count = state.active_track_count().max(1);
     let (effect_descriptors, instrument_descriptors) = state.scratch_runtime_descriptors();
     let effect_descriptors = if effect_descriptors.is_empty() {
@@ -12606,12 +12819,13 @@ pub fn scratch_runtime_with_fallbacks(
     } else {
         instrument_descriptors
     };
-    let mut runtime = ScratchControlRuntime::new(
+    let mut runtime = ScratchControlRuntime::new_with_process_chain_writes(
         state,
         effect_descriptors,
         instrument_descriptors,
         track,
         cursor_step,
+        write_process_chain_state,
     );
     runtime.set_theme_sync_enabled(false);
     runtime
@@ -13072,10 +13286,11 @@ mod tests {
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
         new_eval_context, parse_manifest, read_eseqlisp_init_source,
         register_graph_authoring_natives, register_published_process_authoring_natives,
-        register_sequencer_natives, scratch_runtime_with_fallbacks,
-        selected_neural_instrument_plock_value, set_selected_neural_instrument_plocks,
-        shared_native_metadata, AccumulatorNoteSpan, DGenParam, DGenSidechainInput,
-        ScratchControlRuntime, SelectedNeuralNeuron,
+        register_sequencer_natives, scheduler_scratch_runtime_with_fallbacks,
+        scratch_runtime_with_fallbacks, selected_neural_instrument_plock_value,
+        set_selected_neural_instrument_plocks, shared_native_metadata, AccumulatorNoteSpan,
+        DGenParam, DGenSidechainInput, ScratchControlRuntime, SelectedNeuralNeuron,
+        UI_PROCESS_HANDLE_BASE,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
@@ -20789,10 +21004,12 @@ mod tests {
             .expect("process definition");
         assert_eq!(def.seed_policy, crate::process::ProcessSeedPolicy::Locked);
         assert_eq!(
-            def.target,
-            Some(crate::process::ProcessTargetDef::StepParam {
-                param: "transpose".to_string()
-            })
+            def.ports,
+            vec![crate::process::ProcessPortDef::default_with_target(
+                crate::process::ProcessTargetHint::StepParam {
+                    param: "transpose".to_string()
+                }
+            )]
         );
         let inlet = &def.inlets[0];
         assert_eq!(inlet.name, "delta");
@@ -20822,19 +21039,304 @@ mod tests {
                 inlets: HashMap::from([("delta".to_string(), Value::Number(5.0))]),
                 state: HashMap::new(),
                 event: None,
-                target: def.target.clone(),
+                ports: def.ports.clone(),
                 seed: 123,
             })
             .expect("invoke process");
         assert_eq!(
             result.target_writes,
             vec![crate::process::ProcessTargetWrite {
-                target: crate::process::ProcessTargetDef::StepParam {
-                    param: "transpose".to_string()
-                },
+                port: crate::process::DEFAULT_PROCESS_PORT.to_string(),
+                target: Some(crate::process::ProcessTargetHint::StepParam {
+                    param: "transpose".to_string(),
+                }),
                 op: crate::process::ProcessTargetOp::Add,
                 value: 5.0,
             }]
+        );
+    }
+
+    #[test]
+    fn def_process_parses_named_targets_and_named_target_writes() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (def-process multi-port
+                  :targets '((pitch (step-param :transpose))
+                             (gate (fx-param :beat-repeat :gate)))
+                  :run (do
+                    (target-add! :pitch 7)
+                    (target-set! :gate 0.25)))
+                "#,
+            )
+            .expect("define named-port process");
+
+        let authored = scratch.process_authoring_snapshot();
+        let def = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "multi-port")
+            .expect("process definition");
+        assert_eq!(
+            def.ports,
+            vec![
+                crate::process::ProcessPortDef {
+                    name: "pitch".to_string(),
+                    target: Some(crate::process::ProcessTargetHint::StepParam {
+                        param: "transpose".to_string(),
+                    }),
+                },
+                crate::process::ProcessPortDef {
+                    name: "gate".to_string(),
+                    target: Some(crate::process::ProcessTargetHint::MidiFxParam {
+                        fx: "beat-repeat".to_string(),
+                        param: "gate".to_string(),
+                    }),
+                },
+            ]
+        );
+
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 78,
+                source: def.run_source.clone().expect("run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                ports: def.ports.clone(),
+                seed: 123,
+            })
+            .expect("invoke named-port process");
+        assert_eq!(
+            result.target_writes,
+            vec![
+                crate::process::ProcessTargetWrite {
+                    port: "pitch".to_string(),
+                    target: Some(crate::process::ProcessTargetHint::StepParam {
+                        param: "transpose".to_string(),
+                    }),
+                    op: crate::process::ProcessTargetOp::Add,
+                    value: 7.0,
+                },
+                crate::process::ProcessTargetWrite {
+                    port: "gate".to_string(),
+                    target: Some(crate::process::ProcessTargetHint::MidiFxParam {
+                        fx: "beat-repeat".to_string(),
+                        param: "gate".to_string(),
+                    }),
+                    op: crate::process::ProcessTargetOp::Set,
+                    value: 0.25,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn process_target_write_errors_on_unknown_named_port() {
+        let process_eval = Arc::new(std::sync::Mutex::new(Some(super::ProcessEvalContext {
+            runtime_id: 79,
+            beat: 0.0,
+            inlets: HashMap::new(),
+            state: HashMap::new(),
+            event: None,
+            ports: vec![crate::process::ProcessPortDef {
+                name: "pitch".to_string(),
+                target: Some(crate::process::ProcessTargetHint::StepParam {
+                    param: "transpose".to_string(),
+                }),
+            }],
+            outputs: Vec::new(),
+            emissions: Vec::new(),
+            target_writes: Vec::new(),
+            transpose: None,
+            random_state: 123,
+        })));
+
+        let err = super::push_process_target_write(
+            &process_eval,
+            crate::process::ProcessTargetOp::Add,
+            Some("missing".to_string()),
+            1.0,
+        )
+        .expect_err("unknown target port should fail");
+        assert!(
+            err.contains("unknown process target port 'missing'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn midi_fx_param_tags_are_parsed_alongside_role() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (midi-fx-param "gate"
+                  :default 0.5
+                  :min 0
+                  :max 1
+                  :role :level
+                  :tags :gate "probability")
+                (def-midi-fx "tagged-gate" (fx-emit 0))
+                "#,
+            )
+            .expect("define tagged MIDI FX");
+
+        let desc = scratch
+            .midi_fx_descriptors()
+            .into_iter()
+            .find(|desc| desc.name == "tagged-gate")
+            .expect("tagged MIDI FX descriptor");
+        let gate_param = desc
+            .params
+            .iter()
+            .find(|param| param.name == "gate")
+            .expect("declared gate param");
+        let metadata = gate_param
+            .ui_metadata
+            .as_ref()
+            .expect("tagged param metadata");
+        assert_eq!(metadata.role.as_deref(), Some("level"));
+        assert_eq!(
+            metadata.tags,
+            vec!["gate".to_string(), "probability".to_string()]
+        );
+        assert!(gate_param.has_tag_or_name("gate"));
+        assert!(gate_param.has_tag_or_name("probability"));
+    }
+
+    #[test]
+    fn process_phase3a_ports_demo_loads_and_attaches_chain() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-phase3a-ports-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
+
+        scratch
+            .eval(&super::load_midi_fx_library_source())
+            .expect("load builtin MIDI FX library");
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate Phase 3A process demo");
+
+        assert!(scratch
+            .midi_fx_names()
+            .iter()
+            .any(|name| name == "beat-repeat"));
+        assert!(state.pattern.track_params[0].midi_fx_chain().is_empty());
+        let chain = state.track_process_chain(0).expect("track 0 process chain");
+        assert_eq!(chain.slots.len(), 1);
+        assert_eq!(chain.slots[0].class_name, "phase3a-port-writer");
+
+        let authored = scratch.process_authoring_snapshot();
+        let def = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "phase3a-port-writer")
+            .expect("Phase 3A process definition");
+        assert_eq!(def.ports.len(), 3);
+        assert!(def.ports.iter().any(|port| {
+            port.name == "pitch"
+                && port.target
+                    == Some(crate::process::ProcessTargetHint::StepParam {
+                        param: "transpose".to_string(),
+                    })
+        }));
+        assert!(def.ports.iter().any(|port| {
+            port.name == "gate"
+                && port.target
+                    == Some(crate::process::ProcessTargetHint::MidiFxParam {
+                        fx: "beat-repeat".to_string(),
+                        param: "gate".to_string(),
+                    })
+        }));
+        assert!(def.ports.iter().any(|port| {
+            port.name == "speed"
+                && port.target
+                    == Some(crate::process::ProcessTargetHint::InstrumentParam {
+                        param: "speed".to_string(),
+                    })
+        }));
+    }
+
+    #[test]
+    fn scheduler_scratch_load_does_not_replace_ui_authored_process_chain_slots() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let script_path = format!(
+            "{}/scripts/process-phase3a-ports-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
+
+        let mut ui_runtime = Runtime::new();
+        ui_runtime
+            .eval_str("(def seq-register-script-source-tab (label) nil)")
+            .expect("install source-tab stub");
+        register_published_process_authoring_natives(
+            &mut ui_runtime,
+            Arc::clone(&state),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        ui_runtime
+            .eval_str(&source)
+            .expect("evaluate demo in UI runtime");
+
+        let ui_instance_id = state
+            .track_process_chain(0)
+            .expect("track 0 process chain")
+            .slots
+            .first()
+            .expect("UI-authored process slot")
+            .instance_id;
+        assert!(
+            ui_instance_id.0 >= UI_PROCESS_HANDLE_BASE,
+            "UI-authored process slot should use the UI handle range, got {ui_instance_id:?}"
+        );
+
+        let mut scheduler_runtime =
+            scheduler_scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+        scheduler_runtime
+            .eval(&source)
+            .expect("scheduler scratch should accept the demo source");
+
+        assert_eq!(
+            state
+                .track_process_chain(0)
+                .expect("track 0 process chain")
+                .slots
+                .first()
+                .expect("process slot after scheduler eval")
+                .instance_id,
+            ui_instance_id,
+            "scheduler scratch eval must not replace UI-authored chain slots with scheduler-local handles"
         );
     }
 
@@ -20882,7 +21384,7 @@ mod tests {
                     inlets: HashMap::new(),
                     state: HashMap::new(),
                     event: None,
-                    target: def.target.clone(),
+                    ports: def.ports.clone(),
                     seed,
                 })
                 .expect("invoke helper process")

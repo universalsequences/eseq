@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::effects::EffectSlotSnapshot;
+use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::neural::ProjectNeuralNetwork;
 
@@ -43,8 +43,10 @@ pub struct SequencerTrackSnapshot {
     pub engine_id: Option<usize>,
     pub rack_track: Option<RackTrackSnapshot>,
     pub process_chain: crate::process::TrackProcessChain,
+    pub effect_descriptors: Vec<EffectDescriptor>,
     pub effect_slots: Vec<EffectSlotSnapshot>,
     pub midi_fx_slots: Vec<EffectSlotSnapshot>,
+    pub instrument_descriptor: EffectDescriptor,
     pub instrument_slot: EffectSlotSnapshot,
     pub steps: Vec<SequencerStepSnapshot>,
 }
@@ -90,6 +92,8 @@ impl SequencerSnapshot {
         let mut tracks = Vec::with_capacity(num_tracks);
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let live_process_chains = state.pattern.process_chains.lock().unwrap();
+        let (effect_descriptors_by_track, instrument_descriptors) =
+            state.scratch_runtime_descriptors();
 
         for track_idx in 0..num_tracks {
             let tp = &state.pattern.track_params[track_idx];
@@ -138,10 +142,18 @@ impl SequencerSnapshot {
                 .iter()
                 .map(EffectSlotSnapshot::capture)
                 .collect();
+            let effect_descriptors = effect_descriptors_by_track
+                .get(track_idx)
+                .cloned()
+                .unwrap_or_else(EffectDescriptor::default_full_chain);
             let midi_fx_slots = state.pattern.midi_fx_slots[track_idx]
                 .iter()
                 .map(EffectSlotSnapshot::capture)
                 .collect();
+            let instrument_descriptor = instrument_descriptors
+                .get(track_idx)
+                .cloned()
+                .unwrap_or_else(EffectDescriptor::builtin_sampler);
             let instrument_slot =
                 EffectSlotSnapshot::capture(&state.pattern.instrument_slots[track_idx]);
 
@@ -192,8 +204,10 @@ impl SequencerSnapshot {
                     .get(track_idx)
                     .cloned()
                     .unwrap_or_default(),
+                effect_descriptors,
                 effect_slots,
                 midi_fx_slots,
+                instrument_descriptor,
                 instrument_slot,
                 steps,
             });
@@ -294,8 +308,10 @@ fn track_snapshot_from_pattern_data(
         engine_id,
         rack_track: data.rack_track.clone(),
         process_chain: data.process_chain.clone(),
+        effect_descriptors: Vec::new(),
         effect_slots: data.effect_slots.clone(),
         midi_fx_slots: data.midi_fx_slots.clone(),
+        instrument_descriptor: EffectDescriptor::builtin_sampler(),
         instrument_slot: data.instrument_slot.clone(),
         steps,
     }

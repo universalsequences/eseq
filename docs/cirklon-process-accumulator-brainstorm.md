@@ -739,6 +739,108 @@ expensive to reverse.
 2. Ordered-discrete domain ops for timebase values.
 3. Cross-track timebase deferred until a control dependency graph exists.
 
+## End Game (non-normative — doors to keep open)
+
+The long vision, so earlier phases don't accidentally close doors on it. Not
+scheduled; nothing below gates Phases 0–9.
+
+The library should eventually hold **players, not just utilities**: a pack like
+"es chord 2" loads from the browser, opens as a tab with its own panel (the
+scripts-as-tabs mechanism already does this — the graph-neural scripts are the
+precedent, including per-node track routing), lets the user say "observe these
+2 melody tracks, play these 4 harmony tracks," and coordinates triggers into
+shifting harmonies toward a panel-controlled goal density — while another
+track's process lane sequences the pack's `chord` inlet.
+
+Most of this already rides existing seams: custom tab UIs (scripts system),
+track-typed inlets, cross-track **emissions** as the sanctioned cross-track
+write (the conductor *plays* the harmony tracks, never edits their step data),
+Phase 7 grabs/history for harmonic context, and `ProcessInlet` targets so
+other processes/lanes sequence a conductor's inlets. Preset tier 3 becomes a
+*style* ("close voicings, low density, follows the bass").
+
+### Fields: suggestions instead of commands (the band model)
+
+The richer version of coordination is not top-down. Alongside `:play` (emit
+notes on bound tracks) and `:steer` (write followers' step params directly), a
+process can **suggest**: publish a typed *field* — a pitch-set, a scalar
+density, an accent gate — that any track may listen to on its own terms:
+
+```lisp
+;; conductor side — typed channel publish (domain rides with the field)
+(suggest :harmony (pitch-field (chord-tones chord) :root chord :weight energy))
+(suggest :density density)
+
+;; band-member side — an ordinary chain process; acceptance is its knobs
+(def-process follow-harmony
+  :in ((listen :field :default :harmony)
+       (amount :float 0 1 :default 1 :lane true)   ; obedience — sequenceable
+       (grace  :int 0 3 :default 0))               ; allowed passing tones
+  :run (let ((field (hear listen)))
+         (when field
+           (note! ev (draw-toward (note ev) field amount :passing grace)))))
+```
+
+Why this shape is right:
+
+- **Acceptance is a process in the member's own chain.** Obedience is an
+  inlet — lane-sequenceable, p-lockable, per-pattern. Interpretation is
+  per-member (the pad snaps hard, the lead plays passing tones through the
+  field). Refusal/counterpoint is a sign flip (`defy`).
+- **Joining the band is one gesture.** The publisher never enumerates
+  listeners; drop `follow-harmony` on a ninth track and it's in. This inverts
+  the binding — `:play` roles bind conductor→track, fields bind
+  track→field — and scales from quartet to orchestra unconfigured.
+- **Decentralized, not dictatorial.** Any process can `suggest`, including
+  band members — the drummer suggests `:accent` while following `:harmony`.
+  Listening is a mesh, not a tree; "conductor" is a social role, not an
+  architectural one. This maps to how people actually play together.
+- **`hear` is nil-safe**: no publisher ⇒ follow processes are inert
+  (defaults-inert / soft resolution, again).
+- **Determinism**: `hear` reads fields as published at the *end of the
+  previous tick* (same register rule as cross-track grabs) — one tick of
+  latency, no ordering cycles, and reacting a beat late is musically human.
+- **Collisions (decided): field names are plain channel names; two publishers
+  on one field are the author's problem for now.** Blend policies / per-
+  instance namespacing only if this bites in practice.
+- Library shelf this implies: *band members* (`follow-harmony`,
+  `follow-density`, `call-response`, `defy`) whose presets are personalities.
+
+The command spectrum, in one line:
+`:play` = the band's hands · `:steer` = lean on a player · `suggest` = the vibe.
+
+The genuine engine deltas — the depth this spec doesn't yet cover:
+
+1. **Conductor attachment mode.** One instance observing N tracks and playing
+   M others — `(processes :observe (list 1 2) :play (list 3 4 5 6) ...)`-ish —
+   invoked once per tick *after* all observed tracks resolve. This is where the
+   currently-undefined same-tick cross-track ordering gets its answer: the
+   determinism rule today says reads see end-of-previous-step registers; a
+   conductor needs a defined view of "everything that fired this tick" across
+   its observed set. Post-resolution invocation of a single instance is that
+   answer without a general dependency graph. (Fields reduce how load-bearing
+   this is — much of the band model works through opt-in listening with the
+   one-tick rule, no track binding at all.)
+2. **A determinism contract for stateful conductors.** A density-goal
+   harmonizer with memory can't be a lane fold; it's the raw tier's "missing
+   sugar shape" made concrete. Likely a third tier (`def-conductor`?):
+   replayable because it is a pure function of (seeded RNG, resolved-state
+   reads, inlets), not because it folds a lane. Lookahead/replay semantics for
+   its emissions need the same rigor Phase 1 gives accumulators.
+3. **Reactive outlet/channel → widget bindings.** Panels can *write* inlets
+   today but can't cheaply *display* process state (current chord, achieved
+   density). The graph engine's `bind-graph` reactive bindings are the
+   precedent; processes need the analog. (Promotes the existing
+   send/outlet-visualization open question from cheap-win to load-bearing.)
+4. **Browser/packaging polish.** Scripts already deliver UI tabs; the gap is
+   framing only — process packs as browsable library entries with presets,
+   instrument-bank style.
+
+Doors to keep open in earlier phases: keep the emission path fully
+track-agnostic; keep `ProcessInlet` a first-class `ParamTarget` (it is the
+seam for "sequence the conductor"); don't let chain-slot identity/storage
+assume one-instance-per-track so hard that an N-track instance can't exist.
+
 ## Locked Decisions
 
 - Immediate ordered write application (not final-merge); reads see pending writes.

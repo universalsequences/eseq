@@ -542,12 +542,45 @@ fn process_inlet_kind_name(kind: &sequencer::process::ProcessInletKind) -> &'sta
     }
 }
 
-fn process_target_label(target: Option<&sequencer::process::ProcessTargetDef>) -> String {
+fn process_target_hint_label(target: Option<&sequencer::process::ProcessTargetHint>) -> String {
     match target {
-        Some(sequencer::process::ProcessTargetDef::StepParam { param }) => {
+        Some(sequencer::process::ProcessTargetHint::StepParam { param }) => {
             format!("step-param:{param}")
         }
+        Some(sequencer::process::ProcessTargetHint::ParamTag { tag }) => {
+            format!("param-tag:{tag}")
+        }
+        Some(sequencer::process::ProcessTargetHint::InstrumentParam { param }) => {
+            format!("instrument-param:{param}")
+        }
+        Some(sequencer::process::ProcessTargetHint::EffectParam { effect, param }) => {
+            format!("effect-param:{effect}:{param}")
+        }
+        Some(sequencer::process::ProcessTargetHint::MidiFxParam { fx, param }) => {
+            format!("midi-fx-param:{fx}:{param}")
+        }
         None => String::new(),
+    }
+}
+
+fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) -> String {
+    match ports {
+        [] => String::new(),
+        [port] if port.name == sequencer::process::DEFAULT_PROCESS_PORT => {
+            process_target_hint_label(port.target.as_ref())
+        }
+        _ => ports
+            .iter()
+            .map(|port| {
+                let target = process_target_hint_label(port.target.as_ref());
+                if target.is_empty() {
+                    format!("{}:unbound", port.name)
+                } else {
+                    format!("{}:{target}", port.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -676,7 +709,9 @@ fn process_lane_entries_for_track(
                 max,
                 default,
                 decimals: process_inlet_decimals(inlet.map(|entry| &entry.kind)),
-                target: process_target_label(def.and_then(|def| def.target.as_ref())),
+                target: def
+                    .map(|def| process_ports_label(&def.ports))
+                    .unwrap_or_default(),
                 values,
             });
         }
@@ -893,9 +928,10 @@ pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usiz
             ("enabled", Value::Bool(slot.enabled)),
             (
                 "target",
-                Value::String(process_target_label(
-                    def.and_then(|def| def.target.as_ref()),
-                )),
+                Value::String(
+                    def.map(|def| process_ports_label(&def.ports))
+                        .unwrap_or_default(),
+                ),
             ),
             ("inlets", list_value(inlet_values)),
         ])
@@ -916,10 +952,7 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
             ("name", Value::String(def.name.clone())),
             ("label", Value::String(def.name.clone())),
             ("doc", Value::String(def.doc.clone().unwrap_or_default())),
-            (
-                "target",
-                Value::String(process_target_label(def.target.as_ref())),
-            ),
+            ("target", Value::String(process_ports_label(&def.ports))),
             (
                 "lane-count",
                 Value::Number(def.inlets.iter().filter(|inlet| inlet.lane).count() as f64),
@@ -20493,6 +20526,65 @@ mod tests {
                     extract_string_from_payload(payload, "path")
                         .is_some_and(|path| path.ends_with("process-chain-demo.lisp")),
                     "source-tab command should include the loaded process-chain demo path"
+                );
+            }
+            other => panic!("expected open-script-source-tab host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_phase3a_ports_demo_script_picker_opens_source_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let process_state = Arc::new(SequencerState::new(
+            16,
+            (0..16)
+                .map(|_| sequencer::sequencer::default_empty_effect_chain())
+                .collect(),
+        ));
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            editor.runtime_mut(),
+            process_state,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seq-script-load-file
+                    (path-join (seq-script-default-dir) "process-phase3a-ports-demo.lisp"))"#,
+            )
+            .expect("load Phase 3A ports demo through script picker path");
+
+        let commands = editor.drain_host_commands();
+        let script_contract = editor
+            .runtime_mut()
+            .eval_str(
+                "(list script-source-tab-requested script-source-tab-label script-buffer-name)",
+            )
+            .expect("read script contract globals");
+        let status = editor.runtime_mut().take_status_message();
+        let source_tab_command = commands
+            .iter()
+            .find(|command| {
+                matches!(
+                    command,
+                    eseqlisp::host::HostCommand::Custom { name, payload }
+                        if name == "open-script-source-tab"
+                            && extract_string_from_payload(payload, "label")
+                                == Some("Phase 3A Ports".to_string())
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected Phase 3A ports source-tab command, got {commands:?}; contract={script_contract:?}; status={status:?}"
+                )
+            });
+        match source_tab_command {
+            eseqlisp::host::HostCommand::Custom { payload, .. } => {
+                assert!(
+                    extract_string_from_payload(payload, "path")
+                        .is_some_and(|path| path.ends_with("process-phase3a-ports-demo.lisp")),
+                    "source-tab command should include the loaded Phase 3A demo path"
                 );
             }
             other => panic!("expected open-script-source-tab host command, got {other:?}"),

@@ -10,7 +10,10 @@ use eseqlisp::vm::Value;
 use serde::{Deserialize, Serialize};
 
 use crate::lisp_host::EmittedAccumulatorEvent;
+use crate::neural::ParamNodeId;
 use crate::neural::{process_grid_boundaries, GridBoundaryClock};
+
+pub const DEFAULT_PROCESS_PORT: &str = "__default";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProcessTimeExpr {
@@ -60,8 +63,59 @@ pub enum ProcessSeedPolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ProcessTargetDef {
+pub enum ProcessTargetHint {
     StepParam { param: String },
+    ParamTag { tag: String },
+    InstrumentParam { param: String },
+    EffectParam { effect: String, param: String },
+    MidiFxParam { fx: String, param: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessPortDef {
+    pub name: String,
+    pub target: Option<ProcessTargetHint>,
+}
+
+impl ProcessPortDef {
+    pub fn default_with_target(target: ProcessTargetHint) -> Self {
+        Self {
+            name: DEFAULT_PROCESS_PORT.to_string(),
+            target: Some(target),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ParamTarget {
+    StepParam {
+        param: String,
+    },
+    InstrumentParam {
+        param: String,
+        param_id: Option<ParamNodeId>,
+    },
+    EffectParam {
+        slot: usize,
+        effect: String,
+        param: String,
+        param_id: Option<ParamNodeId>,
+    },
+    MidiFxParam {
+        slot: usize,
+        fx: String,
+        param: String,
+    },
+    RackSlotParam {
+        slot: usize,
+        param: String,
+    },
+    RackSlotInstrumentParam {
+        slot: usize,
+        param: String,
+        param_id: Option<ParamNodeId>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +127,8 @@ pub enum ProcessTargetOp {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessTargetWrite {
-    pub target: ProcessTargetDef,
+    pub port: String,
+    pub target: Option<ProcessTargetHint>,
     pub op: ProcessTargetOp,
     pub value: f32,
 }
@@ -115,6 +170,8 @@ pub struct TrackProcessSlot {
     pub inlets: BTreeMap<String, ProcessLiteral>,
     #[serde(default)]
     pub lanes: BTreeMap<String, ProcessLane>,
+    #[serde(default)]
+    pub bindings: BTreeMap<String, Option<ParamTarget>>,
 }
 
 fn default_true() -> bool {
@@ -186,7 +243,7 @@ pub struct ProcessDef {
     pub state: Vec<ProcessStateDef>,
     pub every: Option<ProcessTimeExpr>,
     pub seed_policy: ProcessSeedPolicy,
-    pub target: Option<ProcessTargetDef>,
+    pub ports: Vec<ProcessPortDef>,
     pub accumulator: Option<ProcessAccumulatorSpec>,
     pub run_source: Option<String>,
     pub listens: Vec<ProcessListenDef>,
@@ -358,7 +415,7 @@ pub struct PublishedProcessDef {
     pub state: Vec<PublishedProcessStateDef>,
     pub every: Option<ProcessTimeExpr>,
     pub seed_policy: ProcessSeedPolicy,
-    pub target: Option<ProcessTargetDef>,
+    pub ports: Vec<ProcessPortDef>,
     pub accumulator: Option<ProcessAccumulatorSpec>,
     pub run_source: Option<String>,
     pub listens: Vec<ProcessListenDef>,
@@ -448,7 +505,7 @@ impl ProcessAuthoringSnapshot {
                             .collect::<Result<Vec<_>, String>>()?,
                         every: def.every.clone(),
                         seed_policy: def.seed_policy,
-                        target: def.target.clone(),
+                        ports: def.ports.clone(),
                         accumulator: def.accumulator.clone(),
                         run_source: def.run_source.clone(),
                         listens: def.listens.clone(),
@@ -563,7 +620,7 @@ impl PublishedProcessAuthoringSnapshot {
                         .collect(),
                     every: def.every.clone(),
                     seed_policy: def.seed_policy,
-                    target: def.target.clone(),
+                    ports: def.ports.clone(),
                     accumulator: def.accumulator.clone(),
                     run_source: def.run_source.clone(),
                     listens: def.listens.clone(),
@@ -677,7 +734,7 @@ pub struct ProcessRunInvocation {
     pub inlets: HashMap<String, Value>,
     pub state: HashMap<String, Value>,
     pub event: Option<Value>,
-    pub target: Option<ProcessTargetDef>,
+    pub ports: Vec<ProcessPortDef>,
     pub seed: u64,
 }
 
@@ -898,10 +955,11 @@ impl ProcessRuntime {
                 .get(&instance.class_name)
                 .map(|def| def.seed_policy)
                 .unwrap_or_default();
-            let target = self
+            let ports = self
                 .defs
                 .get(&instance.class_name)
-                .and_then(|def| def.target.clone());
+                .map(|def| def.ports.clone())
+                .unwrap_or_default();
             if instance.one_shot {
                 let Some(target_beat) = instance.one_shot_target_beat else {
                     continue;
@@ -925,7 +983,7 @@ impl ProcessRuntime {
                     ),
                     state: instance.state.clone(),
                     event: None,
-                    target: target.clone(),
+                    ports: ports.clone(),
                     seed: process_rng_seed(instance.runtime_id, seed_policy, target_beat, None),
                 });
                 continue;
@@ -957,7 +1015,7 @@ impl ProcessRuntime {
                         inlets: inlets.clone(),
                         state: state.clone(),
                         event: None,
-                        target: target.clone(),
+                        ports: ports.clone(),
                         seed: process_rng_seed(runtime_id, class_seed_policy, beat, None),
                     });
                 },
@@ -1171,10 +1229,11 @@ impl ProcessRuntime {
                     ),
                     state: instance.state.clone(),
                     event: Some(value.clone()),
-                    target: self
+                    ports: self
                         .defs
                         .get(&instance.class_name)
-                        .and_then(|def| def.target.clone()),
+                        .map(|def| def.ports.clone())
+                        .unwrap_or_default(),
                     seed: process_rng_seed(
                         instance.runtime_id,
                         self.defs
@@ -1221,7 +1280,7 @@ impl ProcessRuntime {
         let Some(accumulator) = def.accumulator.as_ref() else {
             return Vec::new();
         };
-        let Some(target) = def.target.clone() else {
+        let Some(port) = def.ports.first().cloned() else {
             return Vec::new();
         };
         let amount_default = def
@@ -1257,7 +1316,8 @@ impl ProcessRuntime {
             cycle_len,
         );
         vec![ProcessTargetWrite {
-            target,
+            port: port.name,
+            target: port.target,
             op: ProcessTargetOp::Add,
             value: acc,
         }]
@@ -1276,7 +1336,7 @@ impl ProcessRuntime {
             return None;
         }
         let source = def.run_source.clone()?;
-        let target = def.target.clone();
+        let ports = def.ports.clone();
         let seed_policy = def.seed_policy;
         let instance_id = slot.instance_id;
         self.step_process_runtime_ids.insert(instance_id.0);
@@ -1294,7 +1354,7 @@ impl ProcessRuntime {
             inlets: resolve_step_process_inlets(&def, slot, ctx.step),
             state,
             event: Some(ctx.event),
-            target,
+            ports,
             seed: process_rng_seed(instance_id.0, seed_policy, ctx.beat, Some(ctx.cycle)),
         })
     }
@@ -1807,7 +1867,7 @@ mod tests {
                         state: Vec::new(),
                         every: None,
                         seed_policy: ProcessSeedPolicy::default(),
-                        target: None,
+                        ports: Vec::new(),
                         accumulator: None,
                         run_source: None,
                         listens: Vec::new(),
@@ -1821,7 +1881,7 @@ mod tests {
                         state: Vec::new(),
                         every: None,
                         seed_policy: ProcessSeedPolicy::default(),
-                        target: None,
+                        ports: Vec::new(),
                         accumulator: None,
                         run_source: None,
                         listens: vec![ProcessListenDef {
@@ -1905,7 +1965,7 @@ mod tests {
                     state: Vec::new(),
                     every: None,
                     seed_policy: ProcessSeedPolicy::default(),
-                    target: None,
+                    ports: Vec::new(),
                     accumulator: None,
                     run_source: None,
                     listens: vec![ProcessListenDef {
@@ -1962,9 +2022,11 @@ mod tests {
                     state: Vec::new(),
                     every: None,
                     seed_policy: ProcessSeedPolicy::default(),
-                    target: Some(ProcessTargetDef::StepParam {
-                        param: "transpose".to_string(),
-                    }),
+                    ports: vec![ProcessPortDef::default_with_target(
+                        ProcessTargetHint::StepParam {
+                            param: "transpose".to_string(),
+                        },
+                    )],
                     accumulator: Some(ProcessAccumulatorSpec {
                         amount_inlet: "amount".to_string(),
                         reset_inlet: None,
@@ -1989,6 +2051,7 @@ mod tests {
                     values: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
                 },
             )]),
+            bindings: BTreeMap::new(),
         };
 
         let first = (0..8)

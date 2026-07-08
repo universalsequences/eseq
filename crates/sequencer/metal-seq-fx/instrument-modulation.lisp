@@ -234,7 +234,7 @@
 (def instrument-mod-control-panel (inst)
   (box :debug-name "instrument-mod-control-panel"
     :width 36.4
-    :height 7
+    :height 9.5
     :padding 1
     :background-color :black
     :corner-radius 10

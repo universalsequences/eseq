@@ -41,16 +41,43 @@ pub struct ParamUiMetadata {
     pub group: Option<String>,
     pub env: Option<String>,
     pub role: Option<String>,
+    pub tags: Vec<String>,
 }
 
 impl ParamUiMetadata {
     pub fn new(group: Option<String>, env: Option<String>, role: Option<String>) -> Option<Self> {
-        if group.is_none() && env.is_none() && role.is_none() {
+        Self::with_tags(group, env, role, Vec::new())
+    }
+
+    pub fn with_tags(
+        group: Option<String>,
+        env: Option<String>,
+        role: Option<String>,
+        tags: Vec<String>,
+    ) -> Option<Self> {
+        let tags = normalized_param_tags(tags);
+        if group.is_none() && env.is_none() && role.is_none() && tags.is_empty() {
             None
         } else {
-            Some(Self { group, env, role })
+            Some(Self {
+                group,
+                env,
+                role,
+                tags,
+            })
         }
     }
+}
+
+fn normalized_param_tags(tags: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for tag in tags {
+        let normalized = tag.trim_start_matches(':').to_ascii_lowercase();
+        if !normalized.is_empty() && !out.contains(&normalized) {
+            out.push(normalized);
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +123,23 @@ pub struct ParamDescriptor {
 }
 
 impl ParamDescriptor {
+    pub fn has_tag_or_name(&self, tag_or_name: &str) -> bool {
+        let needle = tag_or_name.trim_start_matches(':').to_ascii_lowercase();
+        if self.name.eq_ignore_ascii_case(&needle) {
+            return true;
+        }
+        self.ui_metadata.as_ref().is_some_and(|metadata| {
+            metadata
+                .role
+                .as_ref()
+                .is_some_and(|role| role.trim_start_matches(':').eq_ignore_ascii_case(&needle))
+                || metadata
+                    .tags
+                    .iter()
+                    .any(|tag| tag.eq_ignore_ascii_case(&needle))
+        })
+    }
+
     /// Step size for +/- adjustment.
     pub fn increment(&self, current_val: f32) -> f32 {
         match &self.kind {
