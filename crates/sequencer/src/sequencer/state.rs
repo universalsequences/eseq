@@ -4487,6 +4487,40 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
         true
     }
+    /// Replace a lane wholesale on every current-pattern chain slot owned by
+    /// `instance_id` (a handle can be attached to several tracks). Returns the
+    /// number of slots updated; publishes only when at least one matched.
+    pub fn set_process_lane_values(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+        inlet_name: &str,
+        values: Vec<f32>,
+    ) -> usize {
+        let mut updated = 0;
+        {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            for chain in chains.iter_mut() {
+                for slot in chain
+                    .slots
+                    .iter_mut()
+                    .filter(|slot| slot.instance_id == instance_id)
+                {
+                    slot.lanes.insert(
+                        inlet_name.to_string(),
+                        crate::process::ProcessLane {
+                            values: values.clone(),
+                        },
+                    );
+                    updated += 1;
+                }
+            }
+        }
+        if updated > 0 {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            self.publish_scheduler_snapshot();
+        }
+        updated
+    }
     pub fn scratch_runtime_descriptors(
         &self,
     ) -> (Vec<Vec<EffectDescriptor>>, Vec<EffectDescriptor>) {

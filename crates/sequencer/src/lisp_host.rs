@@ -3545,7 +3545,7 @@ impl ScratchControlRuntime {
         runtime.set_theme_sync_enabled(false);
         register_sequencer_natives_with_accumulators(
             &mut runtime,
-            state,
+            Arc::clone(&state),
             Arc::clone(&context),
             Arc::clone(&metadata),
             Arc::clone(&accumulators),
@@ -3563,6 +3563,7 @@ impl ScratchControlRuntime {
             None,
             true,
         );
+        register_process_chain_natives(&mut runtime, state, Arc::clone(&process_authoring));
         register_def_accumulator_dispatch_native(
             &mut runtime,
             Arc::clone(&accumulators),
@@ -4212,8 +4213,9 @@ fn register_process_natives(
         "def-accumulator",
         "(def-accumulator name :target (step-param :transpose) :amount (...) :reset :lane :range (lo hi) :mode :wrap)",
         "Define a replay-safe lane-folding step process accumulator.",
-        move |args, _vm| match register_process_accumulator_def(
+        move |args, vm| match register_process_accumulator_def(
             args,
+            vm,
             &process_authoring_for_def_acc,
             publish_for_def_acc.clone(),
         ) {
@@ -4715,50 +4717,68 @@ fn register_def_accumulator_dispatch_native(
     process_authoring: SharedProcessAuthoring,
     publish: Option<ProcessPublishHook>,
 ) {
-    runtime.register_native_with_docs(
+    // A vm native (not a plain native) so the process-accumulator branch can
+    // register the class constructor, matching def-process.
+    runtime.register_vm_native_with_docs(
         "def-accumulator",
         "(def-accumulator name body) | (def-accumulator name :target (step-param :transpose) :amount (...))",
         "Define either a legacy script accumulator or a process accumulator, depending on the argument shape.",
-        move |args, ctx| {
-            let is_legacy_script_form =
-                args.len() == 2 && !matches!(args.get(1), Some(EValue::Keyword(_)));
-            if !is_legacy_script_form {
-                return register_process_accumulator_def(
-                    args,
-                    &process_authoring,
-                    publish.clone(),
-                );
-            }
-            let name = process_symbol_name(
-                args.first()
-                    .ok_or_else(|| "expected accumulator name".to_string())?,
-            )?;
-            let callback = args
-                .get(1)
-                .ok_or_else(|| "expected accumulator callback".to_string())?;
-            let callback = match callback {
-                EValue::Closure(_, _) => RegisteredAccumulatorCallback::Closure(callback.clone()),
-                EValue::String(source) => RegisteredAccumulatorCallback::Source(source.clone()),
-                other => {
-                    RegisteredAccumulatorCallback::Source(eseqlisp::vm::format_lisp_source(other))
+        move |args, vm| {
+            let result = def_accumulator_dispatch(
+                args,
+                vm,
+                &accumulators,
+                &process_authoring,
+                publish.clone(),
+            );
+            match result {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("[process] def-accumulator error: {error}");
+                    EValue::Bool(false)
                 }
-            };
-            let mut registry = accumulators
-                .lock()
-                .map_err(|_| "failed to lock accumulator registry".to_string())?;
-            if let Some(existing) = registry.iter_mut().find(|entry| entry.name == name) {
-                existing.callback = callback.clone();
-            } else {
-                registry.push(RegisteredAccumulator {
-                    name: name.clone(),
-                    callback: callback.clone(),
-                    params: Vec::new(),
-                });
             }
-            ctx.set_status(format!("registered accumulator '{name}'"));
-            Ok(EValue::Bool(true))
         },
     );
+}
+
+fn def_accumulator_dispatch(
+    args: Vec<EValue>,
+    vm: &mut eseqlisp::vm::VM,
+    accumulators: &SharedRegisteredAccumulators,
+    process_authoring: &SharedProcessAuthoring,
+    publish: Option<ProcessPublishHook>,
+) -> Result<EValue, String> {
+    let is_legacy_script_form =
+        args.len() == 2 && !matches!(args.get(1), Some(EValue::Keyword(_)));
+    if !is_legacy_script_form {
+        return register_process_accumulator_def(args, vm, process_authoring, publish);
+    }
+    let name = process_symbol_name(
+        args.first()
+            .ok_or_else(|| "expected accumulator name".to_string())?,
+    )?;
+    let callback = args
+        .get(1)
+        .ok_or_else(|| "expected accumulator callback".to_string())?;
+    let callback = match callback {
+        EValue::Closure(_, _) => RegisteredAccumulatorCallback::Closure(callback.clone()),
+        EValue::String(source) => RegisteredAccumulatorCallback::Source(source.clone()),
+        other => RegisteredAccumulatorCallback::Source(eseqlisp::vm::format_lisp_source(other)),
+    };
+    let mut registry = accumulators
+        .lock()
+        .map_err(|_| "failed to lock accumulator registry".to_string())?;
+    if let Some(existing) = registry.iter_mut().find(|entry| entry.name == name) {
+        existing.callback = callback.clone();
+    } else {
+        registry.push(RegisteredAccumulator {
+            name: name.clone(),
+            callback: callback.clone(),
+            params: Vec::new(),
+        });
+    }
+    Ok(EValue::Bool(true))
 }
 
 fn register_process_graph_emit_native(
@@ -4793,16 +4813,291 @@ pub fn register_published_process_authoring_natives(
         UI_PROCESS_HANDLE_BASE,
     )));
     let process_eval = Arc::new(Mutex::new(None));
+    let state_for_publish = Arc::clone(&state);
     let publish: ProcessPublishHook = Arc::new(move |snapshot| {
-        state.publish_process_authoring(snapshot);
+        state_for_publish.publish_process_authoring(snapshot);
         ui_epoch.fetch_add(1, Ordering::Relaxed);
     });
     register_process_natives(
         runtime,
-        process_authoring,
+        Arc::clone(&process_authoring),
         process_eval,
         Some(publish),
         false,
+    );
+    register_process_chain_natives(runtime, state, process_authoring);
+}
+
+const PROCESS_LANE_TAG: &str = "__process-lane";
+
+/// `(lane 0 1 0 ...)` evaluates to a tagged list; `processes`/`lane!` unpack it.
+fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, String>> {
+    let EValue::List(items) = value else {
+        return None;
+    };
+    match items.first().map(|item| item.borrow().clone()) {
+        Some(EValue::Keyword(tag)) if tag.trim_start_matches(':') == PROCESS_LANE_TAG => {}
+        _ => return None,
+    }
+    let mut values = Vec::with_capacity(items.len().saturating_sub(1));
+    for item in &items[1..] {
+        match &*item.borrow() {
+            EValue::Number(number) => values.push(*number as f32),
+            EValue::Bool(gate) => values.push(if *gate { 1.0 } else { 0.0 }),
+            other => {
+                return Some(Err(format!(
+                    "lane values must be numbers, got {}",
+                    eseqlisp::vm::format_lisp_value(other)
+                )))
+            }
+        }
+    }
+    Some(Ok(values))
+}
+
+fn parse_process_track_spec(
+    value: &EValue,
+    active_tracks: usize,
+) -> Result<Vec<usize>, String> {
+    let parse_index = |number: f64| -> Result<usize, String> {
+        if number < 0.0 || number.fract() != 0.0 {
+            return Err("processes expects non-negative integer track indices".to_string());
+        }
+        let track = number as usize;
+        if track >= active_tracks {
+            return Err(format!("track {track} out of range"));
+        }
+        Ok(track)
+    };
+    match value {
+        EValue::Number(number) => Ok(vec![parse_index(*number)?]),
+        EValue::Keyword(name) | EValue::Symbol(name)
+            if name.trim_start_matches(':') == "all" =>
+        {
+            Ok((0..active_tracks).collect())
+        }
+        EValue::List(items) => {
+            let mut tracks = Vec::with_capacity(items.len());
+            for item in items {
+                match &*item.borrow() {
+                    EValue::Number(number) => tracks.push(parse_index(*number)?),
+                    _ => return Err("processes :track list expects track indices".to_string()),
+                }
+            }
+            Ok(tracks)
+        }
+        _ => Err("processes expects :track <index | :all | (list ...)>".to_string()),
+    }
+}
+
+/// Convert an attached instance handle into a pattern-scoped chain slot:
+/// scalar inlet literals into `slot.inlets`, `(lane ...)` literals into
+/// `slot.lanes` (legal only on `:lane true` inlets).
+fn process_chain_slot_from_handle(
+    registry: &ProcessAuthoringRegistry,
+    handle_id: u64,
+) -> Result<crate::process::TrackProcessSlot, String> {
+    let instance = registry
+        .instances
+        .iter()
+        .find(|entry| entry.handle_id.0 == handle_id)
+        .ok_or_else(|| "unknown process handle".to_string())?;
+    let def = registry
+        .defs
+        .iter()
+        .find(|def| def.name == instance.class_name)
+        .ok_or_else(|| format!("unknown process class '{}'", instance.class_name))?;
+    let mut inlets = std::collections::BTreeMap::new();
+    let mut lanes = std::collections::BTreeMap::new();
+    for (name, value) in &instance.inlets {
+        let crate::process::ProcessInletValue::Literal(literal) = value else {
+            return Err(format!(
+                "chain-attached process inlet '{name}' must be a literal (patch outlets/channels with `patch` instead)"
+            ));
+        };
+        if let Some(lane_values) = process_lane_values(literal) {
+            let lane_backed = def
+                .inlets
+                .iter()
+                .any(|inlet| inlet.name == *name && inlet.lane);
+            if !lane_backed {
+                return Err(format!(
+                    "inlet '{name}' of '{}' is not lane-backed (:lane true)",
+                    instance.class_name
+                ));
+            }
+            lanes.insert(
+                name.clone(),
+                crate::process::ProcessLane {
+                    values: lane_values?,
+                },
+            );
+        } else {
+            inlets.insert(
+                name.clone(),
+                crate::process::ProcessLiteral::from_value(literal)?,
+            );
+        }
+    }
+    Ok(crate::process::TrackProcessSlot {
+        instance_id: crate::process::ProcessInstanceId(handle_id),
+        class_name: instance.class_name.clone(),
+        enabled: true,
+        inlets,
+        lanes,
+    })
+}
+
+fn register_process_chain_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+    process_authoring: SharedProcessAuthoring,
+) {
+    runtime.register_native_with_docs(
+        "lane",
+        "(lane v1 v2 ...)",
+        "Per-step lane literal for a lane-backed process inlet. Steps beyond the lane's length read the inlet default.",
+        move |args, _ctx| {
+            let mut items = vec![EValue::Keyword(PROCESS_LANE_TAG.to_string())];
+            for arg in &args {
+                match arg {
+                    EValue::Number(_) | EValue::Bool(_) => items.push(arg.clone()),
+                    other => {
+                        return Err(format!(
+                            "lane values must be numbers, got {}",
+                            eseqlisp::vm::format_lisp_value(other)
+                        ))
+                    }
+                }
+            }
+            Ok(process_list(items))
+        },
+    );
+
+    let state_for_processes = Arc::clone(&state);
+    let authoring_for_processes = Arc::clone(&process_authoring);
+    runtime.register_native_with_docs(
+        "processes",
+        "(processes :track <index | :all | (list ...)> instance...)",
+        "Declare a track's step-process chain, in order. Replaces the current pattern's chain; no instances clears it. Returns the instance handle (or a list of them) for lane!/knob tweaks.",
+        move |args, _ctx| {
+            let (EValue::Keyword(key) | EValue::Symbol(key)) = args
+                .first()
+                .ok_or_else(|| "processes expects :track first".to_string())?
+            else {
+                return Err("processes expects :track first".to_string());
+            };
+            if key.trim_start_matches(':') != "track" {
+                return Err("processes expects :track first".to_string());
+            }
+            let tracks = parse_process_track_spec(
+                args.get(1)
+                    .ok_or_else(|| "processes expects a track spec after :track".to_string())?,
+                state_for_processes.active_track_count(),
+            )?;
+            let mut slots = Vec::new();
+            let mut handles = Vec::new();
+            {
+                let registry = authoring_for_processes
+                    .lock()
+                    .map_err(|_| "failed to lock process registry".to_string())?;
+                for arg in &args[2..] {
+                    let EValue::HostHandle { kind, id, .. } = arg else {
+                        return Err(
+                            "processes expects process instances, e.g. (transpose-climb :limit 12)"
+                                .to_string(),
+                        );
+                    };
+                    if kind != "process" {
+                        return Err(format!("processes expects process instances, got {kind}"));
+                    }
+                    slots.push(process_chain_slot_from_handle(&registry, *id)?);
+                    handles.push(arg.clone());
+                }
+            }
+            let chain = crate::process::TrackProcessChain { slots };
+            for track in &tracks {
+                if !state_for_processes.set_track_process_chain(*track, chain.clone()) {
+                    return Err(format!("track {track} out of range"));
+                }
+            }
+            match handles.len() {
+                0 => Ok(EValue::Bool(true)),
+                1 => Ok(handles.remove(0)),
+                _ => Ok(process_list(handles)),
+            }
+        },
+    );
+
+    let state_for_lane = Arc::clone(&state);
+    let authoring_for_lane = Arc::clone(&process_authoring);
+    runtime.register_native_with_docs(
+        "lane!",
+        "(lane! instance :inlet v1 v2 ...)",
+        "Replace a lane on an attached process instance in the current pattern (every track it is attached to).",
+        move |args, _ctx| {
+            let Some(EValue::HostHandle { kind, id, .. }) = args.first() else {
+                return Err("lane! expects a process instance handle".to_string());
+            };
+            if kind != "process" {
+                return Err("lane! expects a process instance handle".to_string());
+            }
+            let inlet = process_symbol_name(
+                args.get(1)
+                    .ok_or_else(|| "lane! expects an :inlet name".to_string())?,
+            )?;
+            let mut values = Vec::with_capacity(args.len().saturating_sub(2));
+            for arg in &args[2..] {
+                match arg {
+                    EValue::Number(number) => values.push(*number as f32),
+                    EValue::Bool(gate) => values.push(if *gate { 1.0 } else { 0.0 }),
+                    other => {
+                        return Err(format!(
+                            "lane! values must be numbers, got {}",
+                            eseqlisp::vm::format_lisp_value(other)
+                        ))
+                    }
+                }
+            }
+            {
+                let registry = authoring_for_lane
+                    .lock()
+                    .map_err(|_| "failed to lock process registry".to_string())?;
+                let instance = registry
+                    .instances
+                    .iter()
+                    .find(|entry| entry.handle_id.0 == *id)
+                    .ok_or_else(|| "unknown process handle".to_string())?;
+                let lane_backed = registry
+                    .defs
+                    .iter()
+                    .find(|def| def.name == instance.class_name)
+                    .map(|def| {
+                        def.inlets
+                            .iter()
+                            .any(|entry| entry.name == inlet && entry.lane)
+                    })
+                    .unwrap_or(false);
+                if !lane_backed {
+                    return Err(format!(
+                        "inlet '{inlet}' of '{}' is not lane-backed (:lane true)",
+                        instance.class_name
+                    ));
+                }
+            }
+            let updated = state_for_lane.set_process_lane_values(
+                crate::process::ProcessInstanceId(*id),
+                &inlet,
+                values,
+            );
+            if updated == 0 {
+                return Err(
+                    "process instance is not attached to any track (use `processes` first)"
+                        .to_string(),
+                );
+            }
+            Ok(EValue::Number(updated as f64))
+        },
     );
 }
 
@@ -4822,11 +5117,21 @@ fn register_process_def(
         .map_err(|_| "failed to lock process registry".to_string())?
         .upsert_def(def.clone());
     publish_process_authoring(process_authoring, &publish);
+    register_process_constructor_native(vm, &name, process_authoring, publish);
+    Ok(EValue::String(name))
+}
+
+fn register_process_constructor_native(
+    vm: &mut eseqlisp::vm::VM,
+    name: &str,
+    process_authoring: &SharedProcessAuthoring,
+    publish: Option<ProcessPublishHook>,
+) {
     let process_authoring_for_constructor = Arc::clone(process_authoring);
-    let publish_for_constructor = publish.clone();
-    let class_name = name.clone();
+    let publish_for_constructor = publish;
+    let class_name = name.to_string();
     vm.register_native_with_vm(
-        &name,
+        name,
         move |ctor_args, _vm| match construct_process_instance(
             &process_authoring_for_constructor,
             &class_name,
@@ -4851,11 +5156,11 @@ fn register_process_def(
             }
         },
     );
-    Ok(EValue::String(name))
 }
 
 fn register_process_accumulator_def(
     args: Vec<EValue>,
+    vm: &mut eseqlisp::vm::VM,
     process_authoring: &SharedProcessAuthoring,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
@@ -4869,6 +5174,7 @@ fn register_process_accumulator_def(
         .map_err(|_| "failed to lock process registry".to_string())?
         .upsert_def(def);
     publish_process_authoring(process_authoring, &publish);
+    register_process_constructor_native(vm, &name, process_authoring, publish);
     Ok(EValue::String(name))
 }
 
@@ -19905,6 +20211,89 @@ mod tests {
         // ticks, so transpose climbs 1,2,3,4.
         let transposes: Vec<f32> = out.iter().map(|e| e.event.resolved.transpose).collect();
         assert_eq!(transposes, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn processes_form_attaches_chain_slots_with_lanes_and_knobs() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(2),
+            fallback_instrument_descriptors(2),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-accumulator sparse-transpose
+                  :target (step-param :transpose)
+                  :amount (amount :lane true :default 0)
+                  :range (-128 128)
+                  :mode :clip)
+
+                (def climb
+                  (processes :track 0
+                    (sparse-transpose :amount (lane 0 1 0 0 1 0 0 0))))
+                "#,
+            )
+            .expect("attach process chain");
+
+        let chain = state.track_process_chain(0).expect("track 0 chain");
+        assert_eq!(chain.slots.len(), 1);
+        assert_eq!(chain.slots[0].class_name, "sparse-transpose");
+        assert_eq!(
+            chain.slots[0].lanes.get("amount").map(|lane| &lane.values),
+            Some(&vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+        );
+        assert!(chain.slots[0].inlets.is_empty());
+        assert!(state
+            .track_process_chain(1)
+            .expect("track 1 chain")
+            .slots
+            .is_empty());
+
+        // lane! rewrites the attached lane in place via the returned handle.
+        scratch
+            .eval("(lane! climb :amount 0 2 0 0 2 0 0 0)")
+            .expect("lane! rewrite");
+        let chain = state.track_process_chain(0).expect("track 0 chain");
+        assert_eq!(
+            chain.slots[0].lanes.get("amount").map(|lane| &lane.values),
+            Some(&vec![0.0, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0])
+        );
+
+        // :track :all stamps the slot on every track; empty form clears.
+        scratch
+            .eval("(processes :track :all (sparse-transpose :amount (lane 1 1)))")
+            .expect("attach to all tracks");
+        for track in 0..2 {
+            let chain = state.track_process_chain(track).expect("chain");
+            assert_eq!(chain.slots.len(), 1, "track {track} should have a slot");
+        }
+        scratch.eval("(processes :track 0)").expect("clear chain");
+        assert!(state
+            .track_process_chain(0)
+            .expect("track 0 chain")
+            .slots
+            .is_empty());
+
+        // (lane ...) on a non-lane inlet is rejected: the native errors (status +
+        // false, per plain-native convention) and the chain is left untouched.
+        scratch
+            .eval("(processes :track 0 (sparse-transpose :range (lane 1 2)))")
+            .expect("eval itself should not fail");
+        assert!(
+            state
+                .track_process_chain(0)
+                .expect("track 0 chain")
+                .slots
+                .is_empty(),
+            "rejected attach must not modify the chain"
+        );
     }
 
     #[test]

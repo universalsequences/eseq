@@ -61,7 +61,7 @@ Things we can do that Cirklon can't:
 - Accumulator overflow as an event generator (`wrap-crash` below).
 - History reads (`:steps-ago`) turning grabs into canons/delay-lines.
 
-## Verified Repo Facts (as of this writing)
+## Verified Repo Facts (re-verified 2026-07-07)
 
 These ground the plan; all confirmed in code:
 
@@ -93,6 +93,25 @@ These ground the plan; all confirmed in code:
   the same model. `PublishedProcessDef` already flows into sequencer state.
 - `ProcessRunInvocation` already has an `event: Option<Value>` slot — the hook for
   passing the resolved base event into step-attached runs.
+
+### Landed since the original draft (affect this design)
+
+- **Racks** (`RackSlotParam`, `RackSlotSnapshot`, `RackSlotParamPlocks` in
+  `sequencer/state.rs`): tracks are no longer one-instrument. Any target model
+  that says `InstrumentParam { track, param }` is already stale — see the rack
+  addressing note under Typed Targets.
+- **P-lock variants** (`plock_variants.rs`, commit `8d065f39`): interned p-lock
+  bundles keyed on exact `value_bits`, with domains split
+  `Instrument / Effect / RackSlotParam / RackSlotInstrument(Tensor)`. Two
+  consequences: process writes must never persist into plock/step storage
+  (would corrupt variant identity — now a locked decision), and the merge-order
+  claim must be validated against the reworked step-resolution path
+  (`state_values.rs` grew ~3k lines across `8d065f39`/`207e4589`).
+- **Key-locks spec** (`docs/key-locks-spec.md`, draft): per-note param
+  overrides resolved at voice-assignment time on the *sounding* pitch. Defines
+  its own resolve chain that must compose with process writes — see Merge
+  Order below. Key-locks is the smaller feature and shares the resolve seam;
+  prefer landing it first so this work builds on a settled chain.
 
 ## Core Architecture
 
@@ -167,8 +186,22 @@ track step fires
   keeps advancing under masked trigs. With pure folds this is automatic.
 - **Spawned events go through the same downstream path** (MIDI FX, graph) as the
   base event.
-- **Merge order: base → p-lock → process writes.** Manual p-locks are the base the
-  process transforms (modulation-on-top, Cirklon mental model), not overridden by it.
+- **Merge order (full chain, per param):**
+  `patch default → key lock → step p-lock → process write → mods`. Manual
+  p-locks are the base the process transforms (modulation-on-top, Cirklon
+  mental model), not overridden by it; key locks (per-note overrides,
+  `docs/key-locks-spec.md`) sit below step p-locks; mods modulate around
+  whatever survives. This is the one authoritative ordering — both specs cite
+  it.
+- **Process writes are transient fire-time overlays.** They are never written
+  back into plock/step storage. This was always implied; `plock_variants.rs`
+  makes it load-bearing — variants intern p-lock bundles on exact `value_bits`,
+  and a persisted process write would corrupt variant identity.
+- **Process transpose writes change the sounding pitch, which changes which key
+  lock fires.** Processes run at step-resolution time, before voice
+  assignment, so the key-lock lookup naturally sees the post-process pitch.
+  Correct behavior, but it must be an explicit test in whichever feature lands
+  second.
 
 ### Typed targets with fused domains
 
@@ -180,13 +213,23 @@ enum ParamTarget {
     StepParam { track: TrackRef, param: StepParam },
     TrackTimebase { track: TrackRef },
     TrackSwing { track: TrackRef },
-    InstrumentParam { track: TrackRef, param: ParamRef },
+    InstrumentParam { track: TrackRef, instrument: InstrumentRef, param: ParamRef },
     EffectParam { track: TrackRef, slot: usize, param: ParamRef },
     MidiFxParam { track: TrackRef, slot: usize, param: ParamRef },
     ProcessInlet { process: ProcessRef, inlet: String },
     ProcessChannel { name: String },
 }
 ```
+
+**Rack addressing.** Tracks are no longer one-instrument: racks landed
+(`RackSlotSnapshot` etc. in `sequencer/state.rs`), and `plock_variants.rs`
+already had to split its domains into
+`Instrument / Effect / RackSlotParam / RackSlotInstrument(Tensor)`.
+`InstrumentRef` above must mirror that split (plain slot vs. rack slot vs.
+instrument-inside-rack-slot) from the first version of the enum — this is
+part of the expensive-to-reverse decision, not a Phase 3 detail to retrofit.
+On a rack track, `:self` in an instrument-param target means *the slot the
+base event routes to*.
 
 Domains: continuous range, ordered discrete (timebase), integer range, gate,
 unordered enum. `add`/accumulate is legal only on ordered domains; enums get
@@ -229,6 +272,43 @@ alongside `step_data`, and does NOT extend the fixed `StepParam` enum.
 - Attachment **implies** the trigger: chain-attached processes need no
   `:on (track-step :self)` clause. `:on`/`:every` remain for self-clocked and
   channel-listening processes.
+
+### Attachment authoring form (landed decision)
+
+The Lisp surface for attaching processes to tracks — usable today for testing,
+and the same surface the UI will drive later. Declarative for structure,
+handles for live tweaking:
+
+```lisp
+;; Declare a track's whole chain (ordered). Replaces any existing chain —
+;; re-evaluating the buffer is idempotent.
+(def climb
+  (processes :track 0
+    (transpose-climb :limit 12
+                     :delta (lane 0 1 0 0 1 0 0 0))))
+
+(processes :track :all (prob-mask :prob (lane 1 0.75)))  ; every track
+(processes :track (list 0 3) ...)                        ; a set of tracks
+(processes :track 0)                                     ; empty = clear
+
+;; Handles keep the existing instance-call idiom alive after attachment:
+(lane! climb :delta 0 2 0 0 2 0 0 0)   ; re-sequence a lane
+(climb :limit 6)                        ; knob tweak (write-through: follow-up)
+```
+
+Rules:
+
+- Instance forms are ordinary class calls (`(transpose-climb :limit 12)`) —
+  the existing instantiation idiom. `processes` consumes the resulting
+  handles and turns them into chain slots.
+- **Lane-backed inlets accept either a scalar (constant) or a `(lane ...)`
+  literal** — the call site mirrors the `:in` declaration's triple duty.
+  `(lane ...)` on a non-lane inlet is an error. Steps beyond the lane's
+  length read the inlet default.
+- Chain attachment implies the trigger (no `:on`), per the locked decision.
+- Writes go to the *current pattern's* chain (settings/lanes pattern-scoped,
+  identity track-level). `:patterns :all` can come later with preset tier 2.
+- `processes` returns the handle when given one instance, a list otherwise.
 
 ### Pattern scoping and identity
 
@@ -483,6 +563,11 @@ expensive to reverse.
 6. **Acceptance test** (integration): the sparse example —
    `delta: 0 1 0 0 1 0 0 0` ⇒ `acc: 0 1 1 1 2 2 2 2` ⇒ output = base transpose +
    acc — including a reschedule/scene-switch replay test proving no double-advance.
+   This test validates the gating pure-fold decision, so the replay harness is
+   in-scope for Phase 1, not deferred: check whether the existing process tests
+   in `lisp_host.rs` (~19386+) or the scene-switch perf work left a harness
+   that can drive a scene switch mid-lookahead deterministically; if not, build
+   one as part of this phase.
 
 ### Phase 2 — UI lanes and slots
 
@@ -500,7 +585,9 @@ expensive to reverse.
    lane driving an existing repeat-MIDI-FX's `times` per step (compositional
    ratchet, before `ratchet!` exists).
 3. Multi-target syntax (`:targets` + named `target-set!`/`target-add!`).
-4. Define and test merge order vs p-locks per target kind.
+4. Define and test the full merge order per target kind:
+   `patch default → key lock → step p-lock → process write → mods` — including
+   the transpose-write-changes-key-lock-lookup case and rack-slot targets.
 
 ### Phase 4 — Verdicts and ratchets
 
@@ -552,9 +639,17 @@ expensive to reverse.
 
 - Immediate ordered write application (not final-merge); reads see pending writes.
 - Veto does not halt the chain; state advances under masked trigs.
-- Merge order: base → p-lock → process writes.
+- Merge order: `patch default → key lock → step p-lock → process write → mods`.
+- Process writes are transient fire-time overlays; never persisted into
+  plock/step storage (protects `plock_variants` identity).
+- `ParamTarget` addresses rack slots from its first version (mirror the
+  `plock_variants` domain split); `:self` on a rack track = the slot the base
+  event routes to.
 - Identity track-level, settings/lanes pattern-level; default reset on pattern change.
 - Chain attachment implies the trigger (no `:on` for chain processes).
+- Attachment authoring form: `(processes :track <n|:all|list> instance...)` —
+  declarative whole-chain replace, class-call instances, `(lane ...)` literals
+  on lane-backed inlets, returned handles + `lane!` for live tweaks.
 - `(rand)` is the RNG verb; `:seed :locked | :per-cycle` on the instance.
 - `MidiFxParam` targets early (Phase 3), timebase last (Phase 9).
 - Ratchets clone the base event; sub-events go through the normal downstream path.

@@ -7496,6 +7496,17 @@ mod tests {
     }
 
     fn run_sparse_process_accumulator_fixture() -> (Arc<SequencerState>, Vec<ObservedTrigger>) {
+        run_sparse_process_accumulator_fixture_impl(false)
+    }
+
+    fn run_sparse_process_accumulator_fixture_via_lisp_attach(
+    ) -> (Arc<SequencerState>, Vec<ObservedTrigger>) {
+        run_sparse_process_accumulator_fixture_impl(true)
+    }
+
+    fn run_sparse_process_accumulator_fixture_impl(
+        attach_via_lisp: bool,
+    ) -> (Arc<SequencerState>, Vec<ObservedTrigger>) {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         state.pattern.track_params[0].set_num_steps(8);
         for step in 0..8 {
@@ -7521,23 +7532,39 @@ mod tests {
             )
             .expect("define process accumulator");
 
-        assert!(state.set_track_process_chain(
-            0,
-            crate::process::TrackProcessChain {
-                slots: vec![crate::process::TrackProcessSlot {
-                    instance_id: crate::process::ProcessInstanceId(1),
-                    class_name: "sparse-transpose".to_string(),
-                    enabled: true,
-                    inlets: std::collections::BTreeMap::new(),
-                    lanes: std::collections::BTreeMap::from([(
-                        "amount".to_string(),
-                        crate::process::ProcessLane {
-                            values: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-                        },
-                    )]),
-                }],
-            },
-        ));
+        if attach_via_lisp {
+            scratch
+                .eval(
+                    r#"
+                    (processes :track 0
+                      (sparse-transpose :amount (lane 0 1 0 0 1 0 0 0)))
+                    "#,
+                )
+                .expect("attach process chain via lisp");
+            let chain = state
+                .track_process_chain(0)
+                .expect("track 0 process chain");
+            assert_eq!(chain.slots.len(), 1);
+            assert_eq!(chain.slots[0].class_name, "sparse-transpose");
+        } else {
+            assert!(state.set_track_process_chain(
+                0,
+                crate::process::TrackProcessChain {
+                    slots: vec![crate::process::TrackProcessSlot {
+                        instance_id: crate::process::ProcessInstanceId(1),
+                        class_name: "sparse-transpose".to_string(),
+                        enabled: true,
+                        inlets: std::collections::BTreeMap::new(),
+                        lanes: std::collections::BTreeMap::from([(
+                            "amount".to_string(),
+                            crate::process::ProcessLane {
+                                values: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                            },
+                        )]),
+                    }],
+                },
+            ));
+        }
 
         state.transport.playing.store(true, Ordering::Relaxed);
         let snapshot = state.publish_scheduler_snapshot();
@@ -7584,6 +7611,18 @@ mod tests {
     #[test]
     fn scheduler_process_accumulator_folds_sparse_lane_into_transpose() {
         let (_state, events) = run_with_scheduler_stack(run_sparse_process_accumulator_fixture);
+        let transposes = events
+            .iter()
+            .take(8)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(transposes, vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn scheduler_process_accumulator_lisp_attach_matches_manual_chain() {
+        let (_state, events) =
+            run_with_scheduler_stack(run_sparse_process_accumulator_fixture_via_lisp_attach);
         let transposes = events
             .iter()
             .take(8)
