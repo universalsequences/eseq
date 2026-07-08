@@ -203,10 +203,79 @@ track step fires
   Correct behavior, but it must be an explicit test in whichever feature lands
   second.
 
-### Typed targets with fused domains
+### Typed targets: ports (def-time) vs. bindings (instance-time)
 
-A resolved target is `(address, domain)` — the domain rides with the target, and
-dictates which ops are legal at definition time:
+Portability requirement: a process must "just work" when dropped on an arbitrary
+project. A def that hardcodes `(instrument-param :self :cutoff)` or an effect
+slot index only works on tracks that happen to match its authoring project. So
+the target model is split in two:
+
+- **Ports** — the `:targets` clause in a `def-process` declares named, typed
+  *output ports* with domain metadata (`(cutoff :float)`), **not addresses**.
+  `target-set!` / `target-add!` write to ports, never to concrete params.
+- **Bindings** — each chain *instance* stores `port → Option<ParamTarget>`:
+  the concrete address, chosen per-project. A def may carry a *default binding
+  hint* — a selector, not an address — auto-resolved when the process is
+  attached (and re-tried when the chain changes while the port is still on its
+  hint, i.e. the user hasn't manually rebound):
+  - step-param hints (`:transpose`, velocity…) bind unconditionally — every
+    track has them; this is why the portable library examples all target them.
+  - `(param-tag :cutoff)` — semantic tag match across the track's
+    instrument/effect/MIDI-FX params. Params opt in: an instrument's param
+    descriptor can declare tags (the Prophet-style ladder filter's `frequency`
+    param tags itself `:cutoff`), so hints work without knowing any device's
+    literal param names. Falls back to exact-name match when no tag matches,
+    so untagged devices still resolve when names happen to line up.
+  - `(fx-param :beat-repeat :times)` — kind-selector: "if this track's chain
+    has a beat-repeat, drive its `times`"; matches on the builtin's kind id,
+    first matching slot wins. This is the "opportunistic" authoring style:
+    the process does something extra on tracks that happen to have the gear.
+  - no hint — the port starts unbound: the "general-purpose accumulator on a
+    mappable parameter" style, bound entirely through the mapping UI.
+
+**Param tags (small curated vocabulary, not an ontology).** Tags live on the
+param descriptor at the device level — instruments declare them in their param
+metadata, builtin effects in their descriptors — and are the polymorphic layer
+that makes hints portable: any device answering to `:cutoff` receives
+cutoff-targeting processes, regardless of what it calls the knob. Keep the
+vocabulary short and reviewed (`:cutoff`, `:resonance`, `:decay`, `:drive`,
+`:wet`, `:feedback`, `:rate`, `:depth`, `:times`…) — a tag is a promise about
+musical role, so additions go through the same library review as
+defaults-inert. One param may carry multiple tags; ties resolve
+instrument-first then chain order, first match wins. The same tags double as
+the "mappable parameter" filter in the mapping UI (arm a `:cutoff`-hinted port
+and tagged params highlight brightest).
+
+**Soft resolution (locked):** bindings resolve at fire time against live
+pattern state. An unresolvable or unbound port makes that write a silent no-op —
+the process still runs, state still advances, other ports still apply. The UI
+flags the binding as unbound/stale; nothing errors. This is the write-side twin
+of the defaults-inert discipline, and mirrors the stale-target handling already
+specified in `MACRO_MAPPING_SPEC.md` §7.
+
+**Binding scope:** bindings live with track-level *identity*, not pattern-level
+settings — "this climb drives *that* filter" is part of what the process is on
+this track. (Per-pattern binding overrides are a possible later addition, not
+the default.)
+
+**Mapping UI + shared seam with macros:** binding is performed with the
+arm-and-highlight interaction specified in `MACRO_MAPPING_SPEC.md` (draft, not
+yet implemented): a "map parameter" button on the process slot/lane arms
+mapping mode, every mappable param highlights (a third wrapper color —
+modulation blue, macro green, process ports their own), click to bind. The
+macro spec's `MacroTarget` identity machinery (`ParamNodeId` / `logical_id`
+guards so bindings survive node rebuilds, re-resolve-and-flag on load) is
+exactly the runtime half of `ParamTarget`. Whichever feature lands first builds
+the arm-mode wrapper fork and the identity-guarded target type as shared
+infrastructure; the other reuses it.
+
+This also fixes the preset story: tier-3 presets ship ports + hints, never
+addresses. Dropped on any project, step-param ports bind immediately and the
+preset grooves; instrument/effect ports sit unbound-but-inert until arm-mapped.
+
+`ParamTarget` remains the *address* type a binding resolves to — `(address,
+domain)`, where the domain rides with the target and dictates which ops are
+legal:
 
 ```rust
 enum ParamTarget {
@@ -239,8 +308,9 @@ param units.
 
 **`MidiFxParam` targets come early** (Phase 3, not late): a process lane driving an
 existing repeat-MIDI-FX's `times` param per step is the cheapest route to a large
-chunk of the generative vocabulary, before `veto!`/`ratchet!` verbs exist. Two
-legitimate routes to a ratchet:
+chunk of the generative vocabulary, before `veto!`/`ratchet!` verbs exist. With
+ports, this is a port hinted `(fx-param :repeat :times)` — it lights up on any
+track carrying that FX and no-ops elsewhere. Two legitimate routes to a ratchet:
 
 - self-contained: step process with `ratchet!` (one coherent authored behavior)
 - compositional: existing MIDI FX + a process lane writing its params per step
@@ -453,18 +523,32 @@ Ratchet with velocity decay:
                             (vel! ev (* (vel ev) (pow (in :decay) i)))))))
 ```
 
-Multi-target (named targets once a process writes more than one place):
+Multi-target (named ports once a process writes more than one place; the second
+element of each port is a binding *hint*, not an address — see Ports vs.
+bindings):
 
 ```lisp
 (def-process climb-and-open
-  :targets ((pitch  (step-param :transpose))
-            (cutoff (instrument-param :self :cutoff)))
+  :targets ((pitch  (step-param :transpose))       ; always binds
+            (cutoff (param-tag :cutoff)))          ; tag hint; unbound = no-op
   :in ((delta :float 0 2 :default 0 :lane true))
   :state ((acc 0))
   :run (do
     (set! acc (clip (+ acc (in :delta)) 0 24))
     (target-add! :pitch (floor acc))
     (target-set! :cutoff (/ acc 24))))       ; normalized; domain maps to range
+```
+
+Opportunistic FX hint + fully generic mappable port:
+
+```lisp
+(def-process stutter-brain
+  :targets ((times (fx-param :repeat :times))  ; binds only if the track has it
+            (aux   :float))                    ; no hint: map in the UI
+  :in ((energy :float 0 1 :default 0 :lane true))
+  :run (do
+    (target-set! :times (* energy 8))
+    (target-set! :aux energy)))
 ```
 
 Grab / call-and-response:
@@ -578,16 +662,36 @@ expensive to reverse.
 4. Library browser entry for process defs (name + doc).
 5. Defaults-inert check: attaching at defaults is audibly a no-op.
 
-### Phase 3 — Typed targets, MIDI FX early
+### Phase 3 — Ports, bindings, typed targets, MIDI FX early
 
 1. `ParamTarget` enum with fused domain metadata; normalized-write mapping.
-2. `MidiFxParam` and `InstrumentParam`/`EffectParam` targets. Milestone: a process
-   lane driving an existing repeat-MIDI-FX's `times` per step (compositional
-   ratchet, before `ratchet!` exists).
-3. Multi-target syntax (`:targets` + named `target-set!`/`target-add!`).
-4. Define and test the full merge order per target kind:
+   Identity-guarded addresses (`ParamNodeId`/`logical_id`, per
+   `MACRO_MAPPING_SPEC.md` — unimplemented draft; whichever feature lands
+   first builds this as shared infrastructure).
+2. Ports vs. bindings split: `:targets` parses as named typed ports with
+   optional hints; instance-level `bindings: port → Option<ParamTarget>`
+   stored with track-level identity; hint auto-resolution on attach and on
+   chain change (`step-param` unconditional, `param-tag` tag-then-name match,
+   `fx-param` kind match).
+3. Param tags: descriptor-level tag metadata on instrument/effect/MIDI-FX
+   params + the initial curated vocabulary; tag lookup across a track's chain
+   (rack-aware).
+4. Soft resolution: fire-time re-resolve; unbound/stale port writes are silent
+   no-ops; state still advances. Test: delete the target FX mid-playback,
+   nothing errors, other ports keep applying.
+5. `MidiFxParam` and `InstrumentParam`/`EffectParam` targets. Milestone: a process
+   lane driving a repeat-MIDI-FX's `times` per step via an `(fx-param :repeat
+   :times)` hint (compositional ratchet, before `ratchet!` exists) — and the
+   same process attached to a track without the FX is a clean no-op.
+6. Multi-port syntax (`:targets` + named `target-set!`/`target-add!`).
+7. Define and test the full merge order per target kind:
    `patch default → key lock → step p-lock → process write → mods` — including
    the transpose-write-changes-key-lock-lookup case and rack-slot targets.
+8. Mapping UI (may trail as 3b): "map parameter" button on the process slot
+   arms mapping mode — the `MACRO_MAPPING_SPEC.md` §5 arm-and-highlight wrapper
+   fork with a process-port color; tagged params matching the armed port's
+   hint highlight brightest; click binds, double-click unbinds; unbound/stale
+   badge on the port row.
 
 ### Phase 4 — Verdicts and ratchets
 
@@ -645,6 +749,15 @@ expensive to reverse.
 - `ParamTarget` addresses rack slots from its first version (mirror the
   `plock_variants` domain split); `:self` on a rack track = the slot the base
   event routes to.
+- Ports vs. bindings: defs declare named typed ports (hints are selectors —
+  `step-param` / `param-tag` / `fx-param` — never addresses); concrete
+  `ParamTarget` bindings are instance-level, track-identity-scoped, editable
+  via the arm-mode mapping UI shared with `MACRO_MAPPING_SPEC.md`.
+- Soft resolution: unbound or stale port writes are silent no-ops at fire
+  time; the process still runs and state advances. Presets ship ports +
+  hints, never addresses.
+- Param tags are a small curated device-descriptor vocabulary (library-review
+  gated), matched tag-first then exact-name; not a free-form ontology.
 - Identity track-level, settings/lanes pattern-level; default reset on pattern change.
 - Chain attachment implies the trigger (no `:on` for chain processes).
 - Attachment authoring form: `(processes :track <n|:all|list> instance...)` —
@@ -666,3 +779,12 @@ expensive to reverse.
 - Per-pattern process *bypass* toggle vs. relying on inert lane defaults.
 - How process `send`/outlet values surface in visualization widgets (scope/meter
   lane?) — cheap win, design later.
+- Initial param-tag vocabulary: exact list, and how existing instruments get
+  retro-tagged (sweep the builtin/instrument descriptors once, or tag lazily
+  as processes need them).
+- Hint re-resolution UX: when a chain edit makes a *better* hint match appear
+  while a port is already hint-bound elsewhere, does it re-bind (follow the
+  hint) or stay put (stability)? Leaning: follow the hint until the user
+  manually binds, then never move.
+- Whether per-pattern binding overrides are ever needed, or track-level
+  bindings suffice (start track-level only).

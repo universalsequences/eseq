@@ -276,17 +276,15 @@
       0
       (if (or (= key "d") (= key "D"))
         1
-        (if (or (= key "a") (= key "A"))
-          2
-          (if (or (= key "t") (= key "T"))
-            3
-            (if (or (= key "p") (= key "P"))
-              4
-              (if (or (= key "s") (= key "S"))
-                5
-                (if (or (= key "x") (= key "X"))
-                  (if (> (len SEQ.process-lanes) 0) seqv-process-lane-mode-offset -1)
-                  -1)))))))))
+        (if (or (= key "t") (= key "T"))
+          3
+          (if (or (= key "p") (= key "P"))
+            4
+            (if (or (= key "s") (= key "S"))
+              5
+              (if (or (= key "x") (= key "X"))
+                (if (> (len SEQ.process-lanes) 0) seqv-process-lane-mode-offset -1)
+                -1))))))))
 
 (def seqv-select-all-current-track-steps ()
   (do
@@ -1097,7 +1095,7 @@
     (seqv-sync-all-track-cursors-to-global)))
 
 (def seqv-param-tab-width (mode)
-  (if (seqv-process-lane-mode? mode) 9.4 8))
+  7.8)
 
 (def seqv-clip-label (text max-chars)
   (let ((s (str text)))
@@ -1121,6 +1119,51 @@
     (label tab-label :font-size 12
       :color (if (= (seqv-param-mode track-id) mode) :primary :dim)
       :bg :transparent)))
+
+(def seqv-process-lane-option-label (track lane-idx)
+  (let ((lane (nth (seqv-track-process-lanes track) lane-idx)))
+    (str (+ lane-idx 1) " " (get lane :short-label))))
+
+(def seqv-process-lane-options (track)
+  (append
+    (list "none")
+    (map
+      (lambda (lane-idx) (seqv-process-lane-option-label track lane-idx))
+      (range 0 (len (seqv-track-process-lanes track))))))
+
+(def seqv-process-lane-selector-value (track mode)
+  (if (seqv-process-lane-mode? mode)
+    (let ((lane-idx (seqv-process-lane-index mode)))
+      (if (and (>= lane-idx 0) (< lane-idx (len (seqv-track-process-lanes track))))
+        (seqv-process-lane-option-label track lane-idx)
+        "none"))
+    "none"))
+
+(def seqv-process-lane-selector-index (track label)
+  (if (= label "none")
+    -1
+    (reduce |acc lane-idx|
+      (if (= label (seqv-process-lane-option-label track lane-idx)) lane-idx acc)
+      -1
+      (range 0 (len (seqv-track-process-lanes track))))))
+
+(def seqv-select-process-lane-option (track track-id label)
+  (let ((lane-idx (seqv-process-lane-selector-index track label)))
+    (do
+      (seqv-activate-track-for-edit track)
+      (if (>= lane-idx 0)
+        (seqv-set-param-mode track-id (+ seqv-process-lane-mode-offset lane-idx))
+        (if (seqv-process-lane-mode? (seqv-param-mode track-id))
+          (seqv-set-param-mode track-id 3)
+          nil)))))
+
+(def seqv-process-lane-selector (track track-id mode)
+  (dropdown
+    :value (seqv-process-lane-selector-value track mode)
+    :key (str "seqv-expanded-process-lane-selector-" track-id)
+    :options (seqv-process-lane-options track)
+    :on-change (lambda (v) (seqv-select-process-lane-option track track-id v))
+    :width 12.8 :height 1.45 :font-size 10))
 
 (def seqv-expanded-track-quick-controls (track track-id)
   (let ((mode (seqv-param-mode track-id)))
@@ -1220,18 +1263,11 @@
             (box :width 1)
             (seqv-param-tab track track-id 0 "vel")
             (seqv-param-tab track track-id 1 "dur")
-            (seqv-param-tab track track-id 2 "aux_a")
-            (seqv-param-tab track track-id 3 "xpose")
+            (seqv-param-tab track track-id 3 "tpose")
             (seqv-param-tab track track-id 4 "pan")
-            (seqv-param-tab track track-id 5 "syn")
-            (seqv-param-tab track track-id 6 "dly")
-            (each (range 0 (len (seqv-track-process-lanes track))) |lane-idx|
-              (let ((lane (nth (seqv-track-process-lanes track) lane-idx)))
-                (seqv-param-tab
-                  track
-                  track-id
-                  (+ seqv-process-lane-mode-offset lane-idx)
-                  (get lane :short-label))))
+            (seqv-param-tab track track-id 5 "sync")
+            (seqv-param-tab track track-id 6 "delay")
+            (seqv-process-lane-selector track track-id mode)
             (h-stack :align :center :gap 0.35
               (dropdown :value (seqv-track-timebase track)
                 :key (str "seqv-expanded-timebase-" track-id)

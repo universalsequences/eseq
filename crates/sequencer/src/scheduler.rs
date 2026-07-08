@@ -7429,7 +7429,7 @@ mod tests {
         Network,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, PartialEq)]
     struct ObservedTrigger {
         kind: ScheduledTriggerKind,
         track: usize,
@@ -7601,6 +7601,82 @@ mod tests {
         (state, observed_triggers(&queue))
     }
 
+    fn run_default_inert_process_accumulator_fixture(
+        attach_default_process: bool,
+    ) -> (Arc<SequencerState>, Vec<ObservedTrigger>) {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(8);
+        let base_transposes = [0.0, 7.0, -3.0, 12.0, 0.0, 5.0, -5.0, 2.0];
+        let base_durations = [1.0, 0.5, 2.0, 1.5, 0.75, 1.25, 0.5, 2.0];
+        for step in 0..8 {
+            state.pattern.patterns[0].set_step_active(step, true);
+            state.set_step_param(0, step, StepParam::Transpose, base_transposes[step]);
+            state.set_step_param(0, step, StepParam::Duration, base_durations[step]);
+        }
+
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new()],
+            vec![EffectDescriptor::builtin_sampler()],
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-accumulator default-transpose
+                  :target (step-param :transpose)
+                  :amount (amount :lane true :default 0)
+                  :range (-128 128)
+                  :mode :clip)
+                "#,
+            )
+            .expect("define default-inert process accumulator");
+        if attach_default_process {
+            scratch
+                .eval("(processes :track 0 (default-transpose))")
+                .expect("attach default process accumulator");
+            let chain = state.track_process_chain(0).expect("track 0 process chain");
+            assert_eq!(chain.slots.len(), 1);
+            assert_eq!(chain.slots[0].class_name, "default-transpose");
+            assert!(
+                chain.slots[0].lanes.is_empty(),
+                "default attachment should not persist any lane overrides"
+            );
+        }
+
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<32>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        scheduler
+            .process_runtime
+            .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = Some(scratch);
+
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            102_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        (state, observed_triggers(&queue))
+    }
+
     fn run_with_scheduler_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         std::thread::Builder::new()
             .name("scheduler-process-accumulator-harness".to_string())
@@ -7665,6 +7741,19 @@ mod tests {
             .map(|event| event.transpose)
             .collect::<Vec<_>>();
         assert_eq!(second_transposes, first_transposes);
+    }
+
+    #[test]
+    fn scheduler_process_chain_defaults_are_audibly_inert() {
+        let (_base_state, baseline) =
+            run_with_scheduler_stack(|| run_default_inert_process_accumulator_fixture(false));
+        let (_process_state, default_attached) =
+            run_with_scheduler_stack(|| run_default_inert_process_accumulator_fixture(true));
+        assert_eq!(
+            default_attached.iter().take(8).cloned().collect::<Vec<_>>(),
+            baseline.iter().take(8).cloned().collect::<Vec<_>>(),
+            "attaching a process at defaults must not alter scheduled note timing, transpose, duration, or sampler params"
+        );
     }
 
     #[test]

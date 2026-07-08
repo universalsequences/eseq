@@ -20679,6 +20679,64 @@ mod tests {
     }
 
     #[test]
+    fn process_multi_accumulator_demo_projects_multiple_ui_lanes() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.track_params[0].set_num_steps(16);
+        let mut runtime = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+
+        let script_path = format!(
+            "{}/scripts/process-multi-accumulator-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source =
+            std::fs::read_to_string(&script_path).expect("read multi accumulator demo script");
+        runtime
+            .eval_source_at_path(script_path.into(), &source)
+            .expect("evaluate multi accumulator demo");
+
+        let Value::List(slots) = build_process_slots_value(&state, 0) else {
+            panic!("process slots should be a list");
+        };
+        assert_eq!(slots.len(), 3, "demo should attach three process slots");
+
+        let Value::List(lanes) = build_process_lanes_value(&state, 0) else {
+            panic!("process lanes should be a list");
+        };
+        let labels = lanes
+            .iter()
+            .map(|lane| match &*lane.borrow() {
+                Value::Map(map) => map
+                    .get("label")
+                    .map(|label| label.borrow().clone())
+                    .expect("lane label"),
+                other => panic!("expected lane map, got {other:?}"),
+            })
+            .map(|label| match label {
+                Value::String(label) => label,
+                other => panic!("expected label string, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "octave-rise / amount".to_string(),
+                "fifth-fall / amount".to_string(),
+                "phrase-reset / amount".to_string(),
+                "phrase-reset / reset".to_string(),
+            ],
+            "expanded sequencer should expose every accumulator lane in chain order"
+        );
+    }
+
+    #[test]
     fn metal_seq_script_picker_load_syncs_hidden_scratch_into_project_state() {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
@@ -23521,6 +23579,19 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing expanded control {key}"));
             assert_finite_nonzero_rect(node, key);
         }
+        assert!(
+            find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-param-tab-0-2")
+                .is_none(),
+            "aux_a should not render as an expanded sequencer param tab"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(r#"(seqv-param-mode-for-key "a")"#)
+                .expect("evaluate aux shortcut mode"),
+            Some(Value::Number(-1.0)),
+            "aux_a should not remain reachable through the expanded sequencer shortcut"
+        );
 
         let first_tab =
             find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-param-tab-0-0")
@@ -23611,7 +23682,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_process_lanes_render_as_expanded_step_tabs_and_knobs() {
+    fn metal_seq_process_lanes_render_as_expanded_selector_and_knobs() {
         let mut editor = full_grid_editor_for_scroll_tests();
         install_sparse_transpose_process_lane_fixture(&mut editor);
         editor
@@ -23636,12 +23707,28 @@ mod tests {
         let layout = editor
             .widget_layout()
             .expect("expanded sequencer layout should build");
-        let process_tab = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-7")
-            .expect("process lane tab should render");
-        assert_finite_nonzero_rect(process_tab, "process lane tab");
         assert!(
-            find_layout_node_by_text(&layout, "st/amount").is_some(),
-            "process lane tab should identify both process and inlet"
+            find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-7").is_none(),
+            "process lanes should not consume direct step-param tab slots"
+        );
+        let process_selector =
+            find_layout_node_by_stable_key(&layout, "seqv-expanded-process-lane-selector-0")
+                .expect("process lane selector should render");
+        assert_finite_nonzero_rect(process_selector, "process lane selector");
+        assert_eq!(
+            process_selector.props.get("value"),
+            Some(&Value::String("1 st/amount".to_string())),
+            "selected process lane should be visible in the process-lane selector"
+        );
+        assert!(
+            value_contains_string(
+                process_selector
+                    .props
+                    .get("options")
+                    .expect("process selector options"),
+                "none"
+            ),
+            "process selector should offer a no-process-lane option"
         );
         let summary = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-summary-0")
             .expect("process lane summary should render");
@@ -23657,6 +23744,114 @@ mod tests {
         let knob = find_layout_node_by_stable_key(&layout, "seqv-process-inlet-0-0-limit")
             .expect("process inlet knob should render");
         assert_finite_nonzero_rect(knob, "process inlet knob");
+    }
+
+    #[test]
+    fn metal_seq_multiple_process_lanes_stay_in_single_expanded_selector() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.track_params[0].set_num_steps(16);
+        let mut runtime = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let script_path = format!(
+            "{}/scripts/process-multi-accumulator-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source =
+            std::fs::read_to_string(&script_path).expect("read multi accumulator demo script");
+        runtime
+            .eval_source_at_path(script_path.into(), &source)
+            .expect("evaluate multi accumulator demo");
+
+        let lanes = build_process_lanes_value(&state, 0);
+        let slots = build_process_slots_value(&state, 0);
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-lanes", lanes.clone());
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-lanes",
+            test_list(vec![lanes.clone()]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-slots", slots.clone());
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-process-slots", test_list(vec![slots]));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(r#"(do (seqv-select-process-lane-option 0 0 "3 pr/amount") (seqv-param-mode 0))"#)
+                .expect("select third process lane through selector"),
+            Some(Value::Number(9.0)),
+            "third process selector option should select the third process-lane mode"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(
+                    r#"(do (seqv-select-process-lane-option 0 0 "none") (seqv-param-mode 0))"#
+                )
+                .expect("clear process lane through selector"),
+            Some(Value::Number(3.0)),
+            "choosing none while a process lane is active should return to transpose"
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (seqv-set-track-expanded 0 true)
+                (seqv-set-param-mode 0 7)
+                "#,
+            )
+            .expect("expand track and select first process lane");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(132, 30);
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+
+        let selector =
+            find_layout_node_by_stable_key(&layout, "seqv-expanded-process-lane-selector-0")
+                .expect("process lane selector should render");
+        assert_finite_nonzero_rect(selector, "multi-lane process selector");
+        assert_eq!(
+            selector.props.get("value"),
+            Some(&Value::String("1 or/amount".to_string()))
+        );
+        for mode in 7..11 {
+            assert!(
+                find_layout_node_by_stable_key(
+                    &layout,
+                    &format!("seqv-expanded-param-tab-0-{mode}")
+                )
+                .is_none(),
+                "process lane mode {mode} should be represented by the selector, not a tab"
+            );
+        }
+        let timebase = find_layout_node_by_stable_key(&layout, "seqv-expanded-timebase-0")
+            .expect("timebase dropdown should still fit after process selector");
+        assert!(
+            timebase.rect.col + timebase.rect.width <= 132.0,
+            "timebase dropdown should remain visible in a 132-col expanded sequencer, got {:?}",
+            timebase.rect
+        );
     }
 
     #[test]
