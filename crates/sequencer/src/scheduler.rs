@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +15,7 @@ use crate::accumulator::{
 use crate::effects::EffectDescriptor;
 use crate::lisp_host::{self, AccumulatorNoteSpan};
 use crate::neural::{NeuralOutput, NeuralRuntime, ParamNodeId};
+use crate::process::ProcessMidiFxParamOverride;
 use crate::scheduled_event::{
     resolved_chord_transpose, EventSource, ScheduledChordData, ScheduledEffectParam,
     ScheduledEvent, ScheduledEventKind, ScheduledEventQueue, ScheduledInstrumentParam,
@@ -1915,6 +1916,7 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
     global_transpose: f32,
     arp_phase_beats: f32,
     mut event: StepEvent,
+    midi_fx_params: Vec<ProcessMidiFxParamOverride>,
     debug_accum: bool,
 ) -> bool {
     if event.track >= snapshot.tracks.len() {
@@ -2000,8 +2002,15 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
     } else {
         0.0
     };
-    let event =
-        midi_fx_event_from_step_event(snapshot, event, step, step_beats, 0.0, arp_phase_beats);
+    let event = midi_fx_event_from_step_event(
+        snapshot,
+        event,
+        step,
+        step_beats,
+        0.0,
+        arp_phase_beats,
+        midi_fx_params,
+    );
     let events = run_midi_fx_chain_for_track(
         runtime,
         snapshot,
@@ -2115,6 +2124,7 @@ fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
                     global_transpose,
                     arp_phase_beats,
                     event,
+                    Vec::new(),
                     debug_accum,
                 );
         }
@@ -2144,6 +2154,7 @@ fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
         global_transpose,
         arp_phase_beats,
         event,
+        Vec::new(),
         debug_accum,
     )
 }
@@ -2296,6 +2307,7 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
         global_transpose,
         arp_phase_beats,
         event,
+        Vec::new(),
         debug_accum,
     )
 }
@@ -2314,51 +2326,78 @@ fn enqueue_due_process_emissions<const QUEUE_CAP: usize>(
     samples_per_quarter: f64,
     debug_accum: bool,
 ) -> bool {
-    for emission in process_runtime.take_due_emissions(up_to_beat) {
+    for item in process_runtime.take_due_events(up_to_beat) {
         let sample_time = chunk_start_sample.saturating_add(
-            ((emission.beat - chunk_start_beats).max(0.0) * samples_per_quarter).round() as u64,
+            ((item.beat - chunk_start_beats).max(0.0) * samples_per_quarter).round() as u64,
         );
-        if debug_routing_enabled() {
-            eprintln!(
-                "[routing] process-emission process={} track={:?} sample={} beat={:.6} transpose={} vel={}",
-                emission.process_runtime_id,
-                emission.event.track,
-                sample_time,
-                emission.beat,
-                emission.event.resolved.transpose,
-                emission.event.resolved.velocity
-            );
-        }
-        if !enqueue_emitted_network_event_with_midi_fx(
-            queue,
-            snapshot,
-            track_output_events,
-            scratch_runtime.as_mut(),
-            Some(&mut *quantizer_state),
-            pattern_epoch,
-            sample_time,
-            samples_per_quarter as f32,
-            emission.beat as f32,
-            process_runtime.global_transpose(),
-            EmittedNetworkEventSource::Process {
-                runtime_id: emission.process_runtime_id,
-            },
-            emission.event,
-            debug_accum,
-        ) {
-            return false;
+        match item.event {
+            crate::process::ProcessScheduledEvent::Emission(event) => {
+                if debug_routing_enabled() {
+                    eprintln!(
+                        "[routing] process-emission process={} track={:?} sample={} beat={:.6} transpose={} vel={}",
+                        item.process_runtime_id,
+                        event.track,
+                        sample_time,
+                        item.beat,
+                        event.resolved.transpose,
+                        event.resolved.velocity
+                    );
+                }
+                if !enqueue_emitted_network_event_with_midi_fx(
+                    queue,
+                    snapshot,
+                    track_output_events,
+                    scratch_runtime.as_mut(),
+                    Some(&mut *quantizer_state),
+                    pattern_epoch,
+                    sample_time,
+                    samples_per_quarter as f32,
+                    item.beat as f32,
+                    process_runtime.global_transpose(),
+                    EmittedNetworkEventSource::Process {
+                        runtime_id: item.process_runtime_id,
+                    },
+                    event,
+                    debug_accum,
+                ) {
+                    return false;
+                }
+            }
+            crate::process::ProcessScheduledEvent::Step(spawned) => {
+                if debug_routing_enabled() {
+                    eprintln!(
+                        "[routing] process-step process={} track={} sample={} beat={:.6} transpose={} vel={} midi_fx_overrides={}",
+                        item.process_runtime_id,
+                        spawned.event.track,
+                        sample_time,
+                        item.beat,
+                        spawned.event.resolved.transpose,
+                        spawned.event.resolved.velocity,
+                        spawned.midi_fx_params.len()
+                    );
+                }
+                if !enqueue_step_event_with_midi_fx(
+                    queue,
+                    snapshot,
+                    track_output_events,
+                    scratch_runtime.as_mut(),
+                    Some(&mut *quantizer_state),
+                    pattern_epoch,
+                    sample_time,
+                    item.beat,
+                    samples_per_quarter as f32,
+                    process_runtime.global_transpose(),
+                    item.beat as f32,
+                    spawned.event,
+                    spawned.midi_fx_params,
+                    debug_accum,
+                ) {
+                    return false;
+                }
+            }
         }
     }
     true
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct ProcessMidiFxParamOverride {
-    slot: usize,
-    fx: String,
-    param: String,
-    param_idx: usize,
-    value: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -2391,6 +2430,24 @@ fn process_target_op_label(op: crate::process::ProcessTargetOp) -> &'static str 
     }
 }
 
+type StepProcessInletWrites =
+    BTreeMap<usize, BTreeMap<String, Vec<crate::process::ProcessInletWrite>>>;
+
+#[derive(Clone, Debug)]
+struct DeferredProcessInletWrite {
+    track: usize,
+    instance_id: crate::process::ProcessInstanceId,
+    inlet: String,
+    write: crate::process::ProcessInletWrite,
+}
+
+struct ProcessInletWriteContext<'a> {
+    chain: &'a crate::process::TrackProcessChain,
+    current_slot_index: Option<usize>,
+    current_fire_writes: &'a mut StepProcessInletWrites,
+    deferred_writes: &'a mut Vec<DeferredProcessInletWrite>,
+}
+
 fn process_target_label(target: &crate::process::ParamTarget) -> String {
     match target {
         crate::process::ParamTarget::StepParam { param } => format!("step-param:{param}"),
@@ -2406,6 +2463,13 @@ fn process_target_label(target: &crate::process::ParamTarget) -> String {
         crate::process::ParamTarget::MidiFxParam { slot, fx, param } => {
             format!("midi-fx{}:{fx}:{param}", slot + 1)
         }
+        crate::process::ParamTarget::ProcessInlet {
+            process,
+            inlet,
+            instance_id,
+        } => instance_id
+            .map(|id| format!("process-inlet:{process}#{}:{inlet}", id.0))
+            .unwrap_or_else(|| format!("process-inlet:{process}:{inlet}")),
         crate::process::ParamTarget::RackSlotParam { slot, param } => {
             format!("rack{}:{param}", slot + 1)
         }
@@ -2850,6 +2914,117 @@ fn process_resolve_hint_to_target(
     }
 }
 
+fn resolve_process_inlet_target(
+    chain: &crate::process::TrackProcessChain,
+    target: &crate::process::ParamTarget,
+) -> Option<(usize, crate::process::ProcessInstanceId, String)> {
+    let crate::process::ParamTarget::ProcessInlet {
+        process,
+        inlet,
+        instance_id,
+    } = target
+    else {
+        return None;
+    };
+    let slot_idx = match instance_id {
+        Some(instance_id) => chain
+            .slots
+            .iter()
+            .position(|slot| slot.instance_id == *instance_id && slot.class_name == *process),
+        None => chain
+            .slots
+            .iter()
+            .position(|slot| slot.class_name == *process),
+    }?;
+    let slot = &chain.slots[slot_idx];
+    Some((slot_idx, slot.instance_id, inlet.clone()))
+}
+
+fn process_apply_inlet_write(
+    snapshot: &SequencerSnapshot,
+    track: usize,
+    step: usize,
+    target: &crate::process::ParamTarget,
+    write: &crate::process::ProcessTargetWrite,
+    context: Option<&mut ProcessInletWriteContext<'_>>,
+) {
+    let Some(context) = context else {
+        process_trace(snapshot, || {
+            format!(
+                "skip track={} step={} port={} target={} reason=process-inlet-context-missing",
+                track + 1,
+                step,
+                write.port,
+                process_target_label(target)
+            )
+        });
+        return;
+    };
+    let Some((target_slot_index, instance_id, inlet)) =
+        resolve_process_inlet_target(context.chain, target)
+    else {
+        process_trace(snapshot, || {
+            format!(
+                "skip track={} step={} port={} target={} reason=process-inlet-target-not-found",
+                track + 1,
+                step,
+                write.port,
+                process_target_label(target)
+            )
+        });
+        return;
+    };
+    let inlet_write = crate::process::ProcessInletWrite {
+        op: write.op,
+        value: write.value,
+    };
+    if context
+        .current_slot_index
+        .is_some_and(|current_slot_index| target_slot_index > current_slot_index)
+    {
+        context
+            .current_fire_writes
+            .entry(target_slot_index)
+            .or_default()
+            .entry(inlet.clone())
+            .or_default()
+            .push(inlet_write);
+        process_trace(snapshot, || {
+            format!(
+                "apply track={} step={} port={} target={} op={} value={} -> slot={} inlet={} timing=current-fire",
+                track + 1,
+                step,
+                write.port,
+                process_target_label(target),
+                process_target_op_label(write.op),
+                write.value,
+                target_slot_index,
+                inlet
+            )
+        });
+    } else {
+        context.deferred_writes.push(DeferredProcessInletWrite {
+            track,
+            instance_id,
+            inlet: inlet.clone(),
+            write: inlet_write,
+        });
+        process_trace(snapshot, || {
+            format!(
+                "defer track={} step={} port={} target={} op={} value={} -> instance={} inlet={} timing=next-fire",
+                track + 1,
+                step,
+                write.port,
+                process_target_label(target),
+                process_target_op_label(write.op),
+                write.value,
+                instance_id.0,
+                inlet
+            )
+        });
+    }
+}
+
 fn process_apply_concrete_target_write(
     snapshot: &SequencerSnapshot,
     midi_fx_descriptors: &[EffectDescriptor],
@@ -3157,6 +3332,17 @@ fn process_apply_concrete_target_write(
                 }),
             }
         }
+        crate::process::ParamTarget::ProcessInlet { .. } => {
+            process_trace(snapshot, || {
+                format!(
+                    "skip track={} step={} port={} target={} reason=process-inlet-context-missing",
+                    track + 1,
+                    step,
+                    write.port,
+                    process_target_label(target)
+                )
+            });
+        }
         crate::process::ParamTarget::RackSlotParam { .. }
         | crate::process::ParamTarget::RackSlotInstrumentParam { .. } => {
             process_trace(snapshot, || {
@@ -3181,6 +3367,7 @@ fn apply_process_target_writes(
     overlay: &mut ProcessTargetOverlay,
     slot: Option<&crate::process::TrackProcessSlot>,
     writes: &[crate::process::ProcessTargetWrite],
+    mut process_inlet_context: Option<&mut ProcessInletWriteContext<'_>>,
 ) {
     for write in writes {
         process_trace(snapshot, || {
@@ -3234,16 +3421,218 @@ fn apply_process_target_writes(
                 process_target_label(&target)
             )
         });
-        process_apply_concrete_target_write(
+        if matches!(target, crate::process::ParamTarget::ProcessInlet { .. }) {
+            process_apply_inlet_write(
+                snapshot,
+                track,
+                step,
+                &target,
+                write,
+                process_inlet_context.as_deref_mut(),
+            );
+        } else {
+            process_apply_concrete_target_write(
+                snapshot,
+                midi_fx_descriptors,
+                track,
+                step,
+                resolved,
+                overlay,
+                &target,
+                write,
+            );
+        }
+    }
+}
+
+fn step_event_with_process_overlay(
+    snapshot: &SequencerSnapshot,
+    track: usize,
+    step: usize,
+    samples_per_step: f32,
+    resolved: ResolvedStep,
+    overlay: &ProcessTargetOverlay,
+) -> StepEvent {
+    let mut effect_params = resolve_effect_params(snapshot, track, step);
+    let mut instrument_params = resolve_instrument_params(snapshot, track, step);
+    upsert_effect_params(&mut effect_params, overlay.effect_params.clone());
+    upsert_instrument_params(&mut instrument_params, overlay.instrument_params.clone());
+    step_event_from_resolved(
+        snapshot,
+        track,
+        step,
+        samples_per_step,
+        resolved,
+        step_chord_data(snapshot, track, step),
+        effect_params,
+        instrument_params,
+        resolve_instrument_tensor_params(snapshot, track, step),
+    )
+}
+
+fn clamp_ratchet_event(
+    mut event: crate::process::ProcessRatchetEvent,
+) -> crate::process::ProcessRatchetEvent {
+    event.offset_beats = event.offset_beats.max(0.0);
+    let resolved = event.resolved;
+    set_resolved_step_param(&mut event.resolved, StepParam::Duration, resolved.duration);
+    set_resolved_step_param(&mut event.resolved, StepParam::Velocity, resolved.velocity);
+    set_resolved_step_param(&mut event.resolved, StepParam::Speed, resolved.speed);
+    set_resolved_step_param(&mut event.resolved, StepParam::AuxA, resolved.aux_a);
+    set_resolved_step_param(&mut event.resolved, StepParam::AuxB, resolved.aux_b);
+    set_resolved_step_param(
+        &mut event.resolved,
+        StepParam::Transpose,
+        resolved.transpose,
+    );
+    set_resolved_step_param(&mut event.resolved, StepParam::Pan, resolved.pan);
+    set_resolved_step_param(&mut event.resolved, StepParam::Chop, resolved.chop);
+    event
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_process_ratchet(
+    scratch: &mut lisp_host::ScratchControlRuntime,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    process_runtime_id: u64,
+    snapshot: &SequencerSnapshot,
+    track: usize,
+    step: usize,
+    absolute_beats: f64,
+    samples_per_step: f32,
+    base_resolved: ResolvedStep,
+    overlay: &ProcessTargetOverlay,
+    request: &crate::process::ProcessRatchetRequest,
+) -> Result<(), String> {
+    if request.times == 0 {
+        return Ok(());
+    }
+    let step_beats = request.shape_context.step_context.step_beats.max(0.0);
+    let span_beats = request.span_beats.unwrap_or(step_beats).max(0.0);
+    let subdivided_span = if request.times > 0 {
+        span_beats / request.times as f32
+    } else {
+        0.0
+    };
+    let mut shape_context = request.shape_context.clone();
+    let mut scheduled_events = Vec::with_capacity(request.times as usize);
+    for index in 0..request.times {
+        let mut resolved = base_resolved;
+        let offset_beats = match request.mode {
+            crate::process::ProcessRatchetMode::Subdivide => {
+                if step_beats > 0.0 {
+                    set_resolved_step_param(
+                        &mut resolved,
+                        StepParam::Duration,
+                        subdivided_span / step_beats,
+                    );
+                }
+                index as f32 * subdivided_span
+            }
+            crate::process::ProcessRatchetMode::Repeat => index as f32 * span_beats,
+        };
+        let mut event = crate::process::ProcessRatchetEvent {
+            offset_beats,
+            resolved,
+        };
+        if let Some(shape) = request.shape.as_ref() {
+            event = scratch
+                .invoke_process_ratchet_shape(&mut shape_context, shape, index, event)
+                .map_err(|err| {
+                    format!(
+                        "ratchet shape error process={} track={} step={} index={} err={}",
+                        process_runtime_id, track, step, index, err
+                    )
+                })?;
+        }
+        let event = clamp_ratchet_event(event);
+        let step_event = step_event_with_process_overlay(
             snapshot,
-            midi_fx_descriptors,
             track,
             step,
-            resolved,
+            samples_per_step,
+            event.resolved,
             overlay,
-            &target,
-            write,
         );
+        scheduled_events.push((
+            absolute_beats + event.offset_beats as f64,
+            crate::process::ProcessScheduledStepEvent {
+                event: step_event,
+                midi_fx_params: overlay.midi_fx_params.clone(),
+            },
+        ));
+    }
+    for (beat, event) in scheduled_events {
+        process_runtime.schedule_step_event_at(process_runtime_id, beat, event);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_step_process_commands(
+    scratch: &mut lisp_host::ScratchControlRuntime,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    process_runtime_id: u64,
+    snapshot: &SequencerSnapshot,
+    midi_fx_descriptors: &[EffectDescriptor],
+    track: usize,
+    step: usize,
+    absolute_beats: f64,
+    samples_per_step: f32,
+    slot: Option<&crate::process::TrackProcessSlot>,
+    resolved: &mut ResolvedStep,
+    overlay: &mut ProcessTargetOverlay,
+    process_base_alive: &mut bool,
+    commands: &[crate::process::ProcessRunCommand],
+    mut process_inlet_context: Option<&mut ProcessInletWriteContext<'_>>,
+    debug_accum: bool,
+) {
+    for command in commands {
+        match command {
+            crate::process::ProcessRunCommand::TargetWrite(write) => {
+                apply_process_target_writes(
+                    snapshot,
+                    midi_fx_descriptors,
+                    track,
+                    step,
+                    resolved,
+                    overlay,
+                    slot,
+                    std::slice::from_ref(write),
+                    process_inlet_context.as_deref_mut(),
+                );
+            }
+            crate::process::ProcessRunCommand::VetoBaseEvent => {
+                *process_base_alive = false;
+                process_trace(snapshot, || {
+                    format!(
+                        "veto track={} step={} process={}",
+                        track + 1,
+                        step,
+                        process_runtime_id
+                    )
+                });
+            }
+            crate::process::ProcessRunCommand::Ratchet(request) => {
+                if let Err(err) = materialize_process_ratchet(
+                    scratch,
+                    process_runtime,
+                    process_runtime_id,
+                    snapshot,
+                    track,
+                    step,
+                    absolute_beats,
+                    samples_per_step,
+                    *resolved,
+                    overlay,
+                    request,
+                ) {
+                    if debug_accum || debug_routing_enabled() {
+                        eprintln!("[process] {err}");
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -3278,10 +3667,15 @@ fn invoke_process_cascade<F>(
     process_runtime: &mut crate::process::ProcessRuntime,
     initial: crate::process::ProcessRunInvocation,
     debug_accum: bool,
-    mut apply_target_writes: F,
+    mut apply_commands: F,
 ) -> bool
 where
-    F: FnMut(&[crate::process::ProcessTargetWrite]),
+    F: FnMut(
+        &mut lisp_host::ScratchControlRuntime,
+        &mut crate::process::ProcessRuntime,
+        u64,
+        &[crate::process::ProcessRunCommand],
+    ),
 {
     let mut pending_invocations = vec![initial];
     let mut processed_invocations = 0usize;
@@ -3303,7 +3697,8 @@ where
         };
         match scratch.invoke_process_run(invocation) {
             Ok(result) => {
-                apply_target_writes(&result.target_writes);
+                let runtime_id = result.runtime_id;
+                apply_commands(scratch, process_runtime, runtime_id, &result.commands);
                 let mut followups = process_runtime.apply_run_result(result);
                 followups.reverse();
                 pending_invocations.extend(followups);
@@ -3328,6 +3723,7 @@ fn process_step_event_value(
     beat: f64,
     sample_time: u64,
     resolved: ResolvedStep,
+    step_beats: f32,
 ) -> eseqlisp::vm::Value {
     fn number(value: impl Into<f64>) -> Rc<RefCell<eseqlisp::vm::Value>> {
         Rc::new(RefCell::new(eseqlisp::vm::Value::Number(value.into())))
@@ -3339,6 +3735,7 @@ fn process_step_event_value(
     map.insert("cycle".to_string(), number(cycle as f64));
     map.insert("beat".to_string(), number(beat));
     map.insert("sample-time".to_string(), number(sample_time as f64));
+    map.insert("step-length".to_string(), number(step_beats as f64));
     map.insert("duration".to_string(), number(resolved.duration as f64));
     map.insert("velocity".to_string(), number(resolved.velocity as f64));
     map.insert("speed".to_string(), number(resolved.speed as f64));
@@ -4106,6 +4503,7 @@ fn midi_fx_event_from_step_event(
     step_beats: f32,
     offset_beats: f32,
     arp_phase_beats: f32,
+    midi_fx_params: Vec<ProcessMidiFxParamOverride>,
 ) -> MidiFxEvent {
     let step_idx = midi_fx_event_step_for_track(snapshot, event.track, step_idx);
     let chord = event.chord.notes[..event.chord.count].to_vec();
@@ -4128,7 +4526,7 @@ fn midi_fx_event_from_step_event(
         chord_step_transpose: event.chord.step_transpose,
         note_spans: None,
         arp_phase_beats,
-        midi_fx_params: Vec::new(),
+        midi_fx_params,
         effect_params: event.effect_params,
         instrument_params: event.instrument_params,
         instrument_tensor_params: event.instrument_tensor_params,
@@ -5313,7 +5711,11 @@ fn build_scheduler_scratch_runtime(
     debug_accum: bool,
 ) -> Option<lisp_host::ScratchControlRuntime> {
     let midi_fx_source = lisp_host::load_midi_fx_library_source();
-    if midi_fx_source.trim().is_empty() && user_source.trim().is_empty() {
+    let process_source = lisp_host::load_process_library_source();
+    if midi_fx_source.trim().is_empty()
+        && process_source.trim().is_empty()
+        && user_source.trim().is_empty()
+    {
         return None;
     }
 
@@ -5335,6 +5737,32 @@ fn build_scheduler_scratch_runtime(
                     let status = runtime.take_status_message();
                     eprintln!(
                         "[scheduler-runtime] builtin midi-fx eval err={} status={:?}",
+                        err, status
+                    );
+                }
+            }
+        }
+    }
+
+    if !process_source.trim().is_empty() {
+        match runtime.eval(&process_source) {
+            Ok(_) => {
+                keep_runtime = true;
+                if debug_accum || debug_routing_enabled() {
+                    let names = runtime
+                        .process_authoring_snapshot()
+                        .defs
+                        .iter()
+                        .map(|def| def.name.clone())
+                        .collect::<Vec<_>>();
+                    eprintln!("[scheduler-runtime] builtin process eval ok processes={names:?}");
+                }
+            }
+            Err(err) => {
+                if debug_accum || debug_routing_enabled() {
+                    let status = runtime.take_status_message();
+                    eprintln!(
+                        "[scheduler-runtime] builtin process eval err={} status={:?}",
                         err, status
                     );
                 }
@@ -5532,26 +5960,44 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 chop: step_snapshot.params[StepParam::Chop.index()],
             };
             let mut process_overlay = ProcessTargetOverlay::default();
-            for slot in &track.process_chain.slots {
+            let mut process_base_alive = true;
+            let step_beats = trigger.samples_per_step / samples_per_quarter as f32;
+            let process_chain = &track.process_chain;
+            let mut process_inlet_writes =
+                process_runtime.take_step_process_inlet_writes(trigger.track, process_chain);
+            let mut deferred_process_inlet_writes = Vec::new();
+            for (slot_index, slot) in process_chain.slots.iter().enumerate() {
                 if !slot.enabled {
                     continue;
                 }
-                let writes = process_runtime.step_process_writes(
+                let slot_inlet_writes =
+                    process_inlet_writes.remove(&slot_index).unwrap_or_default();
+                let writes = process_runtime.step_process_writes_with_inlet_writes(
                     slot,
                     trigger.step,
                     trigger.cycle,
                     track.params.num_steps,
+                    Some(&slot_inlet_writes),
                 );
-                apply_process_target_writes(
-                    snapshot,
-                    &midi_fx_descriptors_for_scheduling,
-                    trigger.track,
-                    trigger.step,
-                    &mut resolved,
-                    &mut process_overlay,
-                    Some(slot),
-                    &writes,
-                );
+                {
+                    let mut inlet_context = ProcessInletWriteContext {
+                        chain: process_chain,
+                        current_slot_index: Some(slot_index),
+                        current_fire_writes: &mut process_inlet_writes,
+                        deferred_writes: &mut deferred_process_inlet_writes,
+                    };
+                    apply_process_target_writes(
+                        snapshot,
+                        &midi_fx_descriptors_for_scheduling,
+                        trigger.track,
+                        trigger.step,
+                        &mut resolved,
+                        &mut process_overlay,
+                        Some(slot),
+                        &writes,
+                        Some(&mut inlet_context),
+                    );
+                }
                 let event = process_step_event_value(
                     trigger.track,
                     trigger.step,
@@ -5559,8 +6005,9 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     trigger.absolute_beats,
                     sample_time,
                     resolved,
+                    step_beats,
                 );
-                if let Some(invocation) = process_runtime.step_process_invocation(
+                if let Some(invocation) = process_runtime.step_process_invocation_with_inlet_writes(
                     slot,
                     crate::process::ProcessStepRunContext {
                         track: trigger.track,
@@ -5568,24 +6015,41 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         cycle: trigger.cycle,
                         beat: trigger.absolute_beats,
                         sample_time,
+                        step_beats,
+                        resolved,
                         event,
                     },
+                    Some(&slot_inlet_writes),
                 ) {
                     if !invoke_process_cascade(
                         scratch_runtime,
                         process_runtime,
                         invocation,
                         debug_accum,
-                        |writes| {
-                            apply_process_target_writes(
+                        |scratch, process_runtime, runtime_id, commands| {
+                            let mut inlet_context = ProcessInletWriteContext {
+                                chain: process_chain,
+                                current_slot_index: Some(slot_index),
+                                current_fire_writes: &mut process_inlet_writes,
+                                deferred_writes: &mut deferred_process_inlet_writes,
+                            };
+                            apply_step_process_commands(
+                                scratch,
+                                process_runtime,
+                                runtime_id,
                                 snapshot,
                                 &midi_fx_descriptors_for_scheduling,
                                 trigger.track,
                                 trigger.step,
+                                trigger.absolute_beats,
+                                trigger.samples_per_step,
+                                Some(slot),
                                 &mut resolved,
                                 &mut process_overlay,
-                                Some(slot),
-                                writes,
+                                &mut process_base_alive,
+                                commands,
+                                Some(&mut inlet_context),
+                                debug_accum,
                             )
                         },
                     ) {
@@ -5597,6 +6061,14 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if !chunk_enqueued {
                 break;
             }
+            for deferred in deferred_process_inlet_writes.drain(..) {
+                process_runtime.defer_step_process_inlet_write(
+                    deferred.track,
+                    deferred.instance_id,
+                    deferred.inlet,
+                    deferred.write,
+                );
+            }
             let track_fire_event = process_step_event_value(
                 trigger.track,
                 trigger.step,
@@ -5604,28 +6076,47 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 trigger.absolute_beats,
                 sample_time,
                 resolved,
+                step_beats,
             );
+            let track_fire_step_context = crate::process::ProcessStepEventContext {
+                track: trigger.track,
+                step: trigger.step,
+                cycle: trigger.cycle,
+                beat: trigger.absolute_beats,
+                sample_time,
+                step_beats,
+                resolved,
+            };
             for invocation in process_runtime.track_fires_at(
                 trigger.track,
                 track_fire_event.clone(),
                 trigger.absolute_beats,
                 sample_time,
+                track_fire_step_context.clone(),
             ) {
                 if !invoke_process_cascade(
                     scratch_runtime,
                     process_runtime,
                     invocation,
                     debug_accum,
-                    |writes| {
-                        apply_process_target_writes(
+                    |scratch, process_runtime, runtime_id, commands| {
+                        apply_step_process_commands(
+                            scratch,
+                            process_runtime,
+                            runtime_id,
                             snapshot,
                             &midi_fx_descriptors_for_scheduling,
                             trigger.track,
                             trigger.step,
+                            trigger.absolute_beats,
+                            trigger.samples_per_step,
+                            None,
                             &mut resolved,
                             &mut process_overlay,
+                            &mut process_base_alive,
+                            commands,
                             None,
-                            writes,
+                            debug_accum,
                         )
                     },
                 ) {
@@ -5764,7 +6255,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
                             let step_beats = trigger.samples_per_step / samples_per_quarter;
                             let mut accumulator_events = Vec::new();
-                            if !output.suppressed {
+                            if !output.suppressed && process_base_alive {
                                 let mut event_effect_params = output.effect_params.clone();
                                 let mut event_instrument_params =
                                     scheduled_instrument_params_from_vec(
@@ -5946,6 +6437,9 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             };
 
             for action in actions.iter() {
+                if !process_base_alive {
+                    continue;
+                }
                 let (target_track, resolved) = match *action {
                     StepAction::Play(resolved) => (trigger.track, resolved),
                     StepAction::SendToTrack { track, resolved } => (track, resolved),
@@ -7856,6 +8350,7 @@ mod tests {
             0.0,
             0.0,
             event,
+            Vec::new(),
             false,
         ));
         let scheduled = queue.pop().expect("MIDI FX output event");
@@ -8878,6 +9373,43 @@ mod tests {
         events
     }
 
+    fn schedule_process_observed_fixture(
+        state: &Arc<SequencerState>,
+        scratch: lisp_host::ScratchControlRuntime,
+        lookahead_target_samples: u64,
+    ) -> Vec<ObservedTrigger> {
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<64>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        scheduler
+            .process_runtime
+            .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = Some(scratch);
+
+        schedule_playing_lookahead(
+            &mut scheduler,
+            state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            lookahead_target_samples,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        observed_triggers(&queue)
+    }
+
     fn first_resolved_trigger(events: &[ScheduledEventKind]) -> &ScheduledEventKind {
         events
             .iter()
@@ -9018,6 +9550,294 @@ mod tests {
             assert_eq!(
                 state.pattern.step_data[0].get(0, StepParam::Transpose),
                 StepParam::Transpose.default_value()
+            );
+        });
+    }
+
+    #[test]
+    fn scheduler_process_inlet_writes_compose_with_downstream_lane_this_fire() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(1);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process process-inlet-setter
+                      :targets ((out :process-inlet))
+                      :run (target-set! :out 3))
+                    (def-process process-inlet-adder
+                      :targets ((out :process-inlet))
+                      :run (target-add! :out 2))
+                    (def-process inlet-driven-pitch
+                      :in ((amount :float -12 12 :default 0 :lane true))
+                      :target (step-param :transpose)
+                      :run (target-add! (in :amount)))
+
+                    (def setter (process-inlet-setter))
+                    (def adder (process-inlet-adder))
+                    (def pitch (inlet-driven-pitch :amount (lane 1)))
+                    (processes :track 0 setter adder pitch)
+                    (connect! setter :out (inlet pitch :amount))
+                    (connect! adder :out (inlet pitch :amount))
+                    "#,
+                )
+                .expect("define process-inlet chain");
+
+            let events = schedule_process_fixture(&state, scratch);
+            match first_resolved_trigger(&events) {
+                ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
+                    assert_eq!(resolved.transpose, 5.0);
+                }
+                other => panic!("expected resolved trigger, got {other:?}"),
+            }
+            assert_eq!(
+                state.pattern.step_data[0].get(0, StepParam::Transpose),
+                StepParam::Transpose.default_value()
+            );
+            let chain = state.track_process_chain(0).expect("track 0 chain");
+            assert_eq!(
+                chain.slots[2]
+                    .lanes
+                    .get("amount")
+                    .map(|lane| lane.values.as_slice()),
+                Some(&[1.0][..])
+            );
+        });
+    }
+
+    #[test]
+    fn scheduler_process_inlet_write_to_earlier_slot_arrives_next_fire() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[0].set_step_active(1, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process earlier-pitch
+                      :in ((amount :float -12 12 :default 0 :lane true))
+                      :target (step-param :transpose)
+                      :run (target-add! (in :amount)))
+                    (def-process late-writer
+                      :targets ((out :process-inlet))
+                      :run (target-set! :out 7))
+
+                    (def pitch (earlier-pitch))
+                    (def writer (late-writer))
+                    (processes :track 0 pitch writer)
+                    (connect! writer :out (inlet pitch :amount))
+                    "#,
+                )
+                .expect("define upstream process-inlet chain");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 12_000);
+            let transposes = events
+                .iter()
+                .take(2)
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>();
+            assert_eq!(transposes, vec![0.0, 7.0], "{events:?}");
+        });
+    }
+
+    #[test]
+    fn scheduler_process_veto_suppresses_base_event_but_continues_chain() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process kill-base
+                      :run (veto!))
+                    (def-process clone-after-veto
+                      :target (step-param :transpose)
+                      :run (do
+                        (target-add! 7)
+                        (ratchet! :times 1 :mode :repeat :span 0)))
+                    (processes :track 0 (kill-base) (clone-after-veto))
+                    "#,
+                )
+                .expect("define veto chain fixture");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 6_000);
+            assert_eq!(events.len(), 1, "{events:?}");
+            assert_eq!(events[0].sample_time, 1);
+            assert_eq!(events[0].transpose, 7.0);
+        });
+    }
+
+    #[test]
+    fn scheduler_process_commands_apply_target_writes_in_authored_order() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process ordered-command-stream
+                      :target (step-param :transpose)
+                      :run (do
+                        (ratchet! :times 1 :mode :repeat :span 0)
+                        (target-add! 7)
+                        (veto!)))
+                    (processes :track 0 (ordered-command-stream))
+                    "#,
+                )
+                .expect("define ordered command fixture");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 6_000);
+            assert_eq!(events.len(), 1, "{events:?}");
+            assert_eq!(events[0].transpose, 0.0, "{events:?}");
+        });
+    }
+
+    #[test]
+    fn scheduler_process_ratchet_subdivide_offsets_and_scales_duration() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process subdivide-burst
+                      :run (do
+                        (veto!)
+                        (ratchet! :times 4 :mode :subdivide :span 0.25)))
+                    (processes :track 0 (subdivide-burst))
+                    "#,
+                )
+                .expect("define subdivide ratchet fixture");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 6_000);
+            let sample_times = events
+                .iter()
+                .map(|event| event.sample_time)
+                .collect::<Vec<_>>();
+            assert_eq!(sample_times, vec![1, 1_501, 3_001, 4_501], "{events:?}");
+            assert!(events
+                .iter()
+                .all(|event| (event.duration - 0.25).abs() < 1e-6));
+        });
+    }
+
+    #[test]
+    fn scheduler_process_ratchet_repeat_keeps_duration_for_ring_through_overlap() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.step_data[0].set(0, StepParam::Duration, 1.0);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process repeat-burst
+                      :run (do
+                        (veto!)
+                        (ratchet! :times 3 :mode :repeat :span 0.125)))
+                    (processes :track 0 (repeat-burst))
+                    "#,
+                )
+                .expect("define repeat ratchet fixture");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 12_000);
+            let sample_times = events
+                .iter()
+                .map(|event| event.sample_time)
+                .collect::<Vec<_>>();
+            assert_eq!(sample_times, vec![1, 3_001, 6_001], "{events:?}");
+            assert!(events
+                .iter()
+                .all(|event| (event.duration - 1.0).abs() < 1e-6));
+        });
+    }
+
+    #[test]
+    fn scheduler_process_ratchet_shape_error_drops_burst_without_aborting_lookahead() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[0].set_step_active(1, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process broken-ratchet-shape
+                      :run (ratchet! :times 3
+                                      :mode :subdivide
+                                      :span 0.25
+                                      :shape (lambda (i ev)
+                                               (if (= i 1)
+                                                 (vel! ev "not-a-number")
+                                                 ev))))
+                    (processes :track 0 (broken-ratchet-shape))
+                    "#,
+                )
+                .expect("define broken ratchet shape fixture");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 12_000);
+            let sample_times = events
+                .iter()
+                .map(|event| event.sample_time)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                sample_times,
+                vec![0, 6_000],
+                "a bad shape should drop each burst atomically while base scheduling continues: {events:?}"
             );
         });
     }
@@ -9653,6 +10473,7 @@ mod tests {
             0.0,
             0.0,
             event,
+            Vec::new(),
             false,
         ));
         let scheduled = queue.pop().expect("routed network trigger");
@@ -9731,6 +10552,7 @@ mod tests {
             0.0,
             0.0,
             event,
+            Vec::new(),
             false,
         ));
 

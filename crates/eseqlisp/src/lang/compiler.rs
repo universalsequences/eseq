@@ -1641,6 +1641,7 @@ impl Compiler {
                                 || k == "phase"
                                 || k == "listen"
                                 || k == "target"
+                                || k == "targets"
                                 || k == "seed"
                                 || k == "doc"
                                 || k == "run"

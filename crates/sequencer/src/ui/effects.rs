@@ -261,8 +261,9 @@ impl App {
             track,
             cursor_step,
         );
-        let scratch_source =
-            lisp_host::midi_fx_library_source_with_user_source(&self.editor.scratch_buffer);
+        let scratch_source = lisp_host::midi_fx_library_source_with_user_source(
+            &lisp_host::process_library_source_with_user_source(&self.editor.scratch_buffer),
+        );
         if !scratch_source.trim().is_empty() {
             runtime.eval(&scratch_source)?;
         }
@@ -3665,6 +3666,10 @@ impl App {
         let midi_fx_library = lisp_host::load_midi_fx_library_source();
         if !midi_fx_library.trim().is_empty() {
             let _ = runtime.eval(&midi_fx_library);
+        }
+        let process_library = lisp_host::load_process_library_source();
+        if !process_library.trim().is_empty() {
+            let _ = runtime.eval(&process_library);
         }
         if let Some((text, cursor, runtime)) = lisp_host::run_embedded_scratch_flow(
             track,

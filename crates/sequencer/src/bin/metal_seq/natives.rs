@@ -215,6 +215,21 @@ fn process_binding_target_from_value(
                 param,
             })
         }
+        "process-inlet" | "process_inlet" => {
+            let process = value_string_field(value, "process")
+                .or_else(|| value_string_field(value, "class"))
+                .ok_or_else(|| "process-inlet target must include :process".to_string())?;
+            let inlet = value_string_field(value, "inlet")
+                .ok_or_else(|| "process-inlet target must include :inlet".to_string())?;
+            let instance_id = value_number_field(value, "instance-id")
+                .or_else(|| value_number_field(value, "instance_id"))
+                .map(|id| sequencer::process::ProcessInstanceId(id as u64));
+            Ok(sequencer::process::ParamTarget::ProcessInlet {
+                process,
+                inlet,
+                instance_id,
+            })
+        }
         "rack-slot" | "rack-slot-param" | "rack-instrument" | "rack-slot-instrument-param" => Err(
             "rack process-port bindings are not exposed until rack dispatch supports them"
                 .to_string(),
@@ -661,6 +676,10 @@ pub(crate) fn init_runtime(
             Arc::clone(&state),
             Arc::clone(&ui_epoch),
         );
+    let process_library = sequencer::lisp_host::load_process_library_source();
+    if !process_library.trim().is_empty() {
+        let _ = runtime.eval_str(&process_library);
+    }
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -1975,7 +1994,7 @@ pub(crate) fn init_runtime(
             )
             .into());
         };
-        if !port_def.mappable {
+        if !port_def.is_mappable() {
             return Err(format!(
                 "seq-bind-process-port: process port {port:?} is not mappable"
             )
@@ -1983,7 +2002,7 @@ pub(crate) fn init_runtime(
         }
         let target = process_binding_target_from_value(&st, track, target)
             .map_err(|error| format!("seq-bind-process-port: {error}"))?;
-        if !port_def.allows_manual_target(&target) {
+        if !port_def.allows_parameter_mapping_target(&target) {
             let target_kind = port_def
                 .effective_target_kind()
                 .map(|kind| kind.as_str())

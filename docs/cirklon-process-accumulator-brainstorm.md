@@ -1,10 +1,10 @@
 # Cirklon-Style Step Processes: Design Spec
 
-Status: design spec (evolved from brainstorm). Phase 3A backend ports and
-transient device writes have landed; Phase 3B should focus on mapping UI and
-binding visibility before rack-slot write application. Covers accumulators,
-masks, ratchets, grabs, and the track-attached process chain, all built on the
-existing scheduler-owned `def-process` framework.
+Status: design spec (evolved from brainstorm). Phase 4 backend verdicts,
+ratchets, and process-inlet connections have landed. Rack-slot write
+application and the Phase 5 ordered-chain editing surface remain follow-ups.
+Covers accumulators, masks, ratchets, grabs, and the track-attached process
+chain, all built on the existing scheduler-owned `def-process` framework.
 
 ## Design Principle
 
@@ -165,10 +165,13 @@ Lisp conditionals:
 2. **Verdicts on the base event** — `(veto!)` masks this step's trig; mutator verbs
    modify it in place. The step-attached `:run` executes with the resolved base
    event as implicit context.
-3. **Event multiplication** — `(ratchet! :times n :span dur :shape (fn (i ev) ...))`
+3. **Event multiplication** —
+   `(ratchet! :times n :mode :subdivide|:repeat :span dur :shape (fn (i ev) ...))`
    spawns sub-events **cloned from the base event** (chord, p-locks, param locks
    intact), never constructed from scratch. The `:shape` lambda with index `i` is
-   the burst-local accumulator — a pure fold over `i`.
+   the burst-local accumulator — a pure fold over `i`. `:mode` selects the two
+   Cirklon-style repeat behaviors and reinterprets `:span` accordingly (see
+   Phase 4 for the full table).
 
 ### Normative ordering rules
 
@@ -214,8 +217,8 @@ the target model is split in two:
 
 - **Ports** — the `:targets` clause in a `def-process` declares named
   *output ports*, **not addresses**. `target-set!` / `target-add!` write to
-  ports, never to concrete params. A port is either fixed/hint-following or
-  explicitly **mappable**:
+  ports, never to concrete params. A port has one explicit binding mode:
+  fixed/hint-following, parameter-mappable, or process-connectable.
   - `(name target-hint)` — fixed/hint-following port. It may resolve
     automatically, but it is not shown as remappable in the UI. This is the
     right shape for things like `(step-param :transpose)`.
@@ -226,12 +229,17 @@ the target model is split in two:
     `:instrument-param`, `:effect-param`, or `:midi-fx-param`.
   - `(name :mappable target-hint)` — mappable target with a default selector,
     e.g. `(param-tag :cutoff)` or `(instrument-param :release)`.
+  - `(name :process-inlet)` — connectable only to another process instance's
+    declared inlet. It is wired with `connect!`/`:connect` and never appears in
+    the parameter-mapping UI.
 - **Bindings** — each chain *instance* stores `port → Option<ParamTarget>`:
   the concrete address, chosen per-project. Fixed/hint-following ports resolve
-  from their hint only; mappable ports may be manually assigned. A def may carry
-  a *default binding hint* — a selector, not an address — auto-resolved when the
-  process is attached (and re-tried when the chain changes while the port is
-  still on its hint, i.e. the user hasn't manually rebound):
+  from their hint only; parameter-mappable ports may be manually assigned to
+  compatible parameter targets; process-connectable ports accept only
+  `ProcessInlet` targets. A def may carry a *default binding hint* — a selector,
+  not an address — auto-resolved when the process is attached (and re-tried when
+  the chain changes while the port is still on its hint, i.e. the user hasn't
+  manually rebound):
   - step-param hints (`:transpose`, velocity…) bind unconditionally — every
     track has them; this is why the portable library examples all target them.
   - `(param-tag :cutoff)` — semantic tag match across the track's
@@ -274,11 +282,11 @@ settings — "this climb drives *that* filter" is part of what the process is on
 this track. (Per-pattern binding overrides are a possible later addition, not
 the default.)
 
-**Mapping UI + shared seam with macros:** binding should be performed with the
+**Parameter-mapping UI + shared seam with macros:** parameter binding should be performed with the
 arm-and-highlight interaction specified in `MACRO_MAPPING_SPEC.md` (draft, not
 yet implemented). The mapping affordance is not an inlet property. Instead,
 when the selected process lane belongs to process slot X, the lane UI shows all
-`:mappable` target ports on slot X. Fixed targets, including fixed
+`:mappable` parameter ports on slot X. Fixed targets, including fixed
 `(step-param :transpose)` targets, do not show map controls. Pressing a map
 button arms mapping mode, every compatible param highlights (a third wrapper
 color — modulation blue, macro green, process ports their own), click to bind.
@@ -312,6 +320,73 @@ enum ParamTarget {
     ProcessChannel { name: String },
 }
 ```
+
+### Process-inlet targets: connecting within the chain (Phase 4)
+
+The Cirklon aux-A-feeds-aux-D pattern — one process generates a value another
+process consumes (a dice roll driving a ratchet's `times`) — is a small delta
+on the model, not a new model. The locked immediate-ordered-application rule
+already defines the semantics: a write from slot N lands before slot N+1 runs,
+so a `ProcessInlet` write is same-tick and order-visible within one track's
+chain. The cross-track one-tick register rule does not apply inside a chain.
+
+Rules:
+
+- **Defs stay generic.** A `:process-inlet` port is declared shape-only:
+  `(out :process-inlet)` — a connectable port kind, never a parameter-mappable
+  port and never a hint naming
+  another process class. A def that names a sibling class couples two
+  blueprints (worse than `midi-fx-target`, whose target is a stable device).
+  The generator doesn't know if it's driving a ratchet count, a mask
+  probability, or a climb delta.
+- **Wiring is instance-level**, stored in `TrackProcessSlot.bindings` like any
+  other port binding. Two authoring surfaces, both writing the same store:
+
+  ```lisp
+  ;; handles + connect! — the live-coding surface (parallels lane!)
+  (def rng (dice :lo 1 :hi 4))
+  (def rep (repeater :decay 0.7))
+  (processes :track 0 rng rep)
+  (connect! rng :out (inlet rep :times))
+
+  ;; inline selector — the declarative one-block surface
+  (processes :track 0
+    (dice :lo 1 :hi 4 :connect '((out (process-inlet :repeater :times))))
+    (repeater :decay 0.7))
+  ```
+
+  The inline `:connect` value is quoted because it is declarative selector data.
+
+  `(process-inlet :class :inlet)` is a selector, not an address — it resolves
+  against the finished chain (first matching slot), which is why the inline
+  form works despite `processes` being whole-chain-replace: a forward handle
+  reference to a sibling two lines down doesn't exist yet at read time, a
+  selector does. `connect!` and the Phase 3B parameter-mapping gesture write
+  the same instance binding store, but are deliberately different authoring
+  operations with different validation and UI surfaces.
+- **Write application**: the write lands as a transient overlay on the target
+  slot's inlet resolution for this fire — never persisted, composing with the
+  inlet's lane per the op (`target-set!` owns the value and the lane dims in
+  the UI; `target-add!` embellishes the hand-authored lane).
+- **Chain position matters**: a write to an *earlier* slot's inlet is only
+  seen on the next fire. This is Cirklon-authentic (aux order is evaluation
+  order) and the UI already treats chain order as semantic; no cycle handling
+  needed.
+- **Soft resolution as usual**: no matching slot ⇒ silent no-op, stale badge.
+  A generator attached alone is inert (defaults-inert holds).
+- **Fan-out is the channel layer's job.** A port binds to one inlet. One
+  generator driving many consumers publishes a channel (`(send :dice held)`)
+  and consumers read it (Phase 7) — ports are patch cords inside one track's
+  chain (same-tick, previewable, preset-portable); channels are the
+  project-wide bus (one-tick latency).
+- **Preview caveat**: a pure-fold consumer driven by a process-inlet write is
+  previewable only if the producer is also pure-fold — the composed fold is
+  still deterministic, but Phase 8's preview must evaluate the chain prefix,
+  not one lane in isolation.
+- **Preset granularity**: the wire is chain-level state, so tier-1 (class +
+  settings) presets cannot capture a patch. "Random ratchets" is a *chain
+  preset* (both slots + the binding) — a granularity the preset tiers don't
+  have yet; see Open Questions.
 
 **Rack addressing.** Tracks are no longer one-instrument: racks landed
 (`RackSlotSnapshot` etc. in `sequencer/state.rs`), and `plock_variants.rs`
@@ -389,7 +464,7 @@ attached to track 0, with live handle updates like
 For sampler `speed`, remember the process value is normalized: `0.625` maps to
 raw speed `1.0`, `0.75` maps to raw `2.0`, and `1.0` maps to raw `4.0`.
 
-### Phase 3B next: mapping UI and binding visibility
+### Phase 3B landed: mapping UI and binding visibility
 
 The backend now has enough behavior to make UI the highest-yield next step:
 
@@ -626,15 +701,21 @@ Ratchet with velocity decay:
 
 ```lisp
 (def-process repeater
-  :in ((times :int 0 8 :default 0 :lane true)
-       (decay :float 0 1 :default 0.7)
+  :in ((times  :int 0 8 :default 0 :lane true)
+       (mode   :enum (:subdivide :repeat) :default :subdivide)
+       (decay  :float 0 1 :default 0.7)
        (spread :float 0.5 2 :default 1))
   :run (when (> (in :times) 0)
          (ratchet! :times (in :times)
-                   :span (* (step-length) (in :spread))
+                   :mode  (in :mode)   ; :subdivide fills the step; :repeat trails past it
+                   :span  (* (step-length) (in :spread))
                    :shape (fn (i ev)
                             (vel! ev (* (vel ev) (pow (in :decay) i)))))))
 ```
+
+`mode` is an ordinary inlet, so the choice is a knob (and lane-/p-lockable like
+everything else). Authors writing raw `:run` bodies can also pass `:mode`
+directly, even computed per-fire (`:mode (if (in :long) :repeat :subdivide)`).
 
 Multi-target (named ports once a process writes more than one place; fixed
 ports use their hint only, while `:mappable` ports expose the mapping UI — see
@@ -663,6 +744,36 @@ by this process slot shows the `aux` mapper; `gate` stays fixed/hint-following:
   :run (do
     (target-set! :gate energy)
     (target-set! :aux energy)))
+```
+
+Generator + consumer patch (process-inlet ports, Phase 4). The def is a
+generic number source — the ratchet coupling lives entirely at the
+attachment site; `repeater` is unchanged and doesn't know it's being driven:
+
+```lisp
+(def-process dice
+  :doc "Roll an integer each fire and publish it."
+  :targets ((out :process-inlet))   ; connectable shape only — no class named here
+  :in ((lo :int 0 8 :default 1)
+       (hi :int 0 8 :default 4)
+       (roll :gate :default 1 :lane true))    ; sequence WHEN to reroll
+  :seed :locked
+  :state ((held 0))
+  :run (do
+    (when (gate? roll)
+      (set! held (+ lo (rand-int (- hi lo)))))
+    (target-set! :out held)))
+
+(processes :track 0
+  (dice :lo 1 :hi 4 :connect '((out (process-inlet :repeater :times))))
+  (repeater :decay 0.7))
+```
+
+Repoint the same generator at a mask's probability and nothing about `dice`
+changes — only the instance wiring:
+
+```lisp
+(connect! rng :out (inlet mask :prob))
 ```
 
 Accumulator with a fixed target: no mapping UI, even though the amount inlet is
@@ -866,16 +977,44 @@ Known 3A limitations:
 
 1. `(veto!)`: verdict in the run result; event marked dead; chain continues; state
    still advances. Dimmed-step preview for `:seed :locked` masks.
-2. `(ratchet! :times :span :shape)`: clones the base event (chord/p-locks/params
-   intact), applies the `:shape` fold per sub-event, schedules via the pending-
-   emissions store; sub-events routed through the existing
-   `enqueue_due_process_emissions` / MIDI FX path. Ghost-step preview.
+2. `(ratchet! :times :mode :span :shape)`: clones the base event
+   (chord/p-locks/params intact), applies the `:shape` fold per sub-event,
+   schedules via the pending-emissions store; sub-events routed through the
+   existing `enqueue_due_process_emissions` / MIDI FX path. Ghost-step preview.
 
-   define 2 modes for ratchet:
-     + Divide the "duration" by times (so duration of each hit is step.duration / times)
-     + Schedule :times repeats :duration apart (so duration of each hit is step.duration)
+   **Two modes** (Cirklon's "repeat" has the same split). One verb, one clone
+   path, one `:shape` fold — `:mode` only changes the onset/duration math when
+   the scheduler materializes the clones, and reinterprets what `:span` means:
 
-3. `prob-mask` and `repeater` land as builtin library processes with presets.
+   | `:mode` | `:span` means | onset spacing | each hit's duration | total burst | feel |
+   |---|---|---|---|---|---|
+   | `:subdivide` (default) | total window to fill (default `step.duration`) | `span / times` | `span / times` | one step | classic roll / stutter |
+   | `:repeat` | inter-onset interval (default `step.duration`) | `span` | base event's own duration (unchanged) | `times × span` | echo / delay-line, trails past the step |
+
+   `:span` defaults to the step length in both modes, so the common case is just
+   `(ratchet! :times n)`. Both modes are deterministic given
+   `(times, mode, span)`, so ghost-step preview draws onsets at the computed
+   offsets: `:subdivide` packs ghosts inside the step, `:repeat` shows trailing
+   ghosts.
+
+   **Overlap policy (open — see Open Questions):** in `:repeat` mode the burst
+   extends past the step boundary, so trailing hits can collide with the next
+   trig on the track. Default to **ring-through** (each clone is a normal
+   downstream event with its own duration, per the "same downstream path" rule),
+   leaving a `:choke`-at-boundary option for later. `:subdivide` never raises
+   this.
+
+3. **Process-inlet ports** (see "Process-inlet targets" above):
+   `ParamTarget::ProcessInlet` and the connectable `:process-inlet` port mode
+   are distinct from parameter-mappable ports; writes apply as transient
+   overlays on the downstream slot's inlet resolution, composing with lanes per
+   the op;
+   instance-level wiring via `connect!` and the inline `:connect` selector form;
+   soft no-op when no slot matches. Acceptance: dice → repeater `times`
+   chain, including chain-reorder (write to an earlier slot lands next fire)
+   and lane-composition (`set` vs `add`) tests.
+4. `prob-mask`, `repeater`, and `dice` land as builtin library processes with
+   presets. `repeater` exposes `mode` as a `:subdivide|:repeat` inlet.
 
 ### Phase 5 — Ordered-chain UI polish
 
@@ -1046,6 +1185,12 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
 - `(rand)` is the RNG verb; `:seed :locked | :per-cycle` on the instance.
 - `MidiFxParam` targets early (Phase 3), timebase last (Phase 9).
 - Ratchets clone the base event; sub-events go through the normal downstream path.
+- Process-inlet ports: `(name :process-inlet)` declares a connectable port —
+  defs never name another process class, and the port never appears in the
+  parameter-mapping UI. Wiring is instance-level (`connect!` / inline `:connect`
+  with `(process-inlet :class :inlet)` selectors), same-tick within the chain
+  under immediate ordered application, transient overlay on the target slot's
+  inlet resolution. Fan-out goes through channels, not ports.
 - Lane storage keyed by durable instance id, outside `StepParam::ALL`.
 - Defaults-inert discipline for every library process.
 - Patching/channels UI deferred; track chain is the user-facing composition surface.
@@ -1068,3 +1213,16 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
   Leaning: follow the hint until the user manually maps it, then never move.
 - Whether per-pattern binding overrides are ever needed, or track-level
   bindings suffice (start track-level only).
+- Ratchet `:repeat`-mode overlap: do trailing hits ring through the next trig
+  (leaning default) or get choked at the step boundary? Add a `:choke` option
+  only if ring-through bites in practice.
+- Chain presets: process-inlet wires are chain-level state, so tier-1 presets
+  can't capture a generator→consumer patch. Does a fourth preset granularity
+  (whole chain: slots + bindings + optionally lanes) subsume tier 3, or sit
+  beside it?
+- Whether the `(process-inlet :class :inlet)` selector should also match by a
+  future inlet *tag* (like param tags) instead of class name, for
+  library-portable patches across e.g. different ratchet implementations.
+- Preview of process-inlet-driven chains: Phase 8's curve preview must
+  evaluate the chain prefix (producer folds feeding consumer folds) rather
+  than single lanes — confirm this stays cheap enough for the lane UI.

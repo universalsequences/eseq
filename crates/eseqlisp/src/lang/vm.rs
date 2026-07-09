@@ -5081,6 +5081,25 @@ mod tests {
     }
 
     #[test]
+    fn keyword_map_arguments_keep_normal_expression_evaluation() {
+        let mut vm = VM::new(Vec::new());
+        vm.register_native("map-argument-probe", |args| {
+            args.get(1).cloned().unwrap_or(Value::Nil)
+        });
+
+        let result = vm
+            .eval_str("(map-argument-probe :map (list 1 2))")
+            .expect("evaluate :map expression argument");
+
+        let Some(Value::List(items)) = result else {
+            panic!("expected evaluated list argument, got {result:?}");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(*items[0].borrow(), Value::Number(1.0));
+        assert_eq!(*items[1].borrow(), Value::Number(2.0));
+    }
+
+    #[test]
     fn eval_str_grows_global_storage_for_large_programs() {
         let mut vm = VM::new(Vec::new());
         let mut source = String::new();

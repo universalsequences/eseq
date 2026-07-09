@@ -1128,9 +1128,14 @@
               (if (= mode 5) "Sync"
                 "Delay"))))))))
 
+(def seqv-range-origin (min-value max-value)
+  (if (and (< min-value 0) (= (abs min-value) max-value))
+    0
+    min-value))
+
 (def seqv-param-origin (mode)
   (if (seqv-process-lane-mode? mode)
-    (get (seqv-current-process-lane mode) :default)
+    (seqv-range-origin (seqv-param-min mode) (seqv-param-max mode))
     (if (= mode 3) 0
       (if (= mode 4) 0
         (if (= mode 5) 0
@@ -1158,7 +1163,7 @@
 
 (def seqv-track-param-origin (track mode)
   (if (seqv-process-lane-mode? mode)
-    (get (seqv-track-process-lane track mode) :default)
+    (seqv-range-origin (seqv-track-param-min track mode) (seqv-track-param-max track mode))
     (seqv-param-origin mode)))
 
 (def seqv-track-param-decimals (track mode)

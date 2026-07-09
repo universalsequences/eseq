@@ -4626,6 +4626,42 @@ impl SequencerState {
         }
         true
     }
+    /// Bind a process target port on every current-pattern chain slot owned by
+    /// `instance_id`. This mirrors `set_process_lane_values`: authored Lisp and
+    /// UI interactions both update the pattern-owned slots currently attached to
+    /// tracks without touching step/plock storage.
+    pub fn set_process_port_binding_for_instance(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+        port_name: &str,
+        target: crate::process::ParamTarget,
+    ) -> usize {
+        let mut updated = 0;
+        let mut changed = false;
+        {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            for chain in chains.iter_mut() {
+                for slot in chain
+                    .slots
+                    .iter_mut()
+                    .filter(|slot| slot.instance_id == instance_id)
+                {
+                    updated += 1;
+                    let current = slot.bindings.get(port_name);
+                    if !matches!(current, Some(Some(existing)) if existing == &target) {
+                        slot.bindings
+                            .insert(port_name.to_string(), Some(target.clone()));
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            self.publish_scheduler_snapshot();
+        }
+        updated
+    }
     pub fn clear_process_port_binding(
         &self,
         track: usize,

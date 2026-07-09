@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::os::raw::{c_char, c_float, c_int, c_void};
@@ -3384,6 +3384,12 @@ type SharedProcessAuthoring = Arc<Mutex<ProcessAuthoringRegistry>>;
 type SharedProcessEvalContext = Arc<Mutex<Option<ProcessEvalContext>>>;
 type ProcessPublishHook = Arc<dyn Fn(crate::process::PublishedProcessAuthoringSnapshot) + 'static>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessEvalScope {
+    Run,
+    RatchetShape,
+}
+
 #[derive(Clone)]
 pub struct PublishedProcessAuthoringNatives {
     process_authoring: SharedProcessAuthoring,
@@ -3515,12 +3521,15 @@ pub(crate) struct ProcessEvalContext {
     inlets: HashMap<String, EValue>,
     state: HashMap<String, EValue>,
     event: Option<EValue>,
+    step_context: Option<crate::process::ProcessStepEventContext>,
     ports: Vec<crate::process::ProcessPortDef>,
     outputs: Vec<crate::process::ProcessOutput>,
     emissions: Vec<EmittedAccumulatorEvent>,
+    commands: Vec<crate::process::ProcessRunCommand>,
     target_writes: Vec<crate::process::ProcessTargetWrite>,
     transpose: Option<f32>,
     random_state: u64,
+    scope: ProcessEvalScope,
 }
 
 pub struct ScratchControlRuntime {
@@ -4191,23 +4200,33 @@ impl ScratchControlRuntime {
                 inlets: invocation.inlets,
                 state: invocation.state,
                 event: invocation.event,
+                step_context: invocation.step_context,
                 ports: invocation.ports,
                 outputs: Vec::new(),
                 emissions: Vec::new(),
+                commands: Vec::new(),
                 target_writes: Vec::new(),
                 transpose: None,
                 random_state: invocation.seed,
+                scope: ProcessEvalScope::Run,
             });
         }
+        let _ = self.runtime.take_status_message();
         self.runtime
             .eval_str(&invocation.source)
             .map_err(|error| format!("{error:?}"))?;
+        let process_status = self.runtime.take_status_message();
         let ctx = self
             .process_eval
             .lock()
             .map_err(|_| "failed to lock process eval context".to_string())?
             .take()
             .ok_or_else(|| "process run did not produce a context".to_string())?;
+        if let Some(status) = process_status {
+            if status.starts_with("Error:") {
+                return Err(status);
+            }
+        }
         Ok(crate::process::ProcessRunResult {
             runtime_id: invocation.runtime_id,
             beat: invocation.beat,
@@ -4215,9 +4234,66 @@ impl ScratchControlRuntime {
             state: ctx.state,
             outputs: ctx.outputs,
             emissions: ctx.emissions,
+            commands: ctx.commands,
             target_writes: ctx.target_writes,
             transpose: ctx.transpose,
         })
+    }
+
+    pub fn invoke_process_ratchet_shape(
+        &mut self,
+        shape_context: &mut crate::process::ProcessRatchetShapeContext,
+        shape: &EValue,
+        index: u32,
+        event: crate::process::ProcessRatchetEvent,
+    ) -> Result<crate::process::ProcessRatchetEvent, String> {
+        let event_value = process_ratchet_event_value(event);
+        {
+            let mut ctx = self
+                .process_eval
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            *ctx = Some(ProcessEvalContext {
+                runtime_id: shape_context.runtime_id,
+                beat: shape_context.beat,
+                inlets: shape_context.inlets.clone(),
+                state: shape_context.state.clone(),
+                event: shape_context.event.clone(),
+                step_context: Some(shape_context.step_context.clone()),
+                ports: shape_context.ports.clone(),
+                outputs: Vec::new(),
+                emissions: Vec::new(),
+                commands: Vec::new(),
+                target_writes: Vec::new(),
+                transpose: None,
+                random_state: shape_context.random_state,
+                scope: ProcessEvalScope::RatchetShape,
+            });
+        }
+        let _ = self.runtime.take_status_message();
+        let invoke_result = self.runtime.invoke(
+            shape.clone(),
+            vec![EValue::Number(index as f64), event_value.clone()],
+        );
+        let shape_status = self.runtime.take_status_message();
+        let ctx = self
+            .process_eval
+            .lock()
+            .map_err(|_| "failed to lock process eval context".to_string())?
+            .take()
+            .ok_or_else(|| "ratchet shape did not produce an evaluation context".to_string())?;
+        shape_context.random_state = ctx.random_state;
+        if let Some(status) = shape_status {
+            if status.starts_with("Error:") {
+                return Err(status);
+            }
+        }
+        let returned = invoke_result.map_err(|error| format!("{error:?}"))?;
+        let shaped_value = match returned {
+            Some(value @ EValue::Map(_)) => value,
+            _ => event_value,
+        };
+        process_ratchet_event_from_value(&shaped_value)
     }
 }
 
@@ -4258,6 +4334,20 @@ fn register_process_target_hint_constructors(runtime: &mut Runtime) {
             },
         );
     }
+    runtime.register_native_with_docs(
+        "process-inlet",
+        "(process-inlet :class :inlet)",
+        "Construct a process-inlet target selector for a connectable process port.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("process-inlet expects a process class and inlet".to_string());
+            }
+            Ok(process_list(
+                std::iter::once(EValue::Symbol("process-inlet".to_string()))
+                    .chain(args.into_iter()),
+            ))
+        },
+    );
 }
 
 fn register_process_natives(
@@ -4286,6 +4376,53 @@ fn register_process_natives(
     }));
 
     register_process_target_hint_constructors(runtime);
+
+    let process_authoring_for_inlet = Arc::clone(&process_authoring);
+    runtime.register_native_with_docs(
+        "inlet",
+        "(inlet process :inlet)",
+        "Construct an instance-specific process-inlet target selector for connect!.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("inlet expects a process handle and inlet name".to_string());
+            }
+            let Some(EValue::HostHandle { kind, id, .. }) = args.first() else {
+                return Err("inlet expects a process handle".to_string());
+            };
+            if kind != "process" {
+                return Err("inlet expects a process handle".to_string());
+            }
+            let inlet = process_symbol_name(
+                args.get(1)
+                    .ok_or_else(|| "inlet expects an inlet name".to_string())?,
+            )?;
+            let registry = process_authoring_for_inlet
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let instance = registry
+                .instances
+                .iter()
+                .find(|entry| entry.handle_id.0 == *id)
+                .ok_or_else(|| "unknown process handle".to_string())?;
+            let def = registry
+                .defs
+                .iter()
+                .find(|def| def.name == instance.class_name)
+                .ok_or_else(|| format!("unknown process class '{}'", instance.class_name))?;
+            if !def.inlets.iter().any(|entry| entry.name == inlet) {
+                return Err(format!(
+                    "process '{}' has no inlet '{}'",
+                    instance.class_name, inlet
+                ));
+            }
+            Ok(process_list([
+                EValue::Symbol(PROCESS_INLET_INSTANCE_TARGET_TAG.to_string()),
+                EValue::Number(*id as f64),
+                EValue::Symbol(instance.class_name.clone()),
+                EValue::Symbol(inlet),
+            ]))
+        },
+    );
 
     let process_authoring_for_def = Arc::clone(&process_authoring);
     let publish_for_def = publish.clone();
@@ -4539,6 +4676,7 @@ fn register_process_natives(
                 .lock()
                 .map_err(|_| "failed to lock process eval context".to_string())?;
             if let Some(ctx) = eval.as_mut() {
+                ensure_process_run_scope(ctx, "send")?;
                 // Runtime propagation is performed by the scheduler after the run
                 // result returns.
                 ctx.outputs.push(crate::process::ProcessOutput {
@@ -4614,6 +4752,7 @@ fn register_process_natives(
             let Some(ctx) = guard.as_mut() else {
                 return Err("out called outside process execution".to_string());
             };
+            ensure_process_run_scope(ctx, "out")?;
             ctx.outputs.push(crate::process::ProcessOutput {
                 name: key,
                 value: value.clone(),
@@ -4644,6 +4783,7 @@ fn register_process_natives(
         let Some(ctx) = guard.as_mut() else {
             return Err("__process-state-set! called outside process execution".to_string());
         };
+        ensure_process_run_scope(ctx, "__process-state-set!")?;
         ctx.state.insert(key, value.clone());
         Ok(value)
     });
@@ -4674,10 +4814,103 @@ fn register_process_natives(
             let Some(ctx) = guard.as_mut() else {
                 return Err("transpose! called outside process execution".to_string());
             };
+            ensure_process_run_scope(ctx, "transpose!")?;
             ctx.transpose = Some(*value as f32);
             Ok(EValue::Number(*value))
         },
     );
+
+    let process_eval_for_veto = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "veto!",
+        "(veto!)",
+        "Suppress the scheduler-owned base event for this step while allowing later processes to run.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("veto! expects no arguments".to_string());
+            }
+            let mut guard = process_eval_for_veto
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("veto! called outside process execution".to_string());
+            };
+            ensure_process_run_scope(ctx, "veto!")?;
+            if ctx.step_context.is_none() {
+                return Err("veto! requires a scheduler step event context".to_string());
+            }
+            ctx.commands
+                .push(crate::process::ProcessRunCommand::VetoBaseEvent);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let process_eval_for_step_length = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "step-length",
+        "(step-length)",
+        "Return the current scheduler grid step length in beats.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("step-length expects no arguments".to_string());
+            }
+            let guard = process_eval_for_step_length
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("step-length called outside process execution".to_string());
+            };
+            let Some(step_context) = ctx.step_context.as_ref() else {
+                return Err("step-length requires a scheduler step event context".to_string());
+            };
+            Ok(EValue::Number(step_context.step_beats as f64))
+        },
+    );
+
+    let process_eval_for_ratchet = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "ratchet!",
+        "(ratchet! :times n :mode :subdivide|:repeat :span beats :shape fn)",
+        "Clone the current scheduler-owned base event into a ratchet burst.",
+        move |args, _ctx| {
+            let (times, mode, span_beats, shape) = parse_process_ratchet_args(&args)?;
+            let mut guard = process_eval_for_ratchet
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("ratchet! called outside process execution".to_string());
+            };
+            ensure_process_run_scope(ctx, "ratchet!")?;
+            let Some(step_context) = ctx.step_context.clone() else {
+                return Err("ratchet! requires a scheduler step event context".to_string());
+            };
+            if times == 0 {
+                return Ok(EValue::Bool(false));
+            }
+            ctx.commands
+                .push(crate::process::ProcessRunCommand::Ratchet(
+                    crate::process::ProcessRatchetRequest {
+                        times,
+                        mode,
+                        span_beats,
+                        shape,
+                        shape_context: crate::process::ProcessRatchetShapeContext {
+                            runtime_id: ctx.runtime_id,
+                            beat: ctx.beat,
+                            inlets: ctx.inlets.clone(),
+                            state: ctx.state.clone(),
+                            event: ctx.event.clone(),
+                            step_context,
+                            ports: ctx.ports.clone(),
+                            random_state: ctx.random_state,
+                        },
+                    },
+                ));
+            Ok(EValue::Number(times as f64))
+        },
+    );
+
+    register_process_ratchet_event_natives(runtime);
 
     let process_eval_for_target_add = Arc::clone(&process_eval);
     runtime.register_native_with_docs(
@@ -4912,6 +5145,7 @@ fn register_process_graph_emit_native(
                 .lock()
                 .map_err(|_| "failed to lock process eval context".to_string())?;
             if let Some(ctx) = guard.as_mut() {
+                ensure_process_run_scope(ctx, "emit")?;
                 let event = build_process_emit_event(&args)?;
                 ctx.emissions.push(event);
                 return Ok(EValue::Bool(true));
@@ -4959,6 +5193,7 @@ pub fn register_published_process_authoring_natives(
 }
 
 const PROCESS_LANE_TAG: &str = "__process-lane";
+const PROCESS_INLET_INSTANCE_TARGET_TAG: &str = "__process-inlet-instance";
 
 /// `(lane 0 1 0 ...)` evaluates to a tagged list; `processes`/`lane!` unpack it.
 fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, String>> {
@@ -5070,6 +5305,15 @@ fn process_chain_slot_from_handle(
             );
         }
     }
+    validate_process_port_bindings(def, &instance.bindings)?;
+    let mut bindings: BTreeMap<String, Option<crate::process::ParamTarget>> = def
+        .ports
+        .iter()
+        .map(|port| (port.name.clone(), None))
+        .collect();
+    for (port, target) in &instance.bindings {
+        bindings.insert(port.clone(), target.clone());
+    }
     Ok(crate::process::TrackProcessSlot {
         instance_id: crate::process::ProcessInstanceId(handle_id),
         instance_name: instance.name.clone(),
@@ -5077,12 +5321,64 @@ fn process_chain_slot_from_handle(
         enabled: true,
         inlets,
         lanes,
-        bindings: def
-            .ports
-            .iter()
-            .map(|port| (port.name.clone(), None))
-            .collect(),
+        bindings,
     })
+}
+
+fn validate_process_port_bindings(
+    def: &crate::process::ProcessDef,
+    bindings: &BTreeMap<String, Option<crate::process::ParamTarget>>,
+) -> Result<(), String> {
+    for (port_name, target) in bindings {
+        let Some(port) = def.ports.iter().find(|port| port.name == *port_name) else {
+            return Err(format!(
+                "process '{}' has no target port '{}'",
+                def.name, port_name
+            ));
+        };
+        if let Some(target) = target {
+            if !port.allows_binding_target(target) {
+                return Err(format!(
+                    "target {} is incompatible with process '{}' port '{}'",
+                    process_param_target_label_for_error(target),
+                    def.name,
+                    port_name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn process_param_target_label_for_error(target: &crate::process::ParamTarget) -> String {
+    match target {
+        crate::process::ParamTarget::StepParam { param } => format!("step-param:{param}"),
+        crate::process::ParamTarget::InstrumentParam { param, .. } => {
+            format!("instrument:{param}")
+        }
+        crate::process::ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            ..
+        } => format!("effect{}:{effect}:{param}", slot + 1),
+        crate::process::ParamTarget::MidiFxParam { slot, fx, param } => {
+            format!("midi-fx{}:{fx}:{param}", slot + 1)
+        }
+        crate::process::ParamTarget::ProcessInlet {
+            process,
+            inlet,
+            instance_id,
+        } => instance_id
+            .map(|id| format!("process-inlet:{process}#{}:{inlet}", id.0))
+            .unwrap_or_else(|| format!("process-inlet:{process}:{inlet}")),
+        crate::process::ParamTarget::RackSlotParam { slot, param } => {
+            format!("rack{}:{param}", slot + 1)
+        }
+        crate::process::ParamTarget::RackSlotInstrumentParam { slot, param, .. } => {
+            format!("rack{}:instrument:{param}", slot + 1)
+        }
+    }
 }
 
 fn matching_existing_process_slot<'a>(
@@ -5134,7 +5430,7 @@ fn preserve_process_slot_state(
             let Some(Some(target)) = existing_slot.bindings.get(&port.name) else {
                 continue;
             };
-            if port.allows_manual_target(target) && slot.bindings.contains_key(&port.name) {
+            if port.allows_binding_target(target) && slot.bindings.contains_key(&port.name) {
                 slot.bindings
                     .insert(port.name.clone(), Some(target.clone()));
             }
@@ -5236,7 +5532,7 @@ fn register_process_chain_natives(
 
     let state_for_lane = Arc::clone(&state);
     let authoring_for_lane = Arc::clone(&process_authoring);
-    let publish_for_lane = publish;
+    let publish_for_lane = publish.clone();
     runtime.register_native_with_docs(
         "lane!",
         "(lane! instance :inlet v1 v2 ...)",
@@ -5323,6 +5619,70 @@ fn register_process_chain_natives(
             }
             if write_process_chain_state {
                 publish_process_authoring(&authoring_for_lane, &publish_for_lane);
+            }
+            Ok(EValue::Number(updated as f64))
+        },
+    );
+
+    let state_for_connect = Arc::clone(&state);
+    let authoring_for_connect = Arc::clone(&process_authoring);
+    let publish_for_connect = publish;
+    runtime.register_native_with_docs(
+        "connect!",
+        "(connect! instance :port (inlet target-instance :inlet))",
+        "Connect a process output port to another process instance's inlet.",
+        move |args, _ctx| {
+            if args.len() != 3 {
+                return Err("connect! expects a process handle, port, and inlet target".to_string());
+            }
+            let Some(EValue::HostHandle { kind, id, .. }) = args.first() else {
+                return Err("connect! expects a process handle".to_string());
+            };
+            if kind != "process" {
+                return Err("connect! expects a process handle".to_string());
+            }
+            let port = process_symbol_name(
+                args.get(1)
+                    .ok_or_else(|| "connect! expects a port name".to_string())?,
+            )?;
+            let target = parse_process_connection_target(
+                args.get(2)
+                    .ok_or_else(|| "connect! expects an inlet target".to_string())?,
+            )?;
+            {
+                let mut registry = authoring_for_connect
+                    .lock()
+                    .map_err(|_| "failed to lock process registry".to_string())?;
+                let instance = registry
+                    .instances
+                    .iter()
+                    .find(|entry| entry.handle_id.0 == *id)
+                    .ok_or_else(|| "unknown process handle".to_string())?;
+                let def = registry
+                    .defs
+                    .iter()
+                    .find(|def| def.name == instance.class_name)
+                    .ok_or_else(|| format!("unknown process class '{}'", instance.class_name))?;
+                let single = BTreeMap::from([(port.clone(), Some(target.clone()))]);
+                validate_process_port_bindings(def, &single)?;
+                let instance = registry
+                    .instances
+                    .iter_mut()
+                    .find(|entry| entry.handle_id.0 == *id)
+                    .ok_or_else(|| "unknown process handle".to_string())?;
+                instance.bindings.insert(port.clone(), Some(target.clone()));
+            }
+            let updated = if write_process_chain_state {
+                state_for_connect.set_process_port_binding_for_instance(
+                    crate::process::ProcessInstanceId(*id),
+                    &port,
+                    target,
+                )
+            } else {
+                0
+            };
+            if write_process_chain_state {
+                publish_process_authoring(&authoring_for_connect, &publish_for_connect);
             }
             Ok(EValue::Number(updated as f64))
         },
@@ -5462,8 +5822,14 @@ fn parse_process_accumulator_def(
     }
     let mut target_port =
         target_port.ok_or_else(|| "def-accumulator requires :target".to_string())?;
-    if target_port.mappable {
+    if target_port.is_mappable() {
         if let Some(kind) = target_kind {
+            if kind == crate::process::ProcessTargetKind::ProcessInlet {
+                return Err(
+                    "def-accumulator does not expose connectable ports; use def-process with :targets ((out :process-inlet))"
+                        .to_string(),
+                );
+            }
             target_port.target_kind = Some(kind);
         }
         if let Some(hint) = target_hint {
@@ -5553,6 +5919,251 @@ fn process_target_write_args(
     }
 }
 
+fn ensure_process_run_scope(ctx: &ProcessEvalContext, native: &str) -> Result<(), String> {
+    if ctx.scope == ProcessEvalScope::Run {
+        Ok(())
+    } else {
+        Err(format!(
+            "{native} cannot be used while shaping a ratchet event"
+        ))
+    }
+}
+
+fn process_value_is_callable(value: &EValue) -> bool {
+    matches!(
+        value,
+        EValue::Closure(_, _)
+            | EValue::Function(_)
+            | EValue::NativeFunction(_)
+            | EValue::HostHandle { .. }
+    )
+}
+
+fn parse_process_ratchet_args(
+    args: &[EValue],
+) -> Result<
+    (
+        u32,
+        crate::process::ProcessRatchetMode,
+        Option<f32>,
+        Option<EValue>,
+    ),
+    String,
+> {
+    if args.is_empty() {
+        return Err("ratchet! requires keyword arguments".to_string());
+    }
+    if args.len() % 2 != 0 {
+        return Err("ratchet! expects keyword/value pairs".to_string());
+    }
+    let mut times = None;
+    let mut mode = crate::process::ProcessRatchetMode::Subdivide;
+    let mut span_beats = None;
+    let mut shape = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = process_symbol_name(&args[idx])?.to_ascii_lowercase();
+        let value = &args[idx + 1];
+        match key.as_str() {
+            "times" => {
+                let n = process_number_arg(Some(value), "ratchet! :times")?;
+                if !n.is_finite() || n < 0.0 || n.fract() != 0.0 {
+                    return Err("ratchet! :times expects a non-negative integer".to_string());
+                }
+                if n > 1024.0 {
+                    return Err("ratchet! :times must be <= 1024".to_string());
+                }
+                times = Some(n as u32);
+            }
+            "mode" => {
+                let value = process_symbol_name(value)?.to_ascii_lowercase();
+                mode = match value.as_str() {
+                    "subdivide" => crate::process::ProcessRatchetMode::Subdivide,
+                    "repeat" => crate::process::ProcessRatchetMode::Repeat,
+                    _ => return Err("ratchet! :mode expects :subdivide or :repeat".to_string()),
+                };
+            }
+            "span" => {
+                let beats = process_number_arg(Some(value), "ratchet! :span")?;
+                if !beats.is_finite() || beats < 0.0 {
+                    return Err(
+                        "ratchet! :span expects a non-negative finite beat value".to_string()
+                    );
+                }
+                span_beats = Some(beats as f32);
+            }
+            "shape" => {
+                if !process_value_is_callable(value) {
+                    return Err("ratchet! :shape expects a callable value".to_string());
+                }
+                shape = Some(value.clone());
+            }
+            other => return Err(format!("ratchet! unknown key :{other}")),
+        }
+        idx += 2;
+    }
+    let times = times.ok_or_else(|| "ratchet! requires :times".to_string())?;
+    Ok((times, mode, span_beats, shape))
+}
+
+fn process_ratchet_event_value(event: crate::process::ProcessRatchetEvent) -> EValue {
+    fn number(value: impl Into<f64>) -> Rc<RefCell<EValue>> {
+        Rc::new(RefCell::new(EValue::Number(value.into())))
+    }
+
+    let mut map = HashMap::new();
+    map.insert(
+        "offset-beats".to_string(),
+        number(event.offset_beats as f64),
+    );
+    map.insert(
+        "duration".to_string(),
+        number(event.resolved.duration as f64),
+    );
+    map.insert(
+        "velocity".to_string(),
+        number(event.resolved.velocity as f64),
+    );
+    map.insert("speed".to_string(), number(event.resolved.speed as f64));
+    map.insert("aux-a".to_string(), number(event.resolved.aux_a as f64));
+    map.insert("aux-b".to_string(), number(event.resolved.aux_b as f64));
+    map.insert(
+        "transpose".to_string(),
+        number(event.resolved.transpose as f64),
+    );
+    map.insert("pan".to_string(), number(event.resolved.pan as f64));
+    map.insert("chop".to_string(), number(event.resolved.chop as f64));
+    EValue::Map(map)
+}
+
+fn process_ratchet_event_number(
+    map: &HashMap<String, Rc<RefCell<EValue>>>,
+    key: &str,
+) -> Result<f32, String> {
+    match map.get(key).map(|value| value.borrow().clone()) {
+        Some(EValue::Number(value)) if value.is_finite() => Ok(value as f32),
+        Some(other) => Err(format!(
+            "ratchet event field '{key}' must be a finite number, got {}",
+            eseqlisp::vm::format_lisp_value(&other)
+        )),
+        None => Err(format!("ratchet event missing field '{key}'")),
+    }
+}
+
+fn process_ratchet_event_from_value(
+    value: &EValue,
+) -> Result<crate::process::ProcessRatchetEvent, String> {
+    let EValue::Map(map) = value else {
+        return Err("ratchet shape must return or mutate an event map".to_string());
+    };
+    Ok(crate::process::ProcessRatchetEvent {
+        offset_beats: process_ratchet_event_number(map, "offset-beats")?,
+        resolved: ResolvedStep {
+            duration: process_ratchet_event_number(map, "duration")?,
+            velocity: process_ratchet_event_number(map, "velocity")?,
+            speed: process_ratchet_event_number(map, "speed")?,
+            aux_a: process_ratchet_event_number(map, "aux-a")?,
+            aux_b: process_ratchet_event_number(map, "aux-b")?,
+            transpose: process_ratchet_event_number(map, "transpose")?,
+            pan: process_ratchet_event_number(map, "pan")?,
+            chop: process_ratchet_event_number(map, "chop")?,
+        },
+    })
+}
+
+fn process_ratchet_event_param_key(native: &str) -> Option<&'static str> {
+    match native.trim_end_matches('!') {
+        "vel" => Some("velocity"),
+        "note" => Some("transpose"),
+        "dur" => Some("duration"),
+        "speed" => Some("speed"),
+        "pan" => Some("pan"),
+        "chop" => Some("chop"),
+        _ => None,
+    }
+}
+
+fn process_ratchet_event_read(value: Option<&EValue>, native: &str) -> Result<EValue, String> {
+    let key = process_ratchet_event_param_key(native)
+        .ok_or_else(|| format!("unknown ratchet event reader '{native}'"))?;
+    let Some(EValue::Map(map)) = value else {
+        return Err(format!("{native} expects a ratchet event map"));
+    };
+    Ok(EValue::Number(
+        process_ratchet_event_number(map, key)? as f64
+    ))
+}
+
+fn process_ratchet_event_write(args: &[EValue], native: &str) -> Result<EValue, String> {
+    let key = process_ratchet_event_param_key(native)
+        .ok_or_else(|| format!("unknown ratchet event writer '{native}'"))?;
+    let Some(EValue::Map(map)) = args.first() else {
+        return Err(format!("{native} expects an event map and number"));
+    };
+    let value = process_number_arg(args.get(1), native)?;
+    if !value.is_finite() {
+        return Err(format!("{native} expects a finite number"));
+    }
+    let Some(cell) = map.get(key) else {
+        return Err(format!("ratchet event missing field '{key}'"));
+    };
+    *cell.borrow_mut() = EValue::Number(value);
+    Ok(EValue::Number(value))
+}
+
+fn register_process_ratchet_event_natives(runtime: &mut Runtime) {
+    for native in ["vel", "note", "dur", "speed", "pan", "chop"] {
+        runtime.register_native_with_docs(
+            native,
+            native,
+            "Read a ratchet shape event parameter.",
+            move |args, _ctx| {
+                if args.len() != 1 {
+                    return Err(format!("{native} expects one event argument"));
+                }
+                process_ratchet_event_read(args.first(), native)
+            },
+        );
+    }
+    for native in ["vel!", "note!", "dur!", "speed!", "pan!", "chop!"] {
+        runtime.register_native_with_docs(
+            native,
+            native,
+            "Mutate a ratchet shape event parameter.",
+            move |args, _ctx| {
+                if args.len() != 2 {
+                    return Err(format!("{native} expects an event and number"));
+                }
+                process_ratchet_event_write(&args, native)
+            },
+        );
+    }
+    runtime.register_native_with_docs(
+        "nudge!",
+        "(nudge! event beats)",
+        "Offset a ratchet shape event by a number of beats.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("nudge! expects an event and beat offset".to_string());
+            }
+            let Some(EValue::Map(map)) = args.first() else {
+                return Err("nudge! expects an event map and beat offset".to_string());
+            };
+            let amount = process_number_arg(args.get(1), "nudge!")?;
+            if !amount.is_finite() {
+                return Err("nudge! expects a finite beat offset".to_string());
+            }
+            let current = process_ratchet_event_number(map, "offset-beats")? as f64;
+            let Some(cell) = map.get("offset-beats") else {
+                return Err("ratchet event missing field 'offset-beats'".to_string());
+            };
+            let next = current + amount;
+            *cell.borrow_mut() = EValue::Number(next);
+            Ok(EValue::Number(next))
+        },
+    );
+}
+
 fn push_process_target_write(
     process_eval: &SharedProcessEvalContext,
     op: crate::process::ProcessTargetOp,
@@ -5565,6 +6176,7 @@ fn push_process_target_write(
     let Some(ctx) = guard.as_mut() else {
         return Err("target write called outside process execution".to_string());
     };
+    ensure_process_run_scope(ctx, "target write")?;
     let port = match port {
         Some(port) => port,
         None => match ctx.ports.as_slice() {
@@ -5581,12 +6193,15 @@ fn push_process_target_write(
     let Some(port_def) = ctx.ports.iter().find(|entry| entry.name == port).cloned() else {
         return Err(format!("unknown process target port '{port}'"));
     };
-    ctx.target_writes.push(crate::process::ProcessTargetWrite {
+    let write = crate::process::ProcessTargetWrite {
         port: port_def.name,
         target: port_def.target,
         op,
         value,
-    });
+    };
+    ctx.target_writes.push(write.clone());
+    ctx.commands
+        .push(crate::process::ProcessRunCommand::TargetWrite(write));
     Ok(())
 }
 
@@ -5809,6 +6424,9 @@ fn parse_process_target_kind(value: &EValue) -> Result<crate::process::ProcessTa
         "midi-fx-param" | "midi_fx_param" | "midi-fx" | "midi_fx" => {
             Ok(crate::process::ProcessTargetKind::MidiFxParam)
         }
+        "process-inlet" | "process_inlet" | "inlet" => {
+            Ok(crate::process::ProcessTargetKind::ProcessInlet)
+        }
         "rack-slot-param" | "rack_slot_param" | "rack-slot" | "rack_slot" => {
             Ok(crate::process::ProcessTargetKind::RackSlotParam)
         }
@@ -5838,10 +6456,14 @@ fn parse_process_port_def(items: &[EValue]) -> Result<crate::process::ProcessPor
         ),
         [marker] => {
             let marker = process_symbol_name(marker)?.to_ascii_lowercase();
-            if marker == "mappable" {
-                Ok(crate::process::ProcessPortDef::mappable(name, None, None))
-            } else {
-                Err("target port expects a target hint or :mappable".to_string())
+            match marker.as_str() {
+                "mappable" => Ok(crate::process::ProcessPortDef::mappable(name, None, None)),
+                "process-inlet" | "process_inlet" => {
+                    Ok(crate::process::ProcessPortDef::process_inlet(name))
+                }
+                _ => Err(
+                    "target port expects a target hint, :mappable, or :process-inlet".to_string(),
+                ),
             }
         }
         [marker, value] => {
@@ -5856,14 +6478,24 @@ fn parse_process_port_def(items: &[EValue]) -> Result<crate::process::ProcessPor
                     Some(parse_process_target_hint(value)?),
                 ))
             } else {
+                let target_kind = parse_process_target_kind(value)?;
+                if target_kind == crate::process::ProcessTargetKind::ProcessInlet {
+                    return Err(
+                        "process-inlet ports use (name :process-inlet) and connect!, not :mappable"
+                            .to_string(),
+                    );
+                }
                 Ok(crate::process::ProcessPortDef::mappable(
                     name,
-                    Some(parse_process_target_kind(value)?),
+                    Some(target_kind),
                     None,
                 ))
             }
         }
-        [] => Err("target port declaration requires a target hint or :mappable".to_string()),
+        [] => Err(
+            "target port declaration requires a target hint, :mappable, or :process-inlet"
+                .to_string(),
+        ),
         _ => Err("target port declaration has too many fields".to_string()),
     }
 }
@@ -5944,6 +6576,50 @@ fn parse_process_target_hint(value: &EValue) -> Result<crate::process::ProcessTa
             Ok(crate::process::ProcessTargetHint::MidiFxParam { fx, param })
         }
         other => Err(format!("unsupported process target {other}")),
+    }
+}
+
+fn parse_process_connection_target(value: &EValue) -> Result<crate::process::ParamTarget, String> {
+    let items =
+        value_list(value).ok_or_else(|| "process port target must be a list".to_string())?;
+    let head = process_symbol_name(
+        items
+            .first()
+            .ok_or_else(|| "process port target missing head".to_string())?,
+    )?
+    .to_ascii_lowercase();
+    match head.as_str() {
+        "process-inlet" => {
+            if items.len() != 3 {
+                return Err("(process-inlet :class :inlet) expects two arguments".to_string());
+            }
+            Ok(crate::process::ParamTarget::ProcessInlet {
+                process: process_symbol_name(&items[1])?,
+                inlet: process_symbol_name(&items[2])?,
+                instance_id: None,
+            })
+        }
+        PROCESS_INLET_INSTANCE_TARGET_TAG => {
+            if items.len() != 4 {
+                return Err("(inlet process :inlet) target has invalid arity".to_string());
+            }
+            let EValue::Number(raw_id) = items[1] else {
+                return Err("(inlet process :inlet) target has invalid process id".to_string());
+            };
+            if !raw_id.is_finite() || raw_id < 0.0 || raw_id.fract() != 0.0 {
+                return Err(
+                    "(inlet process :inlet) target id must be a non-negative integer".to_string(),
+                );
+            }
+            Ok(crate::process::ParamTarget::ProcessInlet {
+                process: process_symbol_name(&items[2])?,
+                inlet: process_symbol_name(&items[3])?,
+                instance_id: Some(crate::process::ProcessInstanceId(raw_id as u64)),
+            })
+        }
+        other => Err(format!(
+            "connect! target must be a process inlet, got {other}"
+        )),
     }
 }
 
@@ -6300,16 +6976,23 @@ fn construct_process_instance(
     process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
-    let inlets = parse_process_constructor_inlets(process_authoring, &args)?;
+    let constructor_args = parse_process_constructor_args(process_authoring, &args)?;
     let mut registry = process_authoring
         .lock()
         .map_err(|_| "failed to lock process registry".to_string())?;
+    let def = registry
+        .defs
+        .iter()
+        .find(|def| def.name == class_name)
+        .ok_or_else(|| format!("unknown process class '{class_name}'"))?;
+    validate_process_port_bindings(def, &constructor_args.bindings)?;
     let handle_id = crate::process::AuthoredHandleId(registry.next_id());
     registry.upsert_instance(crate::process::AuthoredProcessInstance {
         handle_id,
         name: None,
         class_name: class_name.to_string(),
-        inlets,
+        inlets: constructor_args.inlets,
+        bindings: constructor_args.bindings,
         running,
         anonymous,
         one_shot,
@@ -6360,6 +7043,7 @@ fn construct_anonymous_listener_process(
         name: None,
         class_name,
         inlets: HashMap::new(),
+        bindings: BTreeMap::new(),
         running: true,
         anonymous: true,
         one_shot: false,
@@ -6375,22 +7059,56 @@ fn construct_anonymous_listener_process(
     ))
 }
 
-fn parse_process_constructor_inlets(
+struct ProcessConstructorArgs {
+    inlets: HashMap<String, crate::process::ProcessInletValue>,
+    bindings: BTreeMap<String, Option<crate::process::ParamTarget>>,
+}
+
+fn parse_process_constructor_args(
     process_authoring: &SharedProcessAuthoring,
     args: &[EValue],
-) -> Result<HashMap<String, crate::process::ProcessInletValue>, String> {
+) -> Result<ProcessConstructorArgs, String> {
     if args.len() % 2 != 0 {
         return Err("process constructor expects keyword/value inlet pairs".to_string());
     }
     let mut inlets = HashMap::new();
+    let mut bindings = BTreeMap::new();
     let mut idx = 0;
     while idx < args.len() {
         let key = process_symbol_name(&args[idx])?;
-        let value = parse_inlet_value(process_authoring, &args[idx + 1])?;
-        inlets.insert(key, value);
+        if key.eq_ignore_ascii_case("connect") {
+            bindings.extend(parse_process_constructor_connections(&args[idx + 1])?);
+        } else if key.eq_ignore_ascii_case("map") {
+            return Err(
+                "process constructor :map was replaced by :connect for process-inlet connections"
+                    .to_string(),
+            );
+        } else {
+            let value = parse_inlet_value(process_authoring, &args[idx + 1])?;
+            inlets.insert(key, value);
+        }
         idx += 2;
     }
-    Ok(inlets)
+    Ok(ProcessConstructorArgs { inlets, bindings })
+}
+
+fn parse_process_constructor_connections(
+    value: &EValue,
+) -> Result<BTreeMap<String, Option<crate::process::ParamTarget>>, String> {
+    let entries = value_list(value)
+        .ok_or_else(|| "process constructor :connect expects a list".to_string())?;
+    let mut bindings = BTreeMap::new();
+    for entry in entries {
+        let items = value_list(&entry)
+            .ok_or_else(|| "process constructor :connect entries must be lists".to_string())?;
+        if items.len() != 2 {
+            return Err("process constructor :connect entries expect (port target)".to_string());
+        }
+        let port = process_symbol_name(&items[0])?;
+        let target = parse_process_connection_target(&items[1])?;
+        bindings.insert(port, Some(target));
+    }
+    Ok(bindings)
 }
 
 fn parse_inlet_value(
@@ -13126,6 +13844,19 @@ pub fn load_midi_fx_library_source() -> String {
         .join("\n")
 }
 
+pub fn load_process_library_source() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("processes")
+        .join("builtin.lisp");
+    let source = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| include_str!("../processes/builtin.lisp").to_string());
+    if source.trim().is_empty() {
+        String::new()
+    } else {
+        format!("; processes/builtin.lisp\n{source}\n")
+    }
+}
+
 fn load_midi_fx_descriptors_from_source(source: String) -> Vec<EffectDescriptor> {
     if source.trim().is_empty() {
         return Vec::new();
@@ -13246,6 +13977,17 @@ fn midi_fx_metadata_value(expression: &Expression) -> Result<EValue, String> {
 
 pub fn midi_fx_library_source_with_user_source(user_source: &str) -> String {
     let library = load_midi_fx_library_source();
+    if library.trim().is_empty() {
+        user_source.to_string()
+    } else if user_source.trim().is_empty() {
+        library
+    } else {
+        format!("{library}\n; *scratch*\n{user_source}")
+    }
+}
+
+pub fn process_library_source_with_user_source(user_source: &str) -> String {
+    let library = load_process_library_source();
     if library.trim().is_empty() {
         user_source.to_string()
     } else if user_source.trim().is_empty() {
@@ -13472,7 +14214,7 @@ mod tests {
         clear_neural_effect_plock_by_network_id, clear_neural_instrument_plock_by_network_id,
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
-        new_eval_context, parse_manifest, read_eseqlisp_init_source,
+        new_eval_context, parse_manifest, parse_process_port_def, read_eseqlisp_init_source,
         register_graph_authoring_natives, register_published_process_authoring_natives,
         register_sequencer_natives, scheduler_scratch_runtime_with_fallbacks,
         scratch_runtime_with_fallbacks, selected_neural_instrument_plock_value,
@@ -21227,6 +21969,7 @@ mod tests {
                 inlets: HashMap::from([("delta".to_string(), Value::Number(5.0))]),
                 state: HashMap::new(),
                 event: None,
+                step_context: None,
                 ports: def.ports.clone(),
                 seed: 123,
             })
@@ -21302,6 +22045,7 @@ mod tests {
                 inlets: HashMap::new(),
                 state: HashMap::new(),
                 event: None,
+                step_context: None,
                 ports: def.ports.clone(),
                 seed: 123,
             })
@@ -21395,6 +22139,7 @@ mod tests {
                 inlets: HashMap::new(),
                 state: HashMap::new(),
                 event: None,
+                step_context: None,
                 ports: def.ports.clone(),
                 seed: 123,
             })
@@ -21413,6 +22158,21 @@ mod tests {
             Some(crate::process::ProcessTargetHint::StepParam {
                 param: "transpose".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn process_inlet_ports_reject_parameter_mappable_declarations() {
+        let error = parse_process_port_def(&[
+            Value::Symbol("out".to_string()),
+            Value::Keyword("mappable".to_string()),
+            Value::Keyword("process-inlet".to_string()),
+        ])
+        .expect_err(":mappable :process-inlet must be rejected");
+
+        assert_eq!(
+            error,
+            "process-inlet ports use (name :process-inlet) and connect!, not :mappable"
         );
     }
 
@@ -21498,6 +22258,7 @@ mod tests {
             inlets: HashMap::new(),
             state: HashMap::new(),
             event: None,
+            step_context: None,
             ports: vec![crate::process::ProcessPortDef::with_target(
                 "pitch",
                 crate::process::ProcessTargetHint::StepParam {
@@ -21506,9 +22267,11 @@ mod tests {
             )],
             outputs: Vec::new(),
             emissions: Vec::new(),
+            commands: Vec::new(),
             target_writes: Vec::new(),
             transpose: None,
             random_state: 123,
+            scope: super::ProcessEvalScope::Run,
         })));
 
         let err = super::push_process_target_write(
@@ -21522,6 +22285,232 @@ mod tests {
             err.contains("unknown process target port 'missing'"),
             "{err}"
         );
+    }
+
+    fn test_process_step_context() -> crate::process::ProcessStepEventContext {
+        crate::process::ProcessStepEventContext {
+            track: 0,
+            step: 0,
+            cycle: 0,
+            beat: 0.0,
+            sample_time: 0,
+            step_beats: 0.25,
+            resolved: ResolvedStep {
+                duration: 1.0,
+                velocity: 0.8,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: 5.0,
+                pan: 0.0,
+                chop: 1.0,
+            },
+        }
+    }
+
+    #[test]
+    fn process_run_collects_ordered_veto_ratchet_and_target_write_commands() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process command-check
+                  :target (step-param :transpose)
+                  :run (do
+                    (target-add! 2)
+                    (veto!)
+                    (ratchet! :times 2 :mode :subdivide :span 0.5)))
+                "#,
+            )
+            .expect("define command-check process");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "command-check")
+            .expect("process definition");
+
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 701,
+                source: def.run_source.expect("run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: Some(test_process_step_context()),
+                ports: def.ports,
+                seed: 123,
+            })
+            .expect("invoke command-check process");
+
+        assert_eq!(result.target_writes.len(), 1);
+        assert_eq!(result.commands.len(), 3);
+        assert!(matches!(
+            result.commands[0],
+            crate::process::ProcessRunCommand::TargetWrite(_)
+        ));
+        assert!(matches!(
+            result.commands[1],
+            crate::process::ProcessRunCommand::VetoBaseEvent
+        ));
+        match &result.commands[2] {
+            crate::process::ProcessRunCommand::Ratchet(request) => {
+                assert_eq!(request.times, 2);
+                assert_eq!(request.mode, crate::process::ProcessRatchetMode::Subdivide);
+                assert_eq!(request.span_beats, Some(0.5));
+                assert!(request.shape.is_none());
+                assert_eq!(request.shape_context.step_context.step_beats, 0.25);
+            }
+            other => panic!("expected ratchet command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_ratchet_shape_mutates_event_handle_in_invocation_order() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process shaped-ratchet
+                  :in ((boost :float 0 24 :default 0))
+                  :run (ratchet! :times 1
+                                  :mode :repeat
+                                  :span (step-length)
+                                  :shape (lambda (i ev)
+                                           (do
+                                             (note! ev (+ (note ev) (in :boost) i))
+                                             (vel! ev (* (vel ev) 0.5))
+                                             (nudge! ev 0.125)
+                                             ev))))
+                "#,
+            )
+            .expect("define shaped-ratchet process");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "shaped-ratchet")
+            .expect("process definition");
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 702,
+                source: def.run_source.expect("run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::from([("boost".to_string(), Value::Number(3.0))]),
+                state: HashMap::new(),
+                event: None,
+                step_context: Some(test_process_step_context()),
+                ports: def.ports,
+                seed: 123,
+            })
+            .expect("invoke shaped-ratchet process");
+        let crate::process::ProcessRunCommand::Ratchet(mut request) =
+            result.commands.into_iter().next().expect("ratchet command")
+        else {
+            panic!("expected ratchet command");
+        };
+        let shape = request.shape.clone().expect("shape closure");
+        let shaped = scratch
+            .invoke_process_ratchet_shape(
+                &mut request.shape_context,
+                &shape,
+                2,
+                crate::process::ProcessRatchetEvent {
+                    offset_beats: 0.0,
+                    resolved: test_process_step_context().resolved,
+                },
+            )
+            .expect("invoke ratchet shape");
+        assert_eq!(shaped.offset_beats, 0.125);
+        assert_eq!(shaped.resolved.transpose, 10.0);
+        assert!((shaped.resolved.velocity - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn process_veto_and_ratchet_require_step_event_context() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process invalid-verdicts
+                  :run (do
+                    (veto!)
+                    (ratchet! :times 1)))
+                "#,
+            )
+            .expect("define invalid-verdicts process");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "invalid-verdicts")
+            .expect("process definition");
+        let err = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 703,
+                source: def.run_source.expect("run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: def.ports,
+                seed: 123,
+            })
+            .expect_err("veto! outside step context should fail");
+        assert!(
+            err.contains("requires a scheduler step event context"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn process_builtin_library_loads_prob_mask_repeater_and_dice() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(&super::load_process_library_source())
+            .expect("builtin process library should eval");
+        let names = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .map(|def| def.name)
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "prob-mask"), "{names:?}");
+        assert!(names.iter().any(|name| name == "repeater"), "{names:?}");
+        assert!(names.iter().any(|name| name == "dice"), "{names:?}");
     }
 
     #[test]
@@ -21680,7 +22669,7 @@ mod tests {
                     == Some(crate::process::ProcessTargetHint::InstrumentParam {
                         param: "release".to_string(),
                     })
-                && port.mappable
+                && port.is_mappable()
         }));
         assert!(def.ports.iter().any(|port| {
             port.name == "speed"
@@ -21688,7 +22677,7 @@ mod tests {
                     == Some(crate::process::ProcessTargetHint::InstrumentParam {
                         param: "speed".to_string(),
                     })
-                && port.mappable
+                && port.is_mappable()
         }));
     }
 
@@ -21736,14 +22725,14 @@ mod tests {
                 param: "transpose".to_string(),
             })
         );
-        assert!(!pitch.mappable);
+        assert!(!pitch.is_mappable());
 
         let shape = def
             .ports
             .iter()
             .find(|port| port.name == "shape")
             .expect("shape port");
-        assert!(shape.mappable);
+        assert!(shape.is_mappable());
         assert_eq!(
             shape.target_kind,
             Some(crate::process::ProcessTargetKind::InstrumentParam)
@@ -21755,12 +22744,166 @@ mod tests {
             .iter()
             .find(|port| port.name == "color")
             .expect("color port");
-        assert!(color.mappable);
+        assert!(color.is_mappable());
         assert_eq!(
             color.target_kind,
             Some(crate::process::ProcessTargetKind::DeviceParam)
         );
         assert_eq!(color.target, None);
+    }
+
+    #[test]
+    fn process_phase4_verdict_ratchet_demo_loads_and_attaches_all_lanes() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-phase4-verdict-ratchet-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source =
+            std::fs::read_to_string(&script_path).expect("read Phase 4 verdict/ratchet demo");
+
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate Phase 4 verdict/ratchet demo");
+
+        let chain = state.track_process_chain(0).expect("track 0 process chain");
+        assert_eq!(chain.slots.len(), 1);
+        let slot = &chain.slots[0];
+        assert_eq!(slot.class_name, "phase4-verdict-ratchet");
+        for lane_name in [
+            "veto",
+            "times",
+            "mode",
+            "span",
+            "note-delta",
+            "vel-scale",
+            "dur-scale",
+            "speed-scale",
+            "pan-delta",
+            "chop-scale",
+            "nudge",
+        ] {
+            assert!(
+                slot.lanes.contains_key(lane_name),
+                "missing lane {lane_name}; lanes={:?}",
+                slot.lanes.keys().collect::<Vec<_>>()
+            );
+        }
+
+        let authored = scratch.process_authoring_snapshot();
+        let def = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "phase4-verdict-ratchet")
+            .expect("Phase 4 process definition");
+        assert_eq!(def.ports.len(), 0);
+        assert_eq!(def.inlets.len(), 11);
+        assert!(def.inlets.iter().all(|inlet| inlet.lane));
+    }
+
+    #[test]
+    fn process_inlet_connections_attach_inline_and_via_connect_bang() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (def-process dice-like
+                  :targets ((out :process-inlet))
+                  :run (target-set! :out 3))
+
+                (def-process repeater-like
+                  :in ((times :int 0 8 :default 0 :lane true))
+                  :run nil)
+
+                (def inline-src
+                  (dice-like :connect '((out (process-inlet :repeater-like :times)))))
+                (def mapped-src (dice-like))
+                (def mapped-sink (repeater-like))
+
+                (processes :track 0 inline-src mapped-src mapped-sink)
+                (connect! mapped-src :out (inlet mapped-sink :times))
+                "#,
+            )
+            .expect("define process-inlet connections");
+
+        let chain = state.track_process_chain(0).expect("track 0 process chain");
+        assert_eq!(chain.slots.len(), 3);
+        let authored = scratch.process_authoring_snapshot();
+        let dice = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "dice-like")
+            .expect("dice-like process definition");
+        assert_eq!(dice.ports.len(), 1);
+        assert!(dice.ports[0].is_connectable());
+        assert!(!dice.ports[0].is_mappable());
+        assert_eq!(
+            chain.slots[0].bindings.get("out"),
+            Some(&Some(crate::process::ParamTarget::ProcessInlet {
+                process: "repeater-like".to_string(),
+                inlet: "times".to_string(),
+                instance_id: None,
+            }))
+        );
+        assert_eq!(
+            chain.slots[1].bindings.get("out"),
+            Some(&Some(crate::process::ParamTarget::ProcessInlet {
+                process: "repeater-like".to_string(),
+                inlet: "times".to_string(),
+                instance_id: Some(chain.slots[2].instance_id),
+            }))
+        );
+    }
+
+    #[test]
+    fn process_inlet_patch_demo_loads_and_wires_two_processes() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-inlet-patch-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read process-inlet demo");
+
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate process-inlet patch demo");
+
+        let chain = state.track_process_chain(0).expect("track 0 process chain");
+        assert_eq!(chain.slots.len(), 2);
+        assert_eq!(chain.slots[0].class_name, "process-inlet-demo-dice");
+        assert_eq!(chain.slots[1].class_name, "process-inlet-demo-repeater");
+        assert_eq!(
+            chain.slots[0].bindings.get("out"),
+            Some(&Some(crate::process::ParamTarget::ProcessInlet {
+                process: "process-inlet-demo-repeater".to_string(),
+                inlet: "times".to_string(),
+                instance_id: Some(chain.slots[1].instance_id),
+            }))
+        );
+        assert!(chain.slots[0].lanes.contains_key("roll"));
+        assert!(chain.slots[1].lanes.contains_key("enabled"));
     }
 
     #[test]
@@ -22037,6 +23180,7 @@ mod tests {
                     inlets: HashMap::new(),
                     state: HashMap::new(),
                     event: None,
+                    step_context: None,
                     ports: def.ports.clone(),
                     seed,
                 })

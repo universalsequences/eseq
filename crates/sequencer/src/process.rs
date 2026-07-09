@@ -9,10 +9,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use eseqlisp::vm::Value;
 use serde::{Deserialize, Serialize};
 
+use crate::accumulator::ResolvedStep;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::EmittedAccumulatorEvent;
 use crate::neural::ParamNodeId;
 use crate::neural::{process_grid_boundaries, GridBoundaryClock};
+use crate::scheduled_event::StepEvent;
 
 pub const DEFAULT_PROCESS_PORT: &str = "__default";
 
@@ -80,6 +82,7 @@ pub enum ProcessTargetKind {
     InstrumentParam,
     EffectParam,
     MidiFxParam,
+    ProcessInlet,
     RackSlotParam,
     RackSlotInstrumentParam,
 }
@@ -92,6 +95,7 @@ impl ProcessTargetKind {
             Self::InstrumentParam => "instrument-param",
             Self::EffectParam => "effect-param",
             Self::MidiFxParam => "midi-fx-param",
+            Self::ProcessInlet => "process-inlet",
             Self::RackSlotParam => "rack-slot-param",
             Self::RackSlotInstrumentParam => "rack-slot-instrument-param",
         }
@@ -110,6 +114,7 @@ impl ProcessTargetKind {
             Self::InstrumentParam => matches!(hint, ProcessTargetHint::InstrumentParam { .. }),
             Self::EffectParam => matches!(hint, ProcessTargetHint::EffectParam { .. }),
             Self::MidiFxParam => matches!(hint, ProcessTargetHint::MidiFxParam { .. }),
+            Self::ProcessInlet => false,
             Self::RackSlotParam | Self::RackSlotInstrumentParam => false,
         }
     }
@@ -126,6 +131,7 @@ impl ProcessTargetKind {
             Self::InstrumentParam => matches!(target, ParamTarget::InstrumentParam { .. }),
             Self::EffectParam => matches!(target, ParamTarget::EffectParam { .. }),
             Self::MidiFxParam => matches!(target, ParamTarget::MidiFxParam { .. }),
+            Self::ProcessInlet => matches!(target, ParamTarget::ProcessInlet { .. }),
             Self::RackSlotParam => matches!(target, ParamTarget::RackSlotParam { .. }),
             Self::RackSlotInstrumentParam => {
                 matches!(target, ParamTarget::RackSlotInstrumentParam { .. })
@@ -151,9 +157,18 @@ pub struct ProcessPortDef {
     pub name: String,
     pub target: Option<ProcessTargetHint>,
     #[serde(default)]
-    pub mappable: bool,
+    pub binding_mode: ProcessPortBindingMode,
     #[serde(default)]
     pub target_kind: Option<ProcessTargetKind>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessPortBindingMode {
+    #[default]
+    Fixed,
+    Mappable,
+    Connectable,
 }
 
 impl ProcessPortDef {
@@ -161,7 +176,7 @@ impl ProcessPortDef {
         Self {
             name: DEFAULT_PROCESS_PORT.to_string(),
             target: Some(target),
-            mappable: false,
+            binding_mode: ProcessPortBindingMode::Fixed,
             target_kind: None,
         }
     }
@@ -170,7 +185,7 @@ impl ProcessPortDef {
         Self {
             name: name.into(),
             target: Some(target),
-            mappable: false,
+            binding_mode: ProcessPortBindingMode::Fixed,
             target_kind: None,
         }
     }
@@ -183,8 +198,17 @@ impl ProcessPortDef {
         Self {
             name: name.into(),
             target,
-            mappable: true,
+            binding_mode: ProcessPortBindingMode::Mappable,
             target_kind,
+        }
+    }
+
+    pub fn process_inlet(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            target: None,
+            binding_mode: ProcessPortBindingMode::Connectable,
+            target_kind: Some(ProcessTargetKind::ProcessInlet),
         }
     }
 
@@ -200,12 +224,34 @@ impl ProcessPortDef {
             .or_else(|| self.target.as_ref().map(ProcessTargetHint::target_kind))
     }
 
-    pub fn allows_manual_target(&self, target: &ParamTarget) -> bool {
-        self.mappable
+    pub fn is_mappable(&self) -> bool {
+        self.binding_mode == ProcessPortBindingMode::Mappable
+    }
+
+    pub fn is_connectable(&self) -> bool {
+        self.binding_mode == ProcessPortBindingMode::Connectable
+    }
+
+    pub fn allows_parameter_mapping_target(&self, target: &ParamTarget) -> bool {
+        self.is_mappable()
+            && !matches!(target, ParamTarget::ProcessInlet { .. })
             && self
                 .effective_target_kind()
                 .map(|kind| kind.matches_target(target))
                 .unwrap_or(true)
+    }
+
+    pub fn allows_connection_target(&self, target: &ParamTarget) -> bool {
+        self.is_connectable()
+            && matches!(target, ParamTarget::ProcessInlet { .. })
+            && self
+                .effective_target_kind()
+                .map(|kind| kind.matches_target(target))
+                .unwrap_or(false)
+    }
+
+    pub fn allows_binding_target(&self, target: &ParamTarget) -> bool {
+        self.allows_parameter_mapping_target(target) || self.allows_connection_target(target)
     }
 }
 
@@ -229,6 +275,12 @@ pub enum ParamTarget {
         slot: usize,
         fx: String,
         param: String,
+    },
+    ProcessInlet {
+        process: String,
+        inlet: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_id: Option<ProcessInstanceId>,
     },
     RackSlotParam {
         slot: usize,
@@ -512,6 +564,7 @@ pub struct AuthoredProcessInstance {
     pub name: Option<String>,
     pub class_name: String,
     pub inlets: HashMap<String, ProcessInletValue>,
+    pub bindings: BTreeMap<String, Option<ParamTarget>>,
     pub running: bool,
     pub anonymous: bool,
     pub one_shot: bool,
@@ -682,6 +735,7 @@ pub struct PublishedAuthoredProcessInstance {
     pub name: Option<String>,
     pub class_name: String,
     pub inlets: HashMap<String, PublishedProcessInletValue>,
+    pub bindings: BTreeMap<String, Option<ParamTarget>>,
     pub running: bool,
     pub anonymous: bool,
     pub one_shot: bool,
@@ -768,6 +822,7 @@ impl ProcessAuthoringSnapshot {
                                 ))
                             })
                             .collect::<Result<HashMap<_, _>, String>>()?,
+                        bindings: instance.bindings.clone(),
                         running: instance.running,
                         anonymous: instance.anonymous,
                         one_shot: instance.one_shot,
@@ -876,6 +931,7 @@ impl PublishedProcessAuthoringSnapshot {
                         .iter()
                         .map(|(name, value)| (name.clone(), value.to_runtime()))
                         .collect(),
+                    bindings: instance.bindings.clone(),
                     running: instance.running,
                     anonymous: instance.anonymous,
                     one_shot: instance.one_shot,
@@ -972,6 +1028,7 @@ pub struct ProcessRunInvocation {
     pub inlets: HashMap<String, Value>,
     pub state: HashMap<String, Value>,
     pub event: Option<Value>,
+    pub step_context: Option<ProcessStepEventContext>,
     pub ports: Vec<ProcessPortDef>,
     pub seed: u64,
 }
@@ -984,14 +1041,78 @@ pub struct ProcessRunResult {
     pub state: HashMap<String, Value>,
     pub outputs: Vec<ProcessOutput>,
     pub emissions: Vec<EmittedAccumulatorEvent>,
+    pub commands: Vec<ProcessRunCommand>,
     pub target_writes: Vec<ProcessTargetWrite>,
     pub transpose: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProcessRunCommand {
+    TargetWrite(ProcessTargetWrite),
+    VetoBaseEvent,
+    Ratchet(ProcessRatchetRequest),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessRatchetMode {
+    Subdivide,
+    Repeat,
+}
+
+impl Default for ProcessRatchetMode {
+    fn default() -> Self {
+        Self::Subdivide
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessRatchetRequest {
+    pub times: u32,
+    pub mode: ProcessRatchetMode,
+    pub span_beats: Option<f32>,
+    pub shape: Option<Value>,
+    pub shape_context: ProcessRatchetShapeContext,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessRatchetShapeContext {
+    pub runtime_id: u64,
+    pub beat: f64,
+    pub inlets: HashMap<String, Value>,
+    pub state: HashMap<String, Value>,
+    pub event: Option<Value>,
+    pub step_context: ProcessStepEventContext,
+    pub ports: Vec<ProcessPortDef>,
+    pub random_state: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessRatchetEvent {
+    pub offset_beats: f32,
+    pub resolved: ResolvedStep,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessStepEventContext {
+    pub track: usize,
+    pub step: usize,
+    pub cycle: u64,
+    pub beat: f64,
+    pub sample_time: u64,
+    pub step_beats: f32,
+    pub resolved: ResolvedStep,
 }
 
 #[derive(Clone, Debug)]
 pub struct ProcessOutput {
     pub name: String,
     pub value: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessInletWrite {
+    pub op: ProcessTargetOp,
+    pub value: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -1001,6 +1122,34 @@ pub struct ProcessScheduledEmission {
     pub event: EmittedAccumulatorEvent,
 }
 
+#[derive(Clone, Debug)]
+pub struct ProcessScheduledItem {
+    pub process_runtime_id: u64,
+    pub beat: f64,
+    pub event: ProcessScheduledEvent,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProcessScheduledEvent {
+    Emission(EmittedAccumulatorEvent),
+    Step(ProcessScheduledStepEvent),
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessScheduledStepEvent {
+    pub event: StepEvent,
+    pub midi_fx_params: Vec<ProcessMidiFxParamOverride>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessMidiFxParamOverride {
+    pub slot: usize,
+    pub fx: String,
+    pub param: String,
+    pub param_idx: usize,
+    pub value: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ProcessRuntime {
     defs: HashMap<String, ProcessDef>,
@@ -1008,22 +1157,23 @@ pub struct ProcessRuntime {
     handle_to_runtime: HashMap<AuthoredHandleId, u64>,
     channels: HashMap<String, ChannelState>,
     patches: Vec<AuthoredPatch>,
-    pending_emissions: Vec<PendingProcessEmission>,
+    pending_events: Vec<PendingProcessEvent>,
     step_process_states: HashMap<ProcessInstanceId, HashMap<String, Value>>,
     step_process_runtime_ids: HashSet<u64>,
+    pending_step_inlet_writes: HashMap<(usize, ProcessInstanceId, String), Vec<ProcessInletWrite>>,
     global_transpose: f32,
 }
 
 #[derive(Clone, Debug)]
-struct PendingProcessEmission {
+struct PendingProcessEvent {
     process_runtime_id: u64,
     beat: f64,
-    event: EmittedAccumulatorEvent,
+    event: ProcessScheduledEvent,
 }
 
 impl ProcessRuntime {
     pub fn is_empty(&self) -> bool {
-        self.instances.is_empty() && self.pending_emissions.is_empty()
+        self.instances.is_empty() && self.pending_events.is_empty()
     }
 
     pub fn global_transpose(&self) -> f32 {
@@ -1031,7 +1181,8 @@ impl ProcessRuntime {
     }
 
     pub fn reset_transport(&mut self, total_beats: f64) {
-        self.pending_emissions.clear();
+        self.pending_events.clear();
+        self.pending_step_inlet_writes.clear();
         for instance in &mut self.instances {
             if let Some(clock) = &mut instance.clock {
                 clock.realign(total_beats);
@@ -1040,7 +1191,51 @@ impl ProcessRuntime {
     }
 
     pub fn clear_scene_pending(&mut self) {
-        self.pending_emissions.clear();
+        self.pending_events.clear();
+        self.pending_step_inlet_writes.clear();
+    }
+
+    pub fn defer_step_process_inlet_write(
+        &mut self,
+        track: usize,
+        instance_id: ProcessInstanceId,
+        inlet: impl Into<String>,
+        write: ProcessInletWrite,
+    ) {
+        self.pending_step_inlet_writes
+            .entry((track, instance_id, inlet.into()))
+            .or_default()
+            .push(write);
+    }
+
+    pub fn take_step_process_inlet_writes(
+        &mut self,
+        track: usize,
+        chain: &TrackProcessChain,
+    ) -> BTreeMap<usize, BTreeMap<String, Vec<ProcessInletWrite>>> {
+        let pending = std::mem::take(&mut self.pending_step_inlet_writes);
+        let mut current = BTreeMap::<usize, BTreeMap<String, Vec<ProcessInletWrite>>>::new();
+        for ((pending_track, instance_id, inlet), writes) in pending {
+            if pending_track == track {
+                if let Some(slot_idx) = chain
+                    .slots
+                    .iter()
+                    .position(|slot| slot.instance_id == instance_id)
+                {
+                    current
+                        .entry(slot_idx)
+                        .or_default()
+                        .entry(inlet)
+                        .or_default()
+                        .extend(writes);
+                    continue;
+                }
+                continue;
+            }
+            self.pending_step_inlet_writes
+                .insert((pending_track, instance_id, inlet), writes);
+        }
+        current
     }
 
     pub fn sync_authoring(&mut self, authoring: ProcessAuthoringSnapshot, total_beats: f64) {
@@ -1221,8 +1416,13 @@ impl ProcessRuntime {
                     ),
                     state: instance.state.clone(),
                     event: None,
+                    step_context: None,
                     ports: ports.clone(),
-                    seed: process_rng_seed(instance.runtime_id, seed_policy, target_beat, None),
+                    seed: process_rng_seed(
+                        instance.runtime_id,
+                        seed_policy,
+                        ProcessRngPosition::Temporal { beat: target_beat },
+                    ),
                 });
                 continue;
             }
@@ -1253,8 +1453,13 @@ impl ProcessRuntime {
                         inlets: inlets.clone(),
                         state: state.clone(),
                         event: None,
+                        step_context: None,
                         ports: ports.clone(),
-                        seed: process_rng_seed(runtime_id, class_seed_policy, beat, None),
+                        seed: process_rng_seed(
+                            runtime_id,
+                            class_seed_policy,
+                            ProcessRngPosition::Temporal { beat },
+                        ),
                     });
                 },
             );
@@ -1276,10 +1481,10 @@ impl ProcessRuntime {
                 for mut event in result.emissions {
                     let beat = result.beat + event.offset_beats.max(0.0) as f64;
                     event.offset_beats = 0.0;
-                    self.pending_emissions.push(PendingProcessEmission {
+                    self.pending_events.push(PendingProcessEvent {
                         process_runtime_id: result.runtime_id,
                         beat,
-                        event,
+                        event: ProcessScheduledEvent::Emission(event),
                     });
                 }
             }
@@ -1319,6 +1524,7 @@ impl ProcessRuntime {
                 value,
                 result.beat,
                 result.sample_time,
+                None,
             ));
         }
         for (channel, value) in channel_sends {
@@ -1332,10 +1538,10 @@ impl ProcessRuntime {
         for mut event in result.emissions {
             let beat = result.beat + event.offset_beats.max(0.0) as f64;
             event.offset_beats = 0.0;
-            self.pending_emissions.push(PendingProcessEmission {
+            self.pending_events.push(PendingProcessEvent {
                 process_runtime_id: result.runtime_id,
                 beat,
-                event,
+                event: ProcessScheduledEvent::Emission(event),
             });
         }
         invocations
@@ -1364,16 +1570,30 @@ impl ProcessRuntime {
             value,
             beat,
             sample_time,
+            None,
         )
     }
 
-    pub fn take_due_emissions(&mut self, up_to_beat: f64) -> Vec<ProcessScheduledEmission> {
+    pub fn schedule_step_event_at(
+        &mut self,
+        process_runtime_id: u64,
+        beat: f64,
+        event: ProcessScheduledStepEvent,
+    ) {
+        self.pending_events.push(PendingProcessEvent {
+            process_runtime_id,
+            beat,
+            event: ProcessScheduledEvent::Step(event),
+        });
+    }
+
+    pub fn take_due_events(&mut self, up_to_beat: f64) -> Vec<ProcessScheduledItem> {
         let mut due = Vec::new();
         let mut i = 0;
-        while i < self.pending_emissions.len() {
-            if self.pending_emissions[i].beat <= up_to_beat {
-                let pending = self.pending_emissions.swap_remove(i);
-                due.push(ProcessScheduledEmission {
+        while i < self.pending_events.len() {
+            if self.pending_events[i].beat <= up_to_beat {
+                let pending = self.pending_events.swap_remove(i);
+                due.push(ProcessScheduledItem {
                     process_runtime_id: pending.process_runtime_id,
                     beat: pending.beat,
                     event: pending.event,
@@ -1391,12 +1611,38 @@ impl ProcessRuntime {
         due
     }
 
+    pub fn take_due_emissions(&mut self, up_to_beat: f64) -> Vec<ProcessScheduledEmission> {
+        let mut emissions = Vec::new();
+        let mut requeue = Vec::new();
+        for item in self.take_due_events(up_to_beat) {
+            match item.event {
+                ProcessScheduledEvent::Emission(event) => {
+                    emissions.push(ProcessScheduledEmission {
+                        process_runtime_id: item.process_runtime_id,
+                        beat: item.beat,
+                        event,
+                    });
+                }
+                ProcessScheduledEvent::Step(event) => {
+                    requeue.push(PendingProcessEvent {
+                        process_runtime_id: item.process_runtime_id,
+                        beat: item.beat,
+                        event: ProcessScheduledEvent::Step(event),
+                    });
+                }
+            }
+        }
+        self.pending_events.extend(requeue);
+        emissions
+    }
+
     fn propagate_source_at(
         &mut self,
         source: ProcessSourceRef,
         value: Value,
         beat: f64,
         sample_time: u64,
+        step_context: Option<ProcessStepEventContext>,
     ) -> Vec<ProcessRunInvocation> {
         let mut invocations = Vec::new();
         let patches = self.patches.clone();
@@ -1431,7 +1677,13 @@ impl ProcessRuntime {
                 }
             }
         }
-        invocations.extend(self.listener_invocations_for_source(source, value, beat, sample_time));
+        invocations.extend(self.listener_invocations_for_source(
+            source,
+            value,
+            beat,
+            sample_time,
+            step_context,
+        ));
         invocations
     }
 
@@ -1441,6 +1693,7 @@ impl ProcessRuntime {
         value: Value,
         beat: f64,
         sample_time: u64,
+        step_context: Option<ProcessStepEventContext>,
     ) -> Vec<ProcessRunInvocation> {
         let channel_snapshot = self.channels.clone();
         let handle_snapshot = self.handle_to_runtime.clone();
@@ -1467,6 +1720,7 @@ impl ProcessRuntime {
                     ),
                     state: instance.state.clone(),
                     event: Some(value.clone()),
+                    step_context: step_context.clone(),
                     ports: self
                         .defs
                         .get(&instance.class_name)
@@ -1478,8 +1732,7 @@ impl ProcessRuntime {
                             .get(&instance.class_name)
                             .map(|def| def.seed_policy)
                             .unwrap_or_default(),
-                        beat,
-                        None,
+                        ProcessRngPosition::Temporal { beat },
                     ),
                 });
             }
@@ -1493,12 +1746,14 @@ impl ProcessRuntime {
         value: Value,
         beat: f64,
         sample_time: u64,
+        step_context: ProcessStepEventContext,
     ) -> Vec<ProcessRunInvocation> {
         self.listener_invocations_for_source(
             ProcessSourceRef::TrackFires(track),
             value,
             beat,
             sample_time,
+            Some(step_context),
         )
     }
 
@@ -1508,6 +1763,17 @@ impl ProcessRuntime {
         step: usize,
         cycle: u64,
         cycle_len: usize,
+    ) -> Vec<ProcessTargetWrite> {
+        self.step_process_writes_with_inlet_writes(slot, step, cycle, cycle_len, None)
+    }
+
+    pub fn step_process_writes_with_inlet_writes(
+        &self,
+        slot: &TrackProcessSlot,
+        step: usize,
+        cycle: u64,
+        cycle_len: usize,
+        inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
     ) -> Vec<ProcessTargetWrite> {
         if !slot.enabled {
             return Vec::new();
@@ -1552,6 +1818,7 @@ impl ProcessRuntime {
             step,
             cycle,
             cycle_len,
+            inlet_writes,
         );
         vec![ProcessTargetWrite {
             port: port.name,
@@ -1565,6 +1832,15 @@ impl ProcessRuntime {
         &mut self,
         slot: &TrackProcessSlot,
         ctx: ProcessStepRunContext,
+    ) -> Option<ProcessRunInvocation> {
+        self.step_process_invocation_with_inlet_writes(slot, ctx, None)
+    }
+
+    pub fn step_process_invocation_with_inlet_writes(
+        &mut self,
+        slot: &TrackProcessSlot,
+        ctx: ProcessStepRunContext,
+        inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
     ) -> Option<ProcessRunInvocation> {
         if !slot.enabled {
             return None;
@@ -1589,11 +1865,27 @@ impl ProcessRuntime {
             source,
             beat: ctx.beat,
             sample_time: ctx.sample_time,
-            inlets: resolve_step_process_inlets(&def, slot, ctx.step),
+            inlets: resolve_step_process_inlets(&def, slot, ctx.step, inlet_writes),
             state,
             event: Some(ctx.event),
+            step_context: Some(ProcessStepEventContext {
+                track: ctx.track,
+                step: ctx.step,
+                cycle: ctx.cycle,
+                beat: ctx.beat,
+                sample_time: ctx.sample_time,
+                step_beats: ctx.step_beats,
+                resolved: ctx.resolved,
+            }),
             ports,
-            seed: process_rng_seed(instance_id.0, seed_policy, ctx.beat, Some(ctx.cycle)),
+            seed: process_rng_seed(
+                instance_id.0,
+                seed_policy,
+                ProcessRngPosition::Step {
+                    cycle: ctx.cycle,
+                    step: ctx.step,
+                },
+            ),
         })
     }
 }
@@ -1605,6 +1897,8 @@ pub struct ProcessStepRunContext {
     pub cycle: u64,
     pub beat: f64,
     pub sample_time: u64,
+    pub step_beats: f32,
+    pub resolved: ResolvedStep,
     pub event: Value,
 }
 
@@ -1697,6 +1991,7 @@ fn resolve_step_process_inlets(
     def: &ProcessDef,
     slot: &TrackProcessSlot,
     step: usize,
+    inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
 ) -> HashMap<String, Value> {
     let mut inlets = HashMap::new();
     for inlet in &def.inlets {
@@ -1721,9 +2016,33 @@ fn resolve_step_process_inlets(
                 value = Value::Number(lane.value_at(step, fallback) as f64);
             }
         }
+        if let Some(writes) = inlet_writes.and_then(|writes| writes.get(&inlet.name)) {
+            value = apply_process_inlet_writes(value, writes);
+        }
         inlets.insert(inlet.name.clone(), value);
     }
     inlets
+}
+
+fn process_value_as_f32(value: &Value) -> Option<f32> {
+    match value {
+        Value::Number(value) => Some(*value as f32),
+        Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+fn apply_process_inlet_writes(mut value: Value, writes: &[ProcessInletWrite]) -> Value {
+    for write in writes {
+        value = match write.op {
+            ProcessTargetOp::Set => Value::Number(write.value as f64),
+            ProcessTargetOp::Add => {
+                let current = process_value_as_f32(&value).unwrap_or(0.0);
+                Value::Number((current + write.value) as f64)
+            }
+        };
+    }
+    value
 }
 
 fn process_accumulator_value_at(
@@ -1734,9 +2053,41 @@ fn process_accumulator_value_at(
     step: usize,
     cycle: u64,
     cycle_len: usize,
+    inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
 ) -> f32 {
     let cycle_len = cycle_len.max(step.saturating_add(1)).max(1);
     let step = step.min(cycle_len - 1);
+    if let Some(inlet_writes) = inlet_writes.filter(|writes| !writes.is_empty()) {
+        let start = process_accumulator_cycle_start_fallback(
+            slot,
+            accumulator,
+            amount_default,
+            reset_default,
+            cycle,
+            cycle_len,
+        );
+        let acc = if step == 0 {
+            start
+        } else {
+            fold_process_accumulator_steps(
+                slot,
+                accumulator,
+                amount_default,
+                reset_default,
+                start,
+                0..step,
+            )
+        };
+        return fold_process_accumulator_step_with_inlet_writes(
+            slot,
+            accumulator,
+            amount_default,
+            reset_default,
+            acc,
+            step,
+            inlet_writes,
+        );
+    }
     if accumulator_cycle_has_reset(slot, accumulator, reset_default, cycle_len) {
         let start = if cycle == 0 {
             0.0
@@ -1891,6 +2242,34 @@ fn fold_process_accumulator_steps(
     acc
 }
 
+fn fold_process_accumulator_step_with_inlet_writes(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    amount_default: f32,
+    reset_default: f32,
+    mut acc: f32,
+    step: usize,
+    inlet_writes: &BTreeMap<String, Vec<ProcessInletWrite>>,
+) -> f32 {
+    let reset = accumulator
+        .reset_inlet
+        .as_ref()
+        .map(|name| process_accumulator_inlet_at(slot, name, reset_default, step, inlet_writes))
+        .unwrap_or(0.0);
+    if reset > 0.5 {
+        acc = 0.0;
+    } else {
+        acc += process_accumulator_inlet_at(
+            slot,
+            &accumulator.amount_inlet,
+            amount_default,
+            step,
+            inlet_writes,
+        );
+    }
+    apply_process_accumulator_range(acc, accumulator)
+}
+
 fn process_accumulator_amount_sum(
     slot: &TrackProcessSlot,
     accumulator: &ProcessAccumulatorSpec,
@@ -1931,6 +2310,28 @@ fn process_accumulator_reset_at(
         .unwrap_or(reset_default)
 }
 
+fn process_accumulator_inlet_at(
+    slot: &TrackProcessSlot,
+    inlet: &str,
+    default: f32,
+    step: usize,
+    inlet_writes: &BTreeMap<String, Vec<ProcessInletWrite>>,
+) -> f32 {
+    let base = slot
+        .lanes
+        .get(inlet)
+        .map(|lane| lane.value_at(step, default))
+        .unwrap_or(default);
+    let Some(writes) = inlet_writes.get(inlet) else {
+        return base;
+    };
+    process_value_as_f32(&apply_process_inlet_writes(
+        Value::Number(base as f64),
+        writes,
+    ))
+    .unwrap_or(base)
+}
+
 fn apply_process_accumulator_range(value: f32, accumulator: &ProcessAccumulatorSpec) -> f32 {
     match accumulator.range {
         Some((lo, hi)) => apply_accumulator_range(value, lo, hi, accumulator.mode),
@@ -1968,15 +2369,31 @@ fn apply_accumulator_range(value: f32, lo: f32, hi: f32, mode: ProcessAccumulato
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ProcessRngPosition {
+    Temporal { beat: f64 },
+    Step { cycle: u64, step: usize },
+}
+
 fn process_rng_seed(
     runtime_id: u64,
     seed_policy: ProcessSeedPolicy,
-    beat: f64,
-    cycle: Option<u64>,
+    position: ProcessRngPosition,
 ) -> u64 {
     let mut seed = stable_mix64(runtime_id ^ 0xA2F7_0D64_3B1D_9A91);
-    if matches!(seed_policy, ProcessSeedPolicy::PerCycle) {
-        seed ^= stable_mix64(cycle.unwrap_or_else(|| beat.floor().max(0.0) as u64));
+    match position {
+        ProcessRngPosition::Step { cycle, step } => {
+            seed ^= stable_mix64((step as u64).wrapping_add(0xD1B5_4A32_D192_ED03));
+            if matches!(seed_policy, ProcessSeedPolicy::PerCycle) {
+                seed ^= stable_mix64(cycle.wrapping_add(0x8CB9_2BA7_2F3D_8DD7));
+            }
+        }
+        ProcessRngPosition::Temporal { beat } => {
+            if matches!(seed_policy, ProcessSeedPolicy::PerCycle) {
+                let cycle = beat.floor().max(0.0) as u64;
+                seed ^= stable_mix64(cycle.wrapping_add(0x8CB9_2BA7_2F3D_8DD7));
+            }
+        }
     }
     if seed == 0 {
         0x9E37_79B9_7F4A_7C15
@@ -2031,6 +2448,27 @@ pub fn stable_process_id(name: &str) -> u64 {
 mod tests {
     use super::*;
 
+    fn test_step_context(track: usize) -> ProcessStepEventContext {
+        ProcessStepEventContext {
+            track,
+            step: 0,
+            cycle: 0,
+            beat: 1.0,
+            sample_time: 48_000,
+            step_beats: 0.25,
+            resolved: ResolvedStep {
+                duration: 1.0,
+                velocity: 1.0,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: 0.0,
+                pan: 0.0,
+                chop: 1.0,
+            },
+        }
+    }
+
     fn authored_instance(
         handle: u64,
         class_name: &str,
@@ -2042,12 +2480,100 @@ mod tests {
             name: None,
             class_name: class_name.to_string(),
             inlets: HashMap::new(),
+            bindings: BTreeMap::new(),
             running: true,
             anonymous: true,
             one_shot,
             every,
             run_source: Some("(emit :track 0)".to_string()),
         }
+    }
+
+    #[test]
+    fn step_process_rng_seed_is_step_locked_and_optionally_cycle_variant() {
+        let runtime_id = 41;
+        let locked_step_zero_cycle_zero = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::Locked,
+            ProcessRngPosition::Step { cycle: 0, step: 0 },
+        );
+        let locked_step_zero_later_cycle = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::Locked,
+            ProcessRngPosition::Step { cycle: 9, step: 0 },
+        );
+        let locked_step_one = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::Locked,
+            ProcessRngPosition::Step { cycle: 0, step: 1 },
+        );
+
+        assert_eq!(
+            locked_step_zero_cycle_zero, locked_step_zero_later_cycle,
+            "locked process randomness should repeat the same pattern each cycle"
+        );
+        assert_ne!(
+            locked_step_zero_cycle_zero, locked_step_one,
+            "different steps need independent deterministic rolls"
+        );
+
+        let per_cycle_zero = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::PerCycle,
+            ProcessRngPosition::Step { cycle: 0, step: 0 },
+        );
+        let per_cycle_one = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::PerCycle,
+            ProcessRngPosition::Step { cycle: 1, step: 0 },
+        );
+        assert_ne!(
+            per_cycle_zero, per_cycle_one,
+            "per-cycle process randomness should vary the pattern between cycles"
+        );
+    }
+
+    #[test]
+    fn deferred_step_process_inlet_writes_drop_stale_targets_on_target_track() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.defer_step_process_inlet_write(
+            0,
+            ProcessInstanceId(7),
+            "amount",
+            ProcessInletWrite {
+                op: ProcessTargetOp::Set,
+                value: 3.0,
+            },
+        );
+        runtime.defer_step_process_inlet_write(
+            1,
+            ProcessInstanceId(9),
+            "amount",
+            ProcessInletWrite {
+                op: ProcessTargetOp::Set,
+                value: 5.0,
+            },
+        );
+
+        let current = runtime.take_step_process_inlet_writes(0, &TrackProcessChain::default());
+
+        assert!(current.is_empty());
+        assert!(
+            !runtime.pending_step_inlet_writes.contains_key(&(
+                0,
+                ProcessInstanceId(7),
+                "amount".to_string()
+            )),
+            "stale writes for the currently firing track should be dropped"
+        );
+        assert!(
+            runtime.pending_step_inlet_writes.contains_key(&(
+                1,
+                ProcessInstanceId(9),
+                "amount".to_string()
+            )),
+            "writes for other tracks should remain pending"
+        );
     }
 
     #[test]
@@ -2172,6 +2698,7 @@ mod tests {
                         name: None,
                         class_name: "source".to_string(),
                         inlets: HashMap::new(),
+                        bindings: BTreeMap::new(),
                         running: true,
                         anonymous: false,
                         one_shot: false,
@@ -2183,6 +2710,7 @@ mod tests {
                         name: None,
                         class_name: "listener".to_string(),
                         inlets: HashMap::new(),
+                        bindings: BTreeMap::new(),
                         running: true,
                         anonymous: true,
                         one_shot: false,
@@ -2254,6 +2782,7 @@ mod tests {
                     name: None,
                     class_name: "listener".to_string(),
                     inlets: HashMap::new(),
+                    bindings: BTreeMap::new(),
                     running: true,
                     anonymous: false,
                     one_shot: false,
@@ -2266,13 +2795,18 @@ mod tests {
         );
 
         assert!(runtime
-            .track_fires_at(1, Value::Number(1.0), 1.0, 48_000)
+            .track_fires_at(1, Value::Number(1.0), 1.0, 48_000, test_step_context(1))
             .is_empty());
-        let invocations = runtime.track_fires_at(2, Value::Number(7.0), 1.0, 48_000);
+        let invocations =
+            runtime.track_fires_at(2, Value::Number(7.0), 1.0, 48_000, test_step_context(2));
         assert_eq!(invocations.len(), 1);
         assert_eq!(invocations[0].runtime_id, 11);
         assert_eq!(invocations[0].source, "listener-body");
         assert_eq!(invocations[0].event, Some(Value::Number(7.0)));
+        assert_eq!(
+            invocations[0].step_context.as_ref().map(|ctx| ctx.track),
+            Some(2)
+        );
     }
 
     #[test]

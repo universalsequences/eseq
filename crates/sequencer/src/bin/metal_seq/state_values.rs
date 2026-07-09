@@ -581,6 +581,13 @@ fn process_param_target_label(target: &sequencer::process::ParamTarget) -> Strin
         sequencer::process::ParamTarget::MidiFxParam { slot, fx, param } => {
             format!("midi-fx{}:{fx}:{param}", slot + 1)
         }
+        sequencer::process::ParamTarget::ProcessInlet {
+            process,
+            inlet,
+            instance_id,
+        } => instance_id
+            .map(|id| format!("process:{process}#{}:{inlet}", id.0))
+            .unwrap_or_else(|| format!("process:{process}:{inlet}")),
         sequencer::process::ParamTarget::RackSlotParam { slot, param } => {
             format!("rack{}:{param}", slot + 1)
         }
@@ -634,7 +641,7 @@ fn process_slot_ports_value(
             ports.push(sequencer::process::ProcessPortDef {
                 name: name.clone(),
                 target: None,
-                mappable: false,
+                binding_mode: sequencer::process::ProcessPortBindingMode::Fixed,
                 target_kind: None,
             });
         }
@@ -653,7 +660,7 @@ fn process_mappable_port_values(
     def.map(|def| {
         def.ports
             .iter()
-            .filter(|port| port.mappable)
+            .filter(|port| port.is_mappable())
             .map(|port| process_port_value(slot, port))
             .collect()
     })
@@ -677,7 +684,7 @@ fn process_port_value(
         Some(None) | None if port.target.is_some() => "hint",
         Some(None) | None => "unbound",
     };
-    let bindable = port.mappable
+    let bindable = port.is_mappable()
         && binding
             .and_then(|binding| binding.as_ref())
             .map(process_param_target_is_bindable)
@@ -697,7 +704,8 @@ fn process_port_value(
         ("status", Value::String(status.to_string())),
         ("manual", Value::Bool(manual)),
         ("clearable", Value::Bool(manual)),
-        ("mappable", Value::Bool(port.mappable)),
+        ("mappable", Value::Bool(port.is_mappable())),
+        ("connectable", Value::Bool(port.is_connectable())),
         ("bindable", Value::Bool(bindable)),
         (
             "target-kind",
@@ -1098,7 +1106,8 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
                             "hint",
                             Value::String(process_target_hint_label(port.target.as_ref())),
                         ),
-                        ("mappable", Value::Bool(port.mappable)),
+                        ("mappable", Value::Bool(port.is_mappable())),
+                        ("connectable", Value::Bool(port.is_connectable())),
                         (
                             "target-kind",
                             Value::String(process_target_kind_label(port.effective_target_kind())),
@@ -21154,6 +21163,86 @@ mod tests {
     }
 
     #[test]
+    fn process_lane_payload_excludes_connectable_process_inlet_ports() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut runtime = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        runtime
+            .eval_str(
+                r#"
+                (def-process connection-source
+                  :targets ((out :process-inlet))
+                  :in ((amount :float 0 1 :default 0 :lane true))
+                  :run (target-set! :out (in :amount)))
+
+                (def-process connection-target
+                  :in ((value :float 0 1 :default 0))
+                  :run nil)
+
+                (def source (connection-source :amount (lane 0 0.5 1)))
+                (def target (connection-target))
+                (processes :track 0 source target)
+                (connect! source :out (inlet target :value))
+                "#,
+            )
+            .expect("define and attach connected processes");
+
+        let Value::List(lanes) = build_process_lanes_value(&state, 0) else {
+            panic!("process lanes should be a list");
+        };
+        assert_eq!(lanes.len(), 1);
+        let Value::Map(lane) = &*lanes[0].borrow() else {
+            panic!("process lane should be a map");
+        };
+        assert_eq!(
+            lane.get("map-ports").map(|cell| cell.borrow().clone()),
+            Some(Value::List(Vec::new())),
+            "process connections must not appear in the step-lane parameter mapper"
+        );
+
+        let Value::List(slots) = build_process_slots_value(&state, 0) else {
+            panic!("process slots should be a list");
+        };
+        let Value::Map(source_slot) = &*slots[0].borrow() else {
+            panic!("source process slot should be a map");
+        };
+        let ports = source_slot
+            .get("ports")
+            .map(|cell| cell.borrow().clone())
+            .expect("source process ports");
+        let Value::List(ports) = ports else {
+            panic!("source process ports should be a list");
+        };
+        let Value::Map(port) = &*ports[0].borrow() else {
+            panic!("source process port should be a map");
+        };
+        assert_eq!(
+            port.get("mappable").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            port.get("connectable").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(true))
+        );
+        let target_instance_id = state.track_process_chain(0).expect("process chain").slots[1]
+            .instance_id
+            .0;
+        assert_eq!(
+            port.get("target").map(|cell| cell.borrow().clone()),
+            Some(Value::String(format!(
+                "process:connection-target#{target_instance_id}:value"
+            )))
+        );
+    }
+
+    #[test]
     fn process_multi_accumulator_demo_projects_multiple_ui_lanes() {
         let state = Arc::new(SequencerState::new(
             1,
@@ -21557,11 +21646,13 @@ mod tests {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.refresh_runtime_side_effects();
 
-        editor
-            .runtime_mut()
-            .eval_str(r#"(set-window-buffer "*step*")"#)
-            .expect("switch to step buffer");
-        editor.refresh_runtime_side_effects();
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
         editor.set_layout_viewport(80, 60);
         editor
             .runtime_mut()
@@ -21600,6 +21691,36 @@ mod tests {
         let dropdown =
             find_dropdown_by_value(track_params_panel, "Off").expect("mute group dropdown");
         assert_finite_nonzero_rect(dropdown, "mute group dropdown");
+    }
+
+    #[test]
+    fn metal_seq_track_accumulator_controls_have_visible_layout() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.refresh_runtime_side_effects();
+
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
+        editor.set_layout_viewport(80, 24);
+
+        let layout = editor.widget_layout().expect("track panel layout");
+        let panel = find_layout_node_by_debug_name(&layout, "track-accumulator-panel")
+            .expect("track accumulator panel");
+        assert_finite_nonzero_rect(panel, "track accumulator panel");
+
+        for (key, label) in [
+            ("fx-track-accumulator-function", "accumulator function"),
+            ("fx-track-accumulator-mode", "accumulator mode"),
+            ("fx-track-accumulator-limit", "accumulator limit"),
+        ] {
+            let control = find_layout_node_by_stable_key(panel, key)
+                .unwrap_or_else(|| panic!("{label} control should render"));
+            assert_finite_nonzero_rect(control, label);
+        }
     }
 
     #[test]
@@ -23976,6 +24097,7 @@ mod tests {
     #[test]
     fn metal_seq_sequencer_ellipsis_toggles_expanded_track_editor() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.set_layout_aspect(2.0);
         let sequencer_id = editor
             .buffers
             .iter()
@@ -23988,6 +24110,11 @@ mod tests {
         let initial_layout = editor
             .widget_layout()
             .expect("sequencer layout should build");
+        let initial_row_height =
+            find_layout_node_by_stable_key(&initial_layout, "sequencer-track-0")
+                .expect("initial sequencer row should render")
+                .rect
+                .height;
         assert_eq!(
             count_stable_key_prefix(&initial_layout, "seqv-expanded-step-slider-"),
             0,
@@ -24042,6 +24169,19 @@ mod tests {
             16,
             "expanded row should render the metal-style step toggles"
         );
+        let expanded_row = find_layout_node_by_stable_key(&expanded_layout, "sequencer-track-0")
+            .expect("expanded sequencer row should render");
+        let expanded_column =
+            find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-step-column-0-0")
+                .expect("expanded sequencer step column should render");
+        assert!(
+            expanded_row.rect.row + expanded_row.rect.height
+                - (expanded_column.rect.row + expanded_column.rect.height)
+                < 0.75,
+            "ellipsis expansion should keep the row tight at the Metal cell aspect, row={:?} column={:?}",
+            expanded_row.rect,
+            expanded_column.rect
+        );
         for key in [
             "seqv-expanded-param-tab-0-0",
             "seqv-expanded-timebase-0",
@@ -24076,6 +24216,30 @@ mod tests {
         assert!(
             first_tab.rect.col < track_name.rect.col,
             "expanded editor should start from the row's left edge, not after the track header"
+        );
+
+        let collapse = find_layout_node_by_stable_key(&expanded_layout, "seqv-expand-0")
+            .and_then(|node| node.props.get("on-click"))
+            .cloned()
+            .expect("expanded sequencer row collapse callback");
+        editor
+            .runtime_mut()
+            .invoke(
+                collapse,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke sequencer row collapse button");
+        editor.refresh_runtime_side_effects();
+        let collapsed_layout = editor
+            .widget_layout()
+            .expect("collapsed sequencer layout should build");
+        let collapsed_row = find_layout_node_by_stable_key(&collapsed_layout, "sequencer-track-0")
+            .expect("collapsed sequencer row should render");
+        assert!(
+            (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
+            "ellipsis collapse should restore the original row height at the Metal cell aspect, initial={} collapsed={}",
+            initial_row_height,
+            collapsed_row.rect.height
         );
     }
 
@@ -24262,6 +24426,30 @@ mod tests {
             "track-process-slots",
             test_list(vec![test_list(vec![slot])]),
         );
+    }
+
+    fn ranged_process_lane_value(min: f64, max: f64, default: f64) -> Value {
+        let values = [default; 16];
+        map_value([
+            ("mode", Value::Number(7.0)),
+            ("lane-index", Value::Number(0.0)),
+            ("slot-index", Value::Number(0.0)),
+            ("instance-id", Value::Number(42.0)),
+            ("class", Value::String("range-origin".to_string())),
+            ("process", Value::String("range-origin".to_string())),
+            ("inlet", Value::String("amount".to_string())),
+            ("name", Value::String("amount".to_string())),
+            ("label", Value::String("range-origin / amount".to_string())),
+            ("short-label", Value::String("ro/amount".to_string())),
+            ("kind", Value::String("float".to_string())),
+            ("min", Value::Number(min)),
+            ("max", Value::Number(max)),
+            ("default", Value::Number(default)),
+            ("decimals", Value::Number(2.0)),
+            ("target", Value::String(String::new())),
+            ("map-ports", test_list(vec![])),
+            ("values", test_number_list(&values)),
+        ])
     }
 
     #[test]
@@ -24514,6 +24702,83 @@ mod tests {
                 .eval_str("(process-map-active?)")
                 .expect("read cleared process map active state"),
             Some(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn metal_seq_process_lane_slider_origin_uses_min_unless_range_is_symmetric() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let asymmetric_lane = ranged_process_lane_value(2.0, 10.0, 6.0);
+        let symmetric_lane = ranged_process_lane_value(-24.0, 24.0, 6.0);
+        let lanes = test_list(vec![asymmetric_lane, symmetric_lane]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-lanes", lanes.clone());
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-process-lanes", test_list(vec![lanes]));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-slots", test_list(vec![]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-slots",
+            test_list(vec![test_list(vec![])]),
+        );
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-track-param-origin 0 7)")
+                .expect("evaluate asymmetric process lane origin"),
+            Some(Value::Number(2.0)),
+            "non-symmetric process lane ranges should originate at their minimum"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-track-param-origin 0 8)")
+                .expect("evaluate symmetric process lane origin"),
+            Some(Value::Number(0.0)),
+            "symmetric process lane ranges should originate at zero"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-range-origin 4 4)")
+                .expect("evaluate positive-only degenerate range origin"),
+            Some(Value::Number(4.0)),
+            "positive-only ranges should still originate at their minimum"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (seqv-set-track-expanded 0 true)
+                (seqv-set-param-mode 0 7)
+                "#,
+            )
+            .expect("expand track and select asymmetric process lane");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+            .expect("process lane slider should render");
+        assert_eq!(
+            layout_prop_number(slider, "origin"),
+            Some(2.0),
+            "rendered process lane slider origin should come from the lane range, not the inlet default"
         );
     }
 
@@ -25528,6 +25793,7 @@ mod tests {
         }
 
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.set_layout_aspect(2.0);
         set_full_grid_track_count(&mut editor, 1, 16);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -25651,6 +25917,7 @@ mod tests {
         };
 
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.set_layout_aspect(2.0);
         set_full_grid_track_count(&mut editor, 1, 16);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
