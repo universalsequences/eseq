@@ -23983,6 +23983,7 @@ mod tests {
     #[test]
     fn metal_seq_sequencer_ellipsis_toggles_expanded_track_editor() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.set_layout_aspect(2.0);
         let sequencer_id = editor
             .buffers
             .iter()
@@ -23995,6 +23996,11 @@ mod tests {
         let initial_layout = editor
             .widget_layout()
             .expect("sequencer layout should build");
+        let initial_row_height =
+            find_layout_node_by_stable_key(&initial_layout, "sequencer-track-0")
+                .expect("initial sequencer row should render")
+                .rect
+                .height;
         assert_eq!(
             count_stable_key_prefix(&initial_layout, "seqv-expanded-step-slider-"),
             0,
@@ -24049,6 +24055,19 @@ mod tests {
             16,
             "expanded row should render the metal-style step toggles"
         );
+        let expanded_row = find_layout_node_by_stable_key(&expanded_layout, "sequencer-track-0")
+            .expect("expanded sequencer row should render");
+        let expanded_column =
+            find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-step-column-0-0")
+                .expect("expanded sequencer step column should render");
+        assert!(
+            expanded_row.rect.row + expanded_row.rect.height
+                - (expanded_column.rect.row + expanded_column.rect.height)
+                < 0.75,
+            "ellipsis expansion should keep the row tight at the Metal cell aspect, row={:?} column={:?}",
+            expanded_row.rect,
+            expanded_column.rect
+        );
         for key in [
             "seqv-expanded-param-tab-0-0",
             "seqv-expanded-timebase-0",
@@ -24083,6 +24102,30 @@ mod tests {
         assert!(
             first_tab.rect.col < track_name.rect.col,
             "expanded editor should start from the row's left edge, not after the track header"
+        );
+
+        let collapse = find_layout_node_by_stable_key(&expanded_layout, "seqv-expand-0")
+            .and_then(|node| node.props.get("on-click"))
+            .cloned()
+            .expect("expanded sequencer row collapse callback");
+        editor
+            .runtime_mut()
+            .invoke(
+                collapse,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke sequencer row collapse button");
+        editor.refresh_runtime_side_effects();
+        let collapsed_layout = editor
+            .widget_layout()
+            .expect("collapsed sequencer layout should build");
+        let collapsed_row = find_layout_node_by_stable_key(&collapsed_layout, "sequencer-track-0")
+            .expect("collapsed sequencer row should render");
+        assert!(
+            (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
+            "ellipsis collapse should restore the original row height at the Metal cell aspect, initial={} collapsed={}",
+            initial_row_height,
+            collapsed_row.rect.height
         );
     }
 
@@ -25636,6 +25679,7 @@ mod tests {
         }
 
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.set_layout_aspect(2.0);
         set_full_grid_track_count(&mut editor, 1, 16);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -25759,6 +25803,7 @@ mod tests {
         };
 
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.set_layout_aspect(2.0);
         set_full_grid_track_count(&mut editor, 1, 16);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();

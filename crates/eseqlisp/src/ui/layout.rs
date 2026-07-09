@@ -329,7 +329,7 @@ impl<'a> LayoutEngine<'a> {
                         height: existing_child.rect.height,
                     });
                 }
-                self.measure(child, child_constraints, font_size)
+                self.measure_layout_child(child, child_constraints, font_size)
             },
             &mut |child, child_rect, child_layout_ctx| {
                 let idx = build_idx;
@@ -433,6 +433,19 @@ impl<'a> LayoutEngine<'a> {
         )
         .map(|s| s.width)
         .unwrap_or(0.0)
+    }
+
+    /// Measure a child during container layout with the same aspect semantics
+    /// as a full tree layout. Container definitions may use a unit-aspect
+    /// placeholder when constructing child constraints.
+    fn measure_layout_child(
+        &self,
+        child: &Value,
+        mut constraints: Constraints,
+        inherited_font_size: f32,
+    ) -> Option<Size> {
+        constraints.aspect = self.aspect;
+        self.measure(child, constraints, inherited_font_size)
     }
 
     fn measure(
@@ -567,9 +580,7 @@ impl<'a> LayoutEngine<'a> {
                     self.aspect,
                     layout_ctx,
                     &mut |child, child_constraints| {
-                        let mut cc = child_constraints;
-                        cc.aspect = self.aspect;
-                        self.measure(child, cc, font_size)
+                        self.measure_layout_child(child, child_constraints, font_size)
                     },
                     &mut |child, rect, child_layout_ctx| {
                         self.build_layout_node(child, rect, font_size, child_layout_ctx)
@@ -1672,6 +1683,58 @@ mod tests {
         assert!(
             dirty_widget_ids.contains(&layout.children[1].widget_id),
             "translated siblings need to be reported dirty"
+        );
+    }
+
+    #[test]
+    fn relayout_subtree_path_preserves_layout_aspect_when_remeasuring_changed_child() {
+        fn padded_keyed_box(key: &str, child_height: f64) -> Value {
+            build_widget(
+                "box",
+                vec![
+                    kw("key"),
+                    s(key),
+                    kw("padding"),
+                    num(1.0),
+                    build_widget(
+                        "box",
+                        vec![kw("width"), num(1.0), kw("height"), num(child_height)],
+                    ),
+                ],
+            )
+        }
+
+        let engine = LayoutEngine::new(80, 24, 2.0);
+        let first = build_widget(
+            "v-stack",
+            vec![
+                kw("width"),
+                kw("fill"),
+                padded_keyed_box("target", 1.0),
+                flex_box(1.0, vec![keyed_box(1.0, 1.0, "filler")]),
+            ],
+        );
+        let initial = engine.layout(&first).expect("initial layout");
+
+        let second = build_widget(
+            "v-stack",
+            vec![
+                kw("width"),
+                kw("fill"),
+                padded_keyed_box("target", 3.0),
+                flex_box(1.0, vec![keyed_box(1.0, 1.0, "filler")]),
+            ],
+        );
+        let expected = engine.layout(&second).expect("fresh changed layout");
+        let mut dirty_widget_ids = Vec::new();
+        let updated =
+            relayout_subtree_path_result(&initial, &second, &[0], &mut dirty_widget_ids, &engine)
+                .expect("aspect-aware partial relayout");
+
+        assert_f32_approx(updated.children[0].rect.height, 4.0);
+        assert!(
+            same_layout_geometry(&updated, &expected),
+            "partial relayout geometry should match a fresh layout at non-unit cell aspect"
         );
     }
 
