@@ -1,8 +1,7 @@
 # Cirklon-Style Step Processes: Design Spec
 
-Status: design spec (evolved from brainstorm). Phase 4 backend verdicts,
-ratchets, and process-inlet connections have landed. Rack-slot write
-application and the Phase 5 ordered-chain editing surface remain follow-ups.
+Status: design spec (evolved from brainstorm). Phase 5 has landed through the
+fx-panel process-chain surface. Rack-slot write application remains a follow-up.
 Covers accumulators, masks, ratchets, grabs, and the track-attached process
 chain, all built on the existing scheduler-owned `def-process` framework.
 
@@ -351,19 +350,29 @@ Rules:
 
   ;; inline selector — the declarative one-block surface
   (processes :track 0
-    (dice :lo 1 :hi 4 :connect '((out (process-inlet :repeater :times))))
+    (dice :lo 1 :hi 4 :connect (process-inlet :repeater :times))
     (repeater :decay 0.7))
   ```
 
-  The inline `:connect` value is quoted because it is declarative selector data.
+  **`process-inlet` is a constructor native, not quoted data** (decided when
+  handle-free brain wiring was designed — the `lane` precedent: it evaluates
+  to a tagged first-class *selector value*, a description of a search, never
+  an address, and never resolves at eval time). No quote; arity/keyword
+  mistakes error at eval time; selectors can be built programmatically.
+  `:connect <selector>` binds the def's sole `:process-inlet` port (eval-time
+  error if the def has several — mirrors `target-set!`'s default-port
+  convention); multi-port producers use the `wire` constructor with keyword
+  pairs: `:connect (wire :out (process-inlet ...) :aux (process-inlet ...))`.
+  The legacy quoted `'((out (process-inlet ...)))` form may keep parsing, but
+  all examples and library code use the evaluated form.
 
-  `(process-inlet :class :inlet)` is a selector, not an address — it resolves
-  against the finished chain (first matching slot), which is why the inline
-  form works despite `processes` being whole-chain-replace: a forward handle
-  reference to a sibling two lines down doesn't exist yet at read time, a
-  selector does. `connect!` and the Phase 3B parameter-mapping gesture write
-  the same instance binding store, but are deliberately different authoring
-  operations with different validation and UI surfaces.
+  The selector resolves against the finished chain (first matching slot),
+  which is why the inline form works despite `processes` being
+  whole-chain-replace: a forward handle reference to a sibling two lines down
+  doesn't exist yet at read time, a selector does. `connect!` and the
+  Phase 3B parameter-mapping gesture write the same instance binding store,
+  but are deliberately different authoring operations with different
+  validation and UI surfaces.
 - **Write application**: the write lands as a transient overlay on the target
   slot's inlet resolution for this fire — never persisted, composing with the
   inlet's lane per the op (`target-set!` owns the value and the lane dims in
@@ -545,9 +554,9 @@ handles for live tweaking:
     (transpose-climb :limit 12
                      :delta (lane 0 1 0 0 1 0 0 0))))
 
-(processes :track :all (prob-mask :prob (lane 1 0.75)))  ; every track
 (processes :track (list 0 3) ...)                        ; a set of tracks
 (processes :track 0)                                     ; empty = clear
+(processes :project ...)                                 ; project layer — see below
 
 ;; Handles keep the existing instance-call idiom alive after attachment:
 (lane! climb :delta 0 2 0 0 2 0 0 0)   ; re-sequence a lane
@@ -567,6 +576,191 @@ Rules:
 - Writes go to the *current pattern's* chain (settings/lanes pattern-scoped,
   identity track-level). `:patterns :all` can come later with preset tier 2.
 - `processes` returns the handle when given one instance, a list otherwise.
+- **`:track :all` is deprecated** in favor of `(processes :project ...)` —
+  see the project layer below. The implemented `:all` form stamps a snapshot
+  of the current tracks (new tracks don't inherit) and, worse, shares one
+  runtime id across all tracks — shared mutable state, shared RNG stream
+  (identical rolls on every track at the same `(cycle, step)`), and global
+  `lane!` edits. None of that is what "attach everywhere" means. Once
+  `:project` lands, `:track :all` should error with a pointer to it;
+  `(list ...)` remains for deliberately stamping copies on a track set.
+
+### Project process layer: extending the DAW (design)
+
+"Attach this to every track" done right is a **policy, not a snapshot**: a
+project-level default chain that every track — present and future — runs in
+front of its own chain. This is the "extension of the DAW" surface: drop a
+prob-mask + humanize layer on the whole project once, and per-track chains
+keep composing on top, untouched.
+
+```lisp
+(def ext
+  (processes :project
+    (prob-mask :prob (lane 1))
+    (repeater  :decay 0.7)))
+
+(processes :track 0 (transpose-climb :delta (lane 0 1 0 0)))  ; composes, no clobber
+```
+
+Rules:
+
+- **Separate store, fire-time composition.** The project chain lives beside
+  `process_chains[track]` (a `ProjectProcessChain` on the pattern, same
+  identity-project-level / settings-pattern-level split as everything else).
+  A track's effective chain at fire time is `project slots ++ track slots` —
+  the scheduler's slot iteration becomes a chained iterator. Because
+  composition happens at resolution time against live state, new tracks
+  inherit automatically; there is no stamping and nothing to migrate.
+  `(processes :project ...)` is whole-*layer* replace, idempotent, exactly
+  parallel to the track form; `(processes :project)` clears the layer.
+- **Ordering: project slots run before track slots.** The platform layer runs
+  first; track processes refine on top and can read its writes under the
+  locked immediate-ordered-application rule. Whether a track slot ever needs
+  to run *ahead of* the project layer is an open question — no splice point
+  in v1.
+- **Per-track independence (locked).** Project slots share configuration but
+  never state: runtime state and RNG seeds are keyed by `(instance, track)` —
+  `track_process_slot_runtime_id` grows a track component for project-layer
+  slots, and `ProcessRngPosition::Step` gains the track index. Every track
+  rolls its own dice; `:seed :locked` locks each track's *own* roll pattern.
+  A project prob-mask thins each track independently instead of dropping the
+  whole mix on the same steps.
+- **Knobs and lanes stay singular.** One `prob` lane, edited once (handle or
+  UI), read by every track — "the extension defines the pedal; every channel
+  runs its own copy." Per-track lane *overrides* on a project slot are
+  deliberately out of scope for v1 (mixer-group territory).
+- **Wiring stays within a layer.** `connect!` between project slots follows
+  the normal chain rules (a project slot is one logical inlet, so a wire to
+  it is one binding — the per-track fan-out is implicit and does not violate
+  the fan-out-through-channels rule). Cross-layer wires (project ↔ track
+  chain) are disallowed in v1; channels cover that.
+- **UI**: the fx-panel process stack shows project slots at the top of every
+  track's column, visually distinct (ghosted/badged "project"), editable from
+  any track but clearly one shared object. A per-track bypass toggle on a
+  project slot is the natural "everywhere except the drums" escape hatch —
+  requires per-track storage for that flag; fine to defer.
+
+### Shared brains: self-clocked processes + latched inlet wires (design)
+
+The companion piece to the project layer: **one** shared process — a "brain" —
+running on its own clock and piping values into the per-track project chain.
+In Max terms its output is a **cold outlet**: it *stores* a value at the
+consumer without *triggering* it; the consumer's trigger remains the track
+step firing. That is why the brain is **not a chain slot** — it has no
+position in the per-fire pipeline at all. It is an ordinary standalone
+self-clocked process (the `:on`/`:every` family the chain-attachment rule
+already carves out), wired in from outside:
+
+```lisp
+(def-process energy-brain
+  :every (step 4)                      ; quarter notes, its own clock
+  :targets ((out :process-inlet))      ; cold outlet
+  :in ((wave :float 0 1 :default 1 :lane true))
+  :run (target-set! :out (in :wave)))
+
+(def brain (energy-brain))
+(def mask  (prob-mask :prob (lane 1)))
+(def rep   (repeater :decay 0.7))
+
+(processes :project mask rep)
+(connect! brain :out (inlet mask :prob))   ; one wire; N tracks read it
+```
+
+Semantics:
+
+- **Self-clocked, never fire-woken.** Tracks have independent timebases, so
+  "runs once per step" is undefined project-wide; waking the brain on any
+  track fire would make its tick rate depend on the track mix and "which fire
+  woke it" is a replay hazard. The brain declares its own grid and runs on it.
+- **Latched inlet writes (the one new mechanism).** Chain-internal inlet
+  writes are per-fire transients (produced by an earlier slot, consumed later
+  in the same fire, then gone). A wire from a self-clocked producer has the
+  other lifetime: the write lands in a **sample-and-hold register** on the
+  target inlet; every subsequent fire of the consumer reads the latest latch —
+  the value as of the last brain run at-or-before the fire's timestamp. Brain
+  runs interleave with track fires by timestamp inside the lookahead loop.
+  Same register rule as cross-track grabs and fields.
+- **Lane composition per op** — the latch composes with the consumer's
+  hand-authored lane exactly like chain-internal writes, with one wrinkle and
+  one addition:
+  - `target-set!` — the latch *owns* the inlet; the lane dims. Note the latch
+    never expires, so after the brain's first tick a `set` wire permanently
+    replaces the lane (the lane is only the pre-first-tick value). Legitimate
+    "brain takes over the knob" mode, but it discards authored per-step shape.
+  - `target-add!` — `lane[step] + latch`: the lane stays the per-step *shape*,
+    the brain contributes the slow-moving global term. The musical default.
+  - `target-mul!` (locked: joins the op vocabulary) — `lane[step] × latch`:
+    scales the authored pattern while preserving its ratios. This is what a
+    probability inlet actually wants from an energy brain (`add` floors
+    rather than scales). Legal on continuous/ordered domains only, same rule
+    as `add`; applies to inlet writes and param-target writes alike.
+- **Defaults-inert holds**: before the brain's first run the latch is empty
+  and the inlet resolves from lane/default alone — an attached-but-unticked
+  brain changes nothing.
+- **Replay/preview**: a pure-fold brain (fold over its own lanes on its own
+  grid) recomputes the same latch values on reschedule, and Phase 8 preview
+  can draw the composed curve (brain fold → project-slot fold). Raw `:run`
+  brains get best-effort semantics — the standard two-tier contract.
+- **Direction is brain → chain slot only (v1).** The reverse (a chain slot
+  writing a self-clocked process's inlet) reopens the same-tick cross-track
+  ordering question ("which track's write wins") that the spec deliberately
+  hasn't answered. If the brain needs to hear the band, that's Phase 7 reads
+  / fields, which already have the one-tick answer.
+- **Not project-specific.** The latched-wire mechanism works identically
+  wired to a single track's chain slot; the project layer just makes N tracks
+  read the latch. And the brain remains a natural *channel* publisher
+  (`(send :energy v)`) — wires for the project chain's own plumbing (latched,
+  previewable, preset-capturable), channels for anything else listening.
+- **Handle-free wiring: `:connect` selectors are hints (decided).** The
+  ports/bindings model already splits selectors-resolved-at-fire-time (hints)
+  from concrete addresses (manual bindings); process-inlet ports get the same
+  split. `connect!` with handles writes a concrete address (the live-patching
+  surface); an instance-level `:connect` selector is the *hint* half —
+  stored as a selector on the producer instance, resolved at fire time
+  against its scope, first matching slot, soft no-op + stale badge when
+  nothing matches:
+
+  ```lisp
+  (def brain
+    (energy-brain
+      :connect (process-inlet :prob-mask :prob :scope :project)))
+
+  (processes :project
+    (prob-mask :prob (lane 1))
+    (repeater :decay 0.7))
+  ```
+
+  One form per object, no consumer handles, idempotent re-eval. Rules:
+  - `process-inlet` is a constructor native (see the process-inlet section):
+    unquoted, evaluates to a selector value, never resolves at eval time.
+    Sole-port `:connect <selector>` sugar and the `wire` named-port form
+    apply here identically.
+  - **`:scope` is mandatory on standalone producers** (`:project` or
+    `(track n)`) — a brain has no home chain, so there is no sane default.
+    Chain-internal `:connect` keeps defaulting to the producer's own chain.
+  - The hint inherits existing hint behavior wholesale: defaults-inert while
+    unresolved, hint re-resolution when the target chain changes, manual
+    `connect!` binding wins over the hint once made.
+  - Class-name matching is first-match; two same-class slots in the scope is
+    the same ambiguity the chain-internal selector already has. The inlet-tag
+    open question (`process-inlet` matching by tag instead of class) is the
+    eventual fix and applies here unchanged.
+  - Selector-hinted wires are portable by construction — they name a class,
+    not an instance id — which is what makes packs shippable: brain-with-hint
+    + project chain resolves against whatever the pack (or the user's edited
+    copy) contains.
+  - **Consumer-side wiring is rejected** (`(prob-mask :prob (from brain
+    :out))`): it lies about semantics — composition is decided by the
+    producer's verb (`add`/`mul`), so the inlet position implying "the value
+    is this" misleads; and chain-slot inlets are deliberately literals-only
+    (lanes, presets, and lane UI all assume it).
+  - The brain still needs a `def` — not for wiring, but for instance
+    identity/idempotency across re-evals. "Handle-free" means no consumer
+    handles and no separate `connect!` call.
+- **Preset story**: brain + project chain + wire is a *pack*, one tier above
+  the chain preset — same shape as the existing chain-preset open question,
+  which absorbs it. Selector-hinted wires ship in packs; concrete
+  `connect!` addresses never do.
 
 ### Pattern scoping and identity
 
@@ -765,7 +959,7 @@ attachment site; `repeater` is unchanged and doesn't know it's being driven:
     (target-set! :out held)))
 
 (processes :track 0
-  (dice :lo 1 :hi 4 :connect '((out (process-inlet :repeater :times))))
+  (dice :lo 1 :hi 4 :connect (process-inlet :repeater :times))
   (repeater :decay 0.7))
 ```
 
@@ -941,7 +1135,7 @@ Known 3A limitations:
   deferred.
 - Cross-track writes and timebase writes remain out of scope.
 
-#### Phase 3B — Mapping UI and binding status (next)
+#### Phase 3B — Mapping UI and binding status (landed)
 
 1. Extend target declaration parsing with mappable target ports:
    `(name :mappable)`, `(name :mappable target-kind)`, and
@@ -1016,15 +1210,81 @@ Known 3A limitations:
 4. `prob-mask`, `repeater`, and `dice` land as builtin library processes with
    presets. `repeater` exposes `mode` as a `:subdivide|:repeat` inlet.
 
-### Phase 5 — Ordered-chain UI polish
+### Phase 5 — Process chain in the *fx* panel (landed)
 
 Backend chain order is already meaningful: multiple process slots can be attached
-to a track, and later slots see earlier transient writes. Remaining work is the
-editing surface:
+to a track, and later slots see earlier transient writes. The editing surface is
+the *fx* panel, where the process chain joins the existing per-track chain
+visuals:
 
-1. Reorder/remove in UI, with explicit order feedback.
-2. Slot bypass/enable state in the chain editor.
-3. Pattern-scoped settings/lane reconciliation polish across pattern switches.
+```text
+[ process1 ]
+[ process2 ]  [ instrument ] [ midi fx ]   [ fx1 ] [ fx2 ]
+[ process3 ]
+```
+
+The process panel is conditional: it is omitted entirely when the selected track
+has no attached process slots. It is not an always-present empty/add placeholder.
+
+- **Placement is semantic, not aesthetic**: processes render *left of MIDI FX*
+  because that is the true evaluation order — they run at step-resolution time,
+  and their MIDI-FX writes apply to the temporary slot snapshot the MIDI FX is
+  invoked with. The panel teaches the pipeline for free.
+- **Vertical stack, top-to-bottom = execution order** (aux ordering). Drag to
+  reorder with explicit order feedback. The stack should render visibly unlike
+  the horizontal audio slots — it is an ordered per-step pipeline, not a
+  send/layer stack.
+- **Per-slot bypass/enable toggle** on each row.
+- **Single-click selects the slot** and expands an inline editor in the panel:
+  non-lane inlet knobs (effects-param idiom) **plus the mappable-port widgets**
+  — hint, resolved target, stale/unbound badges, arm-to-map. This becomes the
+  primary mapping anchor, replacing the lane-selection-anchored port editor
+  from Phase 3B (`metal-seq-sequencer.lisp` port editors): mapping is a
+  chain-slot property, and the slot always exists even when a process has no
+  lane-backed inlets — the lane-anchored surface has no path to such a
+  process's ports at all. Retire the lane-anchored editor once the panel
+  lands (or demote it to a shortcut that focuses the panel slot).
+- **Double-click/Enter jumps to code**: for script-defined processes, the def
+  site in the script's tab (scripts-as-tabs flow); for library builtins,
+  read-only source. One click to tweak, one more to understand.
+- **Process-defined rich UIs stay in tabs** (scripts-as-tabs precedent). The
+  panel expansion is inlets + mapping only; at most an "open UI tab" button on
+  the slot. Do not make the fx panel a second UI-hosting path.
+- Pattern-scoped settings/lane reconciliation polish across pattern switches.
+
+Non-track processes (conductors, field publishers) do not get a patch editor
+(locked decision stands). When fields land, the cheap visibility layer is
+badges on track process slots showing field subscriptions, with a
+publishers/listeners list per field name — an inspector, not a graph.
+
+### Phase 5B — Project layer + shared brains (next candidate)
+
+Depends only on Phase 4 (process-inlet machinery) and Phase 5 (fx panel), both
+landed; gates nothing in Phases 6–9. See the two design sections above for
+full semantics.
+
+1. `ProjectProcessChain` store beside `process_chains[track]`; fire-time chain
+   composition (`project slots ++ track slots`) in the scheduler's slot
+   iteration; `(processes :project ...)` authoring form (whole-layer replace).
+2. Per-`(instance, track)` runtime state and RNG seeds for project-layer
+   slots: track component in `track_process_slot_runtime_id` and
+   `ProcessRngPosition::Step`.
+3. Deprecate `:track :all` (error with a pointer to `:project`).
+4. Latched inlet wires: self-clocked producer → chain-slot inlet, sample-and-
+   hold register keyed by target inlet, timestamp-interleaved with track fires
+   in lookahead. Two authoring surfaces: `connect!` from a standalone process
+   handle (concrete address), and the instance-level `:connect` selector hint
+   with mandatory `:scope` — which requires `process-inlet`/`wire` becoming
+   constructor natives (unquoted selector values; migrate the Phase 4 quoted
+   form).
+5. `target-mul!` joins the op vocabulary (continuous/ordered domains; inlet
+   and param-target writes).
+6. fx panel: project slots rendered at the top of every track's process
+   column, badged as the shared project layer.
+7. Acceptance: energy-brain → project prob-mask via `add`/`mul` — per-track
+   independent veto patterns, latch visible only to fires at-or-after the
+   brain tick, defaults-inert before the first tick, replay test across a
+   scene switch mid-lookahead.
 
 ### Phase 6 — Pattern scoping polish + presets
 
@@ -1179,9 +1439,26 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
   gated), matched tag-first then exact-name; not a free-form ontology.
 - Identity track-level, settings/lanes pattern-level; default reset on pattern change.
 - Chain attachment implies the trigger (no `:on` for chain processes).
-- Attachment authoring form: `(processes :track <n|:all|list> instance...)` —
+- Attachment authoring form: `(processes :track <n|list> instance...)` —
   declarative whole-chain replace, class-call instances, `(lane ...)` literals
   on lane-backed inlets, returned handles + `lane!` for live tweaks.
+  `:track :all` is deprecated in favor of the project layer.
+- Project layer: `(processes :project ...)` declares a project-level default
+  chain in its own store, composed at fire time ahead of each track's own
+  slots (policy, not snapshot — new tracks inherit automatically; track
+  chains never clobber it). Project-slot runtime state and RNG seeds are
+  keyed `(instance, track)` — shared configuration, independent state.
+  Knobs/lanes singular; per-track lane overrides deferred.
+- Shared brains are standalone self-clocked processes, never chain slots —
+  their output is a cold outlet. Wires from a self-clocked producer to a
+  chain-slot inlet are **latched** (sample-and-hold, value as of the last
+  producer run at-or-before the consumer's fire), timestamp-interleaved in
+  lookahead. Direction is producer → chain slot only in v1; cross-layer
+  wires disallowed (channels cover both).
+- `target-mul!` joins `target-set!`/`target-add!`: multiplicative compose
+  (`base × value`), continuous/ordered domains only, for inlet and
+  param-target writes alike. With a latched wire: `set` owns the inlet
+  permanently after the first tick, `add` offsets the lane, `mul` scales it.
 - `(rand)` is the RNG verb; `:seed :locked | :per-cycle` on the instance.
 - `MidiFxParam` targets early (Phase 3), timebase last (Phase 9).
 - Ratchets clone the base event; sub-events go through the normal downstream path.
@@ -1191,6 +1468,16 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
   with `(process-inlet :class :inlet)` selectors), same-tick within the chain
   under immediate ordered application, transient overlay on the target slot's
   inlet resolution. Fan-out goes through channels, not ports.
+- `process-inlet` and `wire` are constructor natives (the `lane` precedent):
+  unquoted, evaluating to first-class selector values resolved only at fire
+  time. `:connect <selector>` binds a def's sole `:process-inlet` port;
+  `(wire :port <selector> ...)` names ports. Instance-level `:connect`
+  selectors are the *hint* tier of process-inlet bindings (fire-time,
+  first-match, soft resolution); `connect!` writes the concrete-address
+  tier and wins over the hint. `:scope` (`:project` / `(track n)`) is
+  mandatory on standalone producers, defaults to own-chain inside a
+  `processes` call. Consumer-side wiring (`(from ...)` in inlet position)
+  is rejected.
 - Lane storage keyed by durable instance id, outside `StepParam::ALL`.
 - Defaults-inert discipline for every library process.
 - Patching/channels UI deferred; track chain is the user-facing composition surface.
@@ -1226,3 +1513,10 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
 - Preview of process-inlet-driven chains: Phase 8's curve preview must
   evaluate the chain prefix (producer folds feeding consumer folds) rather
   than single lanes — confirm this stays cheap enough for the lane UI.
+- Project layer: does a track slot ever need to run *ahead of* the project
+  layer (splice point), or is project-first always right?
+- Project layer: per-track lane overrides on a project slot, and per-track
+  bypass of a project slot (needs per-track storage for the flag) — both
+  deferred from v1; add only when they bite.
+- Whether the pack granularity (brain + project chain + wires) folds into the
+  chain-preset question or is its own tier.

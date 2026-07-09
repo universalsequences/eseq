@@ -1,12 +1,18 @@
 ;; Shared shader widgets and selected-effect actions for the FX strip.
 (def fx-select-effect (slot)
-  (seq-set-delete-target :fx-effect (dict :chain "audio" :slot slot)))
+  (do
+    (process-panel-clear-selection)
+    (seq-set-delete-target :fx-effect (dict :chain "audio" :slot slot))))
 
 (def fx-select-midi-effect (slot)
-  (seq-set-delete-target :fx-effect (dict :chain "midi" :slot slot)))
+  (do
+    (process-panel-clear-selection)
+    (seq-set-delete-target :fx-effect (dict :chain "midi" :slot slot))))
 
 (def fx-select-bus-effect (bus slot)
-  (seq-set-delete-target :fx-effect (dict :chain "bus" :bus bus :slot slot)))
+  (do
+    (process-panel-clear-selection)
+    (seq-set-delete-target :fx-effect (dict :chain "bus" :bus bus :slot slot))))
 
 (def fx-has-selected-bus? ()
   (and (>= selected-bus 0)
@@ -14,9 +20,11 @@
        (< selected-bus (len SEQ.bus-effects))))
 
 (def fx-delete-selected-effect ()
-  (if (fx-plock-row-selected?)
-    (fx-delete-selected-plock-row)
-    (seq-delete-active-target)))
+  (if (process-panel-delete-selected)
+    true
+    (if (fx-plock-row-selected?)
+      (fx-delete-selected-plock-row)
+      (seq-delete-active-target))))
 
 (defwidget fx-panel-bg
   :width 1 :height 1

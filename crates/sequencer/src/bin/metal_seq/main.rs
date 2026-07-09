@@ -10,6 +10,7 @@
 )]
 
 mod browser;
+mod capture;
 mod constants;
 mod custom_ui;
 mod editor_setup;
@@ -5167,8 +5168,14 @@ mod tests {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let capture_args = capture::CaptureArgs::parse_env()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     sequencer::paths::enter_sequencer_dir()?;
     sequencer::crash::install()?;
+
+    if let Some(args) = capture_args {
+        return capture::run(args);
+    }
 
     // 1. Init audio engine
     let eng = engine::init_engine()?;
@@ -7144,13 +7151,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap_or("Script")
                                     .to_string()
                             });
+                        let read_only = extract_bool_from_payload(&payload, "read-only");
                         match register_script_source_tab(
                             &mut editor,
                             Path::new(&path_str),
                             &label,
                             &path_str,
                         ) {
-                            Ok(_) => {
+                            Ok(buffer_name) => {
+                                if read_only {
+                                    if let Some(buffer) = editor
+                                        .buffers
+                                        .iter_mut()
+                                        .find(|buffer| buffer.name == buffer_name)
+                                    {
+                                        buffer.read_only = true;
+                                    }
+                                }
                                 editor.handle_host_event(HostEvent::Status(format!(
                                     "Opened script source: {label}"
                                 )));

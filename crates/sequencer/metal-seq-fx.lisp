@@ -9,6 +9,7 @@
 (load "metal-seq-fx/track-panels.lisp")
 (load "metal-seq-fx/panel-widgets.lisp")
 (load "metal-seq-fx/param-controls.lisp")
+(load "metal-seq-fx/process-panel.lisp")
 (load "metal-seq-fx/param-grid.lisp")
 (load "metal-seq-fx/instrument-modulation.lisp")
 (load "metal-seq-fx/effect-modulation.lisp")

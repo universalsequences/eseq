@@ -5385,17 +5385,20 @@ fn matching_existing_process_slot<'a>(
     slot: &crate::process::TrackProcessSlot,
     existing: &'a crate::process::TrackProcessChain,
 ) -> Option<&'a crate::process::TrackProcessSlot> {
-    if let Some(name) = slot.instance_name.as_deref() {
-        if let Some(existing_slot) = existing.slots.iter().find(|existing_slot| {
-            existing_slot.class_name == slot.class_name
-                && existing_slot.instance_name.as_deref() == Some(name)
-        }) {
-            return Some(existing_slot);
-        }
+    existing
+        .slots
+        .iter()
+        .find(|existing_slot| process_slots_have_same_identity(slot, existing_slot))
+}
+
+fn process_slots_have_same_identity(
+    left: &crate::process::TrackProcessSlot,
+    right: &crate::process::TrackProcessSlot,
+) -> bool {
+    if let Some(name) = left.instance_name.as_deref() {
+        return right.class_name == left.class_name && right.instance_name.as_deref() == Some(name);
     }
-    existing.slots.iter().find(|existing_slot| {
-        existing_slot.instance_id == slot.instance_id && existing_slot.class_name == slot.class_name
-    })
+    right.instance_id == left.instance_id && right.class_name == left.class_name
 }
 
 fn preserve_process_slot_state(
@@ -5403,10 +5406,29 @@ fn preserve_process_slot_state(
     existing: &crate::process::TrackProcessChain,
     replacement: &mut crate::process::TrackProcessChain,
 ) {
+    // Once a chain exists, its order is pattern-owned UI state. Scratch
+    // re-evaluation reconciles the attachment set without undoing drag reorder:
+    // retained instances keep their existing relative order and newly authored
+    // instances are appended in declaration order. An explicitly empty
+    // `processes` form still clears the chain.
+    let mut pending = std::mem::take(&mut replacement.slots);
+    let mut ordered = Vec::with_capacity(pending.len());
+    for existing_slot in &existing.slots {
+        if let Some(index) = pending
+            .iter()
+            .position(|slot| process_slots_have_same_identity(slot, existing_slot))
+        {
+            ordered.push(pending.remove(index));
+        }
+    }
+    ordered.extend(pending);
+    replacement.slots = ordered;
+
     for slot in &mut replacement.slots {
         let Some(existing_slot) = matching_existing_process_slot(slot, existing) else {
             continue;
         };
+        slot.enabled = existing_slot.enabled;
         let Some(def) = defs.iter().find(|def| def.name == slot.class_name) else {
             continue;
         };
@@ -5503,6 +5525,14 @@ fn register_process_chain_natives(
                     };
                     if kind != "process" {
                         return Err(format!("processes expects process instances, got {kind}"));
+                    }
+                    if slots.iter().any(
+                        |slot: &crate::process::TrackProcessSlot| slot.instance_id.0 == *id,
+                    ) {
+                        return Err(
+                            "the same process instance cannot appear twice in one track chain; construct a second instance instead"
+                                .to_string(),
+                        );
                     }
                     slots.push(process_chain_slot_from_handle(&registry, *id)?);
                     handles.push(arg.clone());
@@ -5700,7 +5730,10 @@ fn register_process_def(
         args.first()
             .ok_or_else(|| "def-process expects a process name".to_string())?,
     )?;
-    let def = parse_process_def(&name, &args[1..])?;
+    let mut def = parse_process_def(&name, &args[1..])?;
+    def.source_path = vm
+        .current_source_module()
+        .map(|path| path.to_string_lossy().into_owned());
     process_authoring
         .lock()
         .map_err(|_| "failed to lock process registry".to_string())?
@@ -5761,7 +5794,10 @@ fn register_process_accumulator_def(
         args.first()
             .ok_or_else(|| "def-accumulator expects a process name".to_string())?,
     )?;
-    let def = parse_process_accumulator_def(&name, &args[1..])?;
+    let mut def = parse_process_accumulator_def(&name, &args[1..])?;
+    def.source_path = vm
+        .current_source_module()
+        .map(|path| path.to_string_lossy().into_owned());
     process_authoring
         .lock()
         .map_err(|_| "failed to lock process registry".to_string())?
@@ -5869,6 +5905,7 @@ fn parse_process_accumulator_def(
     Ok(crate::process::ProcessDef {
         id: crate::process::stable_process_id(name),
         name: name.to_string(),
+        source_path: None,
         doc,
         inlets,
         outlets: Vec::new(),
@@ -6276,6 +6313,7 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
     Ok(crate::process::ProcessDef {
         id: crate::process::stable_process_id(name),
         name: name.to_string(),
+        source_path: None,
         doc,
         inlets,
         outlets,
@@ -7023,6 +7061,7 @@ fn construct_anonymous_listener_process(
     registry.upsert_def(crate::process::ProcessDef {
         id: crate::process::stable_process_id(&class_name),
         name: class_name.clone(),
+        source_path: None,
         doc: None,
         inlets: Vec::new(),
         outlets: Vec::new(),
@@ -13848,12 +13887,24 @@ pub fn load_process_library_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("processes")
         .join("builtin.lisp");
-    let source = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| include_str!("../processes/builtin.lisp").to_string());
-    if source.trim().is_empty() {
-        String::new()
-    } else {
-        format!("; processes/builtin.lisp\n{source}\n")
+    match std::fs::read_to_string(&path) {
+        Ok(source) if source.trim().is_empty() => String::new(),
+        Ok(_) => {
+            // Evaluate through `load` so def-process can retain the VM's real
+            // source module for slot-to-source navigation. In packaged builds
+            // where the source tree is unavailable, retain the embedded
+            // definitions as a functional fallback.
+            let path = std::fs::canonicalize(&path).unwrap_or(path);
+            format!("(load {:?})", path.to_string_lossy())
+        }
+        Err(_) => {
+            let source = include_str!("../processes/builtin.lisp");
+            if source.trim().is_empty() {
+                String::new()
+            } else {
+                format!("; embedded processes/builtin.lisp\n{source}\n")
+            }
+        }
     }
 }
 
@@ -22502,15 +22553,16 @@ mod tests {
         scratch
             .eval(&super::load_process_library_source())
             .expect("builtin process library should eval");
-        let names = scratch
-            .process_authoring_snapshot()
-            .defs
-            .into_iter()
-            .map(|def| def.name)
-            .collect::<Vec<_>>();
+        let defs = scratch.process_authoring_snapshot().defs;
+        let names = defs.iter().map(|def| def.name.clone()).collect::<Vec<_>>();
         assert!(names.iter().any(|name| name == "prob-mask"), "{names:?}");
         assert!(names.iter().any(|name| name == "repeater"), "{names:?}");
         assert!(names.iter().any(|name| name == "dice"), "{names:?}");
+        assert!(defs.iter().all(|def| {
+            def.source_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("processes/builtin.lisp"))
+        }));
     }
 
     #[test]
@@ -23059,7 +23111,7 @@ mod tests {
     }
 
     #[test]
-    fn project_scratch_reattach_preserves_saved_process_lanes_and_port_bindings() {
+    fn project_scratch_reattach_preserves_saved_process_slot_settings() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let script_path = format!(
             "{}/scripts/process-phase3a-ports-demo.lisp",
@@ -23107,6 +23159,7 @@ mod tests {
             state.set_process_lane_values(instance_id, "speed", vec![1.0, 0.75, 0.5, 0.25]),
             1
         );
+        assert!(state.set_track_process_slot_enabled(0, instance_id, false));
 
         // Project load restores the saved chain first, then evaluates project
         // scratch in a fresh UI runtime. The demo source reattaches the same
@@ -23119,6 +23172,10 @@ mod tests {
             .expect("process chain after scratch reattach");
         let slot = chain.slots.first().expect("process slot after reattach");
         assert_eq!(slot.instance_id, instance_id);
+        assert!(
+            !slot.enabled,
+            "scratch re-evaluation must preserve bypass state"
+        );
         assert_eq!(
             slot.lanes.get("gate").map(|lane| lane.values.as_slice()),
             Some(&[0.0, 0.25, 0.75, 1.0][..])
@@ -23134,6 +23191,44 @@ mod tests {
                 param_id: None,
             }))
         );
+    }
+
+    #[test]
+    fn process_chain_reconciliation_preserves_pattern_order_and_appends_new_slots() {
+        let slot = |id: u64, class_name: &str| crate::process::TrackProcessSlot {
+            instance_id: crate::process::ProcessInstanceId(id),
+            instance_name: None,
+            class_name: class_name.to_string(),
+            enabled: true,
+            inlets: std::collections::BTreeMap::new(),
+            lanes: std::collections::BTreeMap::new(),
+            bindings: std::collections::BTreeMap::new(),
+        };
+        let mut bypassed = slot(3, "third");
+        bypassed.enabled = false;
+        let existing = crate::process::TrackProcessChain {
+            slots: vec![bypassed, slot(1, "first"), slot(2, "second")],
+        };
+        let mut replacement = crate::process::TrackProcessChain {
+            slots: vec![
+                slot(1, "first"),
+                slot(2, "second"),
+                slot(3, "third"),
+                slot(4, "new"),
+            ],
+        };
+
+        super::preserve_process_slot_state(&[], &existing, &mut replacement);
+
+        assert_eq!(
+            replacement
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id.0)
+                .collect::<Vec<_>>(),
+            vec![3, 1, 2, 4]
+        );
+        assert!(!replacement.slots[0].enabled);
     }
 
     #[test]

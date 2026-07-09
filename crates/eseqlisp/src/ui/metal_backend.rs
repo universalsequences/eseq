@@ -2331,10 +2331,18 @@ fragment float4 live_spectrogram_frag(
         }
 
         pub fn new_capture(width: u32, height: u32) -> Result<Self, BackendError> {
+            Self::new_capture_with_font_size(width, height, DEFAULT_MONOSPACE_FONT_SIZE_PT)
+        }
+
+        pub fn new_capture_with_font_size(
+            width: u32,
+            height: u32,
+            monospace_font_size_pt: f64,
+        ) -> Result<Self, BackendError> {
             Self::new_with_size_font_size_and_visibility(
                 width,
                 height,
-                DEFAULT_MONOSPACE_FONT_SIZE_PT,
+                monospace_font_size_pt,
                 false,
             )
         }

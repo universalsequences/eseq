@@ -13,6 +13,22 @@ pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
     app: &ui::App,
 ) -> Result<(Editor, MetalBackend), Box<dyn std::error::Error>> {
+    let mut editor = create_editor(runtime, app)?;
+    let mut backend =
+        MetalBackend::new_with_size_and_font_size(1250, 850, METAL_SEQ_TEXT_FONT_SIZE_PT)
+            .map_err(|_| "Metal backend creation failed")?;
+    backend
+        .initialize()
+        .map_err(|_| "Metal backend init failed")?;
+    configure_editor_for_backend(&mut editor, &mut backend);
+
+    Ok((editor, backend))
+}
+
+pub(crate) fn create_editor(
+    runtime: Runtime,
+    app: &ui::App,
+) -> Result<Editor, Box<dyn std::error::Error>> {
     let (init_src, init_path) = read_eseqlisp_init_source();
     let mut editor = Editor::new(
         runtime,
@@ -44,25 +60,32 @@ pub(crate) fn create_editor_and_backend(
     log_lisp_ui_load_diagnostics(&mut editor);
     reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
+    Ok(editor)
+}
 
+pub(crate) fn create_capture_backend(
+    editor: &mut Editor,
+    width: u32,
+    height: u32,
+) -> Result<MetalBackend, Box<dyn std::error::Error>> {
     let mut backend =
-        MetalBackend::new_with_size_and_font_size(1250, 850, METAL_SEQ_TEXT_FONT_SIZE_PT)
-            .map_err(|_| "Metal backend creation failed")?;
+        MetalBackend::new_capture_with_font_size(width, height, METAL_SEQ_TEXT_FONT_SIZE_PT)
+            .map_err(|_| "Metal capture backend creation failed")?;
     backend
         .initialize()
-        .map_err(|_| "Metal backend init failed")?;
+        .map_err(|_| "Metal capture backend init failed")?;
+    configure_editor_for_backend(editor, &mut backend);
+    Ok(backend)
+}
 
-    {
-        let (cell_w, cell_h) = backend.cell_dimensions();
-        if let Some((text_cell_w, text_cell_h)) = backend.sync_text_zoom(editor.text_zoom()) {
-            editor.set_text_cell_dimensions(cell_w, cell_h, text_cell_w, text_cell_h);
-        }
-        if let Some(measurer) = backend.create_text_measurer() {
-            editor.set_text_measurer(measurer, cell_w, cell_h);
-        }
+fn configure_editor_for_backend(editor: &mut Editor, backend: &mut MetalBackend) {
+    let (cell_w, cell_h) = backend.cell_dimensions();
+    if let Some((text_cell_w, text_cell_h)) = backend.sync_text_zoom(editor.text_zoom()) {
+        editor.set_text_cell_dimensions(cell_w, cell_h, text_cell_w, text_cell_h);
     }
-
-    Ok((editor, backend))
+    if let Some(measurer) = backend.create_text_measurer() {
+        editor.set_text_measurer(measurer, cell_w, cell_h);
+    }
 }
 
 pub(crate) fn apply_startup_grid_layout(

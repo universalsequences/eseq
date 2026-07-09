@@ -1050,12 +1050,16 @@ pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usiz
             ("instance-id", Value::Number(slot.instance_id.0 as f64)),
             ("class", Value::String(slot.class_name.clone())),
             ("process", Value::String(slot.class_name.clone())),
+            ("label", Value::String(slot.class_name.clone())),
             (
-                "label",
+                "doc",
+                Value::String(def.and_then(|def| def.doc.clone()).unwrap_or_default()),
+            ),
+            (
+                "source-path",
                 Value::String(
-                    def.and_then(|def| def.doc.clone())
-                        .filter(|doc| !doc.is_empty())
-                        .unwrap_or_else(|| slot.class_name.clone()),
+                    def.and_then(|def| def.source_path.clone())
+                        .unwrap_or_default(),
                 ),
             ),
             ("enabled", Value::Bool(slot.enabled)),
@@ -1086,6 +1090,10 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
             ("name", Value::String(def.name.clone())),
             ("label", Value::String(def.name.clone())),
             ("doc", Value::String(def.doc.clone().unwrap_or_default())),
+            (
+                "source-path",
+                Value::String(def.source_path.clone().unwrap_or_default()),
+            ),
             ("target", Value::String(process_ports_label(&def.ports))),
             (
                 "ports",
@@ -24281,6 +24289,11 @@ mod tests {
             ("class", Value::String("sparse-transpose".to_string())),
             ("process", Value::String("sparse-transpose".to_string())),
             ("label", Value::String("sparse-transpose".to_string())),
+            ("doc", Value::String("Sparse transpose".to_string())),
+            (
+                "source-path",
+                Value::String("crates/sequencer/scripts/sparse-transpose.lisp".to_string()),
+            ),
             ("enabled", Value::Bool(true)),
             ("target", Value::String("step-param:transpose".to_string())),
             (
@@ -24334,6 +24347,7 @@ mod tests {
             "track-process-slots",
             test_list(vec![test_list(vec![slot])]),
         );
+        editor.runtime_mut().run_reactive_cycle();
     }
 
     fn mappable_process_lane_value() -> Value {
@@ -24386,6 +24400,14 @@ mod tests {
             ("class", Value::String("mod-writer".to_string())),
             ("process", Value::String("mod-writer".to_string())),
             ("label", Value::String("mod-writer".to_string())),
+            (
+                "doc",
+                Value::String("Map a lane to a parameter".to_string()),
+            ),
+            (
+                "source-path",
+                Value::String("crates/sequencer/scripts/mod-writer.lisp".to_string()),
+            ),
             ("enabled", Value::Bool(true)),
             ("target", Value::String("shape:unbound".to_string())),
             (
@@ -24403,6 +24425,22 @@ mod tests {
                     ("target-kind", Value::String("instrument-param".to_string())),
                 ])]),
             ),
+            ("inlets", test_list(vec![])),
+        ])
+    }
+
+    fn compact_process_slot_value(instance_id: u64, name: &str) -> Value {
+        map_value([
+            ("slot-index", Value::Number(0.0)),
+            ("instance-id", Value::Number(instance_id as f64)),
+            ("class", Value::String(name.to_string())),
+            ("process", Value::String(name.to_string())),
+            ("label", Value::String(name.to_string())),
+            ("doc", Value::String(String::new())),
+            ("source-path", Value::String(String::new())),
+            ("enabled", Value::Bool(true)),
+            ("target", Value::String(String::new())),
+            ("ports", test_list(vec![])),
             ("inlets", test_list(vec![])),
         ])
     }
@@ -24426,6 +24464,7 @@ mod tests {
             "track-process-slots",
             test_list(vec![test_list(vec![slot])]),
         );
+        editor.runtime_mut().run_reactive_cycle();
     }
 
     fn ranged_process_lane_value(min: f64, max: f64, default: f64) -> Value {
@@ -24529,6 +24568,70 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_omits_process_panel_without_an_attached_process() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-slots", test_list(vec![]));
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer should exist")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("fx layout should build");
+        assert!(
+            find_layout_node_by_debug_name(&layout, "process-chain-panel").is_none(),
+            "tracks without attached processes must not show a process panel"
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_process_chain_rows_stack_in_execution_order() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "process-slots",
+            test_list(vec![
+                compact_process_slot_value(41, "first"),
+                compact_process_slot_value(42, "second"),
+                compact_process_slot_value(43, "third"),
+            ]),
+        );
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer should exist")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("process stack layout");
+        let panel = find_layout_node_by_debug_name(&layout, "process-chain-panel")
+            .expect("process chain panel should render");
+        let rows = (0..3)
+            .map(|index| {
+                find_layout_node_by_debug_name(&layout, &format!("process-panel-slot-{index}"))
+                    .unwrap_or_else(|| panic!("process row {index} should render"))
+            })
+            .collect::<Vec<_>>();
+        for (index, row) in rows.iter().enumerate() {
+            assert_finite_nonzero_rect(row, &format!("process row {index}"));
+            assert_layout_inside(row, panel, &format!("process row {index}"));
+        }
+        assert!(rows[0].rect.row < rows[1].rect.row && rows[1].rect.row < rows[2].rect.row);
+    }
+
+    #[test]
     fn metal_seq_process_port_mapping_arms_port_and_binds_instrument_param() {
         let mut editor = full_grid_editor_for_scroll_tests();
         install_mappable_process_lane_fixture(&mut editor);
@@ -24593,36 +24696,116 @@ mod tests {
                 });
         }
 
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (seqv-set-track-expanded 0 true)
-                (seqv-set-param-mode 0 7)
-                "#,
-            )
-            .expect("expand track with process controls");
-        editor.refresh_runtime_side_effects();
-
-        let sequencer_id = editor
+        let fx_id = editor
             .buffers
             .iter()
-            .find(|buffer| buffer.name == "*sequencer*")
-            .expect("sequencer buffer should exist")
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer should exist")
             .id;
-        editor.set_active_buffer(sequencer_id);
-        editor.set_layout_viewport(180, 30);
+        editor.set_active_buffer(fx_id);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(180, 18);
         let layout = editor
             .widget_layout()
-            .expect("expanded sequencer layout should build");
+            .expect("fx panel layout should build");
         assert!(
-            find_layout_node_by_stable_key(&layout, "seqv-process-port-map-0-0-shape").is_none(),
-            "process slot footer should not render port map buttons"
+            find_layout_node_by_stable_key(&layout, "seqv-process-lane-map-0-0-shape").is_none(),
+            "the sequencer lane surface must not own process mapping controls"
         );
-        let port_button =
-            find_layout_node_by_stable_key(&layout, "seqv-process-lane-map-0-0-shape")
-                .expect("selected process lane should render mappable port button");
+        let process_panel = find_layout_node_by_debug_name(&layout, "process-chain-panel")
+            .unwrap_or_else(|| {
+                let mut summaries = Vec::new();
+                collect_layout_node_summaries(&layout, &mut summaries);
+                panic!(
+                    "an attached process should render the process chain panel; layout={summaries:#?}"
+                )
+            });
+        assert_finite_nonzero_rect(process_panel, "process chain panel");
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel should render beside process chain");
+        assert!(
+            process_panel.rect.col < instrument_panel.rect.col,
+            "process chain must render left of the instrument and MIDI FX pipeline"
+        );
+
+        let header = find_layout_node_by_stable_key(&layout, "process-panel-header-42")
+            .expect("process slot header should render");
+        assert_finite_nonzero_rect(header, "process slot header");
+        editor
+            .runtime_mut()
+            .invoke(
+                header
+                    .props
+                    .get("on-double-click")
+                    .cloned()
+                    .expect("process slot source-navigation callback"),
+                vec![Value::Nil],
+            )
+            .expect("open process source");
+        let commands = editor.drain_host_commands();
+        let source_command = commands
+            .iter()
+            .find(|command| {
+                matches!(
+                    command,
+                    eseqlisp::host::HostCommand::Custom { name, .. }
+                        if name == "open-script-source-tab"
+                )
+            })
+            .expect("double-click should enqueue a source-tab command");
+        let eseqlisp::host::HostCommand::Custom { payload, .. } = source_command else {
+            unreachable!("matched custom source command")
+        };
+        assert_eq!(
+            extract_string_from_payload(payload, "path"),
+            Some("crates/sequencer/scripts/mod-writer.lisp".to_string())
+        );
+        editor
+            .runtime_mut()
+            .invoke(
+                header
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("process slot header click callback"),
+                vec![Value::Nil],
+            )
+            .expect("select process slot");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .widget_layout()
+            .expect("selected process panel layout should build");
+        let selected_panel = find_layout_node_by_debug_name(&layout, "process-chain-panel")
+            .expect("selected process chain panel should render");
+        let port_button = find_layout_node_by_stable_key(&layout, "process-panel-map-42-shape")
+            .expect("selected process slot should render its mappable port button");
         assert_finite_nonzero_rect(port_button, "process port map button");
+        assert_layout_inside(port_button, selected_panel, "process port map button");
+        for (key, label) in [
+            ("process-panel-enabled-42", "process bypass toggle"),
+            ("process-panel-edit-42", "process edit button"),
+            ("process-panel-remove-42", "process remove button"),
+            ("process-panel-end-drop-zone", "process end drop zone"),
+        ] {
+            let node = find_layout_node_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("{label} should render"));
+            assert_finite_nonzero_rect(node, label);
+            assert_layout_inside(node, selected_panel, label);
+        }
+        let order_drop_target = find_layout_node_by_debug_name(&layout, "process-panel-slot-0")
+            .expect("process slot should expose a reorder drop target");
+        assert_layout_inside(
+            order_drop_target,
+            selected_panel,
+            "process reorder drop target",
+        );
+        assert_eq!(
+            order_drop_target.props.get("drag-type"),
+            Some(&Value::String("process-instance".to_string()))
+        );
+        assert!(order_drop_target.props.contains_key("on-drop"));
         editor
             .runtime_mut()
             .invoke(
@@ -24641,16 +24824,9 @@ mod tests {
                 .expect("read process map active state"),
             Some(Value::Bool(true))
         );
+        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx buffer should exist")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
         assert_eq!(
             editor
                 .runtime_mut()
