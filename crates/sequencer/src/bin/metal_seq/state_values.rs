@@ -24722,11 +24722,33 @@ mod tests {
                 )
             });
         assert_finite_nonzero_rect(process_panel, "process chain panel");
+        assert_eq!(
+            process_panel.props.get("background"),
+            Some(&Value::String("fx-panel-bg".to_string())),
+            "the process chain should use the same rounded panel shader as instruments and effects"
+        );
+        assert_eq!(
+            process_panel.props.get("color"),
+            Some(&Value::Keyword("instrument-panel-bg".to_string())),
+            "the process chain body should use the shared instrument/effect color scheme"
+        );
         let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
             .expect("instrument panel should render beside process chain");
         assert!(
             process_panel.rect.col < instrument_panel.rect.col,
             "process chain must render left of the instrument and MIDI FX pipeline"
+        );
+        let process_panel_header =
+            find_layout_node_by_debug_name(&layout, "process-panel-header-box")
+                .expect("process panel header should render");
+        let instrument_panel_header =
+            find_layout_node_by_debug_name(&layout, "instrument-header-box")
+                .expect("instrument panel header should render");
+        assert!(
+            (process_panel_header.rect.height - instrument_panel_header.rect.height).abs() < 0.01,
+            "process and instrument headers should reserve the same height; process={:?}; instrument={:?}",
+            process_panel_header.rect,
+            instrument_panel_header.rect
         );
 
         let header = find_layout_node_by_stable_key(&layout, "process-panel-header-42")
@@ -24786,7 +24808,6 @@ mod tests {
         for (key, label) in [
             ("process-panel-enabled-42", "process bypass toggle"),
             ("process-panel-edit-42", "process edit button"),
-            ("process-panel-remove-42", "process remove button"),
             ("process-panel-end-drop-zone", "process end drop zone"),
         ] {
             let node = find_layout_node_by_stable_key(&layout, key)
@@ -24794,6 +24815,18 @@ mod tests {
             assert_finite_nonzero_rect(node, label);
             assert_layout_inside(node, selected_panel, label);
         }
+        assert!(
+            find_layout_node_by_stable_key(&layout, "process-panel-remove-42").is_none(),
+            "process rows should use the *fx* Backspace/Delete action instead of an inline remove button"
+        );
+        let slot_header_row =
+            find_layout_node_by_debug_name(&layout, "process-panel-slot-header-row-42")
+                .expect("process slot header row should render");
+        assert_eq!(
+            slot_header_row.props.get("align"),
+            Some(&Value::Keyword("baseline".to_string())),
+            "process index, enabled dot, name, and actions should share a text baseline"
+        );
         let order_drop_target = find_layout_node_by_debug_name(&layout, "process-panel-slot-0")
             .expect("process slot should expose a reorder drop target");
         assert_layout_inside(
@@ -24878,6 +24911,136 @@ mod tests {
                 .eval_str("(process-map-active?)")
                 .expect("read cleared process map active state"),
             Some(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn metal_seq_process_selection_clears_outside_and_backspace_deletes_selected_slot() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        install_mappable_process_lane_fixture(&mut editor);
+        let removals = Arc::new(Mutex::new(Vec::<(usize, u64)>::new()));
+        {
+            let removals = Arc::clone(&removals);
+            editor
+                .runtime_mut()
+                .register_native("seq-remove-process-slot", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(value)) => *value as usize,
+                        _ => usize::MAX,
+                    };
+                    let instance_id = match args.get(1) {
+                        Some(Value::Number(value)) => *value as u64,
+                        _ => 0,
+                    };
+                    removals.lock().unwrap().push((track, instance_id));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer should exist")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(180, 18);
+
+        let select_process = |editor: &mut eseqlisp::Editor| {
+            let layout = editor.widget_layout().expect("process selection layout");
+            let header = find_layout_node_by_stable_key(&layout, "process-panel-header-42")
+                .expect("process header should render");
+            editor
+                .runtime_mut()
+                .invoke(
+                    header
+                        .props
+                        .get("on-click")
+                        .cloned()
+                        .expect("process selection callback"),
+                    vec![Value::Nil],
+                )
+                .expect("select process");
+            editor.refresh_runtime_side_effects();
+        };
+
+        select_process(&mut editor);
+        assert!(matches!(
+            editor
+                .runtime_mut()
+                .eval_str("(process-panel-selected-slot)")
+                .expect("selected process"),
+            Some(Value::Map(_))
+        ));
+
+        let layout = editor.widget_layout().expect("selected process layout");
+        let process_scroll = find_layout_node_by_stable_key(&layout, "process-chain-scroll-0")
+            .expect("process scroll surface should render");
+        editor
+            .runtime_mut()
+            .invoke(
+                process_scroll
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("process background deselection callback"),
+                vec![Value::Nil],
+            )
+            .expect("click process background");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(process-panel-selected-slot)")
+                .expect("cleared process selection"),
+            Some(Value::Nil),
+            "clicking empty process-panel space should collapse the selected process"
+        );
+
+        select_process(&mut editor);
+        let layout = editor.widget_layout().expect("selected process layout");
+        let instrument_body = find_layout_node_by_debug_name(&layout, "instrument-content-box")
+            .expect("neighboring instrument body should render");
+        editor
+            .runtime_mut()
+            .invoke(
+                instrument_body
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("instrument body selection-clear callback"),
+                vec![Value::Nil],
+            )
+            .expect("click neighboring instrument panel");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(process-panel-selected-slot)")
+                .expect("selection after neighboring panel click"),
+            Some(Value::Nil),
+            "clicking outside the process panel should collapse its selection"
+        );
+
+        select_process(&mut editor);
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            removals.lock().unwrap().as_slice(),
+            [(0, 42)],
+            "Backspace in *fx* should remove the selected process slot"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(process-panel-selected-slot)")
+                .expect("selection after Backspace"),
+            Some(Value::Nil),
+            "deleting a process should clear its expanded selection"
         );
     }
 

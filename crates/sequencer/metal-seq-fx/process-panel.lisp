@@ -11,11 +11,12 @@
   (sdf/fill (sdf/circle 0.78)
     (material :color
       (if (> active 0.5)
-        (rgba 0.35 0.92 0.72 1.0)
-        (rgba 0.16 0.18 0.20 1.0)))))
+        (rgba 1.0 0.8 0.12 1.0)
+        (rgba 0 0 0 1.0)))))
 
 (def process-panel-clear-selection ()
   (do
+    (process-map-clear)
     (set! process-panel-selected-track -1)
     (set! process-panel-selected-instance-id 0)))
 
@@ -30,7 +31,7 @@
       nil)
     (set! process-panel-selected-track SEQ.current-track)
     (set! process-panel-selected-instance-id (get slot :instance-id))
-    (fx-clear-selected-effect)))
+    (fx-clear-delete-selection)))
 
 (def process-panel-selected-slot ()
   (if (and (not (fx-has-selected-bus?))
@@ -68,7 +69,6 @@
     (if slot
       (do
         (seq-remove-process-slot SEQ.current-track (get slot :instance-id))
-        (process-map-clear)
         (process-panel-clear-selection)
         true)
       false)))
@@ -81,12 +81,12 @@
 
 (def process-panel-port-status-color (slot port)
   (if (process-map-port-active? SEQ.current-track slot port)
-    (rgba 0.93 0.65 0.16 0.26)
+    (rgba 0.95 0.48 0.18 0.22)
     (if (= (get port :status) "bound")
-      (rgba 0.25 0.72 0.42 0.18)
+      (rgba 0.34 0.36 0.38 0.42)
       (if (= (get port :status) "hint")
-        (rgba 0.28 0.42 0.85 0.16)
-        (rgba 0.46 0.30 0.34 0.18)))))
+        (rgba 0.25 0.27 0.31 0.42)
+        (rgba 0.18 0.19 0.21 0.42)))))
 
 (def process-panel-port-action-label (slot port)
   (if (process-map-port-active? SEQ.current-track slot port)
@@ -163,7 +163,7 @@
         (ports (process-panel-mappable-ports slot)))
     (box :width :fill :padding 0.28
       :debug-name (str "process-panel-slot-editor-" (get slot :instance-id))
-      :background-color (rgba 0.05 0.09 0.10 0.72)
+      :background-color :instrument-control-bg
       (v-stack :width :fill :gap 0.14
         (if (not (= (get slot :doc) ""))
           (label (substring (get slot :doc) 0 48)
@@ -210,38 +210,30 @@
     :width :fill :height 1.34 :padding 0.10
     :background-color
       (if (process-panel-slot-selected? slot)
-        (rgba 0.18 0.52 0.48 0.28)
+        (rgba 0.30 0.32 0.34 1.0)
         (rgba 1 1 1 0.025))
     :on-click (lambda (event) (process-panel-select-slot slot))
     :on-double-click (lambda (event) (process-panel-open-slot-source slot))
-    (h-stack :width :fill :gap 0.24 :align :center
+    (h-stack :debug-name (str "process-panel-slot-header-row-" (get slot :instance-id))
+      :width :fill :gap 0.30 :align :baseline
       (label (str (+ index 1))
-        :width 1.4 :font-size 8.5 :color :dim :bg :transparent)
+        :width 1.25 :font-size 8.5 :color :dim :bg :transparent)
       (box :key (str "process-panel-enabled-" (get slot :instance-id))
         :width 1.35 :height 1.05 :padding 0
         :on-click (lambda (event) (process-panel-toggle-enabled slot))
         (process-panel-enabled-dot
           :active (if (get slot :enabled) 1 0)))
-      (label (get slot :process)
-        :width 10.0 :font-size 9.4
+      (label (substring (get slot :process) 0 (min 24 (len (get slot :process))))
+        :flex 1 :font-size 9.4
         :color (if (get slot :enabled) :white :dim) :bg :transparent)
       (if (not (get slot :enabled))
         (label "BYPASS" :width 4.2 :font-size 7.5 :color :dim :bg :transparent)
-        (box :width 4.2))
+        (box :width 0))
       (button "edit"
         :key (str "process-panel-edit-" (get slot :instance-id))
         :width 3.2 :height 0.9 :padding 0 :font-size 8
         :background-color :transparent :border-color :transparent :color :dim
-        :on-click (lambda (event) (process-panel-open-slot-source slot)))
-      (button "x"
-        :key (str "process-panel-remove-" (get slot :instance-id))
-        :width 1.6 :height 0.9 :padding 0 :font-size 8
-        :background-color :transparent :border-color :transparent :color :dim
-        :on-click (lambda (event)
-          (do
-            (seq-remove-process-slot SEQ.current-track (get slot :instance-id))
-            (process-map-clear)
-            (process-panel-clear-selection)))))))
+        :on-click (lambda (event) (process-panel-open-slot-source slot))))))
 
 (def process-panel-slot (slot index)
   (subtree :key (str "process-panel-slot-" (get slot :instance-id))
@@ -251,14 +243,14 @@
       :border-width (if (process-panel-slot-selected? slot) 0.8 0.35)
       :border-color
         (if (process-panel-slot-selected? slot)
-          (rgba 0.35 0.92 0.72 0.72)
+          (rgba 0.48 0.50 0.52 1.0)
           (rgba 1 1 1 0.10))
       :drag-type "process-instance"
       :drag-payload (process-panel-drag-payload slot)
       :drop-types (list "process-instance")
       :drop-meta (process-panel-drop-meta slot)
-      :drop-hover-border-color (rgba 0.35 0.92 0.72 1.0)
-      :drop-hover-background-color (rgba 0.12 0.28 0.26 0.42)
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-hover-background-color (rgba 0.22 0.23 0.25 0.42)
       :on-drop (lambda (event) (process-panel-drop event))
       (v-stack :width :fill :gap 0
         (process-panel-slot-header slot index)
@@ -272,27 +264,34 @@
     :border-width 0.35 :border-color (rgba 1 1 1 0.08)
     :drop-types (list "process-instance")
     :drop-meta (process-panel-drop-at-end-meta)
-    :drop-hover-border-color (rgba 0.35 0.92 0.72 1.0)
-    :drop-hover-background-color (rgba 0.12 0.28 0.26 0.42)
+    :drop-hover-border-color :mixer-strip-selected-border
+    :drop-hover-background-color (rgba 0.22 0.23 0.25 0.42)
+    :on-click (lambda (event) (process-panel-clear-selection))
     :on-drop (lambda (event) (process-panel-drop event))))
 
 (def process-chain-panel ()
   (box :width 26 :height fx-fixed-panel-height :padding 0
     :debug-name "process-chain-panel"
-    :background-color (rgba 0.035 0.075 0.078 0.96)
-    :corner-radius 8
-    :border-width 0.8 :border-color (rgba 0.25 0.72 0.62 0.34)
+    :background "fx-panel-bg"
+    :color :instrument-panel-bg
+    :header :fx-panel-header-bg
+    :selected-header :fx-panel-header-selected-bg
+    :selected 0
     (v-stack :width :fill :height :fill :gap 0
-      (box :width :fill :height fx-panel-header-height :padding 0.14
-        :background-color (rgba 0.08 0.22 0.21 0.92)
-        (h-stack :width :fill :gap 0.3 :align :center
+      (box :debug-name "process-panel-header-box"
+        :width :fill :height 1 :padding 0 :v-align :center :h-align :start
+        :on-click (lambda (event) (process-panel-clear-selection))
+        (h-stack :width :fill :gap 0.5 :align :center
+          (fx-panel-header-leading-spacer)
           (label "PROCESS"
-            :font-size 9 :color :white :bg :transparent)
-          (box :width 9.4)
+            :font-size 11 :color :white :bg :transparent)
+          (box :flex 1 :height 0.1)
           (label "PRE MIDI"
-            :font-size 7.5 :color :dim :bg :transparent)))
+            :font-size 8.5 :color :dim :bg :transparent)
+          (box :width 0.4 :height 0.1)))
       (scroll :key (str "process-chain-scroll-" SEQ.current-track)
         :width :fill :flex 1
+        :on-click (lambda (event) (process-panel-clear-selection))
         (v-stack :width :fill :padding 0.24 :gap 0.16
           (each SEQ.process-slots |slot index|
             (process-panel-slot slot index))
