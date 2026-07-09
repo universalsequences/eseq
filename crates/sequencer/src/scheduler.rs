@@ -8704,6 +8704,7 @@ mod tests {
                 crate::process::TrackProcessChain {
                     slots: vec![crate::process::TrackProcessSlot {
                         instance_id: crate::process::ProcessInstanceId(1),
+                        instance_name: None,
                         class_name: "sparse-transpose".to_string(),
                         enabled: true,
                         inlets: std::collections::BTreeMap::new(),

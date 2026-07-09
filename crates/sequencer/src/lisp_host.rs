@@ -5072,6 +5072,7 @@ fn process_chain_slot_from_handle(
     }
     Ok(crate::process::TrackProcessSlot {
         instance_id: crate::process::ProcessInstanceId(handle_id),
+        instance_name: instance.name.clone(),
         class_name: instance.class_name.clone(),
         enabled: true,
         inlets,
@@ -5084,16 +5085,30 @@ fn process_chain_slot_from_handle(
     })
 }
 
+fn matching_existing_process_slot<'a>(
+    slot: &crate::process::TrackProcessSlot,
+    existing: &'a crate::process::TrackProcessChain,
+) -> Option<&'a crate::process::TrackProcessSlot> {
+    if let Some(name) = slot.instance_name.as_deref() {
+        if let Some(existing_slot) = existing.slots.iter().find(|existing_slot| {
+            existing_slot.class_name == slot.class_name
+                && existing_slot.instance_name.as_deref() == Some(name)
+        }) {
+            return Some(existing_slot);
+        }
+    }
+    existing.slots.iter().find(|existing_slot| {
+        existing_slot.instance_id == slot.instance_id && existing_slot.class_name == slot.class_name
+    })
+}
+
 fn preserve_process_slot_state(
     defs: &[crate::process::ProcessDef],
     existing: &crate::process::TrackProcessChain,
     replacement: &mut crate::process::TrackProcessChain,
 ) {
     for slot in &mut replacement.slots {
-        let Some(existing_slot) = existing.slots.iter().find(|existing_slot| {
-            existing_slot.instance_id == slot.instance_id
-                && existing_slot.class_name == slot.class_name
-        }) else {
+        let Some(existing_slot) = matching_existing_process_slot(slot, existing) else {
             continue;
         };
         let Some(def) = defs.iter().find(|def| def.name == slot.class_name) else {
@@ -21746,6 +21761,105 @@ mod tests {
             Some(crate::process::ProcessTargetKind::DeviceParam)
         );
         assert_eq!(color.target, None);
+    }
+
+    #[test]
+    fn process_chain_re_eval_preserves_named_slot_scene_lanes_and_mappings() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(AtomicUsize::new(0)),
+        );
+
+        let source = |amount_lane: &str, pitch_lane: &str| {
+            format!(
+                r#"
+                (def-process reload-writer
+                  :in ((amount :float 0 1 :default 0 :lane true)
+                       (pitch :float -12 12 :default 0 :lane true))
+                  :targets '((pitch (step-param :transpose))
+                             (shape :mappable :instrument-param)
+                             (color :mappable :device-param))
+                  :run (do
+                    (target-add! :pitch (in :pitch))
+                    (target-set! :shape (in :amount))
+                    (target-set! :color (in :amount))))
+
+                (def reload-writer-h
+                  (reload-writer
+                    :amount (lane {amount_lane})
+                    :pitch (lane {pitch_lane})))
+                (def reload-demo (processes :track 0 reload-writer-h))
+                "#
+            )
+        };
+
+        runtime
+            .eval_str(&source("0.1 0.2", "1 2"))
+            .expect("initial script evaluation");
+
+        let first_chain = state.track_process_chain(0).expect("initial process chain");
+        let first_slot = first_chain.slots.first().expect("initial process slot");
+        let first_instance_id = first_slot.instance_id;
+        assert_eq!(first_slot.instance_name.as_deref(), Some("reload-writer-h"));
+        assert_eq!(
+            first_slot
+                .lanes
+                .get("amount")
+                .map(|lane| lane.values.as_slice()),
+            Some(&[0.1, 0.2][..])
+        );
+
+        assert!(state.set_process_port_binding(
+            0,
+            first_instance_id,
+            "shape",
+            crate::process::ParamTarget::InstrumentParam {
+                param: "release".to_string(),
+                param_id: None,
+            },
+        ));
+        assert_eq!(
+            state.set_process_lane_values(first_instance_id, "amount", vec![0.9, 0.8, 0.7]),
+            1
+        );
+
+        runtime
+            .eval_str(&source("0.3 0.4 0.5", "9 10 11"))
+            .expect("same buffer re-evaluation should preserve scene-owned state");
+
+        let chain = state
+            .track_process_chain(0)
+            .expect("process chain after re-evaluation");
+        let slot = chain
+            .slots
+            .first()
+            .expect("process slot after re-evaluation");
+        assert_ne!(
+            slot.instance_id, first_instance_id,
+            "same-runtime re-eval should allocate a fresh handle"
+        );
+        assert_eq!(slot.instance_name.as_deref(), Some("reload-writer-h"));
+        assert_eq!(
+            slot.lanes.get("amount").map(|lane| lane.values.as_slice()),
+            Some(&[0.9, 0.8, 0.7][..]),
+            "edited scene lane values should win over script defaults"
+        );
+        assert_eq!(
+            slot.lanes.get("pitch").map(|lane| lane.values.as_slice()),
+            Some(&[1.0, 2.0][..]),
+            "existing scene lane defaults should not be replaced by a script re-eval"
+        );
+        assert_eq!(
+            slot.bindings.get("shape"),
+            Some(&Some(crate::process::ParamTarget::InstrumentParam {
+                param: "release".to_string(),
+                param_id: None,
+            }))
+        );
+        assert_eq!(slot.bindings.get("color"), Some(&None));
     }
 
     #[test]

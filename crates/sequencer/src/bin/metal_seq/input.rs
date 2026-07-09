@@ -251,8 +251,7 @@ fn sample_browser_search_shortcut(key: &crossterm::event::KeyEvent) -> bool {
 
     matches!(
         (key.code, key.modifiers),
-        (KeyCode::Char('/'), KeyModifiers::NONE)
-            | (KeyCode::Char('f') | KeyCode::Char('F'), KeyModifiers::SUPER)
+        (KeyCode::Char('f') | KeyCode::Char('F'), KeyModifiers::SUPER)
     )
 }
 
@@ -1663,11 +1662,11 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn slash_focuses_sample_browser_search_from_ui_buffers() {
+    fn slash_does_not_focus_sample_browser_search_from_ui_buffers() {
         let mut editor = sample_browser_keyboard_editor();
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
 
-        assert!(handle_metal_command_shortcut(
+        assert!(!handle_metal_command_shortcut(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
             &state,
@@ -1676,12 +1675,8 @@ mod live_keyboard_tests {
             &step_clipboard,
         ));
 
-        assert_eq!(editor.active_buffer().name, "*samples*");
-        let focused = editor
-            .focused_widget_node()
-            .expect("slash should focus the browser search");
-        assert_eq!(focused.widget_type, "text-input");
-        assert_eq!(focused.stable_key.as_deref(), Some("sbrowser-search-input"));
+        assert_eq!(editor.active_buffer().name, "*sequencer*");
+        assert!(editor.focused_widget_node().is_none());
     }
 
     #[test]
@@ -1764,12 +1759,12 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn slash_does_not_steal_text_input_or_text_only_buffers() {
+    fn slash_does_not_steal_focused_search_or_text_only_buffers() {
         let mut editor = sample_browser_keyboard_editor();
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
             &state,
             &current_track,
             &selected_steps,
@@ -1805,7 +1800,7 @@ mod live_keyboard_tests {
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
             &state,
             &current_track,
             &selected_steps,
@@ -1834,7 +1829,7 @@ mod live_keyboard_tests {
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
             &state,
             &current_track,
             &selected_steps,

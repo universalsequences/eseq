@@ -8014,6 +8014,7 @@ mod tests {
         crate::process::TrackProcessChain {
             slots: vec![crate::process::TrackProcessSlot {
                 instance_id: crate::process::ProcessInstanceId(7),
+                instance_name: Some("sparse-h".to_string()),
                 class_name: "sparse".to_string(),
                 enabled: true,
                 inlets: std::collections::BTreeMap::new(),
@@ -8037,6 +8038,7 @@ mod tests {
         crate::process::TrackProcessChain {
             slots: vec![crate::process::TrackProcessSlot {
                 instance_id: crate::process::ProcessInstanceId(8),
+                instance_name: Some("phase3b-writer-h".to_string()),
                 class_name: "phase3b-mappable-writer".to_string(),
                 enabled: true,
                 inlets: std::collections::BTreeMap::new(),

@@ -286,6 +286,8 @@ impl ProcessLane {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrackProcessSlot {
     pub instance_id: ProcessInstanceId,
+    #[serde(default)]
+    pub instance_name: Option<String>,
     pub class_name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1574,7 +1576,7 @@ impl ProcessRuntime {
         let source = def.run_source.clone()?;
         let ports = def.ports.clone();
         let seed_policy = def.seed_policy;
-        let instance_id = slot.instance_id;
+        let instance_id = track_process_slot_runtime_id(slot);
         self.step_process_runtime_ids.insert(instance_id.0);
         let existing_state = self
             .step_process_states
@@ -1989,8 +1991,27 @@ fn stable_mix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+const NAMED_PROCESS_RUNTIME_ID_FLAG: u64 = 1 << 63;
+
+fn named_process_runtime_id(class_name: &str, name: &str) -> u64 {
+    stable_process_id(&format!("process-instance:{class_name}:{name}"))
+        | NAMED_PROCESS_RUNTIME_ID_FLAG
+}
+
 fn runtime_instance_id(instance: &AuthoredProcessInstance) -> u64 {
-    instance.handle_id.0
+    if let Some(name) = instance.name.as_deref() {
+        named_process_runtime_id(&instance.class_name, name)
+    } else {
+        instance.handle_id.0
+    }
+}
+
+fn track_process_slot_runtime_id(slot: &TrackProcessSlot) -> ProcessInstanceId {
+    if let Some(name) = slot.instance_name.as_deref() {
+        ProcessInstanceId(named_process_runtime_id(&slot.class_name, name))
+    } else {
+        slot.instance_id
+    }
 }
 
 pub fn stable_process_id(name: &str) -> u64 {
@@ -2027,6 +2048,24 @@ mod tests {
             every,
             run_source: Some("(emit :track 0)".to_string()),
         }
+    }
+
+    #[test]
+    fn named_authored_process_runtime_ids_are_stable_across_re_eval_handles() {
+        let mut first = authored_instance(1, "counter", Some(ProcessTimeExpr::Beats(1.0)), false);
+        first.name = Some("counter-h".to_string());
+        first.anonymous = false;
+        let mut second = authored_instance(2, "counter", Some(ProcessTimeExpr::Beats(1.0)), false);
+        second.name = Some("counter-h".to_string());
+        second.anonymous = false;
+        let mut renamed = authored_instance(3, "counter", Some(ProcessTimeExpr::Beats(1.0)), false);
+        renamed.name = Some("other-counter-h".to_string());
+        renamed.anonymous = false;
+        let anonymous = authored_instance(4, "counter", Some(ProcessTimeExpr::Beats(1.0)), false);
+
+        assert_eq!(runtime_instance_id(&first), runtime_instance_id(&second));
+        assert_ne!(runtime_instance_id(&first), runtime_instance_id(&renamed));
+        assert_eq!(runtime_instance_id(&anonymous), 4);
     }
 
     #[test]
@@ -2278,6 +2317,7 @@ mod tests {
         );
         let slot = TrackProcessSlot {
             instance_id: ProcessInstanceId(55),
+            instance_name: None,
             class_name: "sparse".to_string(),
             enabled: true,
             inlets: BTreeMap::new(),

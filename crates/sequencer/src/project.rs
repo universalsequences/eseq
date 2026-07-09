@@ -1910,6 +1910,7 @@ mod tests {
                     crate::process::TrackProcessChain {
                         slots: vec![crate::process::TrackProcessSlot {
                             instance_id: crate::process::ProcessInstanceId(42),
+                            instance_name: Some("json-sparse-h".to_string()),
                             class_name: "json-sparse".to_string(),
                             enabled: true,
                             inlets: std::collections::BTreeMap::new(),
@@ -1980,6 +1981,12 @@ mod tests {
         assert_eq!(
             restored.patterns[0].process_chains[0].slots[0].instance_id,
             crate::process::ProcessInstanceId(42)
+        );
+        assert_eq!(
+            restored.patterns[0].process_chains[0].slots[0]
+                .instance_name
+                .as_deref(),
+            Some("json-sparse-h")
         );
         assert_eq!(
             restored.patterns[0].process_chains[0].slots[0].class_name,
