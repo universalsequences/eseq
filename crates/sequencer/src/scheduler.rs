@@ -9571,10 +9571,10 @@ mod tests {
                 .eval(
                     r#"
                     (def-process process-inlet-setter
-                      :targets ((out :mappable :process-inlet))
+                      :targets ((out :process-inlet))
                       :run (target-set! :out 3))
                     (def-process process-inlet-adder
-                      :targets ((out :mappable :process-inlet))
+                      :targets ((out :process-inlet))
                       :run (target-add! :out 2))
                     (def-process inlet-driven-pitch
                       :in ((amount :float -12 12 :default 0 :lane true))
@@ -9585,8 +9585,8 @@ mod tests {
                     (def adder (process-inlet-adder))
                     (def pitch (inlet-driven-pitch :amount (lane 1)))
                     (processes :track 0 setter adder pitch)
-                    (map! setter :out (inlet pitch :amount))
-                    (map! adder :out (inlet pitch :amount))
+                    (connect! setter :out (inlet pitch :amount))
+                    (connect! adder :out (inlet pitch :amount))
                     "#,
                 )
                 .expect("define process-inlet chain");
@@ -9635,13 +9635,13 @@ mod tests {
                       :target (step-param :transpose)
                       :run (target-add! (in :amount)))
                     (def-process late-writer
-                      :targets ((out :mappable :process-inlet))
+                      :targets ((out :process-inlet))
                       :run (target-set! :out 7))
 
                     (def pitch (earlier-pitch))
                     (def writer (late-writer))
                     (processes :track 0 pitch writer)
-                    (map! writer :out (inlet pitch :amount))
+                    (connect! writer :out (inlet pitch :amount))
                     "#,
                 )
                 .expect("define upstream process-inlet chain");

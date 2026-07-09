@@ -157,9 +157,18 @@ pub struct ProcessPortDef {
     pub name: String,
     pub target: Option<ProcessTargetHint>,
     #[serde(default)]
-    pub mappable: bool,
+    pub binding_mode: ProcessPortBindingMode,
     #[serde(default)]
     pub target_kind: Option<ProcessTargetKind>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessPortBindingMode {
+    #[default]
+    Fixed,
+    Mappable,
+    Connectable,
 }
 
 impl ProcessPortDef {
@@ -167,7 +176,7 @@ impl ProcessPortDef {
         Self {
             name: DEFAULT_PROCESS_PORT.to_string(),
             target: Some(target),
-            mappable: false,
+            binding_mode: ProcessPortBindingMode::Fixed,
             target_kind: None,
         }
     }
@@ -176,7 +185,7 @@ impl ProcessPortDef {
         Self {
             name: name.into(),
             target: Some(target),
-            mappable: false,
+            binding_mode: ProcessPortBindingMode::Fixed,
             target_kind: None,
         }
     }
@@ -189,8 +198,17 @@ impl ProcessPortDef {
         Self {
             name: name.into(),
             target,
-            mappable: true,
+            binding_mode: ProcessPortBindingMode::Mappable,
             target_kind,
+        }
+    }
+
+    pub fn process_inlet(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            target: None,
+            binding_mode: ProcessPortBindingMode::Connectable,
+            target_kind: Some(ProcessTargetKind::ProcessInlet),
         }
     }
 
@@ -206,12 +224,34 @@ impl ProcessPortDef {
             .or_else(|| self.target.as_ref().map(ProcessTargetHint::target_kind))
     }
 
-    pub fn allows_manual_target(&self, target: &ParamTarget) -> bool {
-        self.mappable
+    pub fn is_mappable(&self) -> bool {
+        self.binding_mode == ProcessPortBindingMode::Mappable
+    }
+
+    pub fn is_connectable(&self) -> bool {
+        self.binding_mode == ProcessPortBindingMode::Connectable
+    }
+
+    pub fn allows_parameter_mapping_target(&self, target: &ParamTarget) -> bool {
+        self.is_mappable()
+            && !matches!(target, ParamTarget::ProcessInlet { .. })
             && self
                 .effective_target_kind()
                 .map(|kind| kind.matches_target(target))
                 .unwrap_or(true)
+    }
+
+    pub fn allows_connection_target(&self, target: &ParamTarget) -> bool {
+        self.is_connectable()
+            && matches!(target, ParamTarget::ProcessInlet { .. })
+            && self
+                .effective_target_kind()
+                .map(|kind| kind.matches_target(target))
+                .unwrap_or(false)
+    }
+
+    pub fn allows_binding_target(&self, target: &ParamTarget) -> bool {
+        self.allows_parameter_mapping_target(target) || self.allows_connection_target(target)
     }
 }
 

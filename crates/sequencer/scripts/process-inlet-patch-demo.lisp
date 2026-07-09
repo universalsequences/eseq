@@ -19,17 +19,17 @@
 ;;   (process-inlet-demo-reverse-track 0) ; writer after target: value lands next fire
 ;;   (processes :track 0)                 ; clear the process chain
 ;;
-;; Equivalent inline map shape:
+;; Equivalent inline connection shape:
 ;;   (processes :track 0
 ;;     (process-inlet-demo-dice
-;;       :map '((out (process-inlet :process-inlet-demo-repeater :times))))
+;;       :connect '((out (process-inlet :process-inlet-demo-repeater :times))))
 ;;     process-inlet-demo-repeater-h)
 
 (seq-register-script-source-tab "Process Inlet Patch Demo")
 
 (def-process process-inlet-demo-dice
-  :doc "Roll a deterministic integer and write it to a mappable process-inlet target."
-  :targets ((out :mappable :process-inlet))
+  :doc "Roll a deterministic integer and write it to a connected process inlet."
+  :targets ((out :process-inlet))
   :in ((lo :int 0 8 :default 1 :lane true)
        (hi :int 0 8 :default 4 :lane true)
        (roll :gate :default 1 :lane true))
@@ -87,7 +87,7 @@
     (processes :track track
       process-inlet-demo-dice-h
       process-inlet-demo-repeater-h)
-    (map! process-inlet-demo-dice-h :out
+    (connect! process-inlet-demo-dice-h :out
       (inlet process-inlet-demo-repeater-h :times))))
 
 (def process-inlet-demo-attach-current-track ()
@@ -98,7 +98,7 @@
     (processes :track track
       process-inlet-demo-repeater-h
       process-inlet-demo-dice-h)
-    (map! process-inlet-demo-dice-h :out
+    (connect! process-inlet-demo-dice-h :out
       (inlet process-inlet-demo-repeater-h :times))))
 
 (def process-inlet-demo-chain

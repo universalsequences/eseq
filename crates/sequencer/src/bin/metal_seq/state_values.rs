@@ -641,7 +641,7 @@ fn process_slot_ports_value(
             ports.push(sequencer::process::ProcessPortDef {
                 name: name.clone(),
                 target: None,
-                mappable: false,
+                binding_mode: sequencer::process::ProcessPortBindingMode::Fixed,
                 target_kind: None,
             });
         }
@@ -660,7 +660,7 @@ fn process_mappable_port_values(
     def.map(|def| {
         def.ports
             .iter()
-            .filter(|port| port.mappable)
+            .filter(|port| port.is_mappable())
             .map(|port| process_port_value(slot, port))
             .collect()
     })
@@ -684,7 +684,7 @@ fn process_port_value(
         Some(None) | None if port.target.is_some() => "hint",
         Some(None) | None => "unbound",
     };
-    let bindable = port.mappable
+    let bindable = port.is_mappable()
         && binding
             .and_then(|binding| binding.as_ref())
             .map(process_param_target_is_bindable)
@@ -704,7 +704,8 @@ fn process_port_value(
         ("status", Value::String(status.to_string())),
         ("manual", Value::Bool(manual)),
         ("clearable", Value::Bool(manual)),
-        ("mappable", Value::Bool(port.mappable)),
+        ("mappable", Value::Bool(port.is_mappable())),
+        ("connectable", Value::Bool(port.is_connectable())),
         ("bindable", Value::Bool(bindable)),
         (
             "target-kind",
@@ -1105,7 +1106,8 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
                             "hint",
                             Value::String(process_target_hint_label(port.target.as_ref())),
                         ),
-                        ("mappable", Value::Bool(port.mappable)),
+                        ("mappable", Value::Bool(port.is_mappable())),
+                        ("connectable", Value::Bool(port.is_connectable())),
                         (
                             "target-kind",
                             Value::String(process_target_kind_label(port.effective_target_kind())),
@@ -21157,6 +21159,86 @@ mod tests {
         assert_eq!(
             port.get("target-kind").map(|cell| cell.borrow().clone()),
             Some(Value::String("instrument-param".to_string()))
+        );
+    }
+
+    #[test]
+    fn process_lane_payload_excludes_connectable_process_inlet_ports() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut runtime = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        runtime
+            .eval_str(
+                r#"
+                (def-process connection-source
+                  :targets ((out :process-inlet))
+                  :in ((amount :float 0 1 :default 0 :lane true))
+                  :run (target-set! :out (in :amount)))
+
+                (def-process connection-target
+                  :in ((value :float 0 1 :default 0))
+                  :run nil)
+
+                (def source (connection-source :amount (lane 0 0.5 1)))
+                (def target (connection-target))
+                (processes :track 0 source target)
+                (connect! source :out (inlet target :value))
+                "#,
+            )
+            .expect("define and attach connected processes");
+
+        let Value::List(lanes) = build_process_lanes_value(&state, 0) else {
+            panic!("process lanes should be a list");
+        };
+        assert_eq!(lanes.len(), 1);
+        let Value::Map(lane) = &*lanes[0].borrow() else {
+            panic!("process lane should be a map");
+        };
+        assert_eq!(
+            lane.get("map-ports").map(|cell| cell.borrow().clone()),
+            Some(Value::List(Vec::new())),
+            "process connections must not appear in the step-lane parameter mapper"
+        );
+
+        let Value::List(slots) = build_process_slots_value(&state, 0) else {
+            panic!("process slots should be a list");
+        };
+        let Value::Map(source_slot) = &*slots[0].borrow() else {
+            panic!("source process slot should be a map");
+        };
+        let ports = source_slot
+            .get("ports")
+            .map(|cell| cell.borrow().clone())
+            .expect("source process ports");
+        let Value::List(ports) = ports else {
+            panic!("source process ports should be a list");
+        };
+        let Value::Map(port) = &*ports[0].borrow() else {
+            panic!("source process port should be a map");
+        };
+        assert_eq!(
+            port.get("mappable").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            port.get("connectable").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(true))
+        );
+        let target_instance_id = state.track_process_chain(0).expect("process chain").slots[1]
+            .instance_id
+            .0;
+        assert_eq!(
+            port.get("target").map(|cell| cell.borrow().clone()),
+            Some(Value::String(format!(
+                "process:connection-target#{target_instance_id}:value"
+            )))
         );
     }
 

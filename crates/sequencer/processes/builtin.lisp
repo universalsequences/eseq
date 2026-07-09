@@ -24,8 +24,8 @@
          nil))
 
 (def-process dice
-  :doc "Roll a deterministic integer and write it to a mappable process-inlet target."
-  :targets ((out :mappable :process-inlet))
+  :doc "Roll a deterministic integer and write it to a connected process inlet."
+  :targets ((out :process-inlet))
   :in ((lo :int 0 16 :default 1 :lane true)
        (hi :int 0 16 :default 4 :lane true)
        (roll :gate :default 1 :lane true))

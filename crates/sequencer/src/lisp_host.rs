@@ -4337,7 +4337,7 @@ fn register_process_target_hint_constructors(runtime: &mut Runtime) {
     runtime.register_native_with_docs(
         "process-inlet",
         "(process-inlet :class :inlet)",
-        "Construct a process-inlet target selector for a mappable process port.",
+        "Construct a process-inlet target selector for a connectable process port.",
         move |args, _ctx| {
             if args.len() != 2 {
                 return Err("process-inlet expects a process class and inlet".to_string());
@@ -4381,7 +4381,7 @@ fn register_process_natives(
     runtime.register_native_with_docs(
         "inlet",
         "(inlet process :inlet)",
-        "Construct an instance-specific process-inlet target selector for map!.",
+        "Construct an instance-specific process-inlet target selector for connect!.",
         move |args, _ctx| {
             if args.len() != 2 {
                 return Err("inlet expects a process handle and inlet name".to_string());
@@ -5337,7 +5337,7 @@ fn validate_process_port_bindings(
             ));
         };
         if let Some(target) = target {
-            if !port.allows_manual_target(target) {
+            if !port.allows_binding_target(target) {
                 return Err(format!(
                     "target {} is incompatible with process '{}' port '{}'",
                     process_param_target_label_for_error(target),
@@ -5430,7 +5430,7 @@ fn preserve_process_slot_state(
             let Some(Some(target)) = existing_slot.bindings.get(&port.name) else {
                 continue;
             };
-            if port.allows_manual_target(target) && slot.bindings.contains_key(&port.name) {
+            if port.allows_binding_target(target) && slot.bindings.contains_key(&port.name) {
                 slot.bindings
                     .insert(port.name.clone(), Some(target.clone()));
             }
@@ -5624,33 +5624,33 @@ fn register_process_chain_natives(
         },
     );
 
-    let state_for_map = Arc::clone(&state);
-    let authoring_for_map = Arc::clone(&process_authoring);
-    let publish_for_map = publish;
+    let state_for_connect = Arc::clone(&state);
+    let authoring_for_connect = Arc::clone(&process_authoring);
+    let publish_for_connect = publish;
     runtime.register_native_with_docs(
-        "map!",
-        "(map! instance :port target)",
-        "Bind a mappable process target port to a concrete target, including another process inlet.",
+        "connect!",
+        "(connect! instance :port (inlet target-instance :inlet))",
+        "Connect a process output port to another process instance's inlet.",
         move |args, _ctx| {
             if args.len() != 3 {
-                return Err("map! expects a process handle, port, and target".to_string());
+                return Err("connect! expects a process handle, port, and inlet target".to_string());
             }
             let Some(EValue::HostHandle { kind, id, .. }) = args.first() else {
-                return Err("map! expects a process handle".to_string());
+                return Err("connect! expects a process handle".to_string());
             };
             if kind != "process" {
-                return Err("map! expects a process handle".to_string());
+                return Err("connect! expects a process handle".to_string());
             }
             let port = process_symbol_name(
                 args.get(1)
-                    .ok_or_else(|| "map! expects a port name".to_string())?,
+                    .ok_or_else(|| "connect! expects a port name".to_string())?,
             )?;
-            let target = parse_process_param_target(
+            let target = parse_process_connection_target(
                 args.get(2)
-                    .ok_or_else(|| "map! expects a target".to_string())?,
+                    .ok_or_else(|| "connect! expects an inlet target".to_string())?,
             )?;
             {
-                let mut registry = authoring_for_map
+                let mut registry = authoring_for_connect
                     .lock()
                     .map_err(|_| "failed to lock process registry".to_string())?;
                 let instance = registry
@@ -5673,7 +5673,7 @@ fn register_process_chain_natives(
                 instance.bindings.insert(port.clone(), Some(target.clone()));
             }
             let updated = if write_process_chain_state {
-                state_for_map.set_process_port_binding_for_instance(
+                state_for_connect.set_process_port_binding_for_instance(
                     crate::process::ProcessInstanceId(*id),
                     &port,
                     target,
@@ -5682,7 +5682,7 @@ fn register_process_chain_natives(
                 0
             };
             if write_process_chain_state {
-                publish_process_authoring(&authoring_for_map, &publish_for_map);
+                publish_process_authoring(&authoring_for_connect, &publish_for_connect);
             }
             Ok(EValue::Number(updated as f64))
         },
@@ -5822,8 +5822,14 @@ fn parse_process_accumulator_def(
     }
     let mut target_port =
         target_port.ok_or_else(|| "def-accumulator requires :target".to_string())?;
-    if target_port.mappable {
+    if target_port.is_mappable() {
         if let Some(kind) = target_kind {
+            if kind == crate::process::ProcessTargetKind::ProcessInlet {
+                return Err(
+                    "def-accumulator does not expose connectable ports; use def-process with :targets ((out :process-inlet))"
+                        .to_string(),
+                );
+            }
             target_port.target_kind = Some(kind);
         }
         if let Some(hint) = target_hint {
@@ -6450,10 +6456,14 @@ fn parse_process_port_def(items: &[EValue]) -> Result<crate::process::ProcessPor
         ),
         [marker] => {
             let marker = process_symbol_name(marker)?.to_ascii_lowercase();
-            if marker == "mappable" {
-                Ok(crate::process::ProcessPortDef::mappable(name, None, None))
-            } else {
-                Err("target port expects a target hint or :mappable".to_string())
+            match marker.as_str() {
+                "mappable" => Ok(crate::process::ProcessPortDef::mappable(name, None, None)),
+                "process-inlet" | "process_inlet" => {
+                    Ok(crate::process::ProcessPortDef::process_inlet(name))
+                }
+                _ => Err(
+                    "target port expects a target hint, :mappable, or :process-inlet".to_string(),
+                ),
             }
         }
         [marker, value] => {
@@ -6468,14 +6478,24 @@ fn parse_process_port_def(items: &[EValue]) -> Result<crate::process::ProcessPor
                     Some(parse_process_target_hint(value)?),
                 ))
             } else {
+                let target_kind = parse_process_target_kind(value)?;
+                if target_kind == crate::process::ProcessTargetKind::ProcessInlet {
+                    return Err(
+                        "process-inlet ports use (name :process-inlet) and connect!, not :mappable"
+                            .to_string(),
+                    );
+                }
                 Ok(crate::process::ProcessPortDef::mappable(
                     name,
-                    Some(parse_process_target_kind(value)?),
+                    Some(target_kind),
                     None,
                 ))
             }
         }
-        [] => Err("target port declaration requires a target hint or :mappable".to_string()),
+        [] => Err(
+            "target port declaration requires a target hint, :mappable, or :process-inlet"
+                .to_string(),
+        ),
         _ => Err("target port declaration has too many fields".to_string()),
     }
 }
@@ -6559,7 +6579,7 @@ fn parse_process_target_hint(value: &EValue) -> Result<crate::process::ProcessTa
     }
 }
 
-fn parse_process_param_target(value: &EValue) -> Result<crate::process::ParamTarget, String> {
+fn parse_process_connection_target(value: &EValue) -> Result<crate::process::ParamTarget, String> {
     let items =
         value_list(value).ok_or_else(|| "process port target must be a list".to_string())?;
     let head = process_symbol_name(
@@ -6597,7 +6617,9 @@ fn parse_process_param_target(value: &EValue) -> Result<crate::process::ParamTar
                 instance_id: Some(crate::process::ProcessInstanceId(raw_id as u64)),
             })
         }
-        other => Err(format!("unsupported process port target {other}")),
+        other => Err(format!(
+            "connect! target must be a process inlet, got {other}"
+        )),
     }
 }
 
@@ -7054,8 +7076,13 @@ fn parse_process_constructor_args(
     let mut idx = 0;
     while idx < args.len() {
         let key = process_symbol_name(&args[idx])?;
-        if key.eq_ignore_ascii_case("map") {
-            bindings.extend(parse_process_constructor_map(&args[idx + 1])?);
+        if key.eq_ignore_ascii_case("connect") {
+            bindings.extend(parse_process_constructor_connections(&args[idx + 1])?);
+        } else if key.eq_ignore_ascii_case("map") {
+            return Err(
+                "process constructor :map was replaced by :connect for process-inlet connections"
+                    .to_string(),
+            );
         } else {
             let value = parse_inlet_value(process_authoring, &args[idx + 1])?;
             inlets.insert(key, value);
@@ -7065,20 +7092,20 @@ fn parse_process_constructor_args(
     Ok(ProcessConstructorArgs { inlets, bindings })
 }
 
-fn parse_process_constructor_map(
+fn parse_process_constructor_connections(
     value: &EValue,
 ) -> Result<BTreeMap<String, Option<crate::process::ParamTarget>>, String> {
-    let entries =
-        value_list(value).ok_or_else(|| "process constructor :map expects a list".to_string())?;
+    let entries = value_list(value)
+        .ok_or_else(|| "process constructor :connect expects a list".to_string())?;
     let mut bindings = BTreeMap::new();
     for entry in entries {
         let items = value_list(&entry)
-            .ok_or_else(|| "process constructor :map entries must be lists".to_string())?;
+            .ok_or_else(|| "process constructor :connect entries must be lists".to_string())?;
         if items.len() != 2 {
-            return Err("process constructor :map entries expect (port target)".to_string());
+            return Err("process constructor :connect entries expect (port target)".to_string());
         }
         let port = process_symbol_name(&items[0])?;
-        let target = parse_process_param_target(&items[1])?;
+        let target = parse_process_connection_target(&items[1])?;
         bindings.insert(port, Some(target));
     }
     Ok(bindings)
@@ -14187,7 +14214,7 @@ mod tests {
         clear_neural_effect_plock_by_network_id, clear_neural_instrument_plock_by_network_id,
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
-        new_eval_context, parse_manifest, read_eseqlisp_init_source,
+        new_eval_context, parse_manifest, parse_process_port_def, read_eseqlisp_init_source,
         register_graph_authoring_natives, register_published_process_authoring_natives,
         register_sequencer_natives, scheduler_scratch_runtime_with_fallbacks,
         scratch_runtime_with_fallbacks, selected_neural_instrument_plock_value,
@@ -22135,6 +22162,21 @@ mod tests {
     }
 
     #[test]
+    fn process_inlet_ports_reject_parameter_mappable_declarations() {
+        let error = parse_process_port_def(&[
+            Value::Symbol("out".to_string()),
+            Value::Keyword("mappable".to_string()),
+            Value::Keyword("process-inlet".to_string()),
+        ])
+        .expect_err(":mappable :process-inlet must be rejected");
+
+        assert_eq!(
+            error,
+            "process-inlet ports use (name :process-inlet) and connect!, not :mappable"
+        );
+    }
+
+    #[test]
     fn def_accumulator_parses_mappable_target_with_kind_and_hint() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
@@ -22627,7 +22669,7 @@ mod tests {
                     == Some(crate::process::ProcessTargetHint::InstrumentParam {
                         param: "release".to_string(),
                     })
-                && port.mappable
+                && port.is_mappable()
         }));
         assert!(def.ports.iter().any(|port| {
             port.name == "speed"
@@ -22635,7 +22677,7 @@ mod tests {
                     == Some(crate::process::ProcessTargetHint::InstrumentParam {
                         param: "speed".to_string(),
                     })
-                && port.mappable
+                && port.is_mappable()
         }));
     }
 
@@ -22683,14 +22725,14 @@ mod tests {
                 param: "transpose".to_string(),
             })
         );
-        assert!(!pitch.mappable);
+        assert!(!pitch.is_mappable());
 
         let shape = def
             .ports
             .iter()
             .find(|port| port.name == "shape")
             .expect("shape port");
-        assert!(shape.mappable);
+        assert!(shape.is_mappable());
         assert_eq!(
             shape.target_kind,
             Some(crate::process::ProcessTargetKind::InstrumentParam)
@@ -22702,7 +22744,7 @@ mod tests {
             .iter()
             .find(|port| port.name == "color")
             .expect("color port");
-        assert!(color.mappable);
+        assert!(color.is_mappable());
         assert_eq!(
             color.target_kind,
             Some(crate::process::ProcessTargetKind::DeviceParam)
@@ -22767,7 +22809,7 @@ mod tests {
     }
 
     #[test]
-    fn process_inlet_maps_attach_inline_and_via_map_bang() {
+    fn process_inlet_connections_attach_inline_and_via_connect_bang() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
             Arc::clone(&state),
@@ -22781,7 +22823,7 @@ mod tests {
             .eval(
                 r#"
                 (def-process dice-like
-                  :targets ((out :mappable :process-inlet))
+                  :targets ((out :process-inlet))
                   :run (target-set! :out 3))
 
                 (def-process repeater-like
@@ -22789,18 +22831,27 @@ mod tests {
                   :run nil)
 
                 (def inline-src
-                  (dice-like :map '((out (process-inlet :repeater-like :times)))))
+                  (dice-like :connect '((out (process-inlet :repeater-like :times)))))
                 (def mapped-src (dice-like))
                 (def mapped-sink (repeater-like))
 
                 (processes :track 0 inline-src mapped-src mapped-sink)
-                (map! mapped-src :out (inlet mapped-sink :times))
+                (connect! mapped-src :out (inlet mapped-sink :times))
                 "#,
             )
-            .expect("define process-inlet maps");
+            .expect("define process-inlet connections");
 
         let chain = state.track_process_chain(0).expect("track 0 process chain");
         assert_eq!(chain.slots.len(), 3);
+        let authored = scratch.process_authoring_snapshot();
+        let dice = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "dice-like")
+            .expect("dice-like process definition");
+        assert_eq!(dice.ports.len(), 1);
+        assert!(dice.ports[0].is_connectable());
+        assert!(!dice.ports[0].is_mappable());
         assert_eq!(
             chain.slots[0].bindings.get("out"),
             Some(&Some(crate::process::ParamTarget::ProcessInlet {

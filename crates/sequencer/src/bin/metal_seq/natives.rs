@@ -1994,7 +1994,7 @@ pub(crate) fn init_runtime(
             )
             .into());
         };
-        if !port_def.mappable {
+        if !port_def.is_mappable() {
             return Err(format!(
                 "seq-bind-process-port: process port {port:?} is not mappable"
             )
@@ -2002,7 +2002,7 @@ pub(crate) fn init_runtime(
         }
         let target = process_binding_target_from_value(&st, track, target)
             .map_err(|error| format!("seq-bind-process-port: {error}"))?;
-        if !port_def.allows_manual_target(&target) {
+        if !port_def.allows_parameter_mapping_target(&target) {
             let target_kind = port_def
                 .effective_target_kind()
                 .map(|kind| kind.as_str())

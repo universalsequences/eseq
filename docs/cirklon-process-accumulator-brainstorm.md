@@ -1,10 +1,10 @@
 # Cirklon-Style Step Processes: Design Spec
 
-Status: design spec (evolved from brainstorm). Phase 3A backend ports and
-transient device writes have landed; Phase 3B should focus on mapping UI and
-binding visibility before rack-slot write application. Covers accumulators,
-masks, ratchets, grabs, and the track-attached process chain, all built on the
-existing scheduler-owned `def-process` framework.
+Status: design spec (evolved from brainstorm). Phase 4 backend verdicts,
+ratchets, and process-inlet connections have landed. Rack-slot write
+application and the Phase 5 ordered-chain editing surface remain follow-ups.
+Covers accumulators, masks, ratchets, grabs, and the track-attached process
+chain, all built on the existing scheduler-owned `def-process` framework.
 
 ## Design Principle
 
@@ -217,8 +217,8 @@ the target model is split in two:
 
 - **Ports** — the `:targets` clause in a `def-process` declares named
   *output ports*, **not addresses**. `target-set!` / `target-add!` write to
-  ports, never to concrete params. A port is either fixed/hint-following or
-  explicitly **mappable**:
+  ports, never to concrete params. A port has one explicit binding mode:
+  fixed/hint-following, parameter-mappable, or process-connectable.
   - `(name target-hint)` — fixed/hint-following port. It may resolve
     automatically, but it is not shown as remappable in the UI. This is the
     right shape for things like `(step-param :transpose)`.
@@ -229,12 +229,17 @@ the target model is split in two:
     `:instrument-param`, `:effect-param`, or `:midi-fx-param`.
   - `(name :mappable target-hint)` — mappable target with a default selector,
     e.g. `(param-tag :cutoff)` or `(instrument-param :release)`.
+  - `(name :process-inlet)` — connectable only to another process instance's
+    declared inlet. It is wired with `connect!`/`:connect` and never appears in
+    the parameter-mapping UI.
 - **Bindings** — each chain *instance* stores `port → Option<ParamTarget>`:
   the concrete address, chosen per-project. Fixed/hint-following ports resolve
-  from their hint only; mappable ports may be manually assigned. A def may carry
-  a *default binding hint* — a selector, not an address — auto-resolved when the
-  process is attached (and re-tried when the chain changes while the port is
-  still on its hint, i.e. the user hasn't manually rebound):
+  from their hint only; parameter-mappable ports may be manually assigned to
+  compatible parameter targets; process-connectable ports accept only
+  `ProcessInlet` targets. A def may carry a *default binding hint* — a selector,
+  not an address — auto-resolved when the process is attached (and re-tried when
+  the chain changes while the port is still on its hint, i.e. the user hasn't
+  manually rebound):
   - step-param hints (`:transpose`, velocity…) bind unconditionally — every
     track has them; this is why the portable library examples all target them.
   - `(param-tag :cutoff)` — semantic tag match across the track's
@@ -277,11 +282,11 @@ settings — "this climb drives *that* filter" is part of what the process is on
 this track. (Per-pattern binding overrides are a possible later addition, not
 the default.)
 
-**Mapping UI + shared seam with macros:** binding should be performed with the
+**Parameter-mapping UI + shared seam with macros:** parameter binding should be performed with the
 arm-and-highlight interaction specified in `MACRO_MAPPING_SPEC.md` (draft, not
 yet implemented). The mapping affordance is not an inlet property. Instead,
 when the selected process lane belongs to process slot X, the lane UI shows all
-`:mappable` target ports on slot X. Fixed targets, including fixed
+`:mappable` parameter ports on slot X. Fixed targets, including fixed
 `(step-param :transpose)` targets, do not show map controls. Pressing a map
 button arms mapping mode, every compatible param highlights (a third wrapper
 color — modulation blue, macro green, process ports their own), click to bind.
@@ -316,7 +321,7 @@ enum ParamTarget {
 }
 ```
 
-### Process-inlet targets: patching within the chain (Phase 4)
+### Process-inlet targets: connecting within the chain (Phase 4)
 
 The Cirklon aux-A-feeds-aux-D pattern — one process generates a value another
 process consumes (a dice roll driving a ratchet's `times`) — is a small delta
@@ -328,7 +333,8 @@ chain. The cross-track one-tick register rule does not apply inside a chain.
 Rules:
 
 - **Defs stay generic.** A `:process-inlet` port is declared shape-only:
-  `(out :mappable :process-inlet)` — a kind constraint, never a hint naming
+  `(out :process-inlet)` — a connectable port kind, never a parameter-mappable
+  port and never a hint naming
   another process class. A def that names a sibling class couples two
   blueprints (worse than `midi-fx-target`, whose target is a stable device).
   The generator doesn't know if it's driving a ratchet count, a mask
@@ -337,27 +343,27 @@ Rules:
   other port binding. Two authoring surfaces, both writing the same store:
 
   ```lisp
-  ;; handles + map! — the live-coding surface (parallels lane!)
+  ;; handles + connect! — the live-coding surface (parallels lane!)
   (def rng (dice :lo 1 :hi 4))
   (def rep (repeater :decay 0.7))
   (processes :track 0 rng rep)
-  (map! rng :out (inlet rep :times))
+  (connect! rng :out (inlet rep :times))
 
   ;; inline selector — the declarative one-block surface
   (processes :track 0
-    (dice :lo 1 :hi 4 :map '((out (process-inlet :repeater :times))))
+    (dice :lo 1 :hi 4 :connect '((out (process-inlet :repeater :times))))
     (repeater :decay 0.7))
   ```
 
-  The inline `:map` value is quoted because it is declarative selector data;
-  ordinary `:map` keyword arguments elsewhere retain normal expression evaluation.
+  The inline `:connect` value is quoted because it is declarative selector data.
 
   `(process-inlet :class :inlet)` is a selector, not an address — it resolves
   against the finished chain (first matching slot), which is why the inline
   form works despite `processes` being whole-chain-replace: a forward handle
   reference to a sibling two lines down doesn't exist yet at read time, a
-  selector does. `map!` is the Lisp twin of the Phase 3B arm-and-click
-  gesture, not a second binding system.
+  selector does. `connect!` and the Phase 3B parameter-mapping gesture write
+  the same instance binding store, but are deliberately different authoring
+  operations with different validation and UI surfaces.
 - **Write application**: the write lands as a transient overlay on the target
   slot's inlet resolution for this fire — never persisted, composing with the
   inlet's lane per the op (`target-set!` owns the value and the lane dims in
@@ -458,7 +464,7 @@ attached to track 0, with live handle updates like
 For sampler `speed`, remember the process value is normalized: `0.625` maps to
 raw speed `1.0`, `0.75` maps to raw `2.0`, and `1.0` maps to raw `4.0`.
 
-### Phase 3B next: mapping UI and binding visibility
+### Phase 3B landed: mapping UI and binding visibility
 
 The backend now has enough behavior to make UI the highest-yield next step:
 
@@ -747,7 +753,7 @@ attachment site; `repeater` is unchanged and doesn't know it's being driven:
 ```lisp
 (def-process dice
   :doc "Roll an integer each fire and publish it."
-  :targets ((out :mappable :process-inlet))   ; shape only — no class named here
+  :targets ((out :process-inlet))   ; connectable shape only — no class named here
   :in ((lo :int 0 8 :default 1)
        (hi :int 0 8 :default 4)
        (roll :gate :default 1 :lane true))    ; sequence WHEN to reroll
@@ -759,7 +765,7 @@ attachment site; `repeater` is unchanged and doesn't know it's being driven:
     (target-set! :out held)))
 
 (processes :track 0
-  (dice :lo 1 :hi 4 :map '((out (process-inlet :repeater :times))))
+  (dice :lo 1 :hi 4 :connect '((out (process-inlet :repeater :times))))
   (repeater :decay 0.7))
 ```
 
@@ -767,7 +773,7 @@ Repoint the same generator at a mask's probability and nothing about `dice`
 changes — only the instance wiring:
 
 ```lisp
-(map! rng :out (inlet mask :prob))
+(connect! rng :out (inlet mask :prob))
 ```
 
 Accumulator with a fixed target: no mapping UI, even though the amount inlet is
@@ -998,12 +1004,12 @@ Known 3A limitations:
    leaving a `:choke`-at-boundary option for later. `:subdivide` never raises
    this.
 
-3. **Process-inlet ports** (see "Process-inlet targets" above): add
-   `ParamTarget::ProcessInlet` and the `:process-inlet` target kind to the
-   implemented enums (the code's `ParamTarget`/`ProcessTargetKind` in
-   `process.rs` lag the spec here); apply writes as transient overlays on the
-   downstream slot's inlet resolution, composing with lanes per the op;
-   instance-level wiring via `map!` and the inline `:map` selector form;
+3. **Process-inlet ports** (see "Process-inlet targets" above):
+   `ParamTarget::ProcessInlet` and the connectable `:process-inlet` port mode
+   are distinct from parameter-mappable ports; writes apply as transient
+   overlays on the downstream slot's inlet resolution, composing with lanes per
+   the op;
+   instance-level wiring via `connect!` and the inline `:connect` selector form;
    soft no-op when no slot matches. Acceptance: dice → repeater `times`
    chain, including chain-reorder (write to an earlier slot lands next fire)
    and lane-composition (`set` vs `add`) tests.
@@ -1179,8 +1185,9 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
 - `(rand)` is the RNG verb; `:seed :locked | :per-cycle` on the instance.
 - `MidiFxParam` targets early (Phase 3), timebase last (Phase 9).
 - Ratchets clone the base event; sub-events go through the normal downstream path.
-- Process-inlet ports: `:process-inlet` is a kind constraint only — defs never
-  name another process class; wiring is instance-level (`map!` / inline `:map`
+- Process-inlet ports: `(name :process-inlet)` declares a connectable port —
+  defs never name another process class, and the port never appears in the
+  parameter-mapping UI. Wiring is instance-level (`connect!` / inline `:connect`
   with `(process-inlet :class :inlet)` selectors), same-tick within the chain
   under immediate ordered application, transient overlay on the target slot's
   inlet resolution. Fan-out goes through channels, not ports.
