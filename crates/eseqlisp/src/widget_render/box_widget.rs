@@ -55,6 +55,14 @@ pub struct BoxWidget;
 
 pub static BOX_WIDGET: BoxWidget = BoxWidget;
 
+fn prop_truthy(props: &std::collections::HashMap<String, Value>, key: &str) -> bool {
+    match props.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Nil) | None => false,
+        Some(_) => true,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn box_state_active(props: &std::collections::HashMap<String, Value>, key: &str) -> bool {
     match props.get(key) {
@@ -445,6 +453,12 @@ impl WidgetDefinition for BoxWidget {
             node.props.get("drag-type")
         {
             Some(box_drag_value(node, drag_type))
+        } else if prop_truthy(&node.props, "capture-pointer")
+            && (node.props.contains_key("on-click")
+                || node.props.contains_key("on-drag")
+                || node.props.contains_key("on-mouse-up"))
+        {
+            Some(Value::String("capture-pointer".to_string()))
         } else if node.props.contains_key("on-drag") || node.props.contains_key("on-mouse-up") {
             Some(Value::String("box-pointer".to_string()))
         } else {

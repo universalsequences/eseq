@@ -1,8 +1,10 @@
 # Cirklon-Style Step Processes: Design Spec
 
-Status: design spec (evolved from brainstorm). Covers accumulators, masks, ratchets,
-grabs, and the track-attached process chain, all built on the existing scheduler-owned
-`def-process` framework.
+Status: design spec (evolved from brainstorm). Phase 3A backend ports and
+transient device writes have landed; Phase 3B should focus on mapping UI and
+binding visibility before rack-slot write application. Covers accumulators,
+masks, ratchets, grabs, and the track-attached process chain, all built on the
+existing scheduler-owned `def-process` framework.
 
 ## Design Principle
 
@@ -61,7 +63,7 @@ Things we can do that Cirklon can't:
 - Accumulator overflow as an event generator (`wrap-crash` below).
 - History reads (`:steps-ago`) turning grabs into canons/delay-lines.
 
-## Verified Repo Facts (re-verified 2026-07-07)
+## Verified Repo Facts (re-verified through Phase 3A, 2026-07-08)
 
 These ground the plan; all confirmed in code:
 
@@ -210,14 +212,26 @@ project. A def that hardcodes `(instrument-param :self :cutoff)` or an effect
 slot index only works on tracks that happen to match its authoring project. So
 the target model is split in two:
 
-- **Ports** — the `:targets` clause in a `def-process` declares named, typed
-  *output ports* with domain metadata (`(cutoff :float)`), **not addresses**.
-  `target-set!` / `target-add!` write to ports, never to concrete params.
+- **Ports** — the `:targets` clause in a `def-process` declares named
+  *output ports*, **not addresses**. `target-set!` / `target-add!` write to
+  ports, never to concrete params. A port is either fixed/hint-following or
+  explicitly **mappable**:
+  - `(name target-hint)` — fixed/hint-following port. It may resolve
+    automatically, but it is not shown as remappable in the UI. This is the
+    right shape for things like `(step-param :transpose)`.
+  - `(name :mappable)` — no default hint; starts unbound and is assigned in
+    the mapping UI.
+  - `(name :mappable target-kind)` — mappable unknown target constrained by
+    compatibility class, e.g. `:device-param`, `:step-param`,
+    `:instrument-param`, `:effect-param`, or `:midi-fx-param`.
+  - `(name :mappable target-hint)` — mappable target with a default selector,
+    e.g. `(param-tag :cutoff)` or `(instrument-param :release)`.
 - **Bindings** — each chain *instance* stores `port → Option<ParamTarget>`:
-  the concrete address, chosen per-project. A def may carry a *default binding
-  hint* — a selector, not an address — auto-resolved when the process is
-  attached (and re-tried when the chain changes while the port is still on its
-  hint, i.e. the user hasn't manually rebound):
+  the concrete address, chosen per-project. Fixed/hint-following ports resolve
+  from their hint only; mappable ports may be manually assigned. A def may carry
+  a *default binding hint* — a selector, not an address — auto-resolved when the
+  process is attached (and re-tried when the chain changes while the port is
+  still on its hint, i.e. the user hasn't manually rebound):
   - step-param hints (`:transpose`, velocity…) bind unconditionally — every
     track has them; this is why the portable library examples all target them.
   - `(param-tag :cutoff)` — semantic tag match across the track's
@@ -226,12 +240,14 @@ the target model is split in two:
     param tags itself `:cutoff`), so hints work without knowing any device's
     literal param names. Falls back to exact-name match when no tag matches,
     so untagged devices still resolve when names happen to line up.
-  - `(fx-param :beat-repeat :times)` — kind-selector: "if this track's chain
-    has a beat-repeat, drive its `times`"; matches on the builtin's kind id,
+  - `(midi-fx-target :beat-repeat :gate)` — kind-selector: "if this track's chain
+    has beat-repeat, drive its `gate`"; matches on the builtin's kind id,
     first matching slot wins. This is the "opportunistic" authoring style:
     the process does something extra on tracks that happen to have the gear.
-  - no hint — the port starts unbound: the "general-purpose accumulator on a
-    mappable parameter" style, bound entirely through the mapping UI.
+    A future true repeat-count param can use the same shape with `:times`.
+  - `:mappable` with no hint — the port starts unbound: the "general-purpose
+    accumulator on a mappable parameter" style, bound entirely through the
+    mapping UI.
 
 **Param tags (small curated vocabulary, not an ontology).** Tags live on the
 param descriptor at the device level — instruments declare them in their param
@@ -243,8 +259,8 @@ vocabulary short and reviewed (`:cutoff`, `:resonance`, `:decay`, `:drive`,
 musical role, so additions go through the same library review as
 defaults-inert. One param may carry multiple tags; ties resolve
 instrument-first then chain order, first match wins. The same tags double as
-the "mappable parameter" filter in the mapping UI (arm a `:cutoff`-hinted port
-and tagged params highlight brightest).
+the "mappable parameter" filter in the mapping UI (arm a mappable
+`:cutoff`-hinted port and tagged params highlight brightest).
 
 **Soft resolution (locked):** bindings resolve at fire time against live
 pattern state. An unresolvable or unbound port makes that write a silent no-op —
@@ -258,20 +274,25 @@ settings — "this climb drives *that* filter" is part of what the process is on
 this track. (Per-pattern binding overrides are a possible later addition, not
 the default.)
 
-**Mapping UI + shared seam with macros:** binding is performed with the
+**Mapping UI + shared seam with macros:** binding should be performed with the
 arm-and-highlight interaction specified in `MACRO_MAPPING_SPEC.md` (draft, not
-yet implemented): a "map parameter" button on the process slot/lane arms
-mapping mode, every mappable param highlights (a third wrapper color —
-modulation blue, macro green, process ports their own), click to bind. The
-macro spec's `MacroTarget` identity machinery (`ParamNodeId` / `logical_id`
+yet implemented). The mapping affordance is not an inlet property. Instead,
+when the selected process lane belongs to process slot X, the lane UI shows all
+`:mappable` target ports on slot X. Fixed targets, including fixed
+`(step-param :transpose)` targets, do not show map controls. Pressing a map
+button arms mapping mode, every compatible param highlights (a third wrapper
+color — modulation blue, macro green, process ports their own), click to bind.
+The macro spec's `MacroTarget` identity machinery (`ParamNodeId` / `logical_id`
 guards so bindings survive node rebuilds, re-resolve-and-flag on load) is
-exactly the runtime half of `ParamTarget`. Whichever feature lands first builds
-the arm-mode wrapper fork and the identity-guarded target type as shared
-infrastructure; the other reuses it.
+exactly the runtime half of `ParamTarget`. Phase 3B should build the arm-mode
+wrapper fork as shared infrastructure rather than inventing a process-only
+mapping path.
 
 This also fixes the preset story: tier-3 presets ship ports + hints, never
-addresses. Dropped on any project, step-param ports bind immediately and the
-preset grooves; instrument/effect ports sit unbound-but-inert until arm-mapped.
+addresses. Dropped on any project, fixed step-param ports bind immediately and
+the preset grooves; mappable instrument/effect ports may start from a hint but
+remain user-assignable, and hintless mappable ports sit unbound-but-inert until
+arm-mapped.
 
 `ParamTarget` remains the *address* type a binding resolves to — `(address,
 domain)`, where the domain rides with the target and dictates which ops are
@@ -285,6 +306,8 @@ enum ParamTarget {
     InstrumentParam { track: TrackRef, instrument: InstrumentRef, param: ParamRef },
     EffectParam { track: TrackRef, slot: usize, param: ParamRef },
     MidiFxParam { track: TrackRef, slot: usize, param: ParamRef },
+    RackSlotParam { track: TrackRef, slot: usize, param: ParamRef },
+    RackSlotInstrumentParam { track: TrackRef, slot: usize, param: ParamRef },
     ProcessInlet { process: ProcessRef, inlet: String },
     ProcessChannel { name: String },
 }
@@ -298,7 +321,10 @@ already had to split its domains into
 instrument-inside-rack-slot) from the first version of the enum — this is
 part of the expensive-to-reverse decision, not a Phase 3 detail to retrofit.
 On a rack track, `:self` in an instrument-param target means *the slot the
-base event routes to*.
+base event routes to*. Phase 3A added rack-aware `ParamTarget` variants to keep
+the data model honest, but the scheduler intentionally treats rack-slot process
+writes as no-ops until the rack audio dispatch path can apply them transiently
+and be tested end-to-end.
 
 Domains: continuous range, ordered discrete (timebase), integer range, gate,
 unordered enum. `add`/accumulate is legal only on ordered domains; enums get
@@ -306,14 +332,101 @@ unordered enum. `add`/accumulate is legal only on ordered domains; enums get
 0..1 and mapped through the target's domain metadata — authors never memorize
 param units.
 
-**`MidiFxParam` targets come early** (Phase 3, not late): a process lane driving an
-existing repeat-MIDI-FX's `times` param per step is the cheapest route to a large
+**`MidiFxParam` targets come early** (Phase 3, not late): a process lane driving
+an existing repeat-style MIDI-FX param per step is the cheapest route to a large
 chunk of the generative vocabulary, before `veto!`/`ratchet!` verbs exist. With
-ports, this is a port hinted `(fx-param :repeat :times)` — it lights up on any
-track carrying that FX and no-ops elsewhere. Two legitimate routes to a ratchet:
+ports, this is a port hinted `(midi-fx-target :beat-repeat :gate)` today because that
+is an existing tested `beat-repeat` param; a true repeat-count/`times` param
+belongs with the MIDI-FX itself, not as a fake process target. The port lights up
+on any track carrying that FX and no-ops elsewhere. Two legitimate routes to a
+ratchet:
 
 - self-contained: step process with `ratchet!` (one coherent authored behavior)
 - compositional: existing MIDI FX + a process lane writing its params per step
+
+### Phase 3A backend checkpoint (landed)
+
+The first backend slice is intentionally hint-driven, not UI-mapped yet:
+
+- `ProcessDef` / `ProcessRunInvocation` now use `ProcessPortDef` entries instead
+  of a single internal target. Legacy `:target (...)` is normalized into one
+  internal default port; `:targets ((pitch (...)) (gate (...)))` declares named
+  ports.
+- `target-set!` / `target-add!` accept either `(target-set! value)` for the
+  sole/default port or `(target-set! :port value)` for a named port. Step-param
+  writes keep raw musical units; instrument/effect/MIDI-FX writes are normalized
+  0..1 and mapped through descriptor metadata at fire time.
+- Supported hints: `(step-param :name)`, `(param-tag :tag)`,
+  `(instrument-param :name)`, `(effect-param :effect :param)`, and
+  `(midi-fx-target :fx :param)`. Quoted legacy `(fx-param :fx :param)` /
+  `(midi-fx-param :fx :param)` forms still parse, but unquoted process target
+  helpers must not reuse live MIDI-FX API names. Tag matching is tag-first with
+  exact-name fallback.
+- The scheduler accumulates a transient process overlay while evaluating the
+  ordered track chain. Step-param writes apply immediately to the in-flight
+  `ResolvedStep`; effect/instrument writes upsert into the scheduled event
+  payload after defaults and p-locks; MIDI-FX writes apply only to the temporary
+  slot snapshot passed into MIDI-FX invocation.
+- Sampler core params that live in both generic instrument params and structured
+  trigger params are kept coherent at the final enqueue boundary. This is why a
+  process write to `(instrument-param :speed)` now changes audible sampler
+  playback speed instead of only appearing in `instrument_params`.
+- Stale or unbound targets are soft no-ops. MIDI-FX bindings use slot + FX name +
+  param name guards because MIDI-FX slots do not have audio-node `ParamNodeId`s.
+  Effect and ordinary instrument params use node identity where available.
+- Rack target variants exist in the data model, but rack-slot writes are not
+  exposed as supported behavior until the rack audio dispatch path applies them
+  transiently and has deterministic coverage.
+- No process write persists into step data, p-locks, key-locks, defaults, or slot
+  snapshots. Tests cover p-lock storage staying unchanged, ordered chain writes,
+  stale MIDI-FX no-op behavior, MIDI-FX temporary slot overrides, and transient
+  instrument/effect payload writes.
+
+The demo script `crates/sequencer/scripts/process-phase3a-ports-demo.lisp`
+exercises the current backend surface: named `pitch`, `gate`, and `speed` ports
+attached to track 0, with live handle updates like
+`(phase3a-port-writer-h :pitch 4)` and `(phase3a-port-writer-h :speed 0.75)`.
+For sampler `speed`, remember the process value is normalized: `0.625` maps to
+raw speed `1.0`, `0.75` maps to raw `2.0`, and `1.0` maps to raw `4.0`.
+
+### Phase 3B next: mapping UI and binding visibility
+
+The backend now has enough behavior to make UI the highest-yield next step:
+
+- `:mappable` is a target-port declaration, not an inlet declaration.
+  Non-mappable ports are fixed/hint-following and do not expose map controls.
+- Process slot rows should not wholesale list every target port. When a selected
+  step lane belongs to process slot X, the lane UI shows mapping widgets for all
+  mappable target ports on slot X, including current hint, resolved target, and
+  stale/unbound status.
+- Arm a mappable process port using the same parameter wrapper seam as
+  `MACRO_MAPPING_SPEC.md`; compatible params highlight, tag/name-hint matches
+  rank highest, click binds.
+- Manual bindings write `TrackProcessSlot.bindings[port] = Some(ParamTarget)`;
+  unbind returns the port to hint-driven auto-resolution or explicit unbound
+  state, depending on the chosen UX.
+- Project scratch re-evaluation must not erase restored pattern-owned slot state:
+  if the same process instance/class is reattached, saved lane edits and manual
+  port bindings are preserved. Clearing the chain or creating a new instance is
+  the explicit reset path.
+- Stale badges come from the same fire-time resolution rules as the scheduler:
+  no hard errors, no state mutation, other ports keep applying.
+- The process color should be distinct from macro/modulation colors but reuse the
+  same arm/highlight infrastructure rather than building a parallel mapping mode.
+
+Phase 3B should not try to solve rack-slot writes. The UI may display rack-aware
+target types as unavailable/unsupported until Phase 3C below.
+
+### Phase 3C deferred: rack write application
+
+Before claiming rack targets are supported:
+
+- Thread process target overlays through the rack audio dispatch path.
+- Define exactly how a rack slot is selected for `:self` on routed/chord events.
+- Apply rack slot params and rack-slot instrument params transiently, without
+  mutating rack p-locks/defaults/snapshots.
+- Add deterministic scheduler/audio-dispatch tests proving rack writes affect the
+  temporary event payload only.
 
 ### Lane-backed inlets
 
@@ -523,14 +636,14 @@ Ratchet with velocity decay:
                             (vel! ev (* (vel ev) (pow (in :decay) i)))))))
 ```
 
-Multi-target (named ports once a process writes more than one place; the second
-element of each port is a binding *hint*, not an address — see Ports vs.
-bindings):
+Multi-target (named ports once a process writes more than one place; fixed
+ports use their hint only, while `:mappable` ports expose the mapping UI — see
+Ports vs. bindings):
 
 ```lisp
 (def-process climb-and-open
-  :targets ((pitch  (step-param :transpose))       ; always binds
-            (cutoff (param-tag :cutoff)))          ; tag hint; unbound = no-op
+  :targets ((pitch  (step-param :transpose))       ; fixed: no map UI
+            (cutoff :mappable (param-tag :cutoff))) ; default selector + map UI
   :in ((delta :float 0 2 :default 0 :lane true))
   :state ((acc 0))
   :run (do
@@ -539,16 +652,42 @@ bindings):
     (target-set! :cutoff (/ acc 24))))       ; normalized; domain maps to range
 ```
 
-Opportunistic FX hint + fully generic mappable port:
+Opportunistic FX hint + fully generic mappable port. Selecting any lane owned
+by this process slot shows the `aux` mapper; `gate` stays fixed/hint-following:
 
 ```lisp
-(def-process stutter-brain
-  :targets ((times (fx-param :repeat :times))  ; binds only if the track has it
-            (aux   :float))                    ; no hint: map in the UI
+(def-process repeat-gate-brain
+  :targets ((gate (midi-fx-target :beat-repeat :gate))  ; binds only if the track has it
+            (aux  :mappable :device-param))       ; no hint: map in the UI
   :in ((energy :float 0 1 :default 0 :lane true))
   :run (do
-    (target-set! :times (* energy 8))
+    (target-set! :gate energy)
     (target-set! :aux energy)))
+```
+
+Accumulator with a fixed target: no mapping UI, even though the amount inlet is
+lane-backed.
+
+```lisp
+(def-accumulator sparse-transpose
+  :target (step-param :transpose)
+  :amount (amount :float -12 12 :lane true)
+  :range (-24 24)
+  :mode :clip)
+```
+
+Accumulator with a user-mapped target. `:target-kind` keeps normalized amount
+values away from raw musical step params; `:target-hint` is optional and remains
+a selector, not an address.
+
+```lisp
+(def-accumulator filter-rise
+  :target :mappable
+  :target-kind :device-param
+  :target-hint (param-tag :cutoff)
+  :amount (amount :float 0 1 :lane true)
+  :range (0 1)
+  :mode :clip)
 ```
 
 Grab / call-and-response:
@@ -664,34 +803,64 @@ expensive to reverse.
 
 ### Phase 3 — Ports, bindings, typed targets, MIDI FX early
 
-1. `ParamTarget` enum with fused domain metadata; normalized-write mapping.
-   Identity-guarded addresses (`ParamNodeId`/`logical_id`, per
-   `MACRO_MAPPING_SPEC.md` — unimplemented draft; whichever feature lands
-   first builds this as shared infrastructure).
-2. Ports vs. bindings split: `:targets` parses as named typed ports with
-   optional hints; instance-level `bindings: port → Option<ParamTarget>`
-   stored with track-level identity; hint auto-resolution on attach and on
-   chain change (`step-param` unconditional, `param-tag` tag-then-name match,
-   `fx-param` kind match).
-3. Param tags: descriptor-level tag metadata on instrument/effect/MIDI-FX
-   params + the initial curated vocabulary; tag lookup across a track's chain
-   (rack-aware).
-4. Soft resolution: fire-time re-resolve; unbound/stale port writes are silent
-   no-ops; state still advances. Test: delete the target FX mid-playback,
-   nothing errors, other ports keep applying.
-5. `MidiFxParam` and `InstrumentParam`/`EffectParam` targets. Milestone: a process
-   lane driving a repeat-MIDI-FX's `times` per step via an `(fx-param :repeat
-   :times)` hint (compositional ratchet, before `ratchet!` exists) — and the
-   same process attached to a track without the FX is a clean no-op.
-6. Multi-port syntax (`:targets` + named `target-set!`/`target-add!`).
-7. Define and test the full merge order per target kind:
-   `patch default → key lock → step p-lock → process write → mods` — including
-   the transpose-write-changes-key-lock-lookup case and rack-slot targets.
-8. Mapping UI (may trail as 3b): "map parameter" button on the process slot
-   arms mapping mode — the `MACRO_MAPPING_SPEC.md` §5 arm-and-highlight wrapper
-   fork with a process-port color; tagged params matching the armed port's
-   hint highlight brightest; click binds, double-click unbinds; unbound/stale
-   badge on the port row.
+#### Phase 3A — Backend ports and fire-time bindings (landed)
+
+1. `ProcessDef` / `ProcessRunInvocation` use named `ProcessPortDef` entries.
+   Legacy `:target` normalizes to one default port; `:targets` declares named
+   ports.
+2. `target-set!` / `target-add!` support default-port and named-port forms.
+3. `ParamTarget` / binding data exists with stale-safe target variants:
+   `StepParam`, ordinary `InstrumentParam`, `EffectParam`, `MidiFxParam`, and
+   rack-aware variants that are present but not yet applied.
+4. Fire-time hint resolution works for step params, instrument params, effect
+   params, MIDI-FX params, and param tags with exact-name fallback.
+5. Transient overlays apply step-param writes immediately; device writes upsert
+   into scheduled event payloads after base defaults and p-locks; MIDI-FX writes
+   affect only the temporary slot snapshot used for invocation.
+6. Device-param writes are normalized 0..1; step-param writes keep raw musical
+   units.
+7. Deterministic tests cover named ports, stale MIDI-FX no-op behavior,
+   transient p-lock-safe writes, MIDI-FX temporary overrides, and sampler
+   instrument params updating the audible sampler trigger payload.
+
+Known 3A limitations:
+
+- Manual binding UI is not implemented; current behavior is hint-driven.
+- Rack target variants exist but scheduler/audio application is intentionally
+  deferred.
+- Cross-track writes and timebase writes remain out of scope.
+
+#### Phase 3B — Mapping UI and binding status (next)
+
+1. Extend target declaration parsing with mappable target ports:
+   `(name :mappable)`, `(name :mappable target-kind)`, and
+   `(name :mappable target-hint)`. Non-mappable `(name target-hint)` ports stay
+   fixed/hint-following.
+2. For `def-accumulator`, support fixed `:target target-hint`, unknown
+   `:target :mappable`, optional `:target-kind`, and optional `:target-hint`.
+3. When a selected step lane belongs to process slot X, show mapping widgets for
+   all mappable target ports on X. Do not list every target under the process
+   slot, and do not show map controls for fixed targets like transpose.
+4. Add a port "map parameter" arm mode using the macro mapping wrapper seam:
+   compatible params highlight, tag/name matches rank highest, click binds,
+   unbind clears.
+5. Persist manual choices into `TrackProcessSlot.bindings`, with explicit
+   semantics for returning to hint-following vs. forced-unbound.
+6. Show stale/unbound badges without changing runtime behavior: stale writes stay
+   no-ops and other ports continue to apply.
+7. Keep UI mapping same-track first. Cross-track and rack-slot application do not
+   belong in this slice.
+
+#### Phase 3C — Rack follow-up (deferred)
+
+1. Implement actual rack-slot process-write application through the rack audio
+   dispatch path.
+2. Define `:self` on rack tracks in terms of the slot selected by the routed base
+   event.
+3. Add tests proving rack slot params and rack-slot instrument params are applied
+   transiently and never mutate rack p-lock/default/snapshot storage.
+4. Only after this should rack targets be presented as mappable/supported in the
+   mapping UI.
 
 ### Phase 4 — Verdicts and ratchets
 
@@ -701,15 +870,22 @@ expensive to reverse.
    intact), applies the `:shape` fold per sub-event, schedules via the pending-
    emissions store; sub-events routed through the existing
    `enqueue_due_process_emissions` / MIDI FX path. Ghost-step preview.
+
+   define 2 modes for ratchet:
+     + Divide the "duration" by times (so duration of each hit is step.duration / times)
+     + Schedule :times repeats :duration apart (so duration of each hit is step.duration)
+
 3. `prob-mask` and `repeater` land as builtin library processes with presets.
 
-### Phase 5 — Ordered chains
+### Phase 5 — Ordered-chain UI polish
 
-1. Multiple processes per track, explicit order index; reorder/remove in UI.
-2. Immediate ordered application; later processes read earlier pending writes;
-   cascade limit reused.
-3. Chain state moves into `state.pattern.process_chains[track]` (settings + lanes
-   pattern-scoped; identity track-level).
+Backend chain order is already meaningful: multiple process slots can be attached
+to a track, and later slots see earlier transient writes. Remaining work is the
+editing surface:
+
+1. Reorder/remove in UI, with explicit order feedback.
+2. Slot bypass/enable state in the chain editor.
+3. Pattern-scoped settings/lane reconciliation polish across pattern switches.
 
 ### Phase 6 — Pattern scoping polish + presets
 
@@ -848,13 +1024,15 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
 - Merge order: `patch default → key lock → step p-lock → process write → mods`.
 - Process writes are transient fire-time overlays; never persisted into
   plock/step storage (protects `plock_variants` identity).
-- `ParamTarget` addresses rack slots from its first version (mirror the
-  `plock_variants` domain split); `:self` on a rack track = the slot the base
-  event routes to.
-- Ports vs. bindings: defs declare named typed ports (hints are selectors —
-  `step-param` / `param-tag` / `fx-param` — never addresses); concrete
-  `ParamTarget` bindings are instance-level, track-identity-scoped, editable
-  via the arm-mode mapping UI shared with `MACRO_MAPPING_SPEC.md`.
+- `ParamTarget` data addresses rack slots from its first version (mirror the
+  `plock_variants` domain split), but runtime rack write application remains
+  deferred until the rack audio dispatch path applies transient overlays.
+- Ports vs. bindings: defs declare named output ports. Non-mappable ports are
+  fixed/hint-following; `:mappable` ports are user-assignable and may carry an
+  optional compatibility kind or default selector. Hints (`step-param` /
+  `param-tag` / `midi-fx-target`) are selectors, never addresses; concrete
+  `ParamTarget` bindings are instance-level and track-identity-scoped. The
+  arm-mode mapping UI shared with `MACRO_MAPPING_SPEC.md` is the next slice.
 - Soft resolution: unbound or stale port writes are silent no-ops at fire
   time; the process still runs and state advances. Presets ship ports +
   hints, never addresses.
@@ -884,9 +1062,9 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
 - Initial param-tag vocabulary: exact list, and how existing instruments get
   retro-tagged (sweep the builtin/instrument descriptors once, or tag lazily
   as processes need them).
-- Hint re-resolution UX: when a chain edit makes a *better* hint match appear
-  while a port is already hint-bound elsewhere, does it re-bind (follow the
-  hint) or stay put (stability)? Leaning: follow the hint until the user
-  manually binds, then never move.
+- Hint re-resolution UX for mappable ports with default hints: when a chain edit
+  makes a *better* hint match appear while a port is already hint-bound
+  elsewhere, does it re-bind (follow the hint) or stay put (stability)?
+  Leaning: follow the hint until the user manually maps it, then never move.
 - Whether per-pattern binding overrides are ever needed, or track-level
   bindings suffice (start track-level only).

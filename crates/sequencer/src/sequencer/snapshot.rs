@@ -58,6 +58,7 @@ pub struct SequencerSnapshot {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    pub process_trace: bool,
 }
 
 impl SequencerSnapshot {
@@ -75,6 +76,7 @@ impl SequencerSnapshot {
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            process_trace: false,
         }
     }
 
@@ -221,6 +223,7 @@ impl SequencerSnapshot {
             mod_connections,
             neural_networks,
             graph_overrides,
+            process_trace: state.process_trace_enabled(),
         }
     }
 
@@ -240,10 +243,27 @@ impl SequencerSnapshot {
             topology_epoch: state.transport.topology_epoch.load(Ordering::Relaxed),
             num_tracks,
         };
+        let (effect_descriptors_by_track, instrument_descriptors) =
+            state.scratch_runtime_descriptors();
         let tracks = tracks
             .iter()
             .enumerate()
-            .map(|(track_idx, data)| track_snapshot_from_pattern_data(track_idx, data, false))
+            .map(|(track_idx, data)| {
+                let effect_descriptors = effect_descriptors_by_track
+                    .get(track_idx)
+                    .cloned()
+                    .unwrap_or_else(EffectDescriptor::default_full_chain);
+                let instrument_descriptor = instrument_descriptors
+                    .get(track_idx)
+                    .cloned()
+                    .unwrap_or_else(EffectDescriptor::builtin_sampler);
+                track_snapshot_from_pattern_data(
+                    data,
+                    false,
+                    effect_descriptors,
+                    instrument_descriptor,
+                )
+            })
             .collect();
 
         Self {
@@ -252,16 +272,20 @@ impl SequencerSnapshot {
             mod_connections,
             neural_networks,
             graph_overrides,
+            process_trace: state.process_trace_enabled(),
         }
     }
 }
 
 fn track_snapshot_from_pattern_data(
-    _track_idx: usize,
     data: &TrackPatternData,
     scene_silenced: bool,
+    effect_descriptors: Vec<EffectDescriptor>,
+    instrument_descriptor: EffectDescriptor,
 ) -> SequencerTrackSnapshot {
     let engine_id = data.track_sound_state.engine_id;
+    let process_chain =
+        data.refreshed_process_chain(Some(&instrument_descriptor), &effect_descriptors);
     let steps = (0..MAX_STEPS)
         .map(|step_idx| {
             let params = data
@@ -307,11 +331,11 @@ fn track_snapshot_from_pattern_data(
         instrument_base_note_offset: data.instrument_base_note_offset,
         engine_id,
         rack_track: data.rack_track.clone(),
-        process_chain: data.process_chain.clone(),
-        effect_descriptors: Vec::new(),
+        process_chain,
+        effect_descriptors,
         effect_slots: data.effect_slots.clone(),
         midi_fx_slots: data.midi_fx_slots.clone(),
-        instrument_descriptor: EffectDescriptor::builtin_sampler(),
+        instrument_descriptor,
         instrument_slot: data.instrument_slot.clone(),
         steps,
     }

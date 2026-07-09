@@ -470,6 +470,38 @@ pub struct TrackPatternData {
 }
 
 impl TrackPatternData {
+    fn refresh_process_effect_binding_param_ids_for_slot(
+        &mut self,
+        slot_idx: usize,
+        descriptor: &EffectDescriptor,
+    ) {
+        let Some(effect_slot) = self.effect_slots.get(slot_idx) else {
+            return;
+        };
+        crate::process::refresh_track_process_chain_effect_binding_param_ids_for_slot(
+            &mut self.process_chain,
+            slot_idx,
+            descriptor,
+            effect_slot,
+        );
+    }
+
+    pub(crate) fn refreshed_process_chain(
+        &self,
+        instrument_descriptor: Option<&EffectDescriptor>,
+        effect_descriptors: &[EffectDescriptor],
+    ) -> crate::process::TrackProcessChain {
+        let mut process_chain = self.process_chain.clone();
+        crate::process::refresh_track_process_chain_binding_param_ids(
+            &mut process_chain,
+            instrument_descriptor,
+            Some(&self.instrument_slot),
+            effect_descriptors,
+            &self.effect_slots,
+        );
+        process_chain
+    }
+
     fn restore_to(&self, state: &SequencerState, track: usize) -> bool {
         if track >= state.pattern.patterns.len()
             || track >= state.pattern.neural_reset_patterns.len()
@@ -564,10 +596,21 @@ impl TrackPatternData {
                 rack_tracks[track] = self.rack_track.clone();
             }
         }
+        let refreshed_process_chain = {
+            let effect_descriptors = state.scratch_effect_descriptors.lock().unwrap();
+            let instrument_descriptors = state.scratch_instrument_descriptors.lock().unwrap();
+            self.refreshed_process_chain(
+                instrument_descriptors.get(track),
+                effect_descriptors
+                    .get(track)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )
+        };
         {
             let mut process_chains = state.pattern.process_chains.lock().unwrap();
             if track < process_chains.len() {
-                process_chains[track] = self.process_chain.clone();
+                process_chains[track] = refreshed_process_chain;
             }
         }
         {
@@ -1352,6 +1395,28 @@ impl ProjectScenes {
 }
 
 impl PatternSnapshot {
+    pub fn refresh_process_binding_param_ids(
+        &mut self,
+        effect_descriptors: &[Vec<EffectDescriptor>],
+        instrument_descriptors: &[EffectDescriptor],
+    ) {
+        for track in 0..self.process_chains.len() {
+            crate::process::refresh_track_process_chain_binding_param_ids(
+                &mut self.process_chains[track],
+                instrument_descriptors.get(track),
+                self.instrument_slots.get(track),
+                effect_descriptors
+                    .get(track)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                self.effect_slots
+                    .get(track)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            );
+        }
+    }
+
     /// Delete one track lane from this snapshot and compact higher track indices.
     ///
     /// This is the snapshot-side half of track deletion semantics:
@@ -2530,6 +2595,7 @@ pub struct SequencerState {
     published_process_authoring_version: AtomicU64,
     scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
+    process_trace_enabled: AtomicBool,
     pending_accumulator_reset_all: AtomicBool,
     pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
 }
@@ -2608,7 +2674,7 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
     ) -> PatternSnapshot {
         let (mod_connections, neural_networks, graph_overrides) = self.current_scene_metadata();
-        PatternSnapshot::capture_with_mod_connections(
+        let mut snapshot = PatternSnapshot::capture_with_mod_connections(
             self,
             num_tracks,
             buffer_ids,
@@ -2618,7 +2684,11 @@ impl SequencerState {
             mod_connections,
             neural_networks,
             graph_overrides,
-        )
+        );
+        let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
+        let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();
+        snapshot.refresh_process_binding_param_ids(&effect_descriptors, &instrument_descriptors);
+        snapshot
     }
 
     pub fn new(num_tracks: usize, initial_chains: Vec<Vec<EffectSlotState>>) -> Self {
@@ -2804,6 +2874,9 @@ impl SequencerState {
             published_process_authoring_version: AtomicU64::new(0),
             scratch_effect_descriptors: Mutex::new(Vec::new()),
             scratch_instrument_descriptors: Mutex::new(Vec::new()),
+            process_trace_enabled: AtomicBool::new(
+                std::env::var("ESEQ_PROCESS_TRACE").is_ok_and(|value| value == "1"),
+            ),
             pending_accumulator_reset_all: AtomicBool::new(false),
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
         };
@@ -2928,17 +3001,12 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
     ) -> bool {
         let current_pattern = self.current_pattern_index();
-        let (mod_connections, neural_networks, graph_overrides) = self.current_scene_metadata();
-        let snapshot = PatternSnapshot::capture_with_mod_connections(
-            self,
+        let snapshot = self.capture_current_pattern_snapshot(
             num_tracks,
             buffer_ids,
             sample_rates,
             names,
             instrument_types,
-            mod_connections,
-            neural_networks,
-            graph_overrides,
         );
         self.pattern
             .scenes
@@ -2984,6 +3052,9 @@ impl SequencerState {
             .iter()
             .map(EffectSlotSnapshot::capture)
             .collect();
+        let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
+        let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();
+        snapshot.refresh_process_binding_param_ids(&effect_descriptors, &instrument_descriptors);
         scenes.save_scene_snapshot(current_pattern, snapshot)
     }
 
@@ -2999,6 +3070,7 @@ impl SequencerState {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         scenes.edit_other_track_patterns(track, |data| {
             data.sync_effect_slot_with_modulator(slot_idx, descriptor, node_id, modulator_node_id);
+            data.refresh_process_effect_binding_param_ids_for_slot(slot_idx, descriptor);
         });
     }
 
@@ -4517,6 +4589,73 @@ impl SequencerState {
         }
         updated
     }
+    pub fn set_process_port_binding(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        port_name: &str,
+        target: crate::process::ParamTarget,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+
+        let changed = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            let Some(slot) = chain
+                .slots
+                .iter_mut()
+                .find(|slot| slot.instance_id == instance_id)
+            else {
+                return false;
+            };
+            let current = slot.bindings.get(port_name);
+            if matches!(current, Some(Some(existing)) if existing == &target) {
+                false
+            } else {
+                slot.bindings.insert(port_name.to_string(), Some(target));
+                true
+            }
+        };
+        if changed {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            self.publish_scheduler_snapshot();
+        }
+        true
+    }
+    pub fn clear_process_port_binding(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        port_name: &str,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+
+        let changed = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            let Some(slot) = chain
+                .slots
+                .iter_mut()
+                .find(|slot| slot.instance_id == instance_id)
+            else {
+                return false;
+            };
+            slot.bindings.remove(port_name).is_some()
+        };
+        if changed {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            self.publish_scheduler_snapshot();
+        }
+        true
+    }
     /// Replace a lane wholesale on every current-pattern chain slot owned by
     /// `instance_id` (a handle can be attached to several tracks). Returns the
     /// number of slots updated; publishes only when at least one matched.
@@ -4582,8 +4721,22 @@ impl SequencerState {
         effect_descriptors: Vec<Vec<EffectDescriptor>>,
         instrument_descriptors: Vec<EffectDescriptor>,
     ) {
-        *self.scratch_effect_descriptors.lock().unwrap() = effect_descriptors;
-        *self.scratch_instrument_descriptors.lock().unwrap() = instrument_descriptors;
+        {
+            *self.scratch_effect_descriptors.lock().unwrap() = effect_descriptors;
+        }
+        {
+            *self.scratch_instrument_descriptors.lock().unwrap() = instrument_descriptors;
+        }
+        self.publish_scheduler_snapshot();
+    }
+    pub fn process_trace_enabled(&self) -> bool {
+        self.process_trace_enabled.load(Ordering::Relaxed)
+    }
+    pub fn set_process_trace_enabled(&self, enabled: bool) {
+        let previous = self.process_trace_enabled.swap(enabled, Ordering::Relaxed);
+        if previous != enabled {
+            self.publish_scheduler_snapshot();
+        }
     }
     pub fn request_accumulator_reset(&self, track: usize) {
         if track < MAX_TRACKS {
@@ -6110,6 +6263,7 @@ mod tests {
         EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
         ParamScaling, BUILTIN_SLOT_COUNT,
     };
+    use crate::neural::ParamNodeId;
     use crate::sequencer::ModDestination;
 
     fn sample_track_params(id: usize) -> TrackParamsSnapshot {
@@ -7871,6 +8025,171 @@ mod tests {
                 )]),
                 bindings: std::collections::BTreeMap::new(),
             }],
+        }
+    }
+
+    fn effect_process_chain(
+        port: &str,
+        effect: &str,
+        param: &str,
+        param_id: ParamNodeId,
+    ) -> crate::process::TrackProcessChain {
+        crate::process::TrackProcessChain {
+            slots: vec![crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(8),
+                class_name: "phase3b-mappable-writer".to_string(),
+                enabled: true,
+                inlets: std::collections::BTreeMap::new(),
+                lanes: std::collections::BTreeMap::new(),
+                bindings: std::collections::BTreeMap::from([(
+                    port.to_string(),
+                    Some(crate::process::ParamTarget::EffectParam {
+                        slot: 0,
+                        effect: effect.to_string(),
+                        param: param.to_string(),
+                        param_id: Some(param_id),
+                    }),
+                )]),
+            }],
+        }
+    }
+
+    fn effect_binding_param_id(
+        chain: &crate::process::TrackProcessChain,
+        port: &str,
+    ) -> Option<ParamNodeId> {
+        let binding = chain.slots.first()?.bindings.get(port)?.as_ref()?;
+        match binding {
+            crate::process::ParamTarget::EffectParam { param_id, .. } => *param_id,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn process_binding_param_ids_refresh_to_restored_effect_slot() {
+        let desc = EffectDescriptor::builtin_insert("Str8 Delay").expect("Str8 Delay descriptor");
+        let wet_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "wet")
+            .expect("Str8 Delay should expose wet");
+        let fresh_slot = EffectSlotSnapshot::new_default(&desc, 130);
+        let expected = ParamNodeId::from_slot_param(
+            fresh_slot.node_id,
+            fresh_slot.modulator_node_id,
+            fresh_slot.param_node_indices[wet_idx],
+        )
+        .expect("wet should have a live node identity");
+        let stale = ParamNodeId {
+            logical_id: 79,
+            node_param_idx: expected.node_param_idx,
+        };
+
+        let mut snapshot = sample_pattern_snapshot(1);
+        snapshot.effect_slots[0] = vec![fresh_slot];
+        snapshot.process_chains[0] = effect_process_chain("color", &desc.name, "wet", stale);
+
+        snapshot.refresh_process_binding_param_ids(&[vec![desc]], &[]);
+
+        assert_eq!(
+            effect_binding_param_id(&snapshot.process_chains[0], "color"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn process_binding_param_ids_refresh_when_scene_restores_stored_chain() {
+        let desc = EffectDescriptor::builtin_insert("Str8 Delay").expect("Str8 Delay descriptor");
+        let wet_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "wet")
+            .expect("Str8 Delay should expose wet");
+        let first_slot = EffectSlotSnapshot::new_default(&desc, 130);
+        let second_slot = EffectSlotSnapshot::new_default(&desc, 131);
+        let first_expected = ParamNodeId::from_slot_param(
+            first_slot.node_id,
+            first_slot.modulator_node_id,
+            first_slot.param_node_indices[wet_idx],
+        )
+        .expect("first wet should have a live node identity");
+        let second_expected = ParamNodeId::from_slot_param(
+            second_slot.node_id,
+            second_slot.modulator_node_id,
+            second_slot.param_node_indices[wet_idx],
+        )
+        .expect("second wet should have a live node identity");
+        let stale = ParamNodeId {
+            logical_id: 79,
+            node_param_idx: first_expected.node_param_idx,
+        };
+
+        let state = make_state_with_tracks(1);
+        state.set_scratch_runtime_descriptors(
+            vec![vec![desc.clone()]],
+            vec![EffectDescriptor::builtin_sampler()],
+        );
+
+        let mut first = sample_pattern_snapshot(1);
+        first.effect_slots[0] = vec![first_slot];
+        first.process_chains[0] = effect_process_chain("color", &desc.name, "wet", stale);
+        let mut second = sample_pattern_snapshot(1);
+        second.effect_slots[0] = vec![second_slot];
+        second.process_chains[0] = effect_process_chain("color", &desc.name, "wet", stale);
+
+        let buffer_ids = [-1];
+        let sample_rates = [44_100];
+        let names = [String::new()];
+        let instrument_types = [InstrumentType::Sampler];
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        assert_eq!(
+            state
+                .track_process_chain(0)
+                .and_then(|chain| effect_binding_param_id(&chain, "color")),
+            Some(first_expected)
+        );
+
+        state
+            .switch_pattern(1, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .expect("switch to scene 2");
+        assert_eq!(
+            state
+                .track_process_chain(0)
+                .and_then(|chain| effect_binding_param_id(&chain, "color")),
+            Some(second_expected)
+        );
+        {
+            let scheduler_snapshot = state.latest_scheduler_snapshot();
+            assert_eq!(
+                effect_binding_param_id(&scheduler_snapshot.tracks[0].process_chain, "color"),
+                Some(second_expected)
+            );
+            assert_eq!(
+                scheduler_snapshot.tracks[0].effect_descriptors[0].name,
+                desc.name
+            );
+        }
+
+        state
+            .switch_pattern(0, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .expect("switch back to scene 1");
+        assert_eq!(
+            state
+                .track_process_chain(0)
+                .and_then(|chain| effect_binding_param_id(&chain, "color")),
+            Some(first_expected)
+        );
+        {
+            let scheduler_snapshot = state.latest_scheduler_snapshot();
+            assert_eq!(
+                effect_binding_param_id(&scheduler_snapshot.tracks[0].process_chain, "color"),
+                Some(first_expected)
+            );
+            assert_eq!(
+                scheduler_snapshot.tracks[0].effect_descriptors[0].name,
+                desc.name
+            );
         }
     }
 

@@ -990,8 +990,8 @@ impl App {
             &self.tracks,
             &self.graph.track_instrument_types,
         );
-        self.state.publish_scheduler_snapshot();
         self.refresh_effect_sidechain_labels();
+        self.sync_scratch_runtime_descriptors();
         self.push_all_restored_defaults();
     }
 
@@ -1644,6 +1644,7 @@ impl App {
                 node_id as u32,
                 modulator_node_id.unwrap_or(0) as u32,
             );
+        self.sync_scratch_runtime_descriptors();
     }
 
     pub(super) fn load_builtin_effect_to_slot_sync(
@@ -2225,7 +2226,7 @@ impl App {
 
         self.push_track_effect_slot_defaults(track, slot_idx);
         self.push_all_delay_bpm();
-        self.state.publish_scheduler_snapshot();
+        self.sync_scratch_runtime_descriptors();
     }
 
     fn descriptor_has_sidechain_control(desc: &EffectDescriptor) -> bool {
@@ -4045,6 +4046,61 @@ mod tests {
             observed_bpm,
             Some(137.0),
             "Str8 Delay BPM should reach watched node state within {MAX_WATCH_REFRESH_BLOCKS} blocks"
+        );
+    }
+
+    #[test]
+    fn add_builtin_effect_publishes_scheduler_descriptor_snapshot() {
+        let graph = TestLiveGraph::new("builtin-effect-scheduler-descriptor-test", 64, 44_100, 2);
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let (keyboard_tx, _keyboard_rx) = mpsc::channel();
+        let mut app = App::new(
+            Arc::clone(&state),
+            graph.ptr,
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.graph.track_node_ids = vec![crate::ui::TrackNodeIds {
+            sampler_ids: Vec::new(),
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: 0,
+            voice_sum_r_id: 0,
+            pan_id: 0,
+            filter_id: 0,
+            delay_id: 0,
+            send_id: 0,
+            mod_out_id: 0,
+            mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            mod_env_id: 0,
+            bus_send_ids: Vec::new(),
+            rack_slots: Vec::new(),
+        }];
+        app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+        app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
+
+        let slot_idx = app
+            .add_builtin_effect_sync(0, "Filter")
+            .expect("add built-in filter");
+        let snapshot = state.latest_scheduler_snapshot();
+        assert_eq!(
+            snapshot.tracks[0].effect_descriptors[slot_idx].name, "Filter",
+            "scheduler snapshot should publish the same descriptor name used by the live graph"
+        );
+        assert!(
+            snapshot.tracks[0].effect_slots[slot_idx].node_id != 0,
+            "scheduler snapshot should publish the loaded effect slot state"
         );
     }
 

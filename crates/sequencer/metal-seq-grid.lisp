@@ -192,6 +192,7 @@
 (def script-sequencer-name "")
 (def script-source-tab-label "")
 (def script-source-tab-requested false)
+(def script-source-tab-opened false)
 (def script-init-fn () false)
 
 (def seq-script-reset-contract ()
@@ -201,12 +202,22 @@
     (set! script-sequencer-name "")
     (set! script-source-tab-label "")
     (set! script-source-tab-requested false)
+    (set! script-source-tab-opened false)
     (def script-init-fn () false)))
 
 (def seq-register-script-source-tab (label)
   (do
     (set! script-source-tab-label label)
-    (set! script-source-tab-requested true)))
+    (set! script-source-tab-requested true)
+    (let ((path (current-source-path)))
+      (if (not (= path ""))
+        (do
+          (set! script-source-tab-opened true)
+          (host-command "open-script-source-tab"
+            (dict
+              :path path
+              :label label)))
+        false))))
 
 (def seq-script-default-dir ()
   (if (directory? "scripts")
@@ -323,7 +334,8 @@
     false))
 
 (def seq-script-register-source-tab-from-path (path)
-  (if (or script-source-tab-requested (= script-buffer-name ""))
+  (if (and (not script-source-tab-opened)
+        (or script-source-tab-requested (= script-buffer-name "")))
     (host-command "open-script-source-tab"
       (dict
         :path path

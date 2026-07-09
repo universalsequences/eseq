@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use eseqlisp::vm::Value;
 use serde::{Deserialize, Serialize};
 
+use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::EmittedAccumulatorEvent;
 use crate::neural::ParamNodeId;
 use crate::neural::{process_grid_boundaries, GridBoundaryClock};
@@ -71,10 +72,88 @@ pub enum ProcessTargetHint {
     MidiFxParam { fx: String, param: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessTargetKind {
+    StepParam,
+    DeviceParam,
+    InstrumentParam,
+    EffectParam,
+    MidiFxParam,
+    RackSlotParam,
+    RackSlotInstrumentParam,
+}
+
+impl ProcessTargetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StepParam => "step-param",
+            Self::DeviceParam => "device-param",
+            Self::InstrumentParam => "instrument-param",
+            Self::EffectParam => "effect-param",
+            Self::MidiFxParam => "midi-fx-param",
+            Self::RackSlotParam => "rack-slot-param",
+            Self::RackSlotInstrumentParam => "rack-slot-instrument-param",
+        }
+    }
+
+    pub fn matches_hint(self, hint: &ProcessTargetHint) -> bool {
+        match self {
+            Self::StepParam => matches!(hint, ProcessTargetHint::StepParam { .. }),
+            Self::DeviceParam => matches!(
+                hint,
+                ProcessTargetHint::ParamTag { .. }
+                    | ProcessTargetHint::InstrumentParam { .. }
+                    | ProcessTargetHint::EffectParam { .. }
+                    | ProcessTargetHint::MidiFxParam { .. }
+            ),
+            Self::InstrumentParam => matches!(hint, ProcessTargetHint::InstrumentParam { .. }),
+            Self::EffectParam => matches!(hint, ProcessTargetHint::EffectParam { .. }),
+            Self::MidiFxParam => matches!(hint, ProcessTargetHint::MidiFxParam { .. }),
+            Self::RackSlotParam | Self::RackSlotInstrumentParam => false,
+        }
+    }
+
+    pub fn matches_target(self, target: &ParamTarget) -> bool {
+        match self {
+            Self::StepParam => matches!(target, ParamTarget::StepParam { .. }),
+            Self::DeviceParam => matches!(
+                target,
+                ParamTarget::InstrumentParam { .. }
+                    | ParamTarget::EffectParam { .. }
+                    | ParamTarget::MidiFxParam { .. }
+            ),
+            Self::InstrumentParam => matches!(target, ParamTarget::InstrumentParam { .. }),
+            Self::EffectParam => matches!(target, ParamTarget::EffectParam { .. }),
+            Self::MidiFxParam => matches!(target, ParamTarget::MidiFxParam { .. }),
+            Self::RackSlotParam => matches!(target, ParamTarget::RackSlotParam { .. }),
+            Self::RackSlotInstrumentParam => {
+                matches!(target, ParamTarget::RackSlotInstrumentParam { .. })
+            }
+        }
+    }
+}
+
+impl ProcessTargetHint {
+    pub fn target_kind(&self) -> ProcessTargetKind {
+        match self {
+            Self::StepParam { .. } => ProcessTargetKind::StepParam,
+            Self::ParamTag { .. } => ProcessTargetKind::DeviceParam,
+            Self::InstrumentParam { .. } => ProcessTargetKind::InstrumentParam,
+            Self::EffectParam { .. } => ProcessTargetKind::EffectParam,
+            Self::MidiFxParam { .. } => ProcessTargetKind::MidiFxParam,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessPortDef {
     pub name: String,
     pub target: Option<ProcessTargetHint>,
+    #[serde(default)]
+    pub mappable: bool,
+    #[serde(default)]
+    pub target_kind: Option<ProcessTargetKind>,
 }
 
 impl ProcessPortDef {
@@ -82,7 +161,51 @@ impl ProcessPortDef {
         Self {
             name: DEFAULT_PROCESS_PORT.to_string(),
             target: Some(target),
+            mappable: false,
+            target_kind: None,
         }
+    }
+
+    pub fn with_target(name: impl Into<String>, target: ProcessTargetHint) -> Self {
+        Self {
+            name: name.into(),
+            target: Some(target),
+            mappable: false,
+            target_kind: None,
+        }
+    }
+
+    pub fn mappable(
+        name: impl Into<String>,
+        target_kind: Option<ProcessTargetKind>,
+        target: Option<ProcessTargetHint>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            target,
+            mappable: true,
+            target_kind,
+        }
+    }
+
+    pub fn default_mappable(
+        target_kind: Option<ProcessTargetKind>,
+        target: Option<ProcessTargetHint>,
+    ) -> Self {
+        Self::mappable(DEFAULT_PROCESS_PORT, target_kind, target)
+    }
+
+    pub fn effective_target_kind(&self) -> Option<ProcessTargetKind> {
+        self.target_kind
+            .or_else(|| self.target.as_ref().map(ProcessTargetHint::target_kind))
+    }
+
+    pub fn allows_manual_target(&self, target: &ParamTarget) -> bool {
+        self.mappable
+            && self
+                .effective_target_kind()
+                .map(|kind| kind.matches_target(target))
+                .unwrap_or(true)
     }
 }
 
@@ -182,6 +305,119 @@ fn default_true() -> bool {
 pub struct TrackProcessChain {
     #[serde(default)]
     pub slots: Vec<TrackProcessSlot>,
+}
+
+fn process_param_index_by_tag_or_name(
+    descriptor: &EffectDescriptor,
+    tag_or_name: &str,
+) -> Option<usize> {
+    descriptor
+        .params
+        .iter()
+        .position(|param| param.has_tag_or_name(tag_or_name))
+}
+
+fn slot_param_node_id(slot: &EffectSlotSnapshot, param_idx: usize) -> Option<ParamNodeId> {
+    let raw_idx = slot.param_node_indices.get(param_idx).copied()?;
+    ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw_idx)
+}
+
+fn refresh_effect_binding_param_id(
+    slot_idx: usize,
+    effect_name: &str,
+    param_name: &str,
+    param_id: &mut Option<ParamNodeId>,
+    effect_descriptors: &[EffectDescriptor],
+    effect_slots: &[EffectSlotSnapshot],
+) {
+    let Some(desc) = effect_descriptors.get(slot_idx) else {
+        return;
+    };
+    if !desc.name.eq_ignore_ascii_case(effect_name) {
+        return;
+    }
+    let Some(param_idx) = process_param_index_by_tag_or_name(desc, param_name) else {
+        return;
+    };
+    let Some(slot) = effect_slots.get(slot_idx) else {
+        return;
+    };
+    if let Some(updated) = slot_param_node_id(slot, param_idx) {
+        *param_id = Some(updated);
+    }
+}
+
+pub fn refresh_track_process_chain_binding_param_ids(
+    chain: &mut TrackProcessChain,
+    instrument_descriptor: Option<&EffectDescriptor>,
+    instrument_slot: Option<&EffectSlotSnapshot>,
+    effect_descriptors: &[EffectDescriptor],
+    effect_slots: &[EffectSlotSnapshot],
+) {
+    for slot in &mut chain.slots {
+        for binding in slot.bindings.values_mut().flatten() {
+            match binding {
+                ParamTarget::InstrumentParam { param, param_id } => {
+                    let (Some(desc), Some(slot)) = (instrument_descriptor, instrument_slot) else {
+                        continue;
+                    };
+                    let Some(param_idx) = process_param_index_by_tag_or_name(desc, param) else {
+                        continue;
+                    };
+                    if let Some(updated) = slot_param_node_id(slot, param_idx) {
+                        *param_id = Some(updated);
+                    }
+                }
+                ParamTarget::EffectParam {
+                    slot,
+                    effect,
+                    param,
+                    param_id,
+                } => refresh_effect_binding_param_id(
+                    *slot,
+                    effect,
+                    param,
+                    param_id,
+                    effect_descriptors,
+                    effect_slots,
+                ),
+                _ => {}
+            }
+        }
+    }
+}
+
+pub fn refresh_track_process_chain_effect_binding_param_ids_for_slot(
+    chain: &mut TrackProcessChain,
+    slot_idx: usize,
+    descriptor: &EffectDescriptor,
+    effect_slot: &EffectSlotSnapshot,
+) {
+    for process_slot in &mut chain.slots {
+        for binding in process_slot.bindings.values_mut().flatten() {
+            let ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                param_id,
+            } = binding
+            else {
+                continue;
+            };
+            if *slot != slot_idx {
+                continue;
+            }
+            if !descriptor.name.eq_ignore_ascii_case(effect) {
+                continue;
+            }
+            let Some(param_idx) = process_param_index_by_tag_or_name(descriptor, param) else {
+                continue;
+            };
+            if let Some(updated) = slot_param_node_id(effect_slot, param_idx) {
+                *param_id = Some(updated);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

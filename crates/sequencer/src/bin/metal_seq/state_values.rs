@@ -521,6 +521,7 @@ struct ProcessLaneUiEntry {
     default: f32,
     decimals: u8,
     target: String,
+    map_ports: Vec<Value>,
     values: Vec<f32>,
 }
 
@@ -563,6 +564,45 @@ fn process_target_hint_label(target: Option<&sequencer::process::ProcessTargetHi
     }
 }
 
+fn process_param_target_label(target: &sequencer::process::ParamTarget) -> String {
+    match target {
+        sequencer::process::ParamTarget::StepParam { param } => {
+            format!("step-param:{param}")
+        }
+        sequencer::process::ParamTarget::InstrumentParam { param, .. } => {
+            format!("instrument:{param}")
+        }
+        sequencer::process::ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            ..
+        } => format!("fx{}:{effect}:{param}", slot + 1),
+        sequencer::process::ParamTarget::MidiFxParam { slot, fx, param } => {
+            format!("midi-fx{}:{fx}:{param}", slot + 1)
+        }
+        sequencer::process::ParamTarget::RackSlotParam { slot, param } => {
+            format!("rack{}:{param}", slot + 1)
+        }
+        sequencer::process::ParamTarget::RackSlotInstrumentParam { slot, param, .. } => {
+            format!("rack{}:instrument:{param}", slot + 1)
+        }
+    }
+}
+
+fn process_param_target_is_bindable(target: &sequencer::process::ParamTarget) -> bool {
+    !matches!(
+        target,
+        sequencer::process::ParamTarget::RackSlotParam { .. }
+            | sequencer::process::ParamTarget::RackSlotInstrumentParam { .. }
+    )
+}
+
+fn process_target_kind_label(kind: Option<sequencer::process::ProcessTargetKind>) -> String {
+    kind.map(|kind| kind.as_str().to_string())
+        .unwrap_or_default()
+}
+
 fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) -> String {
     match ports {
         [] => String::new(),
@@ -582,6 +622,88 @@ fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) -> String {
             .collect::<Vec<_>>()
             .join(", "),
     }
+}
+
+fn process_slot_ports_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+) -> Value {
+    let mut ports = def.map(|def| def.ports.clone()).unwrap_or_default();
+    for name in slot.bindings.keys() {
+        if !ports.iter().any(|port| &port.name == name) {
+            ports.push(sequencer::process::ProcessPortDef {
+                name: name.clone(),
+                target: None,
+                mappable: false,
+                target_kind: None,
+            });
+        }
+    }
+    list_value(
+        ports
+            .into_iter()
+            .map(|port| process_port_value(slot, &port)),
+    )
+}
+
+fn process_mappable_port_values(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+) -> Vec<Value> {
+    def.map(|def| {
+        def.ports
+            .iter()
+            .filter(|port| port.mappable)
+            .map(|port| process_port_value(slot, port))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn process_port_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    port: &sequencer::process::ProcessPortDef,
+) -> Value {
+    let binding = slot.bindings.get(&port.name);
+    let manual = matches!(binding, Some(Some(_)));
+    let hint_label = process_target_hint_label(port.target.as_ref());
+    let target_label = match binding {
+        Some(Some(target)) => process_param_target_label(target),
+        _ if !hint_label.is_empty() => hint_label.clone(),
+        _ => "unbound".to_string(),
+    };
+    let status = match binding {
+        Some(Some(_)) => "bound",
+        Some(None) | None if port.target.is_some() => "hint",
+        Some(None) | None => "unbound",
+    };
+    let bindable = port.mappable
+        && binding
+            .and_then(|binding| binding.as_ref())
+            .map(process_param_target_is_bindable)
+            .unwrap_or(true);
+    map_value([
+        ("name", Value::String(port.name.clone())),
+        (
+            "label",
+            Value::String(if port.name == sequencer::process::DEFAULT_PROCESS_PORT {
+                "default".to_string()
+            } else {
+                port.name.clone()
+            }),
+        ),
+        ("hint", Value::String(hint_label)),
+        ("target", Value::String(target_label)),
+        ("status", Value::String(status.to_string())),
+        ("manual", Value::Bool(manual)),
+        ("clearable", Value::Bool(manual)),
+        ("mappable", Value::Bool(port.mappable)),
+        ("bindable", Value::Bool(bindable)),
+        (
+            "target-kind",
+            Value::String(process_target_kind_label(port.effective_target_kind())),
+        ),
+    ])
 }
 
 fn process_name_initials(name: &str) -> String {
@@ -695,6 +817,7 @@ fn process_lane_entries_for_track(
                         .unwrap_or(default)
                 })
                 .collect::<Vec<_>>();
+            let map_ports = process_mappable_port_values(slot, def);
             entries.push(ProcessLaneUiEntry {
                 instance_id: slot.instance_id,
                 slot_index,
@@ -712,6 +835,7 @@ fn process_lane_entries_for_track(
                 target: def
                     .map(|def| process_ports_label(&def.ports))
                     .unwrap_or_default(),
+                map_ports,
                 values,
             });
         }
@@ -740,6 +864,7 @@ fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) -> Value {
         ("default", Value::Number(entry.default as f64)),
         ("decimals", Value::Number(entry.decimals as f64)),
         ("target", Value::String(entry.target.clone())),
+        ("map-ports", list_value(entry.map_ports.iter().cloned())),
         (
             "values",
             list_value(
@@ -933,6 +1058,7 @@ pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usiz
                         .unwrap_or_default(),
                 ),
             ),
+            ("ports", process_slot_ports_value(slot, def)),
             ("inlets", list_value(inlet_values)),
         ])
     }))
@@ -953,6 +1079,33 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
             ("label", Value::String(def.name.clone())),
             ("doc", Value::String(def.doc.clone().unwrap_or_default())),
             ("target", Value::String(process_ports_label(&def.ports))),
+            (
+                "ports",
+                list_value(def.ports.iter().map(|port| {
+                    map_value([
+                        ("name", Value::String(port.name.clone())),
+                        (
+                            "label",
+                            Value::String(
+                                if port.name == sequencer::process::DEFAULT_PROCESS_PORT {
+                                    "default".to_string()
+                                } else {
+                                    port.name.clone()
+                                },
+                            ),
+                        ),
+                        (
+                            "hint",
+                            Value::String(process_target_hint_label(port.target.as_ref())),
+                        ),
+                        ("mappable", Value::Bool(port.mappable)),
+                        (
+                            "target-kind",
+                            Value::String(process_target_kind_label(port.effective_target_kind())),
+                        ),
+                    ])
+                })),
+            ),
             (
                 "lane-count",
                 Value::Number(def.inlets.iter().filter(|inlet| inlet.lane).count() as f64),
@@ -14219,6 +14372,14 @@ mod tests {
             .find_map(|child| find_layout_node_by_text(child, text))
     }
 
+    fn layout_node_contains_text_fragment(node: &eseqlisp::layout::LayoutNode, text: &str) -> bool {
+        matches!(node.props.get("text"), Some(Value::String(value)) if value.contains(text))
+            || node
+                .children
+                .iter()
+                .any(|child| layout_node_contains_text_fragment(child, text))
+    }
+
     fn find_active_tab_button_by_text<'a>(
         node: &'a eseqlisp::layout::LayoutNode,
         text: &str,
@@ -18527,6 +18688,14 @@ mod tests {
             .register_native("seq-set-process-inlet", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
+            .register_native("seq-bind-process-port", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-clear-process-port-binding", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
             .register_native("seq-set-step-param-plock", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
@@ -20359,6 +20528,10 @@ mod tests {
             "#,
         )
         .expect("write source-tab script fixture");
+        let expected_path = std::fs::canonicalize(&script_path)
+            .expect("canonicalize source-tab script fixture")
+            .display()
+            .to_string();
 
         let load_form = format!(
             "(seq-script-load-file {:?})",
@@ -20371,6 +20544,18 @@ mod tests {
         let _ = std::fs::remove_file(&script_path);
 
         let commands = editor.drain_host_commands();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(
+                    command,
+                    eseqlisp::host::HostCommand::Custom { name, .. }
+                        if name == "open-script-source-tab"
+                ))
+                .count(),
+            1,
+            "source-tab contract should emit exactly one source-tab command"
+        );
         let source_tab_command = commands
             .iter()
             .find(|command| {
@@ -20390,7 +20575,69 @@ mod tests {
                 );
                 assert_eq!(
                     extract_string_from_payload(payload, "path"),
-                    Some(script_path.display().to_string())
+                    Some(expected_path)
+                );
+            }
+            other => panic!("expected open-script-source-tab host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_project_scratch_raw_load_restores_script_source_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let script_path = std::env::temp_dir().join(format!(
+            "eseq-project-scratch-source-tab-test-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script_path,
+            r#"
+            (seq-register-script-source-tab "Scratch Source")
+            "#,
+        )
+        .expect("write project scratch source-tab script fixture");
+        let expected_path = std::fs::canonicalize(&script_path)
+            .expect("canonicalize script path")
+            .display()
+            .to_string();
+        let scratch_source = format!("(load {:?})", script_path.display().to_string());
+
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(project_scratch_source_path()),
+            &scratch_source,
+            overlays,
+        );
+        let _ = std::fs::remove_file(&script_path);
+        assert!(
+            report.success,
+            "project scratch raw load should succeed: {}",
+            report.failure_message()
+        );
+        editor.process_lisp_reload_report(report);
+
+        let commands = editor.drain_host_commands();
+        let source_tab_command = commands
+            .iter()
+            .find(|command| {
+                matches!(
+                    command,
+                    eseqlisp::host::HostCommand::Custom { name, .. }
+                        if name == "open-script-source-tab"
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!("expected project scratch load source-tab command, got {commands:?}")
+            });
+        match source_tab_command {
+            eseqlisp::host::HostCommand::Custom { payload, .. } => {
+                assert_eq!(
+                    extract_string_from_payload(payload, "label"),
+                    Some("Scratch Source".to_string())
+                );
+                assert_eq!(
+                    extract_string_from_payload(payload, "path"),
+                    Some(expected_path)
                 );
             }
             other => panic!("expected open-script-source-tab host command, got {other:?}"),
@@ -20699,6 +20946,11 @@ mod tests {
             Some(Value::String("sparse-transpose / amount".to_string()))
         );
         assert_eq!(
+            lane.get("map-ports").map(|cell| cell.borrow().clone()),
+            Some(Value::List(vec![])),
+            "fixed accumulator target should not publish lane mapping widgets"
+        );
+        assert_eq!(
             lane.get("short-label").map(|cell| cell.borrow().clone()),
             Some(Value::String("st/amount".to_string()))
         );
@@ -20757,6 +21009,75 @@ mod tests {
             panic!("process slots should be a list");
         };
         assert_eq!(slots.len(), 1);
+        let Value::Map(slot) = &*slots[0].borrow() else {
+            panic!("process slot should be a map");
+        };
+        let ports_value = slot
+            .get("ports")
+            .expect("process slot should expose ports")
+            .borrow()
+            .clone();
+        let Value::List(ports) = ports_value else {
+            panic!("process ports should be a list");
+        };
+        assert_eq!(ports.len(), 1);
+        let Value::Map(port) = &*ports[0].borrow() else {
+            panic!("process port should be a map");
+        };
+        assert_eq!(
+            port.get("status").map(|cell| cell.borrow().clone()),
+            Some(Value::String("hint".to_string()))
+        );
+        assert_eq!(
+            port.get("target").map(|cell| cell.borrow().clone()),
+            Some(Value::String("step-param:transpose".to_string()))
+        );
+
+        let instance_id = state
+            .track_process_chain(0)
+            .expect("process chain")
+            .slots
+            .first()
+            .expect("process slot")
+            .instance_id;
+        assert!(state.set_process_port_binding(
+            0,
+            instance_id,
+            sequencer::process::DEFAULT_PROCESS_PORT,
+            sequencer::process::ParamTarget::InstrumentParam {
+                param: "cutoff".to_string(),
+                param_id: None,
+            },
+        ));
+        let Value::List(slots) = build_process_slots_value(&state, 0) else {
+            panic!("process slots should be a list after binding");
+        };
+        let Value::Map(slot) = &*slots[0].borrow() else {
+            panic!("process slot should be a map after binding");
+        };
+        let ports_value = slot
+            .get("ports")
+            .expect("process slot should expose ports after binding")
+            .borrow()
+            .clone();
+        let Value::List(ports) = ports_value else {
+            panic!("process ports should be a list after binding");
+        };
+        let Value::Map(port) = &*ports[0].borrow() else {
+            panic!("process port should be a map after binding");
+        };
+        assert_eq!(
+            port.get("status").map(|cell| cell.borrow().clone()),
+            Some(Value::String("bound".to_string()))
+        );
+        assert_eq!(
+            port.get("target").map(|cell| cell.borrow().clone()),
+            Some(Value::String("instrument:cutoff".to_string()))
+        );
+        assert_eq!(
+            port.get("clearable").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(true))
+        );
 
         let Value::List(library) = build_process_library_value(&state) else {
             panic!("process library should be a list");
@@ -20767,6 +21088,68 @@ mod tests {
         assert_eq!(
             def.get("doc").map(|cell| cell.borrow().clone()),
             Some(Value::String("Sparse transpose accumulator".to_string()))
+        );
+    }
+
+    #[test]
+    fn process_lane_payload_includes_mappable_target_ports_for_selected_slot() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut runtime = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        runtime
+            .eval_str(
+                r#"
+                (def-process mod-writer
+                  :targets '((shape :mappable :instrument-param)
+                             (pitch (step-param :transpose)))
+                  :in ((amount :float 0 1 :default 0 :lane true))
+                  :run (do
+                    (target-set! :shape (in :amount))
+                    (target-add! :pitch 12)))
+
+                (def writer
+                  (processes :track 0
+                    (mod-writer :amount (lane 0 0.5 1))))
+                "#,
+            )
+            .expect("define and attach mappable process");
+
+        let Value::List(lanes) = build_process_lanes_value(&state, 0) else {
+            panic!("process lanes should be a list");
+        };
+        assert_eq!(lanes.len(), 1);
+        let Value::Map(lane) = &*lanes[0].borrow() else {
+            panic!("process lane should be a map");
+        };
+        let map_ports = lane
+            .get("map-ports")
+            .map(|cell| cell.borrow().clone())
+            .expect("mappable ports");
+        let Value::List(map_ports) = map_ports else {
+            panic!("map-ports should be a list: {map_ports:?}");
+        };
+        assert_eq!(map_ports.len(), 1);
+        let Value::Map(port) = &*map_ports[0].borrow() else {
+            panic!("map port should be a map");
+        };
+        assert_eq!(
+            port.get("name").map(|cell| cell.borrow().clone()),
+            Some(Value::String("shape".to_string()))
+        );
+        assert_eq!(
+            port.get("mappable").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            port.get("target-kind").map(|cell| cell.borrow().clone()),
+            Some(Value::String("instrument-param".to_string()))
         );
     }
 
@@ -23717,6 +24100,7 @@ mod tests {
             ("default", Value::Number(0.0)),
             ("decimals", Value::Number(0.0)),
             ("target", Value::String("step-param:transpose".to_string())),
+            ("map-ports", test_list(vec![])),
             (
                 "values",
                 test_number_list(&[
@@ -23735,6 +24119,21 @@ mod tests {
             ("label", Value::String("sparse-transpose".to_string())),
             ("enabled", Value::Bool(true)),
             ("target", Value::String("step-param:transpose".to_string())),
+            (
+                "ports",
+                test_list(vec![map_value([
+                    ("name", Value::String("__default".to_string())),
+                    ("label", Value::String("default".to_string())),
+                    ("hint", Value::String("step-param:transpose".to_string())),
+                    ("target", Value::String("step-param:transpose".to_string())),
+                    ("status", Value::String("hint".to_string())),
+                    ("manual", Value::Bool(false)),
+                    ("clearable", Value::Bool(false)),
+                    ("mappable", Value::Bool(false)),
+                    ("bindable", Value::Bool(false)),
+                    ("target-kind", Value::String("step-param".to_string())),
+                ])]),
+            ),
             (
                 "inlets",
                 test_list(vec![map_value([
@@ -23755,6 +24154,98 @@ mod tests {
     fn install_sparse_transpose_process_lane_fixture(editor: &mut eseqlisp::Editor) {
         let lane = sparse_transpose_process_lane_value();
         let slot = sparse_transpose_process_slot_value();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-lanes", test_list(vec![lane.clone()]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-lanes",
+            test_list(vec![test_list(vec![lane])]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-slots", test_list(vec![slot.clone()]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-slots",
+            test_list(vec![test_list(vec![slot])]),
+        );
+    }
+
+    fn mappable_process_lane_value() -> Value {
+        map_value([
+            ("mode", Value::Number(7.0)),
+            ("lane-index", Value::Number(0.0)),
+            ("slot-index", Value::Number(0.0)),
+            ("instance-id", Value::Number(42.0)),
+            ("class", Value::String("mod-writer".to_string())),
+            ("process", Value::String("mod-writer".to_string())),
+            ("inlet", Value::String("amount".to_string())),
+            ("name", Value::String("amount".to_string())),
+            ("label", Value::String("mod-writer / amount".to_string())),
+            ("short-label", Value::String("mw/amount".to_string())),
+            ("kind", Value::String("float".to_string())),
+            ("min", Value::Number(0.0)),
+            ("max", Value::Number(1.0)),
+            ("default", Value::Number(0.0)),
+            ("decimals", Value::Number(2.0)),
+            ("target", Value::String("shape:unbound".to_string())),
+            (
+                "map-ports",
+                test_list(vec![map_value([
+                    ("name", Value::String("shape".to_string())),
+                    ("label", Value::String("shape".to_string())),
+                    ("hint", Value::String(String::new())),
+                    ("target", Value::String("unbound".to_string())),
+                    ("status", Value::String("unbound".to_string())),
+                    ("manual", Value::Bool(false)),
+                    ("clearable", Value::Bool(false)),
+                    ("mappable", Value::Bool(true)),
+                    ("bindable", Value::Bool(true)),
+                    ("target-kind", Value::String("instrument-param".to_string())),
+                ])]),
+            ),
+            (
+                "values",
+                test_number_list(&[
+                    0.0, 0.25, 0.5, 0.75, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0,
+                ]),
+            ),
+        ])
+    }
+
+    fn mappable_process_slot_value() -> Value {
+        map_value([
+            ("slot-index", Value::Number(0.0)),
+            ("instance-id", Value::Number(42.0)),
+            ("class", Value::String("mod-writer".to_string())),
+            ("process", Value::String("mod-writer".to_string())),
+            ("label", Value::String("mod-writer".to_string())),
+            ("enabled", Value::Bool(true)),
+            ("target", Value::String("shape:unbound".to_string())),
+            (
+                "ports",
+                test_list(vec![map_value([
+                    ("name", Value::String("shape".to_string())),
+                    ("label", Value::String("shape".to_string())),
+                    ("hint", Value::String(String::new())),
+                    ("target", Value::String("unbound".to_string())),
+                    ("status", Value::String("unbound".to_string())),
+                    ("manual", Value::Bool(false)),
+                    ("clearable", Value::Bool(false)),
+                    ("mappable", Value::Bool(true)),
+                    ("bindable", Value::Bool(true)),
+                    ("target-kind", Value::String("instrument-param".to_string())),
+                ])]),
+            ),
+            ("inlets", test_list(vec![])),
+        ])
+    }
+
+    fn install_mappable_process_lane_fixture(editor: &mut eseqlisp::Editor) {
+        let lane = mappable_process_lane_value();
+        let slot = mappable_process_slot_value();
         editor
             .runtime_mut()
             .set_reactive("SEQ", "process-lanes", test_list(vec![lane.clone()]));
@@ -23833,9 +24324,197 @@ mod tests {
             find_layout_node_by_text(&layout, "sparse-transpose / amount").is_some(),
             "selected process lane header should render the full process/inlet label"
         );
-        let knob = find_layout_node_by_stable_key(&layout, "seqv-process-inlet-0-0-limit")
-            .expect("process inlet knob should render");
-        assert_finite_nonzero_rect(knob, "process inlet knob");
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-process-inlet-0-0-limit").is_none(),
+            "expanded process lane should not render slot-level process inlet numberpickers"
+        );
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-process-port-map-0-0-__default")
+                .is_none(),
+            "fixed sparse-transpose target should not render a map button"
+        );
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-process-lane-map-0-0-__default")
+                .is_none(),
+            "fixed sparse-transpose target should not render a lane map button"
+        );
+    }
+
+    #[test]
+    fn metal_seq_process_port_mapping_arms_port_and_binds_instrument_param() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        install_mappable_process_lane_fixture(&mut editor);
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-bind-process-port", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(value)) => *value as usize,
+                        _ => usize::MAX,
+                    };
+                    let instance_id = match args.get(1) {
+                        Some(Value::Number(value)) => *value as u64,
+                        _ => 0,
+                    };
+                    let port = match args.get(2) {
+                        Some(Value::String(value))
+                        | Some(Value::Symbol(value))
+                        | Some(Value::Keyword(value)) => value.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    let (kind, param_idx, param) = match args.get(3) {
+                        Some(Value::Map(map)) => {
+                            let kind = map
+                                .get("kind")
+                                .map(|value| value.borrow().clone())
+                                .and_then(|value| match value {
+                                    Value::String(value)
+                                    | Value::Symbol(value)
+                                    | Value::Keyword(value) => Some(value),
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
+                            let param_idx = map
+                                .get("param-idx")
+                                .map(|value| value.borrow().clone())
+                                .and_then(|value| match value {
+                                    Value::Number(value) => Some(value as usize),
+                                    _ => None,
+                                })
+                                .unwrap_or(usize::MAX);
+                            let param = map
+                                .get("param")
+                                .map(|value| value.borrow().clone())
+                                .and_then(|value| match value {
+                                    Value::String(value)
+                                    | Value::Symbol(value)
+                                    | Value::Keyword(value) => Some(value),
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
+                            (kind, param_idx, param)
+                        }
+                        _ => (String::new(), usize::MAX, String::new()),
+                    };
+                    calls.lock().unwrap().push(format!(
+                        "{track}:{instance_id}:{port}:{kind}:{param}:{param_idx}"
+                    ));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (seqv-set-track-expanded 0 true)
+                (seqv-set-param-mode 0 7)
+                "#,
+            )
+            .expect("expand track with process controls");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-process-port-map-0-0-shape").is_none(),
+            "process slot footer should not render port map buttons"
+        );
+        let port_button =
+            find_layout_node_by_stable_key(&layout, "seqv-process-lane-map-0-0-shape")
+                .expect("selected process lane should render mappable port button");
+        assert_finite_nonzero_rect(port_button, "process port map button");
+        editor
+            .runtime_mut()
+            .invoke(
+                port_button
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("process port map button on-click"),
+                vec![Value::Nil],
+            )
+            .expect("arm process port mapping");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(process-map-active?)")
+                .expect("read process map active state"),
+            Some(Value::Bool(true))
+        );
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer should exist")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(process-map-active?)")
+                .expect("read process map active state before fx layout"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(
+                    "(process-param-bindable? false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+                )
+                .expect("read process map bindable state before fx layout"),
+            Some(Value::Bool(true))
+        );
+        let layout = editor
+            .widget_layout()
+            .expect("fx panel layout should build");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let instrument_wrapper = find_layout_node_by_debug_name(&layout, "process-param-map-wrapper")
+            .unwrap_or_else(|| {
+                panic!(
+                    "instrument cutoff should render as a process-map target wrapper; layout={layout_summaries:#?}"
+                )
+            });
+        assert_finite_nonzero_rect(instrument_wrapper, "instrument cutoff process-map wrapper");
+        editor
+            .runtime_mut()
+            .invoke(
+                instrument_wrapper
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("instrument process-map wrapper on-click"),
+                vec![Value::Nil],
+            )
+            .expect("bind process port to instrument cutoff");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["0:42:shape:instrument:cutoff:0"],
+            "clicking a process-map parameter wrapper should bind the armed port"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(process-map-active?)")
+                .expect("read cleared process map active state"),
+            Some(Value::Bool(false))
+        );
     }
 
     #[test]
@@ -28532,6 +29211,213 @@ mod tests {
             }
             other => panic!("expected set-instrument-plock host command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn metal_seq_sampler_process_map_keeps_speed_knob_visible_with_pointer_capture() {
+        fn target_string_field(value: &Value, key: &str) -> String {
+            let Value::Map(map) = value else {
+                panic!("process target should be a map: {value:?}");
+            };
+            match map.get(key).map(|value| value.borrow().clone()) {
+                Some(Value::String(value))
+                | Some(Value::Symbol(value))
+                | Some(Value::Keyword(value)) => value,
+                other => panic!("process target missing string field {key}: {other:?}"),
+            }
+        }
+
+        fn target_number_field(value: &Value, key: &str) -> f64 {
+            let Value::Map(map) = value else {
+                panic!("process target should be a map: {value:?}");
+            };
+            match map.get(key).map(|value| value.borrow().clone()) {
+                Some(Value::Number(value)) => value,
+                other => panic!("process target missing number field {key}: {other:?}"),
+            }
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        let sampler_inst = test_sampler_instrument_map(0);
+        let synth = sampler_inst
+            .get("synth")
+            .expect("sampler test instrument should expose synth params")
+            .clone();
+        {
+            let mut synth_value = synth.borrow_mut();
+            let Value::List(params) = &mut *synth_value else {
+                panic!("sampler synth params should be a list");
+            };
+            for param_cell in params {
+                let Value::Map(param) = &mut *param_cell.borrow_mut() else {
+                    continue;
+                };
+                let is_speed = matches!(
+                    param.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String(name)) if name == "speed"
+                );
+                if is_speed {
+                    param.insert(
+                        "value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(
+                            "track-0-instrument-param-11-value".to_string(),
+                        ))),
+                    );
+                }
+            }
+        }
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(sampler_inst)]),
+                ),
+                ("sampler-playhead", Value::Number(0.0)),
+                ("bus-effects", test_list(vec![])),
+                ("track-plocks", test_list(vec![])),
+                ("track-plock-variants", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install sampler fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-bind-process-port", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(value)) => *value as usize,
+                        other => panic!("missing track arg: {other:?}"),
+                    };
+                    let instance_id = match args.get(1) {
+                        Some(Value::Number(value)) => *value as u64,
+                        other => panic!("missing instance-id arg: {other:?}"),
+                    };
+                    let port = match args.get(2) {
+                        Some(Value::String(value))
+                        | Some(Value::Symbol(value))
+                        | Some(Value::Keyword(value)) => value.clone(),
+                        other => panic!("missing port arg: {other:?}"),
+                    };
+                    let target = args.get(3).expect("target arg");
+                    calls.lock().unwrap().push(format!(
+                        "{track}:{instance_id}:{port}:{}:{}:{}",
+                        target_string_field(target, "kind"),
+                        target_string_field(target, "param"),
+                        target_number_field(target, "param-idx")
+                    ));
+                    Ok(Value::Bool(true))
+                });
+        }
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (set! process-map-track 0)
+                  (set! process-map-instance-id 42)
+                  (set! process-map-port "speed"))
+                "#,
+            )
+            .expect("arm process map state");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("sampler fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("sampler process-map layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let speed_wrapper =
+            find_layout_node_by_stable_key(&layout, "sampler-param-11-mod-wrapper-process-map")
+                .unwrap_or_else(|| {
+                    panic!("sampler speed process-map wrapper; layout={layout_summaries:#?}")
+                });
+        assert_finite_nonzero_rect(speed_wrapper, "sampler speed process-map wrapper");
+        assert!(
+            !layout_node_contains_text_fragment(&layout, "<bind:"),
+            "process-map targets should not render reactive binding internals; layout={layout_summaries:#?}"
+        );
+        assert_eq!(
+            speed_wrapper.props.get("capture-pointer"),
+            Some(&Value::Bool(true)),
+            "process-map wrapper should capture clicks while leaving the underlying control visible"
+        );
+        let speed_knob = find_layout_node_by_widget_type(speed_wrapper, "knob-number")
+            .unwrap_or_else(|| {
+                panic!("process-map mode should keep the live sampler speed knob visible")
+            });
+        assert_eq!(
+            speed_knob.props.get("label"),
+            Some(&Value::String("speed".to_string())),
+            "process-map mode should preserve the sampler speed knob label"
+        );
+        assert!(
+            speed_knob.rect.width > 0.0 && speed_knob.rect.height > 0.0,
+            "process-map mode should preserve the sampler speed knob geometry"
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(
+                speed_wrapper
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("sampler speed process-map wrapper on-click"),
+                vec![Value::Nil],
+            )
+            .expect("bind sampler speed process target");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["0:42:speed:instrument:speed:11"],
+            "sampler speed mapping should send explicit instrument param identity"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(process-map-active?)")
+                .expect("read cleared process map state"),
+            Some(Value::Bool(false))
+        );
     }
 
     #[test]

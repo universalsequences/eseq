@@ -37,6 +37,195 @@ fn value_symbol_name(value: &Value) -> Option<String> {
     }
 }
 
+fn process_slot_port_def(
+    state: &SequencerState,
+    track: usize,
+    instance_id: sequencer::process::ProcessInstanceId,
+    port_name: &str,
+) -> Option<sequencer::process::ProcessPortDef> {
+    let Some(chain) = state.track_process_chain(track) else {
+        return None;
+    };
+    let Some(slot) = chain
+        .slots
+        .iter()
+        .find(|slot| slot.instance_id == instance_id)
+    else {
+        return None;
+    };
+    state
+        .published_process_authoring()
+        .defs
+        .iter()
+        .find(|def| def.name == slot.class_name)
+        .and_then(|def| def.ports.iter().find(|port| port.name == port_name))
+        .cloned()
+}
+
+fn process_target_param_name(value: &Value) -> Option<String> {
+    value_string_field(value, "param").or_else(|| value_string_field(value, "param-name"))
+}
+
+fn process_target_effect_name(value: &Value) -> Option<String> {
+    value_string_field(value, "effect").or_else(|| value_string_field(value, "fx"))
+}
+
+fn descriptor_param_name(
+    desc: Option<&sequencer::effects::EffectDescriptor>,
+    param_idx: usize,
+) -> Option<String> {
+    desc.and_then(|desc| desc.params.get(param_idx))
+        .map(|param| param.name.clone())
+}
+
+fn require_slot_param_index(
+    param_idx: usize,
+    num_params: usize,
+    target: impl FnOnce() -> String,
+) -> Result<(), String> {
+    if param_idx < num_params {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} param index {param_idx} is out of range ({num_params} params)",
+            target()
+        ))
+    }
+}
+
+fn process_binding_target_from_value(
+    state: &SequencerState,
+    track: usize,
+    value: &Value,
+) -> Result<sequencer::process::ParamTarget, String> {
+    let kind = value_string_field(value, "kind")
+        .ok_or_else(|| "process target must include :kind".to_string())?;
+    match kind.trim_start_matches(':') {
+        "step-param" | "step" => {
+            let param = value_string_field(value, "param")
+                .ok_or_else(|| "step-param process target must include :param".to_string())?;
+            Ok(sequencer::process::ParamTarget::StepParam { param })
+        }
+        "instrument" | "instrument-param" => {
+            let param_idx = value_number_field(value, "param-idx")
+                .ok_or_else(|| "instrument process target must include :param-idx".to_string())?;
+            let slot =
+                state.pattern.instrument_slots.get(track).ok_or_else(|| {
+                    format!("instrument slot for track {} is not loaded", track + 1)
+                })?;
+            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+            require_slot_param_index(param_idx, num_params, || {
+                format!("instrument track {}", track + 1)
+            })?;
+            let (_effect_descriptors, instrument_descriptors) = state.scratch_runtime_descriptors();
+            let param = process_target_param_name(value)
+                .or_else(|| descriptor_param_name(instrument_descriptors.get(track), param_idx))
+                .ok_or_else(|| {
+                    format!(
+                        "instrument process target must include :param for track {} param index {param_idx}",
+                        track + 1
+                    )
+                })?;
+            Ok(sequencer::process::ParamTarget::InstrumentParam {
+                param,
+                param_id: slot.param_node_id(param_idx),
+            })
+        }
+        "effect" | "effect-param" | "audio-fx" | "audio-effect" => {
+            let slot_idx = value_number_field(value, "slot-idx")
+                .or_else(|| value_number_field(value, "slot"))
+                .ok_or_else(|| "effect process target must include :slot-idx".to_string())?;
+            let param_idx = value_number_field(value, "param-idx")
+                .ok_or_else(|| "effect process target must include :param-idx".to_string())?;
+            let slot = state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+                .ok_or_else(|| {
+                    format!(
+                        "effect slot for track {} slot {} is not loaded",
+                        track + 1,
+                        slot_idx + 1
+                    )
+                })?;
+            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+            require_slot_param_index(param_idx, num_params, || {
+                format!("effect track {} slot {}", track + 1, slot_idx + 1)
+            })?;
+            let (effect_descriptors, _instrument_descriptors) = state.scratch_runtime_descriptors();
+            let desc = effect_descriptors
+                .get(track)
+                .and_then(|descs| descs.get(slot_idx));
+            let effect = process_target_effect_name(value)
+                .or_else(|| desc.map(|desc| desc.name.clone()))
+                .ok_or_else(|| {
+                    format!(
+                        "effect process target must include :effect for track {} slot {}",
+                        track + 1,
+                        slot_idx + 1
+                    )
+                })?;
+            let param = process_target_param_name(value)
+                .or_else(|| descriptor_param_name(desc, param_idx))
+                .ok_or_else(|| {
+                    format!(
+                        "effect process target must include :param for track {} slot {} param index {param_idx}",
+                        track + 1,
+                        slot_idx + 1
+                    )
+                })?;
+            Ok(sequencer::process::ParamTarget::EffectParam {
+                slot: slot_idx,
+                effect,
+                param,
+                param_id: slot.param_node_id(param_idx),
+            })
+        }
+        "midi-fx" | "midi-fx-param" | "midi-effect" => {
+            let slot_idx = value_number_field(value, "slot-idx")
+                .or_else(|| value_number_field(value, "slot"))
+                .ok_or_else(|| "midi-fx process target must include :slot-idx".to_string())?;
+            let param_idx = value_number_field(value, "param-idx")
+                .ok_or_else(|| "midi-fx process target must include :param-idx".to_string())?;
+            let chain_fx_name = state
+                .pattern
+                .track_params
+                .get(track)
+                .and_then(|params| params.midi_fx_chain().get(slot_idx).cloned())
+                .ok_or_else(|| {
+                    format!(
+                        "MIDI-FX slot {} is not loaded on track {}",
+                        slot_idx + 1,
+                        track + 1
+                    )
+                })?;
+            let fx = value_string_field(value, "fx").unwrap_or(chain_fx_name);
+            let desc = sequencer::lisp_host::load_midi_fx_descriptor(&fx)
+                .ok_or_else(|| format!("MIDI-FX descriptor for {fx} is not loaded"))?;
+            require_slot_param_index(param_idx, desc.params.len(), || format!("MIDI-FX {fx}"))?;
+            let param = process_target_param_name(value)
+                .or_else(|| descriptor_param_name(Some(&desc), param_idx))
+                .ok_or_else(|| {
+                    format!("midi-fx process target must include :param for {fx} param index {param_idx}")
+                })?;
+            Ok(sequencer::process::ParamTarget::MidiFxParam {
+                slot: slot_idx,
+                fx: desc.name,
+                param,
+            })
+        }
+        "rack-slot" | "rack-slot-param" | "rack-instrument" | "rack-slot-instrument-param" => Err(
+            "rack process-port bindings are not exposed until rack dispatch supports them"
+                .to_string(),
+        ),
+        "bus-effect" | "bus-fx" => {
+            Err("bus FX process-port bindings are not supported".to_string())
+        }
+        other => Err(format!("unknown process target kind :{other}")),
+    }
+}
+
 fn nonnegative_usize_arg(name: &str, value: f64) -> Result<usize, String> {
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
         return Err(format!("{name} must be a non-negative integer"));
@@ -378,6 +567,59 @@ mod delete_target_tests {
     }
 }
 
+#[cfg(test)]
+mod process_binding_target_tests {
+    use super::*;
+
+    fn map_value(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+        Value::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value))))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn process_binding_target_prefers_clicked_instrument_param_name_over_descriptor_cache() {
+        let state =
+            SequencerState::new(1, vec![sequencer::sequencer::default_empty_effect_chain()]);
+        let sampler_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let speed_idx = sampler_desc
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("sampler speed param");
+        state.pattern.instrument_slots[0].apply_descriptor(&sampler_desc, 12);
+        state.set_scratch_runtime_descriptors(
+            vec![sequencer::effects::EffectDescriptor::default_full_chain()],
+            vec![sequencer::effects::EffectDescriptor::builtin_filter()],
+        );
+
+        let target = process_binding_target_from_value(
+            &state,
+            0,
+            &map_value([
+                ("kind", Value::String("instrument".to_string())),
+                ("param-idx", Value::Number(speed_idx as f64)),
+                ("param", Value::String("speed".to_string())),
+            ]),
+        )
+        .expect("instrument target");
+
+        match target {
+            sequencer::process::ParamTarget::InstrumentParam { param, param_id } => {
+                assert_eq!(param, "speed");
+                assert_eq!(
+                    param_id,
+                    state.pattern.instrument_slots[0].param_node_id(speed_idx)
+                );
+            }
+            other => panic!("unexpected target: {other:?}"),
+        }
+    }
+}
+
 pub(crate) fn init_runtime(
     app: &ui::App,
     state: Arc<SequencerState>,
@@ -423,6 +665,10 @@ pub(crate) fn init_runtime(
 
     let track_count = track_names.len();
     let effect_descriptors = app.graph.effect_descriptors.clone();
+    state.set_scratch_runtime_descriptors(
+        app.graph.effect_descriptors.clone(),
+        app.graph.instrument_descriptors.clone(),
+    );
     let accumulator_names = Arc::new(Mutex::new(build_accumulator_names(&app)));
     let midi_fx_names = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -1702,6 +1948,111 @@ pub(crate) fn init_runtime(
         }
         ui_inv.push(UiInvalidation::ProcessChain { track });
         Ok(Value::Number(updated as f64))
+    });
+
+    let st = state.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-bind-process-port", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(instance_id)),
+            Some(port),
+            Some(target),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err(
+                "seq-bind-process-port: expected (track instance-id port target-map)".into(),
+            );
+        };
+        let track = *track as usize;
+        let instance_id = sequencer::process::ProcessInstanceId(*instance_id as u64);
+        let port = value_symbol_name(port)
+            .ok_or_else(|| "seq-bind-process-port: port must be a name".to_string())?;
+        let Some(port_def) = process_slot_port_def(&st, track, instance_id, &port) else {
+            return Err(format!(
+                "seq-bind-process-port: no matching process port {port:?} on track {}",
+                track + 1
+            )
+            .into());
+        };
+        if !port_def.mappable {
+            return Err(format!(
+                "seq-bind-process-port: process port {port:?} is not mappable"
+            )
+            .into());
+        }
+        let target = process_binding_target_from_value(&st, track, target)
+            .map_err(|error| format!("seq-bind-process-port: {error}"))?;
+        if !port_def.allows_manual_target(&target) {
+            let target_kind = port_def
+                .effective_target_kind()
+                .map(|kind| kind.as_str())
+                .unwrap_or("any compatible target");
+            return Err(format!(
+                "seq-bind-process-port: target is incompatible with port {port:?} kind {target_kind}"
+            )
+            .into());
+        }
+        if st.process_trace_enabled() {
+            eprintln!(
+                "[process-trace] bind track={} instance={} port={} target={:?}",
+                track + 1,
+                instance_id.0,
+                port,
+                target
+            );
+        }
+        if !st.set_process_port_binding(track, instance_id, &port, target) {
+            return Err("seq-bind-process-port: no matching attached process slot".into());
+        }
+        ui_inv.push(UiInvalidation::ProcessChain { track });
+        Ok(Value::Bool(true))
+    });
+
+    let st = state.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-clear-process-port-binding", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(instance_id)), Some(port)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-clear-process-port-binding: expected (track instance-id port)".into());
+        };
+        let track = *track as usize;
+        let instance_id = sequencer::process::ProcessInstanceId(*instance_id as u64);
+        let port = value_symbol_name(port)
+            .ok_or_else(|| "seq-clear-process-port-binding: port must be a name".to_string())?;
+        if !st.clear_process_port_binding(track, instance_id, &port) {
+            return Err("seq-clear-process-port-binding: no matching attached process slot".into());
+        }
+        ui_inv.push(UiInvalidation::ProcessChain { track });
+        Ok(Value::Bool(true))
+    });
+
+    let st = state.clone();
+    runtime.register_native("seq-set-process-trace", move |args, _ctx| {
+        let enabled = match args.first() {
+            Some(Value::Bool(value)) => *value,
+            Some(Value::Number(value)) => *value != 0.0,
+            Some(Value::Keyword(value))
+            | Some(Value::Symbol(value))
+            | Some(Value::String(value)) => {
+                matches!(
+                    value.trim_start_matches(':').to_ascii_lowercase().as_str(),
+                    "true" | "on" | "yes" | "1"
+                )
+            }
+            None => return Ok(Value::Bool(st.process_trace_enabled())),
+            Some(other) => {
+                return Err(format!(
+                    "seq-set-process-trace: expected bool-ish value, got {}",
+                    eseqlisp::vm::format_lisp_value(other)
+                )
+                .into())
+            }
+        };
+        st.set_process_trace_enabled(enabled);
+        eprintln!("[process-trace] enabled={enabled}");
+        Ok(Value::Bool(enabled))
     });
 
     let st = state.clone();
@@ -4246,6 +4597,21 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-process-inlet",
             "(seq-set-process-inlet track instance-id inlet value)",
             "Set a scalar inlet on an attached process slot.",
+        ),
+        (
+            "seq-bind-process-port",
+            "(seq-bind-process-port track instance-id port target-map)",
+            "Bind an attached process slot port to a live step, instrument, effect, or MIDI-FX parameter target.",
+        ),
+        (
+            "seq-clear-process-port-binding",
+            "(seq-clear-process-port-binding track instance-id port)",
+            "Clear a manual process slot port binding so the authored target hint is used again.",
+        ),
+        (
+            "seq-set-process-trace",
+            "(seq-set-process-trace enabled)",
+            "Toggle process-port backend trace logging; with no argument, return the current state.",
         ),
         (
             "seq-piano-roll-action",

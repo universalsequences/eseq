@@ -2,6 +2,87 @@
 (def instrument-rack-target? (p)
   (not (= (get p :rack-track) nil)))
 
+(defstate process-map-track -1)
+(defstate process-map-instance-id 0)
+(defstate process-map-port "")
+(defstate process-map-target-kind "")
+
+(def process-map-active? ()
+  (and (>= process-map-track 0)
+       (> process-map-instance-id 0)
+       (not (= process-map-port ""))))
+
+(def process-map-port-active? (track slot port)
+  (and (process-map-active?)
+       (= process-map-track track)
+       (= process-map-instance-id (get slot :instance-id))
+       (= process-map-port (get port :name))))
+
+(def process-map-arm-port (track slot port)
+  (if (process-map-port-active? track slot port)
+    (process-map-clear)
+    (do
+      (set! process-map-track track)
+      (set! process-map-instance-id (get slot :instance-id))
+      (set! process-map-port (get port :name))
+      (set! process-map-target-kind (if (get port :target-kind) (get port :target-kind) ""))
+      (seq-show-fx-lower-panel))))
+
+(def process-map-clear ()
+  (do
+    (set! process-map-track -1)
+    (set! process-map-instance-id 0)
+    (set! process-map-port "")
+    (set! process-map-target-kind "")))
+
+(def process-map-target-map (fx p)
+  (if (not (fx-param-has-idx? p))
+    false
+    (if fx
+      (if (get fx :midi-fx)
+        (dict :kind "midi-fx" :slot-idx (get fx :slot-idx)
+              :fx (get fx :name) :param-idx (get p :idx) :param (get p :name))
+        (if (get fx :bus-fx)
+          false
+          (dict :kind "effect" :slot-idx (get fx :slot-idx)
+                :effect (get fx :name) :param-idx (get p :idx) :param (get p :name))))
+      (if (instrument-rack-target? p)
+        false
+        (dict :kind "instrument" :param-idx (get p :idx) :param (get p :name))))))
+
+(def process-map-target-compatible? (target)
+  (let ((kind (get target :kind)))
+    (if (= process-map-target-kind "")
+      true
+      (if (= process-map-target-kind "device-param")
+        (or (= kind "instrument") (= kind "effect") (= kind "midi-fx"))
+        (if (= process-map-target-kind "instrument-param")
+          (= kind "instrument")
+          (if (= process-map-target-kind "effect-param")
+            (= kind "effect")
+            (if (= process-map-target-kind "midi-fx-param")
+              (= kind "midi-fx")
+              false)))))))
+
+(def process-param-bindable? (fx p)
+  (let ((target (process-map-target-map fx p)))
+    (if target
+      (process-map-target-compatible? target)
+      false)))
+
+(def process-bind-param-target (fx p)
+  (let ((target (process-map-target-map fx p)))
+    (if (and target (process-map-target-compatible? target))
+      (do
+        (seq-bind-process-port process-map-track process-map-instance-id process-map-port target)
+        (process-map-clear))
+      nil)))
+
+(def process-param-map-bg (fx p)
+  (if (and (process-map-active?) (process-param-bindable? fx p))
+    (rgba 0.93 0.65 0.16 0.25)
+    :transparent))
+
 (def instrument-target-param-dict (source-p idx)
   (if (instrument-rack-target? source-p)
     (dict :idx idx :control "param"
@@ -313,15 +394,27 @@
     :transparent))
 
 (def param-mod-wrapper (fx p key body)
-  (if (and (param-mods-open? fx) (get p :modulatable))
-    (subtree :key key
-      (box :background-color (param-mod-bg fx p)
-           :corner-radius 8
-           :border-width 1
-           :padding 0.08
-           :on-double-click (lambda (info) (param-toggle-modulation fx p))
-        body))
-    body))
+  (if (process-map-active?)
+    (if (process-param-bindable? fx p)
+      (subtree :key (str key "-process-map")
+        (box :background-color (process-param-map-bg fx p)
+             :debug-name "process-param-map-wrapper"
+             :corner-radius 8
+             :border-width 1
+             :padding 0.08
+             :capture-pointer true
+             :on-click (lambda (info) (process-bind-param-target fx p))
+          body))
+      body)
+    (if (and (param-mods-open? fx) (get p :modulatable))
+      (subtree :key key
+        (box :background-color (param-mod-bg fx p)
+             :corner-radius 8
+             :border-width 1
+             :padding 0.08
+             :on-double-click (lambda (info) (param-toggle-modulation fx p))
+          body))
+      body)))
 
 (def fx-param-numeric-value (p)
   (reactive-value (fx-param-value p)))
@@ -510,12 +603,24 @@
     :transparent))
 
 (def instrument-param-mod-wrapper (p key body)
-  (if (and instrument-mods-open (get p :modulatable))
-    (subtree :key key
-      (box :background-color (instrument-param-mod-bg p)
-           :corner-radius 8
-           :border-width 1
-           :padding 0.08
-           :on-double-click (lambda (info) (instrument-toggle-param-modulation p))
-        body))
-    body))
+  (if (process-map-active?)
+    (if (process-param-bindable? false p)
+      (subtree :key (str key "-process-map")
+        (box :background-color (process-param-map-bg false p)
+             :debug-name "process-param-map-wrapper"
+             :corner-radius 8
+             :border-width 1
+             :padding 0.0
+             :capture-pointer true
+             :on-click (lambda (info) (process-bind-param-target false p))
+          body))
+      body)
+    (if (and instrument-mods-open (get p :modulatable))
+      (subtree :key key
+        (box :background-color (instrument-param-mod-bg p)
+             :corner-radius 8
+             :border-width 1
+             :padding 0.08
+             :on-double-click (lambda (info) (instrument-toggle-param-modulation p))
+          body))
+      body)))

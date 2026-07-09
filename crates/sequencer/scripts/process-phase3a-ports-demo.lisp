@@ -12,7 +12,7 @@
 ;; The process has three named output ports:
 ;;
 ;;   pitch -> transient step transpose
-;;   gate  -> transient MIDI-FX param on the demo repeat FX
+;;   gate  -> transient sampler release param by default, remappable in the UI
 ;;   speed -> transient sampler instrument param, using normalized values
 ;;
 ;; Nothing below should write back into step data, p-locks, key-locks, MIDI-FX
@@ -29,14 +29,6 @@
 ;;   (phase3a-port-writer-h :speed 1.0)   ; sampler speed normalizes to raw max
 ;;   (processes :track 0)                ; clear the process chain
 ;;
-;; To test the MIDI-FX port, put the built-in "beat-repeat" MIDI-FX on track 0.
-;; If your current evaluator exposes MIDI-FX assignment natives, this helper does
-;; it from Lisp:
-;;   (phase3a-use-beat-repeat)
-;;
-;; If you remove beat-repeat again, the gate port becomes a stale-target no-op
-;; while the pitch and speed ports still apply.
-;;
 ;; Re-evaluating this buffer is idempotent: it replaces track 0's process chain
 ;; for the current pattern.
 
@@ -45,18 +37,15 @@
 (def-process phase3a-port-writer
   :doc "Phase 3A named process port target demo"
   :in ((pitch :float -24 24 :default 12)
-       (gate :float 0 1 :default 0)
-       (speed :float 0 1 :default 0.625))
+       (gate :float 0 1 :default 0 :lane true)
+       (speed :float 0 1 :default 0.625 :lane true))
   :targets '((pitch (step-param :transpose))
-             (gate (fx-param :beat-repeat :gate))
-             (speed (instrument-param :speed)))
+             (gate :mappable (instrument-param :release))
+             (speed :mappable (instrument-param :speed)))
   :run (do
          (target-add! :pitch (in :pitch))
          (target-set! :gate (in :gate))
          (target-set! :speed (in :speed))))
-
-(def phase3a-use-beat-repeat ()
-  (seq-use-midi-fx 0 "beat-repeat"))
 
 (def phase3a-attach-track (track)
   (processes :track track phase3a-port-writer-h))

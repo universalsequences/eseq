@@ -1919,7 +1919,13 @@ mod tests {
                                     values: vec![0.0, 1.0, 0.0, 2.0],
                                 },
                             )]),
-                            bindings: std::collections::BTreeMap::new(),
+                            bindings: std::collections::BTreeMap::from([(
+                                "shape".to_string(),
+                                Some(crate::process::ParamTarget::InstrumentParam {
+                                    param: "release".to_string(),
+                                    param_id: None,
+                                }),
+                            )]),
                         }],
                     },
                     crate::process::TrackProcessChain::default(),
@@ -1982,6 +1988,13 @@ mod tests {
         assert_eq!(
             restored.patterns[0].process_chains[0].slots[0].lanes["amount"].values,
             vec![0.0, 1.0, 0.0, 2.0]
+        );
+        assert_eq!(
+            restored.patterns[0].process_chains[0].slots[0].bindings["shape"],
+            Some(crate::process::ParamTarget::InstrumentParam {
+                param: "release".to_string(),
+                param_id: None,
+            })
         );
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);

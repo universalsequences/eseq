@@ -2544,6 +2544,10 @@ impl App {
             key_lock_variant_registries,
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
+        snapshot.refresh_process_binding_param_ids(
+            &self.graph.effect_descriptors,
+            &self.graph.instrument_descriptors,
+        );
         refresh_neural_output_override_param_ids(&mut snapshot);
 
         Ok((snapshot, bus_patterns, fallback_count))

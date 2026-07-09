@@ -162,6 +162,30 @@ fn path_to_widget_id(node: &LayoutNode, target_id: u64, path: &mut Vec<LayoutNod
     false
 }
 
+fn truthy_prop(node: &LayoutNode, key: &str) -> bool {
+    match node.props.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Nil) | None => false,
+        Some(_) => true,
+    }
+}
+
+fn node_captures_pointer(node: &LayoutNode) -> bool {
+    truthy_prop(node, "capture-pointer")
+}
+
+fn nearest_pointer_capture_node(layout: &LayoutNode, hit_node: &LayoutNode) -> Option<LayoutNode> {
+    let mut path = Vec::new();
+    if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
+        return None;
+    }
+    path.into_iter().rev().find(node_captures_pointer)
+}
+
+fn pointer_dispatch_node(layout: &LayoutNode, hit_node: LayoutNode) -> LayoutNode {
+    nearest_pointer_capture_node(layout, &hit_node).unwrap_or(hit_node)
+}
+
 fn nearest_widget_gesture_node(
     layout: &LayoutNode,
     hit_node: &LayoutNode,
@@ -172,9 +196,16 @@ fn nearest_widget_gesture_node(
     if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
         return None;
     }
+    let pointer_capture_id = nearest_pointer_capture_node(layout, hit_node)
+        .as_ref()
+        .map(|node| node.widget_id);
     let hit_node_handles_pointer = widget_render::node_handles_pointer_events(hit_node);
     path.into_iter().rev().find_map(|node| {
-        if node.widget_id != hit_node.widget_id && hit_node_handles_pointer {
+        let is_pointer_capture = pointer_capture_id == Some(node.widget_id);
+        if pointer_capture_id.is_some() && !is_pointer_capture {
+            return None;
+        }
+        if node.widget_id != hit_node.widget_id && hit_node_handles_pointer && !is_pointer_capture {
             return None;
         }
         let gesture_data = begin_widget_gesture_data(&node, local_col, local_row);
@@ -827,6 +858,12 @@ impl Editor {
             let Some(node) = self.widget_node_at_local(local_col, local_row) else {
                 return false;
             };
+            let node = self
+                .runtime
+                .current_layout
+                .as_ref()
+                .map(|layout| pointer_dispatch_node(layout, node.clone()))
+                .unwrap_or(node);
 
             self.dispatch_widget_mouse_event(
                 &node,
@@ -1230,6 +1267,19 @@ impl Editor {
         let end_local = (end.0 - content_col as f32, end.1 - content_row as f32);
         let start_node = self.widget_node_at_local(start_local.0, start_local.1);
         let end_node = self.widget_node_at_local(end_local.0, end_local.1);
+        let layout = self.runtime.current_layout.clone();
+        let start_node = start_node.map(|node| {
+            layout
+                .as_ref()
+                .map(|layout| pointer_dispatch_node(layout, node.clone()))
+                .unwrap_or(node)
+        });
+        let end_node = end_node.map(|node| {
+            layout
+                .as_ref()
+                .map(|layout| pointer_dispatch_node(layout, node.clone()))
+                .unwrap_or(node)
+        });
         let allow_slider_drag = self.pointer_drag_started_on_slider;
 
         if let Some(node) = start_node.as_ref()
@@ -1832,4 +1882,106 @@ fn find_scroll_ancestor_impl(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod pointer_capture_tests {
+    use std::collections::HashMap;
+
+    use crate::layout::Rect;
+
+    use super::*;
+
+    fn test_node(
+        widget_id: u64,
+        widget_type: &str,
+        props: HashMap<String, Value>,
+        children: Vec<LayoutNode>,
+    ) -> LayoutNode {
+        LayoutNode {
+            widget_id,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: widget_type.to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            props,
+            children,
+            focusable: false,
+        }
+    }
+
+    fn props(entries: &[(&str, Value)]) -> HashMap<String, Value> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn pointer_dispatch_uses_nearest_capture_ancestor() {
+        let hit = test_node(
+            4,
+            "knob-number",
+            props(&[("bind", Value::String("param".to_string()))]),
+            vec![],
+        );
+        let inner_capture = test_node(
+            3,
+            "box",
+            props(&[("capture-pointer", Value::Bool(true))]),
+            vec![hit.clone()],
+        );
+        let outer_capture = test_node(
+            2,
+            "box",
+            props(&[("capture-pointer", Value::Bool(true))]),
+            vec![inner_capture],
+        );
+        let root = test_node(1, "v-stack", HashMap::new(), vec![outer_capture]);
+
+        let dispatch = pointer_dispatch_node(&root, hit);
+
+        assert_eq!(
+            dispatch.widget_id, 3,
+            "the closest capture wrapper should receive the pointer event"
+        );
+    }
+
+    #[test]
+    fn gesture_node_uses_capture_wrapper_even_when_child_handles_pointer() {
+        let hit = test_node(
+            3,
+            "knob-number",
+            props(&[("bind", Value::String("param".to_string()))]),
+            vec![],
+        );
+        let capture = test_node(
+            2,
+            "box",
+            props(&[
+                ("capture-pointer", Value::Bool(true)),
+                ("on-click", Value::Symbol("bind-target".to_string())),
+            ]),
+            vec![hit.clone()],
+        );
+        let root = test_node(1, "v-stack", HashMap::new(), vec![capture]);
+
+        let Some((gesture_node, gesture_data)) = nearest_widget_gesture_node(&root, &hit, 1.0, 1.0)
+        else {
+            panic!("capture wrapper should create a gesture");
+        };
+
+        assert_eq!(gesture_node.widget_id, 2);
+        assert!(
+            matches!(gesture_data, Some(Value::String(value)) if value == "capture-pointer"),
+            "capture wrapper should prevent child drag handlers from taking over"
+        );
+    }
 }

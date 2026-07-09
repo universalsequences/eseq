@@ -4236,6 +4236,30 @@ fn publish_process_authoring(
     }
 }
 
+fn register_process_target_hint_constructors(runtime: &mut Runtime) {
+    for (name, arity) in [
+        ("step-param", 1usize),
+        ("param-tag", 1),
+        ("instrument-param", 1),
+        ("effect-param", 2),
+        ("midi-fx-target", 2),
+    ] {
+        runtime.register_native_with_docs(
+            name,
+            name,
+            "Construct a process target hint expression.",
+            move |args, _ctx| {
+                if args.len() != arity {
+                    return Err(format!("{name} expects {arity} argument(s)"));
+                }
+                Ok(process_list(
+                    std::iter::once(EValue::Symbol(name.to_string())).chain(args.into_iter()),
+                ))
+            },
+        );
+    }
+}
+
 fn register_process_natives(
     runtime: &mut Runtime,
     process_authoring: SharedProcessAuthoring,
@@ -4260,6 +4284,8 @@ fn register_process_natives(
         }
         publish_process_authoring(&process_authoring_for_hook, &publish_for_hook);
     }));
+
+    register_process_target_hint_constructors(runtime);
 
     let process_authoring_for_def = Arc::clone(&process_authoring);
     let publish_for_def = publish.clone();
@@ -5058,6 +5084,49 @@ fn process_chain_slot_from_handle(
     })
 }
 
+fn preserve_process_slot_state(
+    defs: &[crate::process::ProcessDef],
+    existing: &crate::process::TrackProcessChain,
+    replacement: &mut crate::process::TrackProcessChain,
+) {
+    for slot in &mut replacement.slots {
+        let Some(existing_slot) = existing.slots.iter().find(|existing_slot| {
+            existing_slot.instance_id == slot.instance_id
+                && existing_slot.class_name == slot.class_name
+        }) else {
+            continue;
+        };
+        let Some(def) = defs.iter().find(|def| def.name == slot.class_name) else {
+            continue;
+        };
+        for inlet in &def.inlets {
+            if inlet.lane {
+                if let Some(lane) = existing_slot.lanes.get(&inlet.name) {
+                    slot.lanes.insert(inlet.name.clone(), lane.clone());
+                }
+            }
+            if slot.inlets.contains_key(&inlet.name) {
+                if let Some(value) = existing_slot.inlets.get(&inlet.name) {
+                    slot.inlets.insert(inlet.name.clone(), value.clone());
+                }
+            } else if inlet.lane {
+                if let Some(value) = existing_slot.inlets.get(&inlet.name) {
+                    slot.inlets.insert(inlet.name.clone(), value.clone());
+                }
+            }
+        }
+        for port in &def.ports {
+            let Some(Some(target)) = existing_slot.bindings.get(&port.name) else {
+                continue;
+            };
+            if port.allows_manual_target(target) && slot.bindings.contains_key(&port.name) {
+                slot.bindings
+                    .insert(port.name.clone(), Some(target.clone()));
+            }
+        }
+    }
+}
+
 fn register_process_chain_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
@@ -5110,7 +5179,7 @@ fn register_process_chain_natives(
             )?;
             let mut slots = Vec::new();
             let mut handles = Vec::new();
-            {
+            let defs = {
                 let registry = authoring_for_processes
                     .lock()
                     .map_err(|_| "failed to lock process registry".to_string())?;
@@ -5127,11 +5196,16 @@ fn register_process_chain_natives(
                     slots.push(process_chain_slot_from_handle(&registry, *id)?);
                     handles.push(arg.clone());
                 }
-            }
+                registry.defs.clone()
+            };
             let chain = crate::process::TrackProcessChain { slots };
             if write_process_chain_state {
                 for track in &tracks {
-                    if !state_for_processes.set_track_process_chain(*track, chain.clone()) {
+                    let mut track_chain = chain.clone();
+                    if let Some(existing) = state_for_processes.track_process_chain(*track) {
+                        preserve_process_slot_state(&defs, &existing, &mut track_chain);
+                    }
+                    if !state_for_processes.set_track_process_chain(*track, track_chain) {
                         return Err(format!("track {track} out of range"));
                     }
                 }
@@ -5326,7 +5400,9 @@ fn parse_process_accumulator_def(
     name: &str,
     args: &[EValue],
 ) -> Result<crate::process::ProcessDef, String> {
-    let mut ports = None;
+    let mut target_port = None;
+    let mut target_kind = None;
+    let mut target_hint = None;
     let mut amount = None;
     let mut reset_lane = false;
     let mut range = None;
@@ -5342,15 +5418,13 @@ fn parse_process_accumulator_def(
         };
         match key.as_str() {
             "target" => {
-                if ports.is_some() {
-                    return Err(
-                        "def-accumulator cannot specify both :target and :targets".to_string()
-                    );
+                if target_port.is_some() {
+                    return Err("def-accumulator cannot specify :target more than once".to_string());
                 }
-                ports = Some(vec![crate::process::ProcessPortDef::default_with_target(
-                    parse_process_target_hint(value)?,
-                )]);
+                target_port = Some(parse_process_accumulator_target(value)?);
             }
+            "target-kind" => target_kind = Some(parse_process_target_kind(value)?),
+            "target-hint" => target_hint = Some(parse_process_target_hint(value)?),
             "amount" => amount = Some(parse_process_accumulator_amount_inlet(value)?),
             "reset" => {
                 let reset = process_symbol_name(value)?.to_ascii_lowercase();
@@ -5371,7 +5445,29 @@ fn parse_process_accumulator_def(
         }
         idx += 1;
     }
-    let ports = ports.ok_or_else(|| "def-accumulator requires :target".to_string())?;
+    let mut target_port =
+        target_port.ok_or_else(|| "def-accumulator requires :target".to_string())?;
+    if target_port.mappable {
+        if let Some(kind) = target_kind {
+            target_port.target_kind = Some(kind);
+        }
+        if let Some(hint) = target_hint {
+            if let Some(kind) = target_port.target_kind {
+                if !kind.matches_hint(&hint) {
+                    return Err(format!(
+                        "def-accumulator :target-hint kind {} is incompatible with :target-kind {}",
+                        hint.target_kind().as_str(),
+                        kind.as_str()
+                    ));
+                }
+            }
+            target_port.target = Some(hint);
+        }
+    } else if target_kind.is_some() || target_hint.is_some() {
+        return Err(
+            "def-accumulator :target-kind and :target-hint require :target :mappable".to_string(),
+        );
+    }
     let amount = amount.ok_or_else(|| "def-accumulator requires :amount".to_string())?;
     let mut inlets = vec![amount.clone()];
     let reset_inlet = if reset_lane {
@@ -5398,7 +5494,7 @@ fn parse_process_accumulator_def(
         state: Vec::new(),
         every: None,
         seed_policy,
-        ports,
+        ports: vec![target_port],
         accumulator: Some(crate::process::ProcessAccumulatorSpec {
             amount_inlet: amount.name,
             reset_inlet,
@@ -5507,9 +5603,7 @@ fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::Proc
                 if ports.is_some() {
                     return Err("def-process cannot specify both :target and :targets".to_string());
                 }
-                ports = Some(vec![crate::process::ProcessPortDef::default_with_target(
-                    parse_process_target_hint(value)?,
-                )]);
+                ports = Some(vec![parse_process_default_target(value)?]);
             }
             "targets" => {
                 if ports.is_some() {
@@ -5665,34 +5759,114 @@ fn parse_process_seed_policy(value: &EValue) -> Result<crate::process::ProcessSe
     }
 }
 
+fn parse_process_default_target(value: &EValue) -> Result<crate::process::ProcessPortDef, String> {
+    if value_list(value).is_some() {
+        return Ok(crate::process::ProcessPortDef::default_with_target(
+            parse_process_target_hint(value)?,
+        ));
+    }
+    let name = process_symbol_name(value)?.to_ascii_lowercase();
+    if name == "mappable" {
+        return Ok(crate::process::ProcessPortDef::default_mappable(None, None));
+    }
+    Err(":target expects a target hint list or :mappable".to_string())
+}
+
+fn parse_process_accumulator_target(
+    value: &EValue,
+) -> Result<crate::process::ProcessPortDef, String> {
+    parse_process_default_target(value)
+}
+
+fn parse_process_target_kind(value: &EValue) -> Result<crate::process::ProcessTargetKind, String> {
+    let name = process_symbol_name(value)?.to_ascii_lowercase();
+    match name.as_str() {
+        "step-param" | "step_param" | "step" => Ok(crate::process::ProcessTargetKind::StepParam),
+        "device-param" | "device_param" | "device" => {
+            Ok(crate::process::ProcessTargetKind::DeviceParam)
+        }
+        "instrument-param" | "instrument_param" | "instrument" => {
+            Ok(crate::process::ProcessTargetKind::InstrumentParam)
+        }
+        "effect-param" | "effect_param" | "effect" | "fx-param" | "fx_param" => {
+            Ok(crate::process::ProcessTargetKind::EffectParam)
+        }
+        "midi-fx-param" | "midi_fx_param" | "midi-fx" | "midi_fx" => {
+            Ok(crate::process::ProcessTargetKind::MidiFxParam)
+        }
+        "rack-slot-param" | "rack_slot_param" | "rack-slot" | "rack_slot" => {
+            Ok(crate::process::ProcessTargetKind::RackSlotParam)
+        }
+        "rack-slot-instrument-param"
+        | "rack_slot_instrument_param"
+        | "rack-instrument-param"
+        | "rack_instrument_param" => Ok(crate::process::ProcessTargetKind::RackSlotInstrumentParam),
+        other => Err(format!("unknown process target kind :{other}")),
+    }
+}
+
+fn parse_process_port_def(items: &[EValue]) -> Result<crate::process::ProcessPortDef, String> {
+    let name = process_symbol_name(
+        items
+            .first()
+            .ok_or_else(|| "target port declaration missing name".to_string())?,
+    )?;
+    if name == crate::process::DEFAULT_PROCESS_PORT {
+        return Err(format!(
+            "'{name}' is reserved for internal default target ports"
+        ));
+    }
+    let tail = &items[1..];
+    match tail {
+        [target] if value_list(target).is_some() => Ok(
+            crate::process::ProcessPortDef::with_target(name, parse_process_target_hint(target)?),
+        ),
+        [marker] => {
+            let marker = process_symbol_name(marker)?.to_ascii_lowercase();
+            if marker == "mappable" {
+                Ok(crate::process::ProcessPortDef::mappable(name, None, None))
+            } else {
+                Err("target port expects a target hint or :mappable".to_string())
+            }
+        }
+        [marker, value] => {
+            let marker = process_symbol_name(marker)?.to_ascii_lowercase();
+            if marker != "mappable" {
+                return Err("target port expects :mappable before target kind or hint".to_string());
+            }
+            if value_list(value).is_some() {
+                Ok(crate::process::ProcessPortDef::mappable(
+                    name,
+                    None,
+                    Some(parse_process_target_hint(value)?),
+                ))
+            } else {
+                Ok(crate::process::ProcessPortDef::mappable(
+                    name,
+                    Some(parse_process_target_kind(value)?),
+                    None,
+                ))
+            }
+        }
+        [] => Err("target port declaration requires a target hint or :mappable".to_string()),
+        _ => Err("target port declaration has too many fields".to_string()),
+    }
+}
+
 fn parse_process_ports(value: &EValue) -> Result<Vec<crate::process::ProcessPortDef>, String> {
     let entries = value_list(value).ok_or_else(|| ":targets expects a list".to_string())?;
     let mut ports = Vec::new();
     for entry in entries {
         let items = value_list(&entry)
             .ok_or_else(|| "target port declaration must be a list".to_string())?;
-        let name = process_symbol_name(
-            items
-                .first()
-                .ok_or_else(|| "target port declaration missing name".to_string())?,
-        )?;
-        if name == crate::process::DEFAULT_PROCESS_PORT {
-            return Err(format!(
-                "'{name}' is reserved for internal default target ports"
-            ));
-        }
+        let port = parse_process_port_def(&items)?;
         if ports
             .iter()
-            .any(|port: &crate::process::ProcessPortDef| port.name == name)
+            .any(|existing: &crate::process::ProcessPortDef| existing.name == port.name)
         {
-            return Err(format!("duplicate target port '{name}'"));
+            return Err(format!("duplicate target port '{}'", port.name));
         }
-        let target = match items.get(1) {
-            None => None,
-            Some(value) if value_list(value).is_some() => Some(parse_process_target_hint(value)?),
-            Some(_) => None,
-        };
-        ports.push(crate::process::ProcessPortDef { name, target });
+        ports.push(port);
     }
     Ok(ports)
 }
@@ -5742,16 +5916,15 @@ fn parse_process_target_hint(value: &EValue) -> Result<crate::process::ProcessTa
             )?;
             Ok(crate::process::ProcessTargetHint::EffectParam { effect, param })
         }
-        "fx-param" | "midi-fx-param" => {
-            let fx = process_symbol_name(
-                items
-                    .get(1)
-                    .ok_or_else(|| "(fx-param :fx :param) expects an fx name".to_string())?,
-            )?;
+        "fx-param" | "midi-fx-param" | "midi-fx-target" => {
+            let fx =
+                process_symbol_name(items.get(1).ok_or_else(|| {
+                    "(midi-fx-target :fx :param) expects an fx name".to_string()
+                })?)?;
             let param = process_symbol_name(
                 items
                     .get(2)
-                    .ok_or_else(|| "(fx-param :fx :param) expects a param".to_string())?,
+                    .ok_or_else(|| "(midi-fx-target :fx :param) expects a param".to_string())?,
             )?;
             Ok(crate::process::ProcessTargetHint::MidiFxParam { fx, param })
         }
@@ -21072,7 +21245,7 @@ mod tests {
                 r#"
                 (def-process multi-port
                   :targets '((pitch (step-param :transpose))
-                             (gate (fx-param :beat-repeat :gate)))
+                             (gate (midi-fx-target :beat-repeat :gate)))
                   :run (do
                     (target-add! :pitch 7)
                     (target-set! :gate 0.25)))
@@ -21089,19 +21262,19 @@ mod tests {
         assert_eq!(
             def.ports,
             vec![
-                crate::process::ProcessPortDef {
-                    name: "pitch".to_string(),
-                    target: Some(crate::process::ProcessTargetHint::StepParam {
+                crate::process::ProcessPortDef::with_target(
+                    "pitch",
+                    crate::process::ProcessTargetHint::StepParam {
                         param: "transpose".to_string(),
-                    }),
-                },
-                crate::process::ProcessPortDef {
-                    name: "gate".to_string(),
-                    target: Some(crate::process::ProcessTargetHint::MidiFxParam {
+                    },
+                ),
+                crate::process::ProcessPortDef::with_target(
+                    "gate",
+                    crate::process::ProcessTargetHint::MidiFxParam {
                         fx: "beat-repeat".to_string(),
                         param: "gate".to_string(),
-                    }),
-                },
+                    },
+                ),
             ]
         );
 
@@ -21143,6 +21316,166 @@ mod tests {
     }
 
     #[test]
+    fn def_process_parses_mappable_target_ports() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (def-process mappable-port
+                  :targets '((shape :mappable :device-param)
+                             (cutoff :mappable (param-tag :cutoff))
+                             (pitch (step-param :transpose)))
+                  :run (do
+                    (target-set! :shape 0.5)
+                    (target-set! :cutoff 0.25)
+                    (target-add! :pitch 7)))
+                "#,
+            )
+            .expect("define mappable process ports");
+
+        let authored = scratch.process_authoring_snapshot();
+        let def = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "mappable-port")
+            .expect("process definition");
+        assert_eq!(
+            def.ports,
+            vec![
+                crate::process::ProcessPortDef::mappable(
+                    "shape",
+                    Some(crate::process::ProcessTargetKind::DeviceParam),
+                    None,
+                ),
+                crate::process::ProcessPortDef::mappable(
+                    "cutoff",
+                    None,
+                    Some(crate::process::ProcessTargetHint::ParamTag {
+                        tag: "cutoff".to_string(),
+                    }),
+                ),
+                crate::process::ProcessPortDef::with_target(
+                    "pitch",
+                    crate::process::ProcessTargetHint::StepParam {
+                        param: "transpose".to_string(),
+                    },
+                ),
+            ]
+        );
+
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 80,
+                source: def.run_source.clone().expect("run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                ports: def.ports.clone(),
+                seed: 123,
+            })
+            .expect("invoke mappable-port process");
+        assert_eq!(result.target_writes.len(), 3);
+        assert_eq!(result.target_writes[0].port, "shape");
+        assert_eq!(result.target_writes[0].target, None);
+        assert_eq!(
+            result.target_writes[1].target,
+            Some(crate::process::ProcessTargetHint::ParamTag {
+                tag: "cutoff".to_string(),
+            })
+        );
+        assert_eq!(
+            result.target_writes[2].target,
+            Some(crate::process::ProcessTargetHint::StepParam {
+                param: "transpose".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn def_accumulator_parses_mappable_target_with_kind_and_hint() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (def-accumulator filter-rise
+                  :target :mappable
+                  :target-kind :device-param
+                  :target-hint (param-tag :cutoff)
+                  :amount (amount :float 0 1 :lane true)
+                  :range (0 1)
+                  :mode :clip)
+                "#,
+            )
+            .expect("define mappable accumulator");
+
+        let authored = scratch.process_authoring_snapshot();
+        let def = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "filter-rise")
+            .expect("accumulator definition");
+        assert_eq!(
+            def.ports,
+            vec![crate::process::ProcessPortDef::default_mappable(
+                Some(crate::process::ProcessTargetKind::DeviceParam),
+                Some(crate::process::ProcessTargetHint::ParamTag {
+                    tag: "cutoff".to_string(),
+                }),
+            )]
+        );
+        assert!(def.inlets[0].lane);
+    }
+
+    #[test]
+    fn def_process_rejects_legacy_untyped_target_port_placeholder() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        let result = scratch
+            .eval(
+                r#"
+                (def-process old-placeholder
+                  :targets '((aux :float))
+                  :run (target-set! :aux 1))
+                "#,
+            )
+            .expect("legacy untyped placeholder should return false");
+        assert_eq!(result, Some(Value::Bool(false)));
+        assert!(
+            scratch
+                .process_authoring_snapshot()
+                .defs
+                .iter()
+                .all(|def| def.name != "old-placeholder"),
+            "rejected placeholder process should not be registered"
+        );
+    }
+
+    #[test]
     fn process_target_write_errors_on_unknown_named_port() {
         let process_eval = Arc::new(std::sync::Mutex::new(Some(super::ProcessEvalContext {
             runtime_id: 79,
@@ -21150,12 +21483,12 @@ mod tests {
             inlets: HashMap::new(),
             state: HashMap::new(),
             event: None,
-            ports: vec![crate::process::ProcessPortDef {
-                name: "pitch".to_string(),
-                target: Some(crate::process::ProcessTargetHint::StepParam {
+            ports: vec![crate::process::ProcessPortDef::with_target(
+                "pitch",
+                crate::process::ProcessTargetHint::StepParam {
                     param: "transpose".to_string(),
-                }),
-            }],
+                },
+            )],
             outputs: Vec::new(),
             emissions: Vec::new(),
             target_writes: Vec::new(),
@@ -21225,6 +21558,62 @@ mod tests {
     }
 
     #[test]
+    fn process_midi_fx_target_helper_does_not_shadow_midi_fx_param_declaration() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (def-process midi-target-writer
+                  :target (midi-fx-target :beat-repeat :gate)
+                  :run (target-set! 1))
+
+                (midi-fx-param "gate"
+                  :default 0.5
+                  :min 0
+                  :max 1)
+                (def-midi-fx "shadow-check" (fx-emit 0))
+                "#,
+            )
+            .expect("define process target and MIDI FX param in one runtime");
+
+        let process_def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "midi-target-writer")
+            .expect("process definition");
+        assert_eq!(
+            process_def.ports[0].target,
+            Some(crate::process::ProcessTargetHint::MidiFxParam {
+                fx: "beat-repeat".to_string(),
+                param: "gate".to_string(),
+            })
+        );
+
+        let desc = scratch
+            .midi_fx_descriptors()
+            .into_iter()
+            .find(|desc| desc.name == "shadow-check")
+            .expect("MIDI FX descriptor");
+        assert!(
+            desc.params.iter().any(|param| param.name == "gate"),
+            "{:?}",
+            desc.params
+                .iter()
+                .map(|param| param.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn process_phase3a_ports_demo_loads_and_attaches_chain() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
@@ -21273,10 +21662,10 @@ mod tests {
         assert!(def.ports.iter().any(|port| {
             port.name == "gate"
                 && port.target
-                    == Some(crate::process::ProcessTargetHint::MidiFxParam {
-                        fx: "beat-repeat".to_string(),
-                        param: "gate".to_string(),
+                    == Some(crate::process::ProcessTargetHint::InstrumentParam {
+                        param: "release".to_string(),
                     })
+                && port.mappable
         }));
         assert!(def.ports.iter().any(|port| {
             port.name == "speed"
@@ -21284,7 +21673,79 @@ mod tests {
                     == Some(crate::process::ProcessTargetHint::InstrumentParam {
                         param: "speed".to_string(),
                     })
+                && port.mappable
         }));
+    }
+
+    #[test]
+    fn process_phase3b_mappable_demo_loads_and_marks_only_mappable_ports() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-phase3b-mappable-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read Phase 3B mappable demo");
+
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate Phase 3B mappable demo");
+
+        let chain = state.track_process_chain(0).expect("track 0 process chain");
+        assert_eq!(chain.slots.len(), 1);
+        let slot = &chain.slots[0];
+        assert_eq!(slot.class_name, "phase3b-mappable-writer");
+        assert!(slot.lanes.contains_key("amount"));
+        assert!(slot.lanes.contains_key("pitch"));
+
+        let authored = scratch.process_authoring_snapshot();
+        let def = authored
+            .defs
+            .iter()
+            .find(|def| def.name == "phase3b-mappable-writer")
+            .expect("Phase 3B process definition");
+        let pitch = def
+            .ports
+            .iter()
+            .find(|port| port.name == "pitch")
+            .expect("pitch port");
+        assert_eq!(
+            pitch.target,
+            Some(crate::process::ProcessTargetHint::StepParam {
+                param: "transpose".to_string(),
+            })
+        );
+        assert!(!pitch.mappable);
+
+        let shape = def
+            .ports
+            .iter()
+            .find(|port| port.name == "shape")
+            .expect("shape port");
+        assert!(shape.mappable);
+        assert_eq!(
+            shape.target_kind,
+            Some(crate::process::ProcessTargetKind::InstrumentParam)
+        );
+        assert_eq!(shape.target, None);
+
+        let color = def
+            .ports
+            .iter()
+            .find(|port| port.name == "color")
+            .expect("color port");
+        assert!(color.mappable);
+        assert_eq!(
+            color.target_kind,
+            Some(crate::process::ProcessTargetKind::DeviceParam)
+        );
+        assert_eq!(color.target, None);
     }
 
     #[test]
@@ -21337,6 +21798,84 @@ mod tests {
                 .instance_id,
             ui_instance_id,
             "scheduler scratch eval must not replace UI-authored chain slots with scheduler-local handles"
+        );
+    }
+
+    #[test]
+    fn project_scratch_reattach_preserves_saved_process_lanes_and_port_bindings() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let script_path = format!(
+            "{}/scripts/process-phase3a-ports-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
+
+        let eval_demo = |state: Arc<SequencerState>| {
+            let mut runtime = Runtime::new();
+            runtime
+                .eval_str("(def seq-register-script-source-tab (label) nil)")
+                .expect("install source-tab stub");
+            register_published_process_authoring_natives(
+                &mut runtime,
+                state,
+                Arc::new(AtomicUsize::new(0)),
+            );
+            runtime
+                .eval_str(&source)
+                .expect("evaluate demo in UI runtime");
+        };
+
+        eval_demo(Arc::clone(&state));
+        let instance_id = state
+            .track_process_chain(0)
+            .expect("initial process chain")
+            .slots
+            .first()
+            .expect("initial process slot")
+            .instance_id;
+        assert!(state.set_process_port_binding(
+            0,
+            instance_id,
+            "gate",
+            crate::process::ParamTarget::InstrumentParam {
+                param: "release".to_string(),
+                param_id: None,
+            },
+        ));
+        assert_eq!(
+            state.set_process_lane_values(instance_id, "gate", vec![0.0, 0.25, 0.75, 1.0]),
+            1
+        );
+        assert_eq!(
+            state.set_process_lane_values(instance_id, "speed", vec![1.0, 0.75, 0.5, 0.25]),
+            1
+        );
+
+        // Project load restores the saved chain first, then evaluates project
+        // scratch in a fresh UI runtime. The demo source reattaches the same
+        // stable UI handle; that must not reset saved pattern-owned lane/binding
+        // state back to the script defaults.
+        eval_demo(Arc::clone(&state));
+
+        let chain = state
+            .track_process_chain(0)
+            .expect("process chain after scratch reattach");
+        let slot = chain.slots.first().expect("process slot after reattach");
+        assert_eq!(slot.instance_id, instance_id);
+        assert_eq!(
+            slot.lanes.get("gate").map(|lane| lane.values.as_slice()),
+            Some(&[0.0, 0.25, 0.75, 1.0][..])
+        );
+        assert_eq!(
+            slot.lanes.get("speed").map(|lane| lane.values.as_slice()),
+            Some(&[1.0, 0.75, 0.5, 0.25][..])
+        );
+        assert_eq!(
+            slot.bindings.get("gate"),
+            Some(&Some(crate::process::ParamTarget::InstrumentParam {
+                param: "release".to_string(),
+                param_id: None,
+            }))
         );
     }
 

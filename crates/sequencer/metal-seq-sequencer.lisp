@@ -1147,6 +1147,14 @@
       -1
       (range 0 (len (seqv-track-process-lanes track))))))
 
+(def seqv-selected-process-lane (track mode)
+  (if (seqv-process-lane-mode? mode)
+    (let ((lane-idx (seqv-process-lane-index mode)))
+      (if (and (>= lane-idx 0) (< lane-idx (len (seqv-track-process-lanes track))))
+        (nth (seqv-track-process-lanes track) lane-idx)
+        nil))
+    nil))
+
 (def seqv-select-process-lane-option (track track-id label)
   (let ((lane-idx (seqv-process-lane-selector-index track label)))
     (do
@@ -1157,13 +1165,57 @@
           (seqv-set-param-mode track-id 3)
           nil)))))
 
+(def seqv-process-lane-map-row (track lane port)
+  (box :background-color (seqv-process-port-status-color track lane port)
+    :corner-radius 5
+    :padding 0.06
+    :key (str "seqv-process-lane-map-row-" track "-" (get lane :slot-index) "-" (get port :name))
+    (h-stack :gap 0.2 :align :baseline
+      (box :width 0.5)
+      (label (get port :label)
+        :font-size 9.5 :width 4.2 :color :white :bg :transparent)
+      (label (get port :target)
+        :font-size 9.5 :width 9.4 :color :dim :bg :transparent)
+      (button (seqv-process-port-action-label track lane port)
+        :key (str "seqv-process-lane-map-" track "-" (get lane :slot-index) "-" (get port :name))
+        :width 3.8 :height 1.0 :padding 0 :font-size 9.5
+        :background-color :transparent
+        :border-color :transparent
+        :color :white
+        :on-click (lambda (info) (process-map-arm-port track lane port)))
+      (if (get port :clearable)
+        (button "clear"
+          :key (str "seqv-process-lane-map-clear-" track "-" (get lane :slot-index) "-" (get port :name))
+          :width 3.8 :height 1.0 :padding 0 :font-size 9.5
+          :background-color :transparent
+          :border-color :transparent
+          :color :dim
+          :on-click (lambda (info)
+            (do
+              (seq-clear-process-port-binding track (get lane :instance-id) (get port :name))
+              (process-map-clear))))
+        (box :width 3.8 :height 1.0 :bg :transparent)))))
+
+(def seqv-process-lane-map-editor (track lane)
+  (let ((ports (if (get lane :map-ports) (get lane :map-ports) '())))
+    (if (> (len ports) 0)
+      (v-stack :gap 0.08
+        (each ports |port|
+          (seqv-process-lane-map-row track lane port)))
+      (box :width 0.1 :height 0.1 :bg :transparent))))
+
 (def seqv-process-lane-selector (track track-id mode)
-  (dropdown
-    :value (seqv-process-lane-selector-value track mode)
-    :key (str "seqv-expanded-process-lane-selector-" track-id)
-    :options (seqv-process-lane-options track)
-    :on-change (lambda (v) (seqv-select-process-lane-option track track-id v))
-    :width 12.8 :height 1.45 :font-size 10))
+  (let ((lane (seqv-selected-process-lane track mode)))
+    (v-stack :gap 0.1
+      (dropdown
+        :value (seqv-process-lane-selector-value track mode)
+        :key (str "seqv-expanded-process-lane-selector-" track-id)
+        :options (seqv-process-lane-options track)
+        :on-change (lambda (v) (seqv-select-process-lane-option track track-id v))
+        :width 12.8 :height 1.45 :font-size 10)
+      (if lane
+        (seqv-process-lane-map-editor track lane)
+        (box :width 0.1 :height 0.1 :bg :transparent)))))
 
 (def seqv-expanded-track-quick-controls (track track-id)
   (let ((mode (seqv-param-mode track-id)))
@@ -1220,6 +1272,47 @@
                       :color :dim
                       :bg :transparent)))))))))))
 
+(def seqv-process-port-status-color (track slot port)
+  (if (process-map-port-active? track slot port)
+    (rgba 0.93 0.65 0.16 0.28)
+    (if (= (get port :status) "bound")
+      (rgba 0.25 0.72 0.42 0.22)
+      (if (= (get port :status) "hint")
+        (rgba 0.28 0.42 0.85 0.18)
+        (rgba 0.42 0.42 0.46 0.16)))))
+
+(def seqv-process-port-action-label (track slot port)
+  (if (process-map-port-active? track slot port) "armed" "map"))
+
+(def seqv-process-port-editor (track slot port)
+  (box :background-color (seqv-process-port-status-color track slot port)
+       :corner-radius 6
+       :padding 0.08
+    (h-stack :gap 0.25 :align :center
+      (label (get port :label)
+        :font-size 9.5 :width 4.6 :color :white :bg :transparent)
+      (label (get port :target)
+        :font-size 9.5 :width 10.8 :color :dim :bg :transparent)
+      (button (seqv-process-port-action-label track slot port)
+        :key (str "seqv-process-port-map-" track "-" (get slot :slot-index) "-" (get port :name))
+        :width 4.2 :height 1.05 :padding 0 :font-size 9.5
+        :background-color :transparent
+        :border-color :transparent
+        :color :white
+        :on-click (lambda (info) (process-map-arm-port track slot port)))
+      (if (get port :clearable)
+        (button "clear"
+          :key (str "seqv-process-port-clear-" track "-" (get slot :slot-index) "-" (get port :name))
+          :width 4.2 :height 1.05 :padding 0 :font-size 9.5
+          :background-color :transparent
+          :border-color :transparent
+          :color :dim
+          :on-click (lambda (info)
+            (do
+              (seq-clear-process-port-binding track (get slot :instance-id) (get port :name))
+              (process-map-clear))))
+        (box :width 4.2 :height 1.05 :bg :transparent)))))
+
 (def seqv-process-inlet-editor (track slot inlet)
   (h-stack :gap 0.35 :align :center
     (label (get inlet :label)
@@ -1243,13 +1336,20 @@
     (if (> (len slots) 0)
       (v-stack :gap 0.18
         (each slots |slot|
-          (let ((inlets (get slot :inlets)))
-            (if (> (len inlets) 0)
-              (h-stack :gap 0.45 :align :center
+          (let ((inlets (get slot :inlets))
+                (ports (if (get slot :ports) (get slot :ports) '())))
+            (if (or (> (len inlets) 0) (> (len ports) 0))
+              (h-stack :gap 0.45 :align :start
                 (label (get slot :process)
                   :font-size 10 :width 8.6 :color :white :bg :transparent)
-                (each inlets |inlet|
-                  (seqv-process-inlet-editor track slot inlet)))
+                (v-stack :gap 0.12
+                  (each ports |port|
+                    (seqv-process-port-editor track slot port))
+                  (if (> (len inlets) 0)
+                    (h-stack :gap 0.45 :align :center
+                      (each inlets |inlet|
+                        (seqv-process-inlet-editor track slot inlet)))
+                    (box :width 0.1 :height 0.1 :bg :transparent))))
               (box :width 0.1 :height 0.1 :bg :transparent)))))
       (box :width 0.1 :height 0.1 :bg :transparent))))
 
@@ -1355,10 +1455,10 @@
                     :color :dim)
                   (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                     (step-playhead-dot
-                      :active (seqv-slot-playhead-binding track-id i)))))))
-          (seqv-process-slot-editor track track-id))))
+                      :active (seqv-slot-playhead-binding track-id i)))))))))
     )
   )
+)
 
 (def seqv-track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))

@@ -1162,6 +1162,14 @@ impl Runtime {
         runtime.document_builtin_symbols();
         runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
         register_audio_natives(&mut runtime);
+        runtime
+            .vm
+            .register_native_with_vm("current-source-path", |_args, vm| {
+                vm.source_manager
+                    .current_module()
+                    .map(|path| Value::String(path.display().to_string()))
+                    .unwrap_or_else(|| Value::String(String::new()))
+            });
         // (load path) — read through the source manager so dirty editor overlays
         // and load-stack-relative paths participate in normal evaluation.
         runtime.vm.register_native_with_vm("load", |args, vm| {
