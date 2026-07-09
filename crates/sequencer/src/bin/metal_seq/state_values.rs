@@ -24264,6 +24264,30 @@ mod tests {
         );
     }
 
+    fn ranged_process_lane_value(min: f64, max: f64, default: f64) -> Value {
+        let values = [default; 16];
+        map_value([
+            ("mode", Value::Number(7.0)),
+            ("lane-index", Value::Number(0.0)),
+            ("slot-index", Value::Number(0.0)),
+            ("instance-id", Value::Number(42.0)),
+            ("class", Value::String("range-origin".to_string())),
+            ("process", Value::String("range-origin".to_string())),
+            ("inlet", Value::String("amount".to_string())),
+            ("name", Value::String("amount".to_string())),
+            ("label", Value::String("range-origin / amount".to_string())),
+            ("short-label", Value::String("ro/amount".to_string())),
+            ("kind", Value::String("float".to_string())),
+            ("min", Value::Number(min)),
+            ("max", Value::Number(max)),
+            ("default", Value::Number(default)),
+            ("decimals", Value::Number(2.0)),
+            ("target", Value::String(String::new())),
+            ("map-ports", test_list(vec![])),
+            ("values", test_number_list(&values)),
+        ])
+    }
+
     #[test]
     fn metal_seq_process_lanes_render_as_expanded_selector_and_knobs() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -24514,6 +24538,83 @@ mod tests {
                 .eval_str("(process-map-active?)")
                 .expect("read cleared process map active state"),
             Some(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn metal_seq_process_lane_slider_origin_uses_min_unless_range_is_symmetric() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let asymmetric_lane = ranged_process_lane_value(2.0, 10.0, 6.0);
+        let symmetric_lane = ranged_process_lane_value(-24.0, 24.0, 6.0);
+        let lanes = test_list(vec![asymmetric_lane, symmetric_lane]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-lanes", lanes.clone());
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-process-lanes", test_list(vec![lanes]));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-slots", test_list(vec![]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-slots",
+            test_list(vec![test_list(vec![])]),
+        );
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-track-param-origin 0 7)")
+                .expect("evaluate asymmetric process lane origin"),
+            Some(Value::Number(2.0)),
+            "non-symmetric process lane ranges should originate at their minimum"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-track-param-origin 0 8)")
+                .expect("evaluate symmetric process lane origin"),
+            Some(Value::Number(0.0)),
+            "symmetric process lane ranges should originate at zero"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-range-origin 4 4)")
+                .expect("evaluate positive-only degenerate range origin"),
+            Some(Value::Number(4.0)),
+            "positive-only ranges should still originate at their minimum"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (seqv-set-track-expanded 0 true)
+                (seqv-set-param-mode 0 7)
+                "#,
+            )
+            .expect("expand track and select asymmetric process lane");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+            .expect("process lane slider should render");
+        assert_eq!(
+            layout_prop_number(slider, "origin"),
+            Some(2.0),
+            "rendered process lane slider origin should come from the lane range, not the inlet default"
         );
     }
 

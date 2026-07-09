@@ -165,10 +165,13 @@ Lisp conditionals:
 2. **Verdicts on the base event** — `(veto!)` masks this step's trig; mutator verbs
    modify it in place. The step-attached `:run` executes with the resolved base
    event as implicit context.
-3. **Event multiplication** — `(ratchet! :times n :span dur :shape (fn (i ev) ...))`
+3. **Event multiplication** —
+   `(ratchet! :times n :mode :subdivide|:repeat :span dur :shape (fn (i ev) ...))`
    spawns sub-events **cloned from the base event** (chord, p-locks, param locks
    intact), never constructed from scratch. The `:shape` lambda with index `i` is
-   the burst-local accumulator — a pure fold over `i`.
+   the burst-local accumulator — a pure fold over `i`. `:mode` selects the two
+   Cirklon-style repeat behaviors and reinterprets `:span` accordingly (see
+   Phase 4 for the full table).
 
 ### Normative ordering rules
 
@@ -626,15 +629,21 @@ Ratchet with velocity decay:
 
 ```lisp
 (def-process repeater
-  :in ((times :int 0 8 :default 0 :lane true)
-       (decay :float 0 1 :default 0.7)
+  :in ((times  :int 0 8 :default 0 :lane true)
+       (mode   :enum (:subdivide :repeat) :default :subdivide)
+       (decay  :float 0 1 :default 0.7)
        (spread :float 0.5 2 :default 1))
   :run (when (> (in :times) 0)
          (ratchet! :times (in :times)
-                   :span (* (step-length) (in :spread))
+                   :mode  (in :mode)   ; :subdivide fills the step; :repeat trails past it
+                   :span  (* (step-length) (in :spread))
                    :shape (fn (i ev)
                             (vel! ev (* (vel ev) (pow (in :decay) i)))))))
 ```
+
+`mode` is an ordinary inlet, so the choice is a knob (and lane-/p-lockable like
+everything else). Authors writing raw `:run` bodies can also pass `:mode`
+directly, even computed per-fire (`:mode (if (in :long) :repeat :subdivide)`).
 
 Multi-target (named ports once a process writes more than one place; fixed
 ports use their hint only, while `:mappable` ports expose the mapping UI — see
@@ -866,16 +875,35 @@ Known 3A limitations:
 
 1. `(veto!)`: verdict in the run result; event marked dead; chain continues; state
    still advances. Dimmed-step preview for `:seed :locked` masks.
-2. `(ratchet! :times :span :shape)`: clones the base event (chord/p-locks/params
-   intact), applies the `:shape` fold per sub-event, schedules via the pending-
-   emissions store; sub-events routed through the existing
-   `enqueue_due_process_emissions` / MIDI FX path. Ghost-step preview.
+2. `(ratchet! :times :mode :span :shape)`: clones the base event
+   (chord/p-locks/params intact), applies the `:shape` fold per sub-event,
+   schedules via the pending-emissions store; sub-events routed through the
+   existing `enqueue_due_process_emissions` / MIDI FX path. Ghost-step preview.
 
-   define 2 modes for ratchet:
-     + Divide the "duration" by times (so duration of each hit is step.duration / times)
-     + Schedule :times repeats :duration apart (so duration of each hit is step.duration)
+   **Two modes** (Cirklon's "repeat" has the same split). One verb, one clone
+   path, one `:shape` fold — `:mode` only changes the onset/duration math when
+   the scheduler materializes the clones, and reinterprets what `:span` means:
+
+   | `:mode` | `:span` means | onset spacing | each hit's duration | total burst | feel |
+   |---|---|---|---|---|---|
+   | `:subdivide` (default) | total window to fill (default `step.duration`) | `span / times` | `span / times` | one step | classic roll / stutter |
+   | `:repeat` | inter-onset interval (default `step.duration`) | `span` | base event's own duration (unchanged) | `times × span` | echo / delay-line, trails past the step |
+
+   `:span` defaults to the step length in both modes, so the common case is just
+   `(ratchet! :times n)`. Both modes are deterministic given
+   `(times, mode, span)`, so ghost-step preview draws onsets at the computed
+   offsets: `:subdivide` packs ghosts inside the step, `:repeat` shows trailing
+   ghosts.
+
+   **Overlap policy (open — see Open Questions):** in `:repeat` mode the burst
+   extends past the step boundary, so trailing hits can collide with the next
+   trig on the track. Default to **ring-through** (each clone is a normal
+   downstream event with its own duration, per the "same downstream path" rule),
+   leaving a `:choke`-at-boundary option for later. `:subdivide` never raises
+   this.
 
 3. `prob-mask` and `repeater` land as builtin library processes with presets.
+   `repeater` exposes `mode` as a `:subdivide|:repeat` inlet.
 
 ### Phase 5 — Ordered-chain UI polish
 
@@ -1068,3 +1096,6 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
   Leaning: follow the hint until the user manually maps it, then never move.
 - Whether per-pattern binding overrides are ever needed, or track-level
   bindings suffice (start track-level only).
+- Ratchet `:repeat`-mode overlap: do trailing hits ring through the next trig
+  (leaning default) or get choked at the step boundary? Add a `:choke` option
+  only if ring-through bites in practice.

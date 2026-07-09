@@ -1212,7 +1212,7 @@
         :key (str "seqv-expanded-process-lane-selector-" track-id)
         :options (seqv-process-lane-options track)
         :on-change (lambda (v) (seqv-select-process-lane-option track track-id v))
-        :width 12.8 :height 1.45 :font-size 10)
+        :width 14.8 :height 1.45 :font-size 10)
       (if lane
         (seqv-process-lane-map-editor track lane)
         (box :width 0.1 :height 0.1 :bg :transparent)))))

@@ -661,6 +661,10 @@ pub(crate) fn init_runtime(
             Arc::clone(&state),
             Arc::clone(&ui_epoch),
         );
+    let process_library = sequencer::lisp_host::load_process_library_source();
+    if !process_library.trim().is_empty() {
+        let _ = runtime.eval_str(&process_library);
+    }
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();

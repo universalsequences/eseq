@@ -9,10 +9,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use eseqlisp::vm::Value;
 use serde::{Deserialize, Serialize};
 
+use crate::accumulator::ResolvedStep;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::EmittedAccumulatorEvent;
 use crate::neural::ParamNodeId;
 use crate::neural::{process_grid_boundaries, GridBoundaryClock};
+use crate::scheduled_event::StepEvent;
 
 pub const DEFAULT_PROCESS_PORT: &str = "__default";
 
@@ -972,6 +974,7 @@ pub struct ProcessRunInvocation {
     pub inlets: HashMap<String, Value>,
     pub state: HashMap<String, Value>,
     pub event: Option<Value>,
+    pub step_context: Option<ProcessStepEventContext>,
     pub ports: Vec<ProcessPortDef>,
     pub seed: u64,
 }
@@ -984,8 +987,66 @@ pub struct ProcessRunResult {
     pub state: HashMap<String, Value>,
     pub outputs: Vec<ProcessOutput>,
     pub emissions: Vec<EmittedAccumulatorEvent>,
+    pub commands: Vec<ProcessRunCommand>,
     pub target_writes: Vec<ProcessTargetWrite>,
     pub transpose: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProcessRunCommand {
+    TargetWrite(ProcessTargetWrite),
+    VetoBaseEvent,
+    Ratchet(ProcessRatchetRequest),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessRatchetMode {
+    Subdivide,
+    Repeat,
+}
+
+impl Default for ProcessRatchetMode {
+    fn default() -> Self {
+        Self::Subdivide
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessRatchetRequest {
+    pub times: u32,
+    pub mode: ProcessRatchetMode,
+    pub span_beats: Option<f32>,
+    pub shape: Option<Value>,
+    pub shape_context: ProcessRatchetShapeContext,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessRatchetShapeContext {
+    pub runtime_id: u64,
+    pub beat: f64,
+    pub inlets: HashMap<String, Value>,
+    pub state: HashMap<String, Value>,
+    pub event: Option<Value>,
+    pub step_context: ProcessStepEventContext,
+    pub ports: Vec<ProcessPortDef>,
+    pub random_state: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessRatchetEvent {
+    pub offset_beats: f32,
+    pub resolved: ResolvedStep,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessStepEventContext {
+    pub track: usize,
+    pub step: usize,
+    pub cycle: u64,
+    pub beat: f64,
+    pub sample_time: u64,
+    pub step_beats: f32,
+    pub resolved: ResolvedStep,
 }
 
 #[derive(Clone, Debug)]
@@ -1001,6 +1062,34 @@ pub struct ProcessScheduledEmission {
     pub event: EmittedAccumulatorEvent,
 }
 
+#[derive(Clone, Debug)]
+pub struct ProcessScheduledItem {
+    pub process_runtime_id: u64,
+    pub beat: f64,
+    pub event: ProcessScheduledEvent,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProcessScheduledEvent {
+    Emission(EmittedAccumulatorEvent),
+    Step(ProcessScheduledStepEvent),
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessScheduledStepEvent {
+    pub event: StepEvent,
+    pub midi_fx_params: Vec<ProcessMidiFxParamOverride>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessMidiFxParamOverride {
+    pub slot: usize,
+    pub fx: String,
+    pub param: String,
+    pub param_idx: usize,
+    pub value: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ProcessRuntime {
     defs: HashMap<String, ProcessDef>,
@@ -1008,22 +1097,22 @@ pub struct ProcessRuntime {
     handle_to_runtime: HashMap<AuthoredHandleId, u64>,
     channels: HashMap<String, ChannelState>,
     patches: Vec<AuthoredPatch>,
-    pending_emissions: Vec<PendingProcessEmission>,
+    pending_events: Vec<PendingProcessEvent>,
     step_process_states: HashMap<ProcessInstanceId, HashMap<String, Value>>,
     step_process_runtime_ids: HashSet<u64>,
     global_transpose: f32,
 }
 
 #[derive(Clone, Debug)]
-struct PendingProcessEmission {
+struct PendingProcessEvent {
     process_runtime_id: u64,
     beat: f64,
-    event: EmittedAccumulatorEvent,
+    event: ProcessScheduledEvent,
 }
 
 impl ProcessRuntime {
     pub fn is_empty(&self) -> bool {
-        self.instances.is_empty() && self.pending_emissions.is_empty()
+        self.instances.is_empty() && self.pending_events.is_empty()
     }
 
     pub fn global_transpose(&self) -> f32 {
@@ -1031,7 +1120,7 @@ impl ProcessRuntime {
     }
 
     pub fn reset_transport(&mut self, total_beats: f64) {
-        self.pending_emissions.clear();
+        self.pending_events.clear();
         for instance in &mut self.instances {
             if let Some(clock) = &mut instance.clock {
                 clock.realign(total_beats);
@@ -1040,7 +1129,7 @@ impl ProcessRuntime {
     }
 
     pub fn clear_scene_pending(&mut self) {
-        self.pending_emissions.clear();
+        self.pending_events.clear();
     }
 
     pub fn sync_authoring(&mut self, authoring: ProcessAuthoringSnapshot, total_beats: f64) {
@@ -1221,6 +1310,7 @@ impl ProcessRuntime {
                     ),
                     state: instance.state.clone(),
                     event: None,
+                    step_context: None,
                     ports: ports.clone(),
                     seed: process_rng_seed(instance.runtime_id, seed_policy, target_beat, None),
                 });
@@ -1253,6 +1343,7 @@ impl ProcessRuntime {
                         inlets: inlets.clone(),
                         state: state.clone(),
                         event: None,
+                        step_context: None,
                         ports: ports.clone(),
                         seed: process_rng_seed(runtime_id, class_seed_policy, beat, None),
                     });
@@ -1276,10 +1367,10 @@ impl ProcessRuntime {
                 for mut event in result.emissions {
                     let beat = result.beat + event.offset_beats.max(0.0) as f64;
                     event.offset_beats = 0.0;
-                    self.pending_emissions.push(PendingProcessEmission {
+                    self.pending_events.push(PendingProcessEvent {
                         process_runtime_id: result.runtime_id,
                         beat,
-                        event,
+                        event: ProcessScheduledEvent::Emission(event),
                     });
                 }
             }
@@ -1319,6 +1410,7 @@ impl ProcessRuntime {
                 value,
                 result.beat,
                 result.sample_time,
+                None,
             ));
         }
         for (channel, value) in channel_sends {
@@ -1332,10 +1424,10 @@ impl ProcessRuntime {
         for mut event in result.emissions {
             let beat = result.beat + event.offset_beats.max(0.0) as f64;
             event.offset_beats = 0.0;
-            self.pending_emissions.push(PendingProcessEmission {
+            self.pending_events.push(PendingProcessEvent {
                 process_runtime_id: result.runtime_id,
                 beat,
-                event,
+                event: ProcessScheduledEvent::Emission(event),
             });
         }
         invocations
@@ -1364,16 +1456,30 @@ impl ProcessRuntime {
             value,
             beat,
             sample_time,
+            None,
         )
     }
 
-    pub fn take_due_emissions(&mut self, up_to_beat: f64) -> Vec<ProcessScheduledEmission> {
+    pub fn schedule_step_event_at(
+        &mut self,
+        process_runtime_id: u64,
+        beat: f64,
+        event: ProcessScheduledStepEvent,
+    ) {
+        self.pending_events.push(PendingProcessEvent {
+            process_runtime_id,
+            beat,
+            event: ProcessScheduledEvent::Step(event),
+        });
+    }
+
+    pub fn take_due_events(&mut self, up_to_beat: f64) -> Vec<ProcessScheduledItem> {
         let mut due = Vec::new();
         let mut i = 0;
-        while i < self.pending_emissions.len() {
-            if self.pending_emissions[i].beat <= up_to_beat {
-                let pending = self.pending_emissions.swap_remove(i);
-                due.push(ProcessScheduledEmission {
+        while i < self.pending_events.len() {
+            if self.pending_events[i].beat <= up_to_beat {
+                let pending = self.pending_events.swap_remove(i);
+                due.push(ProcessScheduledItem {
                     process_runtime_id: pending.process_runtime_id,
                     beat: pending.beat,
                     event: pending.event,
@@ -1391,12 +1497,38 @@ impl ProcessRuntime {
         due
     }
 
+    pub fn take_due_emissions(&mut self, up_to_beat: f64) -> Vec<ProcessScheduledEmission> {
+        let mut emissions = Vec::new();
+        let mut requeue = Vec::new();
+        for item in self.take_due_events(up_to_beat) {
+            match item.event {
+                ProcessScheduledEvent::Emission(event) => {
+                    emissions.push(ProcessScheduledEmission {
+                        process_runtime_id: item.process_runtime_id,
+                        beat: item.beat,
+                        event,
+                    });
+                }
+                ProcessScheduledEvent::Step(event) => {
+                    requeue.push(PendingProcessEvent {
+                        process_runtime_id: item.process_runtime_id,
+                        beat: item.beat,
+                        event: ProcessScheduledEvent::Step(event),
+                    });
+                }
+            }
+        }
+        self.pending_events.extend(requeue);
+        emissions
+    }
+
     fn propagate_source_at(
         &mut self,
         source: ProcessSourceRef,
         value: Value,
         beat: f64,
         sample_time: u64,
+        step_context: Option<ProcessStepEventContext>,
     ) -> Vec<ProcessRunInvocation> {
         let mut invocations = Vec::new();
         let patches = self.patches.clone();
@@ -1431,7 +1563,13 @@ impl ProcessRuntime {
                 }
             }
         }
-        invocations.extend(self.listener_invocations_for_source(source, value, beat, sample_time));
+        invocations.extend(self.listener_invocations_for_source(
+            source,
+            value,
+            beat,
+            sample_time,
+            step_context,
+        ));
         invocations
     }
 
@@ -1441,6 +1579,7 @@ impl ProcessRuntime {
         value: Value,
         beat: f64,
         sample_time: u64,
+        step_context: Option<ProcessStepEventContext>,
     ) -> Vec<ProcessRunInvocation> {
         let channel_snapshot = self.channels.clone();
         let handle_snapshot = self.handle_to_runtime.clone();
@@ -1467,6 +1606,7 @@ impl ProcessRuntime {
                     ),
                     state: instance.state.clone(),
                     event: Some(value.clone()),
+                    step_context: step_context.clone(),
                     ports: self
                         .defs
                         .get(&instance.class_name)
@@ -1493,12 +1633,14 @@ impl ProcessRuntime {
         value: Value,
         beat: f64,
         sample_time: u64,
+        step_context: ProcessStepEventContext,
     ) -> Vec<ProcessRunInvocation> {
         self.listener_invocations_for_source(
             ProcessSourceRef::TrackFires(track),
             value,
             beat,
             sample_time,
+            Some(step_context),
         )
     }
 
@@ -1592,6 +1734,15 @@ impl ProcessRuntime {
             inlets: resolve_step_process_inlets(&def, slot, ctx.step),
             state,
             event: Some(ctx.event),
+            step_context: Some(ProcessStepEventContext {
+                track: ctx.track,
+                step: ctx.step,
+                cycle: ctx.cycle,
+                beat: ctx.beat,
+                sample_time: ctx.sample_time,
+                step_beats: ctx.step_beats,
+                resolved: ctx.resolved,
+            }),
             ports,
             seed: process_rng_seed(instance_id.0, seed_policy, ctx.beat, Some(ctx.cycle)),
         })
@@ -1605,6 +1756,8 @@ pub struct ProcessStepRunContext {
     pub cycle: u64,
     pub beat: f64,
     pub sample_time: u64,
+    pub step_beats: f32,
+    pub resolved: ResolvedStep,
     pub event: Value,
 }
 
@@ -2031,6 +2184,27 @@ pub fn stable_process_id(name: &str) -> u64 {
 mod tests {
     use super::*;
 
+    fn test_step_context(track: usize) -> ProcessStepEventContext {
+        ProcessStepEventContext {
+            track,
+            step: 0,
+            cycle: 0,
+            beat: 1.0,
+            sample_time: 48_000,
+            step_beats: 0.25,
+            resolved: ResolvedStep {
+                duration: 1.0,
+                velocity: 1.0,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: 0.0,
+                pan: 0.0,
+                chop: 1.0,
+            },
+        }
+    }
+
     fn authored_instance(
         handle: u64,
         class_name: &str,
@@ -2266,13 +2440,18 @@ mod tests {
         );
 
         assert!(runtime
-            .track_fires_at(1, Value::Number(1.0), 1.0, 48_000)
+            .track_fires_at(1, Value::Number(1.0), 1.0, 48_000, test_step_context(1))
             .is_empty());
-        let invocations = runtime.track_fires_at(2, Value::Number(7.0), 1.0, 48_000);
+        let invocations =
+            runtime.track_fires_at(2, Value::Number(7.0), 1.0, 48_000, test_step_context(2));
         assert_eq!(invocations.len(), 1);
         assert_eq!(invocations[0].runtime_id, 11);
         assert_eq!(invocations[0].source, "listener-body");
         assert_eq!(invocations[0].event, Some(Value::Number(7.0)));
+        assert_eq!(
+            invocations[0].step_context.as_ref().map(|ctx| ctx.track),
+            Some(2)
+        );
     }
 
     #[test]

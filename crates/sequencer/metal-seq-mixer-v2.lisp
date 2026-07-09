@@ -568,15 +568,18 @@
     :on-click (lambda (event)
       (do
         (mixer-v2-select-bus i)
-        (seq-set-bus-volume i (mixer-v2-event-volume event))))
+        ;(seq-set-bus-volume i (mixer-v2-event-volume event))
+        )
+      )
     :on-drag (lambda (event)
       (do
         (mixer-v2-select-bus i)
-        (seq-set-bus-volume i (mixer-v2-event-volume event))))
+        ;;(seq-set-bus-volume i (mixer-v2-event-volume event))
+        ))
     (v-stack
-      (box :width :fill :height 4.0)
+      (box :width :fill :height 4.7)
       (h-stack :gap 0.06 
-      (box :width 2 )
+        (box :width 2 )
         (mixer-v2-volume-triangle
           :value (bind-seq-nth "bus-volumes" i)
           :on-click (lambda (sx sy region)
@@ -626,7 +629,7 @@
     ;; dead space at the bottom inside the group container.
     ;; Mute/name/output reads live in bindings or nested subtrees so those
     ;; changes don't rerun the whole strip.
-    (box :width 12.9 :height (if (mixer-v2-track-grouped? i) 12.15 13.15)
+    (box :width 12.9 :height (if (mixer-v2-track-grouped? i) 12.85 13.15)
       :selected (mixer-v2-track-selected-binding i)
       :muted (bind-seq-nth "track-muted-effective" i)
       :background-color :mixer-strip-bg
@@ -648,7 +651,7 @@
         ;; bus); the container provides the color above. A small spacer keeps
         ;; the pattern grid aligned with loose strips.
         (if (mixer-v2-track-grouped? i)
-          (box :width :fill :height 0.2 :bg :transparent)
+          (box :width :fill :height 0.85 :bg :transparent)
           (subtree :key (str "mixer-v2-track-output-sub-" i)
             (dropdown :value (nth SEQ.track-outputs i)
               :key (str "mixer-v2-track-output-" i)
@@ -978,7 +981,7 @@
   (let ((group (nth SEQ.groups gidx))
       (c (mixer-v2-group-color gidx))
       (bus-idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
-    (box :width 9.0 :height 12.8
+    (box :width 9.0 :height 13.05
       :corner-radius 12
       :padding 0.0
       :background-color :mixer-strip-bg
@@ -991,8 +994,8 @@
           (box  :width :fill :height 9.55
             (mixer-v2-bus-meter-control bus-idx))
           (box :width 0.0 :height 0.0 :bg :transparent))
+        (box :height 0.25)
         (mixer-v2-bus-mod-port-row (get group :bus-id))
-        (box :height 0.15)
         (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
           (h-stack :gap 0.2
             (button (if (get group :collapsed) "▸" "▾")
@@ -1020,7 +1023,7 @@
       (c (mixer-v2-group-color gidx))
       (selected (mixer-v2-group-selected? gidx)))
     (box
-      :corner-radius 8
+      :corner-radius 12
       :padding 0.2
       :background-color (rgba (nth c 0) (nth c 1) (nth c 2) (if selected 1.0 0.78))
       :border-width (if selected 4 2)
@@ -1035,8 +1038,8 @@
         (if (get group :collapsed)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :gap 0.0
-            (box :width :fill :height 0.7 :bg :transparent)
-            (h-stack :gap 0.3
+            (box :width :fill :height 0.2 :bg :transparent)
+            (h-stack :gap 0.1
               (each (get group :members) |m|
                 (subtree :key (str "mixer-v2-track-" m)
                   (mixer-v2-group-member-strip m))))
