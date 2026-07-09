@@ -763,6 +763,8 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_cycle_view_mode: bool,
     pub pending_set_view_mode: Option<String>,
     pub current_view_mode: String,
+    pub pending_set_text_zoom: Option<f64>,
+    pub current_text_zoom: f64,
     // Tiling operations — processed in order enqueued
     pub pending_tile_ops: Vec<TileOp>,
     pub pending_window_hide_status: bool,
@@ -1061,6 +1063,19 @@ impl NativeContext {
 
     pub fn current_view_mode(&self) -> String {
         self.shared.borrow().current_view_mode.clone()
+    }
+
+    pub fn set_text_zoom(&mut self, zoom: f64) {
+        self.shared.borrow_mut().pending_set_text_zoom = Some(zoom);
+    }
+
+    pub fn text_zoom(&self) -> f64 {
+        let zoom = self.shared.borrow().current_text_zoom;
+        if zoom.is_finite() && zoom > 0.0 {
+            zoom
+        } else {
+            1.0
+        }
     }
 
     pub fn apply_theme(&mut self, map: Value) {
@@ -2643,6 +2658,10 @@ impl Runtime {
 
     pub(crate) fn take_pending_set_view_mode(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_set_view_mode.take()
+    }
+
+    pub(crate) fn take_pending_set_text_zoom(&mut self) -> Option<f64> {
+        self.shared.borrow_mut().pending_set_text_zoom.take()
     }
 
     pub(crate) fn take_pending_apply_theme(&mut self) -> Option<Value> {

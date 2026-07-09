@@ -9,6 +9,8 @@ use crate::runtime::{LayoutTabSpec, Runtime};
 use crate::theme;
 use crate::vm::{Value, format_lisp_value};
 
+use super::{MAX_TEXT_ZOOM, MIN_TEXT_ZOOM};
+
 fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabSpec>, String> {
     let Value::List(entries) = value else {
         return Err(":tabs expects a list of (label buffer-name ...) entries".to_string());
@@ -1244,6 +1246,34 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "(view-mode)",
         "Return the current view mode: \"both\", \"ui\", or \"text\".",
         |_args, ctx| Ok(Value::String(ctx.current_view_mode())),
+    );
+
+    runtime.register_native_with_docs(
+        "set-text-zoom",
+        "(set-text-zoom factor)",
+        "Set the editor text zoom used by text-only/code buffers. 1.0 is the default.",
+        |args, ctx| {
+            let Some(Value::Number(zoom)) = args.first() else {
+                return Err("set-text-zoom expects a number".to_string());
+            };
+            if !zoom.is_finite() {
+                return Err("set-text-zoom expects a finite number".to_string());
+            }
+            if !((MIN_TEXT_ZOOM as f64)..=(MAX_TEXT_ZOOM as f64)).contains(zoom) {
+                return Err(format!(
+                    "set-text-zoom expects a number between {MIN_TEXT_ZOOM:.2} and {MAX_TEXT_ZOOM:.2}"
+                ));
+            }
+            ctx.set_text_zoom(*zoom);
+            Ok(Value::Number(*zoom))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "text-zoom",
+        "(text-zoom)",
+        "Return the current editor text zoom.",
+        |_args, ctx| Ok(Value::Number(ctx.text_zoom())),
     );
 
     runtime.register_native_with_docs(

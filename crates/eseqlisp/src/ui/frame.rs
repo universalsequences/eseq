@@ -292,6 +292,12 @@ fn build_render_frame_with_layout_viewport(
         editor.active_leaf_mut().widget_scroll_left = 0.0;
     }
     let view_mode = editor.active_buffer().view_mode;
+    let (text_cell_width_scale, text_cell_height_scale) = {
+        let buffer = editor.active_buffer();
+        editor.text_cell_scales_for_buffer(buffer)
+    };
+    let text_viewport_width = text_viewport_cells(layout_width, text_cell_width_scale);
+    let text_viewport_height = text_viewport_cells(layout_height, text_cell_height_scale);
     if view_mode == ViewMode::UiOnly {
         let (cursor_row, cursor_col) = editor.active_buffer().cursor;
         let (status_cells, status_indicator, status_signature) =
@@ -329,12 +335,16 @@ fn build_render_frame_with_layout_viewport(
             widget_scroll_top: editor.widget_scroll_top(),
             widget_scroll_left: editor.widget_scroll_left(),
             text_scroll_top: 0,
+            text_cell_width_scale: 1.0,
+            text_cell_height_scale: 1.0,
         };
     }
 
-    editor.sync_text_horizontal_scroll(viewport_width as u16);
+    editor.sync_text_horizontal_scroll(text_viewport_width as u16);
     if view_mode != ViewMode::UiOnly {
-        editor.active_buffer_mut().clamp_scroll(viewport_height);
+        editor
+            .active_buffer_mut()
+            .clamp_scroll(text_viewport_height);
     }
 
     let region_range = editor.active_region_range();
@@ -349,9 +359,10 @@ fn build_render_frame_with_layout_viewport(
             buf.cursor.1,
         )
     };
-    let highlight_spans = editor.active_highlight_spans_for_visible(scroll_top, viewport_height);
+    let highlight_spans =
+        editor.active_highlight_spans_for_visible(scroll_top, text_viewport_height);
     let buf = editor.active_buffer();
-    let visible = scroll_top..(scroll_top + viewport_height).min(buf.lines.len());
+    let visible = scroll_top..(scroll_top + text_viewport_height).min(buf.lines.len());
 
     let lines: Vec<Vec<Cell>> = buf.lines[visible]
         .iter()
@@ -368,7 +379,7 @@ fn build_render_frame_with_layout_viewport(
             let chars: Vec<char> = content.chars().collect();
             let line_len = chars.len();
             let render_cols = if row_styles.iter().any(|style| style.full_line) {
-                viewport_width.max(line_len + 1)
+                text_viewport_width.max(line_len + 1)
             } else {
                 line_len + 1
             };
@@ -418,7 +429,7 @@ fn build_render_frame_with_layout_viewport(
         .collect();
 
     // Cursor in visible-area coordinates
-    let cursor = if cursor_row >= scroll_top && cursor_row < scroll_top + viewport_height {
+    let cursor = if cursor_row >= scroll_top && cursor_row < scroll_top + text_viewport_height {
         Some((cursor_row - scroll_top, cursor_col))
     } else {
         None
@@ -428,7 +439,14 @@ fn build_render_frame_with_layout_viewport(
     let (status_cells, status_indicator, status_signature) =
         build_active_status_row(editor, cursor_row, cursor_col, viewport_width);
 
-    let completion = build_completion(editor, cursor_row, cursor_col, scroll_top);
+    let completion = build_completion(
+        editor,
+        cursor_row,
+        cursor_col,
+        scroll_top,
+        text_cell_width_scale,
+        text_cell_height_scale,
+    );
     if Editor::trace_completion_enabled() {
         eprintln!(
             "{} render_kind=buffer-frame show={} viewport={}x{} scroll_top={} cursor_visible={}",
@@ -448,6 +466,10 @@ fn build_render_frame_with_layout_viewport(
         editor.active_buffer().mode.hash(&mut hasher);
         viewport_width.hash(&mut hasher);
         viewport_height.hash(&mut hasher);
+        text_viewport_width.hash(&mut hasher);
+        text_viewport_height.hash(&mut hasher);
+        text_cell_width_scale.to_bits().hash(&mut hasher);
+        text_cell_height_scale.to_bits().hash(&mut hasher);
         scroll_top.hash(&mut hasher);
         cursor_row.hash(&mut hasher);
         cursor_col.hash(&mut hasher);
@@ -510,6 +532,8 @@ fn build_render_frame_with_layout_viewport(
         widget_scroll_top: editor.widget_scroll_top(),
         widget_scroll_left: editor.widget_scroll_left(),
         text_scroll_top: frame_text_scroll_top,
+        text_cell_width_scale,
+        text_cell_height_scale,
     }
 }
 
@@ -550,6 +574,11 @@ fn style_applies_to_col(style: &BufferTextStyle, col: usize) -> bool {
     let start = style.start.unwrap_or(0);
     let end = style.end.unwrap_or(usize::MAX);
     col >= start && col < end
+}
+
+fn text_viewport_cells(layout_extent: f32, text_cell_scale: f32) -> usize {
+    let scale = text_cell_scale.max(0.001);
+    (layout_extent / scale).floor().max(1.0) as usize
 }
 
 // ── Tiled frame builder ──────────────────────────────────────────────────────
@@ -734,6 +763,33 @@ mod tests {
 
         assert_eq!(layout.rect.height, 7.5);
     }
+
+    #[test]
+    fn text_zoom_increases_text_only_rows_without_moving_statusline_grid() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let source = (0..30)
+            .map(|line| format!("line-{line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.active_buffer_mut().set_text(&source);
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        editor.active_leaf_mut().show_border = false;
+        editor.set_text_zoom(1.0).unwrap();
+
+        let unzoomed = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+        let unzoomed_rows = unzoomed.tiles[0].frame.lines.len();
+
+        editor.set_text_zoom(0.5).unwrap();
+
+        let frame = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+        let tile = &frame.tiles[0];
+
+        assert!(tile.show_status);
+        assert_eq!(tile.frame.status_cells.len(), 20);
+        assert_eq!(tile.frame.lines.len(), unzoomed_rows * 2);
+        assert_eq!(tile.frame.text_cell_height_scale, 0.5);
+    }
 }
 
 fn build_tiled_render_frame_impl(
@@ -784,7 +840,18 @@ fn build_tiled_render_frame_impl(
     let scroll_top = buf.scroll_top;
     let text_visible = buf.view_mode != ViewMode::UiOnly;
     let completion = if text_visible {
-        build_completion(editor, cursor_row, cursor_col, scroll_top)
+        let (text_cell_width_scale, text_cell_height_scale) = {
+            let buffer = editor.active_buffer();
+            editor.text_cell_scales_for_buffer(buffer)
+        };
+        build_completion(
+            editor,
+            cursor_row,
+            cursor_col,
+            scroll_top,
+            text_cell_width_scale,
+            text_cell_height_scale,
+        )
     } else {
         None
     };
@@ -816,6 +883,8 @@ fn build_tiled_render_frame_impl(
             let show_status = editor
                 .tile_effective_show_status(*tile_id)
                 .unwrap_or(leaf.show_status);
+            let (text_cell_width_scale, text_cell_height_scale) =
+                editor.text_cell_scales_for_buffer(buf);
             (
                 *tile_id,
                 *rect,
@@ -839,6 +908,8 @@ fn build_tiled_render_frame_impl(
                 buf.widget_tree_revision,
                 buf.scroll_top,
                 buf.view_mode,
+                text_cell_width_scale,
+                text_cell_height_scale,
                 leaf.cached_inactive_frame.clone(),
             )
         })
@@ -871,6 +942,8 @@ fn build_tiled_render_frame_impl(
         widget_tree_revision,
         buffer_scroll_top,
         view_mode,
+        text_cell_width_scale,
+        text_cell_height_scale,
         cached_frame,
     ) in tile_info
     {
@@ -944,6 +1017,8 @@ fn build_tiled_render_frame_impl(
             inner_height,
             inner_width_exact.to_bits(),
             inner_height_exact.to_bits(),
+            text_cell_width_scale.to_bits(),
+            text_cell_height_scale.to_bits(),
             view_mode,
         );
         let cached = cached_frame
@@ -1024,6 +1099,8 @@ fn build_tiled_render_frame_impl(
                     syms,
                     inner_width,
                     inner_height,
+                    text_cell_width_scale,
+                    text_cell_height_scale,
                 );
                 // Cache for next frame
                 if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
@@ -1079,9 +1156,13 @@ fn build_inactive_tile_frame_from_parts(
     symbols: Option<&[String]>,
     viewport_width: usize,
     viewport_height: usize,
+    text_cell_width_scale: f32,
+    text_cell_height_scale: f32,
 ) -> RenderFrame {
     let scroll_top = buffer.scroll_top.min(buffer.lines.len());
     let (cursor_row, cursor_col) = buffer.cursor;
+    let text_viewport_width = text_viewport_cells(viewport_width as f32, text_cell_width_scale);
+    let text_viewport_height = text_viewport_cells(viewport_height as f32, text_cell_height_scale);
 
     let (status_cells, status_indicator, status_signature) = build_buffer_status_row(
         buffer,
@@ -1100,6 +1181,10 @@ fn build_inactive_tile_frame_from_parts(
         buffer.view_mode.hash(&mut hasher);
         viewport_width.hash(&mut hasher);
         viewport_height.hash(&mut hasher);
+        text_viewport_width.hash(&mut hasher);
+        text_viewport_height.hash(&mut hasher);
+        text_cell_width_scale.to_bits().hash(&mut hasher);
+        text_cell_height_scale.to_bits().hash(&mut hasher);
         scroll_top.hash(&mut hasher);
         status_signature.hash(&mut hasher);
         hasher.finish()
@@ -1123,10 +1208,12 @@ fn build_inactive_tile_frame_from_parts(
             widget_scroll_top,
             widget_scroll_left,
             text_scroll_top: 0,
+            text_cell_width_scale: 1.0,
+            text_cell_height_scale: 1.0,
         };
     }
 
-    let visible = scroll_top..(scroll_top + viewport_height).min(buffer.lines.len());
+    let visible = scroll_top..(scroll_top + text_viewport_height).min(buffer.lines.len());
     let symbols = symbols.expect("inactive text frame requires completion symbols");
 
     // Only highlight visible lines — not the entire buffer.
@@ -1158,7 +1245,7 @@ fn build_inactive_tile_frame_from_parts(
 
     let cursor = if !buffer.read_only
         && cursor_row >= scroll_top
-        && cursor_row < scroll_top + viewport_height
+        && cursor_row < scroll_top + text_viewport_height
     {
         Some((cursor_row - scroll_top, cursor_col))
     } else {
@@ -1182,6 +1269,8 @@ fn build_inactive_tile_frame_from_parts(
         widget_scroll_top,
         widget_scroll_left,
         text_scroll_top: scroll_top,
+        text_cell_width_scale,
+        text_cell_height_scale,
     }
 }
 
@@ -1207,6 +1296,8 @@ fn build_completion(
     cursor_row: usize,
     cursor_col: usize,
     scroll_top: usize,
+    text_cell_width_scale: f32,
+    text_cell_height_scale: f32,
 ) -> Option<CompletionFrame> {
     let Some(comp) = editor.completion_state() else {
         if Editor::trace_completion_enabled() {
@@ -1250,6 +1341,8 @@ fn build_completion(
         CompletionFrame {
             entries,
             anchor: (cursor_row.saturating_sub(scroll_top), cursor_col),
+            text_cell_width_scale,
+            text_cell_height_scale,
             doc,
         }
     };

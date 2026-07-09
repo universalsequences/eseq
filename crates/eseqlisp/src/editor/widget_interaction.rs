@@ -1547,18 +1547,26 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> Option<(usize, usize)> {
-        let local_col_f = precise_col - content_col as f32;
-        let local_row_f = precise_row - content_row as f32;
+        let buffer = self.active_buffer();
+        let (text_cell_width_scale, text_cell_height_scale) =
+            self.text_cell_scales_for_buffer(buffer);
+        let local_col_f = (precise_col - content_col as f32) / text_cell_width_scale;
+        let local_row_f = (precise_row - content_row as f32) / text_cell_height_scale;
         if local_col_f < 0.0 || local_row_f < 0.0 {
             return None;
         }
         let local_col = local_col_f.floor() as u16;
         let local_row = local_row_f.floor() as u16;
-        if local_col >= content_width || local_row >= content_height {
+        let text_content_width = (content_width as f32 / text_cell_width_scale)
+            .floor()
+            .max(1.0) as u16;
+        let text_content_height = (content_height as f32 / text_cell_height_scale)
+            .floor()
+            .max(1.0) as u16;
+        if local_col >= text_content_width || local_row >= text_content_height {
             return None;
         }
 
-        let buffer = self.active_buffer();
         let scroll_left = if buffer.view_mode != crate::editor::ViewMode::UiOnly {
             self.active_leaf().widget_scroll_left.floor() as usize
         } else {

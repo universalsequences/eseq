@@ -341,6 +341,10 @@ pub struct EditorConfig {
     pub vim_mode: bool,
 }
 
+pub const DEFAULT_TEXT_ZOOM: f32 = 0.85;
+pub const MIN_TEXT_ZOOM: f32 = 0.5;
+pub const MAX_TEXT_ZOOM: f32 = 2.0;
+
 #[derive(Debug)]
 pub enum EditorError {
     Io(std::io::Error),
@@ -497,6 +501,8 @@ struct RetainedTileLayout {
             usize,
             u32,
             u32,
+            u32,
+            u32,
             ViewMode,
         ),
         crate::backend::RenderFrame,
@@ -629,6 +635,9 @@ pub struct Editor {
     hovered_tile_tab: Option<(TileId, usize)>,
     pointer_drag_started_on_slider: bool,
     last_slider_drag_widget_id: Option<u64>,
+    text_zoom: f32,
+    text_cell_width_scale: f32,
+    text_cell_height_scale: f32,
     last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
     inspect_mode: bool,
     inspect_hover_tile_id: Option<TileId>,
@@ -765,6 +774,9 @@ impl Editor {
             hovered_tile_tab: None,
             pointer_drag_started_on_slider: false,
             last_slider_drag_widget_id: None,
+            text_zoom: DEFAULT_TEXT_ZOOM,
+            text_cell_width_scale: DEFAULT_TEXT_ZOOM,
+            text_cell_height_scale: DEFAULT_TEXT_ZOOM,
             last_layout_refresh_timings: Vec::new(),
             inspect_mode: false,
             inspect_hover_tile_id: None,
@@ -787,6 +799,82 @@ impl Editor {
 
     pub fn widget_cursor(&self) -> WidgetCursor {
         self.widget_cursor
+    }
+
+    pub fn text_zoom(&self) -> f32 {
+        self.text_zoom
+    }
+
+    pub fn set_text_zoom(&mut self, zoom: f32) -> Result<f32, String> {
+        if !zoom.is_finite() {
+            return Err("text zoom must be finite".to_string());
+        }
+        if !(MIN_TEXT_ZOOM..=MAX_TEXT_ZOOM).contains(&zoom) {
+            return Err(format!(
+                "text zoom must be between {MIN_TEXT_ZOOM:.2} and {MAX_TEXT_ZOOM:.2}"
+            ));
+        }
+        if (self.text_zoom - zoom).abs() > f32::EPSILON {
+            self.text_zoom = zoom;
+            // Until a graphical backend reports exact zoomed font metrics, use
+            // the requested zoom as the logical text-cell scale.
+            self.text_cell_width_scale = zoom;
+            self.text_cell_height_scale = zoom;
+            self.invalidate_text_frame_caches();
+            self.mark_needs_redraw();
+        }
+        Ok(self.text_zoom)
+    }
+
+    pub fn set_text_cell_dimensions(
+        &mut self,
+        layout_cell_w: f32,
+        layout_cell_h: f32,
+        text_cell_w: f32,
+        text_cell_h: f32,
+    ) {
+        if layout_cell_w <= 0.0
+            || layout_cell_h <= 0.0
+            || text_cell_w <= 0.0
+            || text_cell_h <= 0.0
+            || !layout_cell_w.is_finite()
+            || !layout_cell_h.is_finite()
+            || !text_cell_w.is_finite()
+            || !text_cell_h.is_finite()
+        {
+            return;
+        }
+        let next_width = text_cell_w / layout_cell_w;
+        let next_height = text_cell_h / layout_cell_h;
+        if (self.text_cell_width_scale - next_width).abs() > 0.001
+            || (self.text_cell_height_scale - next_height).abs() > 0.001
+        {
+            self.text_cell_width_scale = next_width;
+            self.text_cell_height_scale = next_height;
+            self.invalidate_text_frame_caches();
+            self.mark_needs_redraw();
+        }
+    }
+
+    pub(crate) fn text_cell_scales_for_buffer(&self, buffer: &Buffer) -> (f32, f32) {
+        if buffer.view_mode != ViewMode::UiOnly
+            && (buffer.view_mode == ViewMode::TextOnly || buffer.widget_tree.is_none())
+        {
+            (
+                self.text_cell_width_scale.max(0.001),
+                self.text_cell_height_scale.max(0.001),
+            )
+        } else {
+            (1.0, 1.0)
+        }
+    }
+
+    fn invalidate_text_frame_caches(&mut self) {
+        for tile_id in self.tile_root.leaf_ids() {
+            if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
+                leaf.cached_inactive_frame = None;
+            }
+        }
     }
 
     pub fn vim_status_label(&self) -> Option<&'static str> {
@@ -5714,7 +5802,8 @@ impl Editor {
             }
             MouseEventKind::ScrollRight => {
                 self.exit_search_mode_if_active();
-                if let Some(max_scroll) = self.max_text_horizontal_scroll(content_width) {
+                let text_viewport_width = self.text_viewport_width_for_layout_width(content_width);
+                if let Some(max_scroll) = self.max_text_horizontal_scroll(text_viewport_width) {
                     let leaf = self.active_leaf_mut();
                     leaf.widget_scroll_left =
                         (leaf.widget_scroll_left + 3.0).min(max_scroll as f32);
@@ -5757,6 +5846,13 @@ impl Editor {
             .unwrap_or(0);
         let max_scroll = line_width.saturating_sub(viewport_width as usize) as u16;
         (max_scroll > 0).then_some(max_scroll)
+    }
+
+    fn text_viewport_width_for_layout_width(&self, viewport_width: u16) -> u16 {
+        let (text_cell_width_scale, _) = self.text_cell_scales_for_buffer(self.active_buffer());
+        ((viewport_width as f32 / text_cell_width_scale.max(0.001))
+            .floor()
+            .max(1.0)) as u16
     }
 
     pub fn sync_text_horizontal_scroll(&mut self, viewport_width: u16) {
@@ -6142,6 +6238,7 @@ impl Editor {
         shared.current_line_text = current_line_text;
         shared.buffer_names = buffer_names;
         shared.current_view_mode = current_view_mode;
+        shared.current_text_zoom = self.text_zoom as f64;
     }
 
     fn sync_runtime_source_context(&mut self) {
@@ -7540,6 +7637,13 @@ impl Editor {
                 self.set_active_buffer_view_mode(mode);
             } else {
                 self.show_transient_message(format!("Unknown view mode: {mode_str}"));
+            }
+        }
+
+        if let Some(zoom) = self.runtime.take_pending_set_text_zoom() {
+            match self.set_text_zoom(zoom as f32) {
+                Ok(applied) => self.show_transient_message(format!("Text zoom: {applied:.2}")),
+                Err(message) => self.show_transient_message(message),
             }
         }
 

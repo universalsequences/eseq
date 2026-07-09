@@ -38,6 +38,9 @@ fn run() -> Result<(), String> {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     let (cell_w, cell_h) = backend.cell_dimensions();
+    if let Some((text_cell_w, text_cell_h)) = backend.sync_text_zoom(editor.text_zoom()) {
+        editor.set_text_cell_dimensions(cell_w, cell_h, text_cell_w, text_cell_h);
+    }
     if let Some(measurer) = backend.create_text_measurer() {
         editor.set_text_measurer(measurer, cell_w, cell_h);
     }

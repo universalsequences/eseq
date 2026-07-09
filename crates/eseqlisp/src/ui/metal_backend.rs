@@ -1901,12 +1901,14 @@ fragment float4 live_spectrogram_frag(
         bg: [f32; 4],
     }
 
-    /// Cell offset for placing tile content at the right screen position.
-    /// Signed to support negative offsets from horizontal scrolling.
+    /// Text placement in layout-cell coordinates. The origin is in the normal
+    /// widget/status grid; text rows and columns advance by the zoomed text
+    /// atlas cell dimensions.
     #[derive(Clone, Copy, Default)]
-    struct TileOffset {
-        col: f32,
-        row: f32,
+    struct TextOffset {
+        origin_col: f32,
+        origin_row: f32,
+        scroll_left: f32,
     }
 
     #[derive(Clone)]
@@ -2265,6 +2267,8 @@ fragment float4 live_spectrogram_frag(
         image_decode_min_interval: Duration,
         // Glyph atlases
         atlas: Option<GlyphAtlas>,
+        text_atlas: Option<GlyphAtlas>,
+        text_atlas_zoom: f32,
         prop_atlas: Option<ProportionalGlyphAtlas>,
         cached_text_key: Option<u64>,
         cached_text_quads: Vec<Vertex>,
@@ -2390,6 +2394,8 @@ fragment float4 live_spectrogram_frag(
                 image_last_decode_at: None,
                 image_decode_min_interval: Duration::ZERO,
                 atlas: None,
+                text_atlas: None,
+                text_atlas_zoom: 0.0,
                 prop_atlas: None,
                 cached_text_key: None,
                 cached_text_quads: Vec::new(),
@@ -3617,6 +3623,37 @@ fragment float4 live_spectrogram_frag(
                 .unwrap_or((8.0, 16.0))
         }
 
+        pub fn sync_text_zoom(&mut self, zoom: f32) -> Option<(f32, f32)> {
+            if !zoom.is_finite() || zoom <= 0.0 {
+                return self
+                    .text_atlas
+                    .as_ref()
+                    .map(|a| (a.cell_w.max(1) as f32, a.cell_h.max(1) as f32));
+            }
+
+            let needs_rebuild =
+                self.text_atlas.is_none() || (self.text_atlas_zoom - zoom).abs() > 0.001;
+            if needs_rebuild {
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor())
+                    .unwrap_or(1.0);
+                let next = GlyphAtlas::new(
+                    &self.device,
+                    "JetBrainsMono-Regular",
+                    self.monospace_font_size_pt * zoom as f64 * scale,
+                )?;
+                self.text_atlas = Some(next);
+                self.text_atlas_zoom = zoom;
+                self.cached_text_key = None;
+            }
+
+            self.text_atlas
+                .as_ref()
+                .map(|a| (a.cell_w.max(1) as f32, a.cell_h.max(1) as f32))
+        }
+
         pub fn render_frame_to_png<P: AsRef<std::path::Path>>(
             &mut self,
             frame: &RenderFrame,
@@ -3733,10 +3770,20 @@ fragment float4 live_spectrogram_frag(
                 })
                 .unwrap_or_default();
 
+            let text_atlas_texture = self
+                .text_atlas
+                .as_ref()
+                .map(|atlas| atlas.texture.clone())
+                .unwrap_or_else(|| atlas_texture.clone());
+            let text_quads = if let Some(text_atlas) = self.text_atlas.as_mut() {
+                build_text_quads(frame, text_atlas, cell_w, cell_h, vp_w, vp_h)
+            } else {
+                let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                build_text_quads(frame, atlas, cell_w, cell_h, vp_w, vp_h)
+            };
             let Some(atlas) = &mut self.atlas else {
                 return Ok(());
             };
-            let text_quads = build_text_quads(frame, atlas, vp_w, vp_h);
             let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
             let (primitive_bg_runs, primitive_fg_runs) =
                 partition_widget_instance_runs(&primitive_scene);
@@ -3804,7 +3851,7 @@ fragment float4 live_spectrogram_frag(
                 &mut self.upload_arena,
                 &mut self.stats,
                 &pipeline,
-                &atlas_texture,
+                &text_atlas_texture,
                 text_quads.as_slice(),
             );
             draw_vertices(
@@ -4930,13 +4977,41 @@ fragment float4 live_spectrogram_frag(
 
                 // ── Text content (shifted by horizontal scroll) ──────────────
                 let hscroll = tile.frame.widget_scroll_left;
-                let offset = TileOffset {
-                    col: content_col - hscroll,
-                    row: content_row,
+                let offset = TextOffset {
+                    origin_col: content_col,
+                    origin_row: content_row,
+                    scroll_left: hscroll,
                 };
+                let text_atlas_texture = self
+                    .text_atlas
+                    .as_ref()
+                    .map(|atlas| atlas.texture.clone())
+                    .unwrap_or_else(|| atlas_texture.clone());
                 let text_verts = {
-                    let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                    build_text_quads_offset(&tile.frame, atlas, vp_w, vp_h, offset, tile_bg)
+                    if let Some(text_atlas) = self.text_atlas.as_mut() {
+                        build_text_quads_offset(
+                            &tile.frame,
+                            text_atlas,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            offset,
+                            tile_bg,
+                        )
+                    } else {
+                        let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                        build_text_quads_offset(
+                            &tile.frame,
+                            atlas,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            offset,
+                            tile_bg,
+                        )
+                    }
                 };
                 draw_vertices(
                     &enc,
@@ -4944,7 +5019,7 @@ fragment float4 live_spectrogram_frag(
                     &mut self.upload_arena,
                     &mut self.stats,
                     &pipeline,
-                    &atlas_texture,
+                    &text_atlas_texture,
                     &text_verts,
                 );
 
@@ -5707,8 +5782,10 @@ fragment float4 live_spectrogram_frag(
                     let sel_bg = to_rgba(theme::COMP_SELECTED_BG());
                     let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
                     let pop_fg = to_rgba(theme::COMP_FG());
-                    let popup_col = col_off + comp.anchor.1;
-                    let anchor_row = row_off + comp.anchor.0;
+                    let popup_col =
+                        col_off + (comp.anchor.1 as f32 * comp.text_cell_width_scale) as usize;
+                    let anchor_row =
+                        row_off + (comp.anchor.0 as f32 * comp.text_cell_height_scale) as usize;
                     let popup_row = anchor_row + 1;
                     let total_cols = (vp_w / cell_w).floor().max(1.0) as usize;
                     let total_rows = (vp_h / cell_h).floor().max(1.0) as usize;
@@ -6020,6 +6097,17 @@ fragment float4 live_spectrogram_frag(
                 "JetBrainsMono-Regular",
                 self.monospace_font_size_pt * scale,
             );
+            let text_zoom = if self.text_atlas_zoom.is_finite() && self.text_atlas_zoom > 0.0 {
+                self.text_atlas_zoom
+            } else {
+                1.0
+            };
+            self.text_atlas = GlyphAtlas::new(
+                &self.device,
+                "JetBrainsMono-Regular",
+                self.monospace_font_size_pt * text_zoom as f64 * scale,
+            );
+            self.text_atlas_zoom = text_zoom;
             self.prop_atlas = ProportionalGlyphAtlas::new(
                 &self.device,
                 DEFAULT_MONOSPACE_FONT_SIZE_PT * scale,
@@ -6591,8 +6679,17 @@ fragment float4 live_spectrogram_frag(
                 return Ok(());
             };
             let atlas_texture = atlas.texture.clone();
+            let text_atlas_texture = self
+                .text_atlas
+                .as_ref()
+                .map(|atlas| atlas.texture.clone())
+                .unwrap_or_else(|| atlas_texture.clone());
             if self.cached_text_key != Some(frame.text_cache_key) {
-                self.cached_text_quads = build_text_quads(frame, atlas, vp_w, vp_h);
+                self.cached_text_quads = if let Some(text_atlas) = self.text_atlas.as_mut() {
+                    build_text_quads(frame, text_atlas, cell_w, cell_h, vp_w, vp_h)
+                } else {
+                    build_text_quads(frame, atlas, cell_w, cell_h, vp_w, vp_h)
+                };
                 self.cached_text_key = Some(frame.text_cache_key);
                 self.cached_text_vertex_count = self.cached_text_quads.len();
                 self.cached_text_buffer = if self.cached_text_quads.is_empty() {
@@ -6676,7 +6773,7 @@ fragment float4 live_spectrogram_frag(
                 enc.setRenderPipelineState(&pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(vbuf), 0, 0);
-                    enc.setFragmentTexture_atIndex(Some(&atlas_texture), 0);
+                    enc.setFragmentTexture_atIndex(Some(&text_atlas_texture), 0);
                     enc.drawPrimitives_vertexStart_vertexCount(
                         MTLPrimitiveType::Triangle,
                         0,
@@ -7278,6 +7375,45 @@ fragment float4 live_spectrogram_frag(
         ]);
     }
 
+    fn rasterize_char_px(
+        atlas: &mut GlyphAtlas,
+        ch: char,
+        x0_px: f32,
+        y0_px: f32,
+        cell_w: f32,
+        cell_h: f32,
+        ctx: &CharCtx,
+        out: &mut Vec<Vertex>,
+    ) {
+        let Some(entry) = atlas.get_or_rasterize(ch) else {
+            return;
+        };
+        let [u0, v0] = entry.uv_min;
+        let [u1, v1] = entry.uv_max;
+
+        let ndc_x = |px: f32| px / ctx.vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / ctx.vp_h * 2.0;
+        let x0 = ndc_x(x0_px);
+        let x1 = ndc_x(x0_px + cell_w);
+        let y0 = ndc_y(y0_px);
+        let y1 = ndc_y(y0_px + cell_h);
+
+        let gv = |px, py, u, v| Vertex {
+            position: [px, py],
+            uv: [u, v],
+            fg: ctx.fg,
+            bg: ctx.bg,
+        };
+        out.extend_from_slice(&[
+            gv(x0, y0, u0, v0),
+            gv(x0, y1, u0, v1),
+            gv(x1, y0, u1, v0),
+            gv(x1, y0, u1, v0),
+            gv(x0, y1, u0, v1),
+            gv(x1, y1, u1, v1),
+        ]);
+    }
+
     /// Build vertices for proportional text primitives.
     /// Each glyph is rendered as a separate quad with alpha blending.
     fn build_proportional_text_quads_cached(
@@ -7397,23 +7533,39 @@ fragment float4 live_spectrogram_frag(
     ///                 ndc_y = 1 - (px_y / vp_h) * 2
     fn build_text_quads(
         frame: &RenderFrame,
-        atlas: &mut GlyphAtlas,
+        text_atlas: &mut GlyphAtlas,
+        layout_cell_w: f32,
+        layout_cell_h: f32,
         vp_w: f32,
         vp_h: f32,
     ) -> Vec<Vertex> {
-        build_text_quads_offset(frame, atlas, vp_w, vp_h, TileOffset::default(), theme::BG())
+        build_text_quads_offset(
+            frame,
+            text_atlas,
+            layout_cell_w,
+            layout_cell_h,
+            vp_w,
+            vp_h,
+            TextOffset::default(),
+            theme::BG(),
+        )
     }
 
     fn build_text_quads_offset(
         frame: &RenderFrame,
-        atlas: &mut GlyphAtlas,
+        text_atlas: &mut GlyphAtlas,
+        layout_cell_w: f32,
+        layout_cell_h: f32,
         vp_w: f32,
         vp_h: f32,
-        offset: TileOffset,
+        offset: TextOffset,
         default_bg: Color,
     ) -> Vec<Vertex> {
-        let cell_w = atlas.cell_w as f32;
-        let cell_h = atlas.cell_h as f32;
+        let text_cell_w = (layout_cell_w * frame.text_cell_width_scale).max(1.0);
+        let text_cell_h = (layout_cell_h * frame.text_cell_height_scale).max(1.0);
+        let origin_x = offset.origin_col * layout_cell_w;
+        let origin_y = offset.origin_row * layout_cell_h;
+        let scroll_left = offset.scroll_left;
         let mut verts = Vec::with_capacity(frame.lines.len() * 80 * 6);
 
         let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
@@ -7422,14 +7574,18 @@ fragment float4 live_spectrogram_frag(
 
         for (row, line) in frame.lines.iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
-                let abs_col = col as f32 + offset.col;
-                let abs_row = row as f32 + offset.row;
+                let text_col = col as f32 - scroll_left;
+                let text_row = row as f32;
                 let is_cursor = frame.cursor == Some((row, col));
 
-                let x0 = ndc_x(abs_col * cell_w);
-                let x1 = ndc_x((abs_col + 1.0) * cell_w);
-                let y0 = ndc_y(abs_row * cell_h);
-                let y1 = ndc_y((abs_row + 1.0) * cell_h);
+                let x0_px = origin_x + text_col * text_cell_w;
+                let x1_px = x0_px + text_cell_w;
+                let y0_px = origin_y + text_row * text_cell_h;
+                let y1_px = y0_px + text_cell_h;
+                let x0 = ndc_x(x0_px);
+                let x1 = ndc_x(x1_px);
+                let y0 = ndc_y(y0_px);
+                let y1 = ndc_y(y1_px);
 
                 // Use a dedicated cursor fill so it stays legible over selection and syntax colors.
                 let (fg, bg) = if is_cursor {
@@ -7468,13 +7624,16 @@ fragment float4 live_spectrogram_frag(
                     continue;
                 }
 
-                rasterize_char(
-                    atlas,
+                rasterize_char_px(
+                    text_atlas,
                     cell.ch,
-                    (abs_col, abs_row),
+                    x0_px,
+                    y0_px,
+                    text_cell_w,
+                    text_cell_h,
                     &CharCtx {
-                        cell_w,
-                        cell_h,
+                        cell_w: text_cell_w,
+                        cell_h: text_cell_h,
                         vp_w,
                         vp_h,
                         fg,
@@ -7486,14 +7645,17 @@ fragment float4 live_spectrogram_frag(
         }
 
         // ── Status bar (placed at bottom of tile region) ─────────────────────
-        let total_rows = (vp_h / cell_h).floor() as usize;
-        let status_row = if offset.col == 0.0 && offset.row == 0.0 {
+        let total_rows = (vp_h / layout_cell_h).floor() as usize;
+        let status_row = if offset.origin_col == 0.0 && offset.origin_row == 0.0 {
             total_rows.saturating_sub(1) // legacy single-tile: bottom of screen
         } else {
             // Skip status bar for offset tiles — handled by tiled renderer
             return verts;
         };
         let status_bg = to_rgba(theme::STATUS_BG());
+        let cell_w = layout_cell_w;
+        let cell_h = layout_cell_h;
+        let atlas = text_atlas;
 
         // ── Completion popup ─────────────────────────────────────────────────
         if let Some(comp) = &frame.completion {

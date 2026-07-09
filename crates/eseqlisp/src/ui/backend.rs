@@ -116,6 +116,9 @@ pub struct CompletionFrame {
     pub entries: Vec<CompletionEntry>,
     /// Where to anchor the popup: (row, col) in visible-area coordinates.
     pub anchor: (usize, usize),
+    /// Text-cell scale for converting the text anchor into layout/tile cells.
+    pub text_cell_width_scale: f32,
+    pub text_cell_height_scale: f32,
     /// Optional doc panel: title + body lines.
     pub doc: Option<(String, Vec<String>)>,
 }
@@ -174,6 +177,10 @@ pub struct RenderFrame {
     /// Text scroll offset — how many rows the text has scrolled.
     /// Used by Metal to sync widget vertical position with text scrolling.
     pub text_scroll_top: usize,
+    /// Width of one text cell relative to the widget/layout cell.
+    pub text_cell_width_scale: f32,
+    /// Height of one text cell relative to the widget/layout cell.
+    pub text_cell_height_scale: f32,
 }
 
 // ── Tiled rendering ──────────────────────────────────────────────────────────
