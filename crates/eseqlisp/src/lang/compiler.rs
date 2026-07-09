@@ -1579,6 +1579,7 @@ impl Compiler {
                         if matches!(l.first(), Some(Expression::Symbol(s)) if s == "def-node"))
                 });
             let mut quote_next = false;
+            let mut quote_next_list_only = false;
             for (i, elem) in list.iter().skip(1).enumerate() {
                 if is_graph_sequencer {
                     match elem {
@@ -1591,6 +1592,13 @@ impl Compiler {
                     self.compile_quoted_expression(elem)?;
                     quote_next = false;
                     continue;
+                }
+                if quote_next_list_only {
+                    quote_next_list_only = false;
+                    if matches!(elem, Expression::List(_) | Expression::QuoteList(_)) {
+                        self.compile_quoted_expression(elem)?;
+                        continue;
+                    }
                 }
                 if is_def_accumulator && list.len() == 3 && i == 1 {
                     self.compile_quoted_expression(elem)?;
@@ -1630,6 +1638,9 @@ impl Compiler {
                         if k == "material" || k == "shader" {
                             quote_next = true;
                         }
+                        if k == "map" {
+                            quote_next_list_only = true;
+                        }
                         if is_def_sequencer && (k == "tick" || k == "init") {
                             quote_next = true;
                         }
@@ -1641,6 +1652,7 @@ impl Compiler {
                                 || k == "phase"
                                 || k == "listen"
                                 || k == "target"
+                                || k == "targets"
                                 || k == "seed"
                                 || k == "doc"
                                 || k == "run"

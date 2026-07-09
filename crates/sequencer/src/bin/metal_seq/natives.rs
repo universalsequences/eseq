@@ -215,6 +215,21 @@ fn process_binding_target_from_value(
                 param,
             })
         }
+        "process-inlet" | "process_inlet" => {
+            let process = value_string_field(value, "process")
+                .or_else(|| value_string_field(value, "class"))
+                .ok_or_else(|| "process-inlet target must include :process".to_string())?;
+            let inlet = value_string_field(value, "inlet")
+                .ok_or_else(|| "process-inlet target must include :inlet".to_string())?;
+            let instance_id = value_number_field(value, "instance-id")
+                .or_else(|| value_number_field(value, "instance_id"))
+                .map(|id| sequencer::process::ProcessInstanceId(id as u64));
+            Ok(sequencer::process::ParamTarget::ProcessInlet {
+                process,
+                inlet,
+                instance_id,
+            })
+        }
         "rack-slot" | "rack-slot-param" | "rack-instrument" | "rack-slot-instrument-param" => Err(
             "rack process-port bindings are not exposed until rack dispatch supports them"
                 .to_string(),

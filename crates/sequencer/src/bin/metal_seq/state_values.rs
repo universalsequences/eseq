@@ -581,6 +581,13 @@ fn process_param_target_label(target: &sequencer::process::ParamTarget) -> Strin
         sequencer::process::ParamTarget::MidiFxParam { slot, fx, param } => {
             format!("midi-fx{}:{fx}:{param}", slot + 1)
         }
+        sequencer::process::ParamTarget::ProcessInlet {
+            process,
+            inlet,
+            instance_id,
+        } => instance_id
+            .map(|id| format!("process:{process}#{}:{inlet}", id.0))
+            .unwrap_or_else(|| format!("process:{process}:{inlet}")),
         sequencer::process::ParamTarget::RackSlotParam { slot, param } => {
             format!("rack{}:{param}", slot + 1)
         }

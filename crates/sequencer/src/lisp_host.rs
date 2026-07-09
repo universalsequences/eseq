@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::os::raw::{c_char, c_float, c_int, c_void};
@@ -4334,6 +4334,20 @@ fn register_process_target_hint_constructors(runtime: &mut Runtime) {
             },
         );
     }
+    runtime.register_native_with_docs(
+        "process-inlet",
+        "(process-inlet :class :inlet)",
+        "Construct a process-inlet target selector for a mappable process port.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("process-inlet expects a process class and inlet".to_string());
+            }
+            Ok(process_list(
+                std::iter::once(EValue::Symbol("process-inlet".to_string()))
+                    .chain(args.into_iter()),
+            ))
+        },
+    );
 }
 
 fn register_process_natives(
@@ -4362,6 +4376,53 @@ fn register_process_natives(
     }));
 
     register_process_target_hint_constructors(runtime);
+
+    let process_authoring_for_inlet = Arc::clone(&process_authoring);
+    runtime.register_native_with_docs(
+        "inlet",
+        "(inlet process :inlet)",
+        "Construct an instance-specific process-inlet target selector for map!.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("inlet expects a process handle and inlet name".to_string());
+            }
+            let Some(EValue::HostHandle { kind, id, .. }) = args.first() else {
+                return Err("inlet expects a process handle".to_string());
+            };
+            if kind != "process" {
+                return Err("inlet expects a process handle".to_string());
+            }
+            let inlet = process_symbol_name(
+                args.get(1)
+                    .ok_or_else(|| "inlet expects an inlet name".to_string())?,
+            )?;
+            let registry = process_authoring_for_inlet
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let instance = registry
+                .instances
+                .iter()
+                .find(|entry| entry.handle_id.0 == *id)
+                .ok_or_else(|| "unknown process handle".to_string())?;
+            let def = registry
+                .defs
+                .iter()
+                .find(|def| def.name == instance.class_name)
+                .ok_or_else(|| format!("unknown process class '{}'", instance.class_name))?;
+            if !def.inlets.iter().any(|entry| entry.name == inlet) {
+                return Err(format!(
+                    "process '{}' has no inlet '{}'",
+                    instance.class_name, inlet
+                ));
+            }
+            Ok(process_list([
+                EValue::Symbol(PROCESS_INLET_INSTANCE_TARGET_TAG.to_string()),
+                EValue::Number(*id as f64),
+                EValue::Symbol(instance.class_name.clone()),
+                EValue::Symbol(inlet),
+            ]))
+        },
+    );
 
     let process_authoring_for_def = Arc::clone(&process_authoring);
     let publish_for_def = publish.clone();
@@ -5132,6 +5193,7 @@ pub fn register_published_process_authoring_natives(
 }
 
 const PROCESS_LANE_TAG: &str = "__process-lane";
+const PROCESS_INLET_INSTANCE_TARGET_TAG: &str = "__process-inlet-instance";
 
 /// `(lane 0 1 0 ...)` evaluates to a tagged list; `processes`/`lane!` unpack it.
 fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, String>> {
@@ -5243,6 +5305,15 @@ fn process_chain_slot_from_handle(
             );
         }
     }
+    validate_process_port_bindings(def, &instance.bindings)?;
+    let mut bindings: BTreeMap<String, Option<crate::process::ParamTarget>> = def
+        .ports
+        .iter()
+        .map(|port| (port.name.clone(), None))
+        .collect();
+    for (port, target) in &instance.bindings {
+        bindings.insert(port.clone(), target.clone());
+    }
     Ok(crate::process::TrackProcessSlot {
         instance_id: crate::process::ProcessInstanceId(handle_id),
         instance_name: instance.name.clone(),
@@ -5250,12 +5321,64 @@ fn process_chain_slot_from_handle(
         enabled: true,
         inlets,
         lanes,
-        bindings: def
-            .ports
-            .iter()
-            .map(|port| (port.name.clone(), None))
-            .collect(),
+        bindings,
     })
+}
+
+fn validate_process_port_bindings(
+    def: &crate::process::ProcessDef,
+    bindings: &BTreeMap<String, Option<crate::process::ParamTarget>>,
+) -> Result<(), String> {
+    for (port_name, target) in bindings {
+        let Some(port) = def.ports.iter().find(|port| port.name == *port_name) else {
+            return Err(format!(
+                "process '{}' has no target port '{}'",
+                def.name, port_name
+            ));
+        };
+        if let Some(target) = target {
+            if !port.allows_manual_target(target) {
+                return Err(format!(
+                    "target {} is incompatible with process '{}' port '{}'",
+                    process_param_target_label_for_error(target),
+                    def.name,
+                    port_name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn process_param_target_label_for_error(target: &crate::process::ParamTarget) -> String {
+    match target {
+        crate::process::ParamTarget::StepParam { param } => format!("step-param:{param}"),
+        crate::process::ParamTarget::InstrumentParam { param, .. } => {
+            format!("instrument:{param}")
+        }
+        crate::process::ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            ..
+        } => format!("effect{}:{effect}:{param}", slot + 1),
+        crate::process::ParamTarget::MidiFxParam { slot, fx, param } => {
+            format!("midi-fx{}:{fx}:{param}", slot + 1)
+        }
+        crate::process::ParamTarget::ProcessInlet {
+            process,
+            inlet,
+            instance_id,
+        } => instance_id
+            .map(|id| format!("process-inlet:{process}#{}:{inlet}", id.0))
+            .unwrap_or_else(|| format!("process-inlet:{process}:{inlet}")),
+        crate::process::ParamTarget::RackSlotParam { slot, param } => {
+            format!("rack{}:{param}", slot + 1)
+        }
+        crate::process::ParamTarget::RackSlotInstrumentParam { slot, param, .. } => {
+            format!("rack{}:instrument:{param}", slot + 1)
+        }
+    }
 }
 
 fn matching_existing_process_slot<'a>(
@@ -5409,7 +5532,7 @@ fn register_process_chain_natives(
 
     let state_for_lane = Arc::clone(&state);
     let authoring_for_lane = Arc::clone(&process_authoring);
-    let publish_for_lane = publish;
+    let publish_for_lane = publish.clone();
     runtime.register_native_with_docs(
         "lane!",
         "(lane! instance :inlet v1 v2 ...)",
@@ -5496,6 +5619,70 @@ fn register_process_chain_natives(
             }
             if write_process_chain_state {
                 publish_process_authoring(&authoring_for_lane, &publish_for_lane);
+            }
+            Ok(EValue::Number(updated as f64))
+        },
+    );
+
+    let state_for_map = Arc::clone(&state);
+    let authoring_for_map = Arc::clone(&process_authoring);
+    let publish_for_map = publish;
+    runtime.register_native_with_docs(
+        "map!",
+        "(map! instance :port target)",
+        "Bind a mappable process target port to a concrete target, including another process inlet.",
+        move |args, _ctx| {
+            if args.len() != 3 {
+                return Err("map! expects a process handle, port, and target".to_string());
+            }
+            let Some(EValue::HostHandle { kind, id, .. }) = args.first() else {
+                return Err("map! expects a process handle".to_string());
+            };
+            if kind != "process" {
+                return Err("map! expects a process handle".to_string());
+            }
+            let port = process_symbol_name(
+                args.get(1)
+                    .ok_or_else(|| "map! expects a port name".to_string())?,
+            )?;
+            let target = parse_process_param_target(
+                args.get(2)
+                    .ok_or_else(|| "map! expects a target".to_string())?,
+            )?;
+            {
+                let mut registry = authoring_for_map
+                    .lock()
+                    .map_err(|_| "failed to lock process registry".to_string())?;
+                let instance = registry
+                    .instances
+                    .iter()
+                    .find(|entry| entry.handle_id.0 == *id)
+                    .ok_or_else(|| "unknown process handle".to_string())?;
+                let def = registry
+                    .defs
+                    .iter()
+                    .find(|def| def.name == instance.class_name)
+                    .ok_or_else(|| format!("unknown process class '{}'", instance.class_name))?;
+                let single = BTreeMap::from([(port.clone(), Some(target.clone()))]);
+                validate_process_port_bindings(def, &single)?;
+                let instance = registry
+                    .instances
+                    .iter_mut()
+                    .find(|entry| entry.handle_id.0 == *id)
+                    .ok_or_else(|| "unknown process handle".to_string())?;
+                instance.bindings.insert(port.clone(), Some(target.clone()));
+            }
+            let updated = if write_process_chain_state {
+                state_for_map.set_process_port_binding_for_instance(
+                    crate::process::ProcessInstanceId(*id),
+                    &port,
+                    target,
+                )
+            } else {
+                0
+            };
+            if write_process_chain_state {
+                publish_process_authoring(&authoring_for_map, &publish_for_map);
             }
             Ok(EValue::Number(updated as f64))
         },
@@ -6231,6 +6418,9 @@ fn parse_process_target_kind(value: &EValue) -> Result<crate::process::ProcessTa
         "midi-fx-param" | "midi_fx_param" | "midi-fx" | "midi_fx" => {
             Ok(crate::process::ProcessTargetKind::MidiFxParam)
         }
+        "process-inlet" | "process_inlet" | "inlet" => {
+            Ok(crate::process::ProcessTargetKind::ProcessInlet)
+        }
         "rack-slot-param" | "rack_slot_param" | "rack-slot" | "rack_slot" => {
             Ok(crate::process::ProcessTargetKind::RackSlotParam)
         }
@@ -6366,6 +6556,48 @@ fn parse_process_target_hint(value: &EValue) -> Result<crate::process::ProcessTa
             Ok(crate::process::ProcessTargetHint::MidiFxParam { fx, param })
         }
         other => Err(format!("unsupported process target {other}")),
+    }
+}
+
+fn parse_process_param_target(value: &EValue) -> Result<crate::process::ParamTarget, String> {
+    let items =
+        value_list(value).ok_or_else(|| "process port target must be a list".to_string())?;
+    let head = process_symbol_name(
+        items
+            .first()
+            .ok_or_else(|| "process port target missing head".to_string())?,
+    )?
+    .to_ascii_lowercase();
+    match head.as_str() {
+        "process-inlet" => {
+            if items.len() != 3 {
+                return Err("(process-inlet :class :inlet) expects two arguments".to_string());
+            }
+            Ok(crate::process::ParamTarget::ProcessInlet {
+                process: process_symbol_name(&items[1])?,
+                inlet: process_symbol_name(&items[2])?,
+                instance_id: None,
+            })
+        }
+        PROCESS_INLET_INSTANCE_TARGET_TAG => {
+            if items.len() != 4 {
+                return Err("(inlet process :inlet) target has invalid arity".to_string());
+            }
+            let EValue::Number(raw_id) = items[1] else {
+                return Err("(inlet process :inlet) target has invalid process id".to_string());
+            };
+            if !raw_id.is_finite() || raw_id < 0.0 || raw_id.fract() != 0.0 {
+                return Err(
+                    "(inlet process :inlet) target id must be a non-negative integer".to_string(),
+                );
+            }
+            Ok(crate::process::ParamTarget::ProcessInlet {
+                process: process_symbol_name(&items[2])?,
+                inlet: process_symbol_name(&items[3])?,
+                instance_id: Some(crate::process::ProcessInstanceId(raw_id as u64)),
+            })
+        }
+        other => Err(format!("unsupported process port target {other}")),
     }
 }
 
@@ -6722,16 +6954,23 @@ fn construct_process_instance(
     process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     publish: Option<ProcessPublishHook>,
 ) -> Result<EValue, String> {
-    let inlets = parse_process_constructor_inlets(process_authoring, &args)?;
+    let constructor_args = parse_process_constructor_args(process_authoring, &args)?;
     let mut registry = process_authoring
         .lock()
         .map_err(|_| "failed to lock process registry".to_string())?;
+    let def = registry
+        .defs
+        .iter()
+        .find(|def| def.name == class_name)
+        .ok_or_else(|| format!("unknown process class '{class_name}'"))?;
+    validate_process_port_bindings(def, &constructor_args.bindings)?;
     let handle_id = crate::process::AuthoredHandleId(registry.next_id());
     registry.upsert_instance(crate::process::AuthoredProcessInstance {
         handle_id,
         name: None,
         class_name: class_name.to_string(),
-        inlets,
+        inlets: constructor_args.inlets,
+        bindings: constructor_args.bindings,
         running,
         anonymous,
         one_shot,
@@ -6782,6 +7021,7 @@ fn construct_anonymous_listener_process(
         name: None,
         class_name,
         inlets: HashMap::new(),
+        bindings: BTreeMap::new(),
         running: true,
         anonymous: true,
         one_shot: false,
@@ -6797,22 +7037,51 @@ fn construct_anonymous_listener_process(
     ))
 }
 
-fn parse_process_constructor_inlets(
+struct ProcessConstructorArgs {
+    inlets: HashMap<String, crate::process::ProcessInletValue>,
+    bindings: BTreeMap<String, Option<crate::process::ParamTarget>>,
+}
+
+fn parse_process_constructor_args(
     process_authoring: &SharedProcessAuthoring,
     args: &[EValue],
-) -> Result<HashMap<String, crate::process::ProcessInletValue>, String> {
+) -> Result<ProcessConstructorArgs, String> {
     if args.len() % 2 != 0 {
         return Err("process constructor expects keyword/value inlet pairs".to_string());
     }
     let mut inlets = HashMap::new();
+    let mut bindings = BTreeMap::new();
     let mut idx = 0;
     while idx < args.len() {
         let key = process_symbol_name(&args[idx])?;
-        let value = parse_inlet_value(process_authoring, &args[idx + 1])?;
-        inlets.insert(key, value);
+        if key.eq_ignore_ascii_case("map") {
+            bindings.extend(parse_process_constructor_map(&args[idx + 1])?);
+        } else {
+            let value = parse_inlet_value(process_authoring, &args[idx + 1])?;
+            inlets.insert(key, value);
+        }
         idx += 2;
     }
-    Ok(inlets)
+    Ok(ProcessConstructorArgs { inlets, bindings })
+}
+
+fn parse_process_constructor_map(
+    value: &EValue,
+) -> Result<BTreeMap<String, Option<crate::process::ParamTarget>>, String> {
+    let entries =
+        value_list(value).ok_or_else(|| "process constructor :map expects a list".to_string())?;
+    let mut bindings = BTreeMap::new();
+    for entry in entries {
+        let items = value_list(&entry)
+            .ok_or_else(|| "process constructor :map entries must be lists".to_string())?;
+        if items.len() != 2 {
+            return Err("process constructor :map entries expect (port target)".to_string());
+        }
+        let port = process_symbol_name(&items[0])?;
+        let target = parse_process_param_target(&items[1])?;
+        bindings.insert(port, Some(target));
+    }
+    Ok(bindings)
 }
 
 fn parse_inlet_value(
@@ -22179,7 +22448,7 @@ mod tests {
     }
 
     #[test]
-    fn process_builtin_library_loads_prob_mask_and_repeater() {
+    fn process_builtin_library_loads_prob_mask_repeater_and_dice() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
             Arc::clone(&state),
@@ -22199,6 +22468,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.iter().any(|name| name == "prob-mask"), "{names:?}");
         assert!(names.iter().any(|name| name == "repeater"), "{names:?}");
+        assert!(names.iter().any(|name| name == "dice"), "{names:?}");
     }
 
     #[test]
@@ -22494,6 +22764,95 @@ mod tests {
         assert_eq!(def.ports.len(), 0);
         assert_eq!(def.inlets.len(), 11);
         assert!(def.inlets.iter().all(|inlet| inlet.lane));
+    }
+
+    #[test]
+    fn process_inlet_maps_attach_inline_and_via_map_bang() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        scratch
+            .eval(
+                r#"
+                (def-process dice-like
+                  :targets ((out :mappable :process-inlet))
+                  :run (target-set! :out 3))
+
+                (def-process repeater-like
+                  :in ((times :int 0 8 :default 0 :lane true))
+                  :run nil)
+
+                (def inline-src
+                  (dice-like :map ((out (process-inlet :repeater-like :times)))))
+                (def mapped-src (dice-like))
+                (def mapped-sink (repeater-like))
+
+                (processes :track 0 inline-src mapped-src mapped-sink)
+                (map! mapped-src :out (inlet mapped-sink :times))
+                "#,
+            )
+            .expect("define process-inlet maps");
+
+        let chain = state.track_process_chain(0).expect("track 0 process chain");
+        assert_eq!(chain.slots.len(), 3);
+        assert_eq!(
+            chain.slots[0].bindings.get("out"),
+            Some(&Some(crate::process::ParamTarget::ProcessInlet {
+                process: "repeater-like".to_string(),
+                inlet: "times".to_string(),
+                instance_id: None,
+            }))
+        );
+        assert_eq!(
+            chain.slots[1].bindings.get("out"),
+            Some(&Some(crate::process::ParamTarget::ProcessInlet {
+                process: "repeater-like".to_string(),
+                inlet: "times".to_string(),
+                instance_id: Some(chain.slots[2].instance_id),
+            }))
+        );
+    }
+
+    #[test]
+    fn process_inlet_patch_demo_loads_and_wires_two_processes() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-inlet-patch-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read process-inlet demo");
+
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate process-inlet patch demo");
+
+        let chain = state.track_process_chain(0).expect("track 0 process chain");
+        assert_eq!(chain.slots.len(), 2);
+        assert_eq!(chain.slots[0].class_name, "process-inlet-demo-dice");
+        assert_eq!(chain.slots[1].class_name, "process-inlet-demo-repeater");
+        assert_eq!(
+            chain.slots[0].bindings.get("out"),
+            Some(&Some(crate::process::ParamTarget::ProcessInlet {
+                process: "process-inlet-demo-repeater".to_string(),
+                inlet: "times".to_string(),
+                instance_id: Some(chain.slots[1].instance_id),
+            }))
+        );
+        assert!(chain.slots[0].lanes.contains_key("roll"));
+        assert!(chain.slots[1].lanes.contains_key("enabled"));
     }
 
     #[test]

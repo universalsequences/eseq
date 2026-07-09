@@ -82,6 +82,7 @@ pub enum ProcessTargetKind {
     InstrumentParam,
     EffectParam,
     MidiFxParam,
+    ProcessInlet,
     RackSlotParam,
     RackSlotInstrumentParam,
 }
@@ -94,6 +95,7 @@ impl ProcessTargetKind {
             Self::InstrumentParam => "instrument-param",
             Self::EffectParam => "effect-param",
             Self::MidiFxParam => "midi-fx-param",
+            Self::ProcessInlet => "process-inlet",
             Self::RackSlotParam => "rack-slot-param",
             Self::RackSlotInstrumentParam => "rack-slot-instrument-param",
         }
@@ -112,6 +114,7 @@ impl ProcessTargetKind {
             Self::InstrumentParam => matches!(hint, ProcessTargetHint::InstrumentParam { .. }),
             Self::EffectParam => matches!(hint, ProcessTargetHint::EffectParam { .. }),
             Self::MidiFxParam => matches!(hint, ProcessTargetHint::MidiFxParam { .. }),
+            Self::ProcessInlet => false,
             Self::RackSlotParam | Self::RackSlotInstrumentParam => false,
         }
     }
@@ -128,6 +131,7 @@ impl ProcessTargetKind {
             Self::InstrumentParam => matches!(target, ParamTarget::InstrumentParam { .. }),
             Self::EffectParam => matches!(target, ParamTarget::EffectParam { .. }),
             Self::MidiFxParam => matches!(target, ParamTarget::MidiFxParam { .. }),
+            Self::ProcessInlet => matches!(target, ParamTarget::ProcessInlet { .. }),
             Self::RackSlotParam => matches!(target, ParamTarget::RackSlotParam { .. }),
             Self::RackSlotInstrumentParam => {
                 matches!(target, ParamTarget::RackSlotInstrumentParam { .. })
@@ -231,6 +235,12 @@ pub enum ParamTarget {
         slot: usize,
         fx: String,
         param: String,
+    },
+    ProcessInlet {
+        process: String,
+        inlet: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_id: Option<ProcessInstanceId>,
     },
     RackSlotParam {
         slot: usize,
@@ -514,6 +524,7 @@ pub struct AuthoredProcessInstance {
     pub name: Option<String>,
     pub class_name: String,
     pub inlets: HashMap<String, ProcessInletValue>,
+    pub bindings: BTreeMap<String, Option<ParamTarget>>,
     pub running: bool,
     pub anonymous: bool,
     pub one_shot: bool,
@@ -684,6 +695,7 @@ pub struct PublishedAuthoredProcessInstance {
     pub name: Option<String>,
     pub class_name: String,
     pub inlets: HashMap<String, PublishedProcessInletValue>,
+    pub bindings: BTreeMap<String, Option<ParamTarget>>,
     pub running: bool,
     pub anonymous: bool,
     pub one_shot: bool,
@@ -770,6 +782,7 @@ impl ProcessAuthoringSnapshot {
                                 ))
                             })
                             .collect::<Result<HashMap<_, _>, String>>()?,
+                        bindings: instance.bindings.clone(),
                         running: instance.running,
                         anonymous: instance.anonymous,
                         one_shot: instance.one_shot,
@@ -878,6 +891,7 @@ impl PublishedProcessAuthoringSnapshot {
                         .iter()
                         .map(|(name, value)| (name.clone(), value.to_runtime()))
                         .collect(),
+                    bindings: instance.bindings.clone(),
                     running: instance.running,
                     anonymous: instance.anonymous,
                     one_shot: instance.one_shot,
@@ -1055,6 +1069,12 @@ pub struct ProcessOutput {
     pub value: Value,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessInletWrite {
+    pub op: ProcessTargetOp,
+    pub value: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProcessScheduledEmission {
     pub process_runtime_id: u64,
@@ -1100,6 +1120,7 @@ pub struct ProcessRuntime {
     pending_events: Vec<PendingProcessEvent>,
     step_process_states: HashMap<ProcessInstanceId, HashMap<String, Value>>,
     step_process_runtime_ids: HashSet<u64>,
+    pending_step_inlet_writes: HashMap<(usize, ProcessInstanceId, String), Vec<ProcessInletWrite>>,
     global_transpose: f32,
 }
 
@@ -1121,6 +1142,7 @@ impl ProcessRuntime {
 
     pub fn reset_transport(&mut self, total_beats: f64) {
         self.pending_events.clear();
+        self.pending_step_inlet_writes.clear();
         for instance in &mut self.instances {
             if let Some(clock) = &mut instance.clock {
                 clock.realign(total_beats);
@@ -1130,6 +1152,50 @@ impl ProcessRuntime {
 
     pub fn clear_scene_pending(&mut self) {
         self.pending_events.clear();
+        self.pending_step_inlet_writes.clear();
+    }
+
+    pub fn defer_step_process_inlet_write(
+        &mut self,
+        track: usize,
+        instance_id: ProcessInstanceId,
+        inlet: impl Into<String>,
+        write: ProcessInletWrite,
+    ) {
+        self.pending_step_inlet_writes
+            .entry((track, instance_id, inlet.into()))
+            .or_default()
+            .push(write);
+    }
+
+    pub fn take_step_process_inlet_writes(
+        &mut self,
+        track: usize,
+        chain: &TrackProcessChain,
+    ) -> BTreeMap<usize, BTreeMap<String, Vec<ProcessInletWrite>>> {
+        let pending = std::mem::take(&mut self.pending_step_inlet_writes);
+        let mut current = BTreeMap::<usize, BTreeMap<String, Vec<ProcessInletWrite>>>::new();
+        for ((pending_track, instance_id, inlet), writes) in pending {
+            if pending_track == track {
+                if let Some(slot_idx) = chain
+                    .slots
+                    .iter()
+                    .position(|slot| slot.instance_id == instance_id)
+                {
+                    current
+                        .entry(slot_idx)
+                        .or_default()
+                        .entry(inlet)
+                        .or_default()
+                        .extend(writes);
+                    continue;
+                }
+                continue;
+            }
+            self.pending_step_inlet_writes
+                .insert((pending_track, instance_id, inlet), writes);
+        }
+        current
     }
 
     pub fn sync_authoring(&mut self, authoring: ProcessAuthoringSnapshot, total_beats: f64) {
@@ -1651,6 +1717,17 @@ impl ProcessRuntime {
         cycle: u64,
         cycle_len: usize,
     ) -> Vec<ProcessTargetWrite> {
+        self.step_process_writes_with_inlet_writes(slot, step, cycle, cycle_len, None)
+    }
+
+    pub fn step_process_writes_with_inlet_writes(
+        &self,
+        slot: &TrackProcessSlot,
+        step: usize,
+        cycle: u64,
+        cycle_len: usize,
+        inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
+    ) -> Vec<ProcessTargetWrite> {
         if !slot.enabled {
             return Vec::new();
         }
@@ -1694,6 +1771,7 @@ impl ProcessRuntime {
             step,
             cycle,
             cycle_len,
+            inlet_writes,
         );
         vec![ProcessTargetWrite {
             port: port.name,
@@ -1707,6 +1785,15 @@ impl ProcessRuntime {
         &mut self,
         slot: &TrackProcessSlot,
         ctx: ProcessStepRunContext,
+    ) -> Option<ProcessRunInvocation> {
+        self.step_process_invocation_with_inlet_writes(slot, ctx, None)
+    }
+
+    pub fn step_process_invocation_with_inlet_writes(
+        &mut self,
+        slot: &TrackProcessSlot,
+        ctx: ProcessStepRunContext,
+        inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
     ) -> Option<ProcessRunInvocation> {
         if !slot.enabled {
             return None;
@@ -1731,7 +1818,7 @@ impl ProcessRuntime {
             source,
             beat: ctx.beat,
             sample_time: ctx.sample_time,
-            inlets: resolve_step_process_inlets(&def, slot, ctx.step),
+            inlets: resolve_step_process_inlets(&def, slot, ctx.step, inlet_writes),
             state,
             event: Some(ctx.event),
             step_context: Some(ProcessStepEventContext {
@@ -1850,6 +1937,7 @@ fn resolve_step_process_inlets(
     def: &ProcessDef,
     slot: &TrackProcessSlot,
     step: usize,
+    inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
 ) -> HashMap<String, Value> {
     let mut inlets = HashMap::new();
     for inlet in &def.inlets {
@@ -1874,9 +1962,33 @@ fn resolve_step_process_inlets(
                 value = Value::Number(lane.value_at(step, fallback) as f64);
             }
         }
+        if let Some(writes) = inlet_writes.and_then(|writes| writes.get(&inlet.name)) {
+            value = apply_process_inlet_writes(value, writes);
+        }
         inlets.insert(inlet.name.clone(), value);
     }
     inlets
+}
+
+fn process_value_as_f32(value: &Value) -> Option<f32> {
+    match value {
+        Value::Number(value) => Some(*value as f32),
+        Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+fn apply_process_inlet_writes(mut value: Value, writes: &[ProcessInletWrite]) -> Value {
+    for write in writes {
+        value = match write.op {
+            ProcessTargetOp::Set => Value::Number(write.value as f64),
+            ProcessTargetOp::Add => {
+                let current = process_value_as_f32(&value).unwrap_or(0.0);
+                Value::Number((current + write.value) as f64)
+            }
+        };
+    }
+    value
 }
 
 fn process_accumulator_value_at(
@@ -1887,9 +1999,41 @@ fn process_accumulator_value_at(
     step: usize,
     cycle: u64,
     cycle_len: usize,
+    inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
 ) -> f32 {
     let cycle_len = cycle_len.max(step.saturating_add(1)).max(1);
     let step = step.min(cycle_len - 1);
+    if let Some(inlet_writes) = inlet_writes.filter(|writes| !writes.is_empty()) {
+        let start = process_accumulator_cycle_start_fallback(
+            slot,
+            accumulator,
+            amount_default,
+            reset_default,
+            cycle,
+            cycle_len,
+        );
+        let acc = if step == 0 {
+            start
+        } else {
+            fold_process_accumulator_steps(
+                slot,
+                accumulator,
+                amount_default,
+                reset_default,
+                start,
+                0..step,
+            )
+        };
+        return fold_process_accumulator_step_with_inlet_writes(
+            slot,
+            accumulator,
+            amount_default,
+            reset_default,
+            acc,
+            step,
+            inlet_writes,
+        );
+    }
     if accumulator_cycle_has_reset(slot, accumulator, reset_default, cycle_len) {
         let start = if cycle == 0 {
             0.0
@@ -2044,6 +2188,34 @@ fn fold_process_accumulator_steps(
     acc
 }
 
+fn fold_process_accumulator_step_with_inlet_writes(
+    slot: &TrackProcessSlot,
+    accumulator: &ProcessAccumulatorSpec,
+    amount_default: f32,
+    reset_default: f32,
+    mut acc: f32,
+    step: usize,
+    inlet_writes: &BTreeMap<String, Vec<ProcessInletWrite>>,
+) -> f32 {
+    let reset = accumulator
+        .reset_inlet
+        .as_ref()
+        .map(|name| process_accumulator_inlet_at(slot, name, reset_default, step, inlet_writes))
+        .unwrap_or(0.0);
+    if reset > 0.5 {
+        acc = 0.0;
+    } else {
+        acc += process_accumulator_inlet_at(
+            slot,
+            &accumulator.amount_inlet,
+            amount_default,
+            step,
+            inlet_writes,
+        );
+    }
+    apply_process_accumulator_range(acc, accumulator)
+}
+
 fn process_accumulator_amount_sum(
     slot: &TrackProcessSlot,
     accumulator: &ProcessAccumulatorSpec,
@@ -2082,6 +2254,28 @@ fn process_accumulator_reset_at(
                 .map(|lane| lane.value_at(step, reset_default))
         })
         .unwrap_or(reset_default)
+}
+
+fn process_accumulator_inlet_at(
+    slot: &TrackProcessSlot,
+    inlet: &str,
+    default: f32,
+    step: usize,
+    inlet_writes: &BTreeMap<String, Vec<ProcessInletWrite>>,
+) -> f32 {
+    let base = slot
+        .lanes
+        .get(inlet)
+        .map(|lane| lane.value_at(step, default))
+        .unwrap_or(default);
+    let Some(writes) = inlet_writes.get(inlet) else {
+        return base;
+    };
+    process_value_as_f32(&apply_process_inlet_writes(
+        Value::Number(base as f64),
+        writes,
+    ))
+    .unwrap_or(base)
 }
 
 fn apply_process_accumulator_range(value: f32, accumulator: &ProcessAccumulatorSpec) -> f32 {
@@ -2216,12 +2410,56 @@ mod tests {
             name: None,
             class_name: class_name.to_string(),
             inlets: HashMap::new(),
+            bindings: BTreeMap::new(),
             running: true,
             anonymous: true,
             one_shot,
             every,
             run_source: Some("(emit :track 0)".to_string()),
         }
+    }
+
+    #[test]
+    fn deferred_step_process_inlet_writes_drop_stale_targets_on_target_track() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.defer_step_process_inlet_write(
+            0,
+            ProcessInstanceId(7),
+            "amount",
+            ProcessInletWrite {
+                op: ProcessTargetOp::Set,
+                value: 3.0,
+            },
+        );
+        runtime.defer_step_process_inlet_write(
+            1,
+            ProcessInstanceId(9),
+            "amount",
+            ProcessInletWrite {
+                op: ProcessTargetOp::Set,
+                value: 5.0,
+            },
+        );
+
+        let current = runtime.take_step_process_inlet_writes(0, &TrackProcessChain::default());
+
+        assert!(current.is_empty());
+        assert!(
+            !runtime.pending_step_inlet_writes.contains_key(&(
+                0,
+                ProcessInstanceId(7),
+                "amount".to_string()
+            )),
+            "stale writes for the currently firing track should be dropped"
+        );
+        assert!(
+            runtime.pending_step_inlet_writes.contains_key(&(
+                1,
+                ProcessInstanceId(9),
+                "amount".to_string()
+            )),
+            "writes for other tracks should remain pending"
+        );
     }
 
     #[test]
@@ -2346,6 +2584,7 @@ mod tests {
                         name: None,
                         class_name: "source".to_string(),
                         inlets: HashMap::new(),
+                        bindings: BTreeMap::new(),
                         running: true,
                         anonymous: false,
                         one_shot: false,
@@ -2357,6 +2596,7 @@ mod tests {
                         name: None,
                         class_name: "listener".to_string(),
                         inlets: HashMap::new(),
+                        bindings: BTreeMap::new(),
                         running: true,
                         anonymous: true,
                         one_shot: false,
@@ -2428,6 +2668,7 @@ mod tests {
                     name: None,
                     class_name: "listener".to_string(),
                     inlets: HashMap::new(),
+                    bindings: BTreeMap::new(),
                     running: true,
                     anonymous: false,
                     one_shot: false,

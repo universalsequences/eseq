@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2430,6 +2430,24 @@ fn process_target_op_label(op: crate::process::ProcessTargetOp) -> &'static str 
     }
 }
 
+type StepProcessInletWrites =
+    BTreeMap<usize, BTreeMap<String, Vec<crate::process::ProcessInletWrite>>>;
+
+#[derive(Clone, Debug)]
+struct DeferredProcessInletWrite {
+    track: usize,
+    instance_id: crate::process::ProcessInstanceId,
+    inlet: String,
+    write: crate::process::ProcessInletWrite,
+}
+
+struct ProcessInletWriteContext<'a> {
+    chain: &'a crate::process::TrackProcessChain,
+    current_slot_index: Option<usize>,
+    current_fire_writes: &'a mut StepProcessInletWrites,
+    deferred_writes: &'a mut Vec<DeferredProcessInletWrite>,
+}
+
 fn process_target_label(target: &crate::process::ParamTarget) -> String {
     match target {
         crate::process::ParamTarget::StepParam { param } => format!("step-param:{param}"),
@@ -2445,6 +2463,13 @@ fn process_target_label(target: &crate::process::ParamTarget) -> String {
         crate::process::ParamTarget::MidiFxParam { slot, fx, param } => {
             format!("midi-fx{}:{fx}:{param}", slot + 1)
         }
+        crate::process::ParamTarget::ProcessInlet {
+            process,
+            inlet,
+            instance_id,
+        } => instance_id
+            .map(|id| format!("process-inlet:{process}#{}:{inlet}", id.0))
+            .unwrap_or_else(|| format!("process-inlet:{process}:{inlet}")),
         crate::process::ParamTarget::RackSlotParam { slot, param } => {
             format!("rack{}:{param}", slot + 1)
         }
@@ -2889,6 +2914,117 @@ fn process_resolve_hint_to_target(
     }
 }
 
+fn resolve_process_inlet_target(
+    chain: &crate::process::TrackProcessChain,
+    target: &crate::process::ParamTarget,
+) -> Option<(usize, crate::process::ProcessInstanceId, String)> {
+    let crate::process::ParamTarget::ProcessInlet {
+        process,
+        inlet,
+        instance_id,
+    } = target
+    else {
+        return None;
+    };
+    let slot_idx = match instance_id {
+        Some(instance_id) => chain
+            .slots
+            .iter()
+            .position(|slot| slot.instance_id == *instance_id && slot.class_name == *process),
+        None => chain
+            .slots
+            .iter()
+            .position(|slot| slot.class_name == *process),
+    }?;
+    let slot = &chain.slots[slot_idx];
+    Some((slot_idx, slot.instance_id, inlet.clone()))
+}
+
+fn process_apply_inlet_write(
+    snapshot: &SequencerSnapshot,
+    track: usize,
+    step: usize,
+    target: &crate::process::ParamTarget,
+    write: &crate::process::ProcessTargetWrite,
+    context: Option<&mut ProcessInletWriteContext<'_>>,
+) {
+    let Some(context) = context else {
+        process_trace(snapshot, || {
+            format!(
+                "skip track={} step={} port={} target={} reason=process-inlet-context-missing",
+                track + 1,
+                step,
+                write.port,
+                process_target_label(target)
+            )
+        });
+        return;
+    };
+    let Some((target_slot_index, instance_id, inlet)) =
+        resolve_process_inlet_target(context.chain, target)
+    else {
+        process_trace(snapshot, || {
+            format!(
+                "skip track={} step={} port={} target={} reason=process-inlet-target-not-found",
+                track + 1,
+                step,
+                write.port,
+                process_target_label(target)
+            )
+        });
+        return;
+    };
+    let inlet_write = crate::process::ProcessInletWrite {
+        op: write.op,
+        value: write.value,
+    };
+    if context
+        .current_slot_index
+        .is_some_and(|current_slot_index| target_slot_index > current_slot_index)
+    {
+        context
+            .current_fire_writes
+            .entry(target_slot_index)
+            .or_default()
+            .entry(inlet.clone())
+            .or_default()
+            .push(inlet_write);
+        process_trace(snapshot, || {
+            format!(
+                "apply track={} step={} port={} target={} op={} value={} -> slot={} inlet={} timing=current-fire",
+                track + 1,
+                step,
+                write.port,
+                process_target_label(target),
+                process_target_op_label(write.op),
+                write.value,
+                target_slot_index,
+                inlet
+            )
+        });
+    } else {
+        context.deferred_writes.push(DeferredProcessInletWrite {
+            track,
+            instance_id,
+            inlet: inlet.clone(),
+            write: inlet_write,
+        });
+        process_trace(snapshot, || {
+            format!(
+                "defer track={} step={} port={} target={} op={} value={} -> instance={} inlet={} timing=next-fire",
+                track + 1,
+                step,
+                write.port,
+                process_target_label(target),
+                process_target_op_label(write.op),
+                write.value,
+                instance_id.0,
+                inlet
+            )
+        });
+    }
+}
+
 fn process_apply_concrete_target_write(
     snapshot: &SequencerSnapshot,
     midi_fx_descriptors: &[EffectDescriptor],
@@ -3196,6 +3332,17 @@ fn process_apply_concrete_target_write(
                 }),
             }
         }
+        crate::process::ParamTarget::ProcessInlet { .. } => {
+            process_trace(snapshot, || {
+                format!(
+                    "skip track={} step={} port={} target={} reason=process-inlet-context-missing",
+                    track + 1,
+                    step,
+                    write.port,
+                    process_target_label(target)
+                )
+            });
+        }
         crate::process::ParamTarget::RackSlotParam { .. }
         | crate::process::ParamTarget::RackSlotInstrumentParam { .. } => {
             process_trace(snapshot, || {
@@ -3220,6 +3367,7 @@ fn apply_process_target_writes(
     overlay: &mut ProcessTargetOverlay,
     slot: Option<&crate::process::TrackProcessSlot>,
     writes: &[crate::process::ProcessTargetWrite],
+    mut process_inlet_context: Option<&mut ProcessInletWriteContext<'_>>,
 ) {
     for write in writes {
         process_trace(snapshot, || {
@@ -3273,16 +3421,27 @@ fn apply_process_target_writes(
                 process_target_label(&target)
             )
         });
-        process_apply_concrete_target_write(
-            snapshot,
-            midi_fx_descriptors,
-            track,
-            step,
-            resolved,
-            overlay,
-            &target,
-            write,
-        );
+        if matches!(target, crate::process::ParamTarget::ProcessInlet { .. }) {
+            process_apply_inlet_write(
+                snapshot,
+                track,
+                step,
+                &target,
+                write,
+                process_inlet_context.as_deref_mut(),
+            );
+        } else {
+            process_apply_concrete_target_write(
+                snapshot,
+                midi_fx_descriptors,
+                track,
+                step,
+                resolved,
+                overlay,
+                &target,
+                write,
+            );
+        }
     }
 }
 
@@ -3427,6 +3586,7 @@ fn apply_step_process_commands(
     overlay: &mut ProcessTargetOverlay,
     process_base_alive: &mut bool,
     commands: &[crate::process::ProcessRunCommand],
+    process_inlet_context: Option<&mut ProcessInletWriteContext<'_>>,
     debug_accum: bool,
 ) -> bool {
     let target_writes = commands
@@ -3445,6 +3605,7 @@ fn apply_step_process_commands(
         overlay,
         slot,
         &target_writes,
+        process_inlet_context,
     );
     for command in commands {
         match command {
@@ -5811,26 +5972,42 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             let mut process_overlay = ProcessTargetOverlay::default();
             let mut process_base_alive = true;
             let step_beats = trigger.samples_per_step / samples_per_quarter as f32;
-            for slot in &track.process_chain.slots {
+            let process_chain = &track.process_chain;
+            let mut process_inlet_writes =
+                process_runtime.take_step_process_inlet_writes(trigger.track, process_chain);
+            let mut deferred_process_inlet_writes = Vec::new();
+            for (slot_index, slot) in process_chain.slots.iter().enumerate() {
                 if !slot.enabled {
                     continue;
                 }
-                let writes = process_runtime.step_process_writes(
+                let slot_inlet_writes =
+                    process_inlet_writes.remove(&slot_index).unwrap_or_default();
+                let writes = process_runtime.step_process_writes_with_inlet_writes(
                     slot,
                     trigger.step,
                     trigger.cycle,
                     track.params.num_steps,
+                    Some(&slot_inlet_writes),
                 );
-                apply_process_target_writes(
-                    snapshot,
-                    &midi_fx_descriptors_for_scheduling,
-                    trigger.track,
-                    trigger.step,
-                    &mut resolved,
-                    &mut process_overlay,
-                    Some(slot),
-                    &writes,
-                );
+                {
+                    let mut inlet_context = ProcessInletWriteContext {
+                        chain: process_chain,
+                        current_slot_index: Some(slot_index),
+                        current_fire_writes: &mut process_inlet_writes,
+                        deferred_writes: &mut deferred_process_inlet_writes,
+                    };
+                    apply_process_target_writes(
+                        snapshot,
+                        &midi_fx_descriptors_for_scheduling,
+                        trigger.track,
+                        trigger.step,
+                        &mut resolved,
+                        &mut process_overlay,
+                        Some(slot),
+                        &writes,
+                        Some(&mut inlet_context),
+                    );
+                }
                 let event = process_step_event_value(
                     trigger.track,
                     trigger.step,
@@ -5840,7 +6017,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     resolved,
                     step_beats,
                 );
-                if let Some(invocation) = process_runtime.step_process_invocation(
+                if let Some(invocation) = process_runtime.step_process_invocation_with_inlet_writes(
                     slot,
                     crate::process::ProcessStepRunContext {
                         track: trigger.track,
@@ -5852,6 +6029,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         resolved,
                         event,
                     },
+                    Some(&slot_inlet_writes),
                 ) {
                     if !invoke_process_cascade(
                         scratch_runtime,
@@ -5859,6 +6037,12 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         invocation,
                         debug_accum,
                         |scratch, process_runtime, runtime_id, commands| {
+                            let mut inlet_context = ProcessInletWriteContext {
+                                chain: process_chain,
+                                current_slot_index: Some(slot_index),
+                                current_fire_writes: &mut process_inlet_writes,
+                                deferred_writes: &mut deferred_process_inlet_writes,
+                            };
                             apply_step_process_commands(
                                 scratch,
                                 process_runtime,
@@ -5874,6 +6058,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 &mut process_overlay,
                                 &mut process_base_alive,
                                 commands,
+                                Some(&mut inlet_context),
                                 debug_accum,
                             )
                         },
@@ -5885,6 +6070,14 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             if !chunk_enqueued {
                 break;
+            }
+            for deferred in deferred_process_inlet_writes.drain(..) {
+                process_runtime.defer_step_process_inlet_write(
+                    deferred.track,
+                    deferred.instance_id,
+                    deferred.inlet,
+                    deferred.write,
+                );
             }
             let track_fire_event = process_step_event_value(
                 trigger.track,
@@ -5932,6 +6125,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             &mut process_overlay,
                             &mut process_base_alive,
                             commands,
+                            None,
                             debug_accum,
                         )
                     },
@@ -9367,6 +9561,108 @@ mod tests {
                 state.pattern.step_data[0].get(0, StepParam::Transpose),
                 StepParam::Transpose.default_value()
             );
+        });
+    }
+
+    #[test]
+    fn scheduler_process_inlet_writes_compose_with_downstream_lane_this_fire() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(1);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process process-inlet-setter
+                      :targets ((out :mappable :process-inlet))
+                      :run (target-set! :out 3))
+                    (def-process process-inlet-adder
+                      :targets ((out :mappable :process-inlet))
+                      :run (target-add! :out 2))
+                    (def-process inlet-driven-pitch
+                      :in ((amount :float -12 12 :default 0 :lane true))
+                      :target (step-param :transpose)
+                      :run (target-add! (in :amount)))
+
+                    (def setter (process-inlet-setter))
+                    (def adder (process-inlet-adder))
+                    (def pitch (inlet-driven-pitch :amount (lane 1)))
+                    (processes :track 0 setter adder pitch)
+                    (map! setter :out (inlet pitch :amount))
+                    (map! adder :out (inlet pitch :amount))
+                    "#,
+                )
+                .expect("define process-inlet chain");
+
+            let events = schedule_process_fixture(&state, scratch);
+            match first_resolved_trigger(&events) {
+                ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
+                    assert_eq!(resolved.transpose, 5.0);
+                }
+                other => panic!("expected resolved trigger, got {other:?}"),
+            }
+            assert_eq!(
+                state.pattern.step_data[0].get(0, StepParam::Transpose),
+                StepParam::Transpose.default_value()
+            );
+            let chain = state.track_process_chain(0).expect("track 0 chain");
+            assert_eq!(
+                chain.slots[2]
+                    .lanes
+                    .get("amount")
+                    .map(|lane| lane.values.as_slice()),
+                Some(&[1.0][..])
+            );
+        });
+    }
+
+    #[test]
+    fn scheduler_process_inlet_write_to_earlier_slot_arrives_next_fire() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[0].set_step_active(1, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process earlier-pitch
+                      :in ((amount :float -12 12 :default 0 :lane true))
+                      :target (step-param :transpose)
+                      :run (target-add! (in :amount)))
+                    (def-process late-writer
+                      :targets ((out :mappable :process-inlet))
+                      :run (target-set! :out 7))
+
+                    (def pitch (earlier-pitch))
+                    (def writer (late-writer))
+                    (processes :track 0 pitch writer)
+                    (map! writer :out (inlet pitch :amount))
+                    "#,
+                )
+                .expect("define upstream process-inlet chain");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 12_000);
+            let transposes = events
+                .iter()
+                .take(2)
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>();
+            assert_eq!(transposes, vec![0.0, 7.0], "{events:?}");
         });
     }
 
