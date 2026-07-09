@@ -3503,10 +3503,9 @@ fn materialize_process_ratchet(
     base_resolved: ResolvedStep,
     overlay: &ProcessTargetOverlay,
     request: &crate::process::ProcessRatchetRequest,
-    debug_accum: bool,
-) -> bool {
+) -> Result<(), String> {
     if request.times == 0 {
-        return true;
+        return Ok(());
     }
     let step_beats = request.shape_context.step_context.step_beats.max(0.0);
     let span_beats = request.span_beats.unwrap_or(step_beats).max(0.0);
@@ -3516,6 +3515,7 @@ fn materialize_process_ratchet(
         0.0
     };
     let mut shape_context = request.shape_context.clone();
+    let mut scheduled_events = Vec::with_capacity(request.times as usize);
     for index in 0..request.times {
         let mut resolved = base_resolved;
         let offset_beats = match request.mode {
@@ -3536,18 +3536,14 @@ fn materialize_process_ratchet(
             resolved,
         };
         if let Some(shape) = request.shape.as_ref() {
-            match scratch.invoke_process_ratchet_shape(&mut shape_context, shape, index, event) {
-                Ok(shaped) => event = shaped,
-                Err(err) => {
-                    if debug_accum || debug_routing_enabled() {
-                        eprintln!(
-                            "[process] ratchet shape error process={} track={} step={} index={} err={}",
-                            process_runtime_id, track, step, index, err
-                        );
-                    }
-                    return false;
-                }
-            }
+            event = scratch
+                .invoke_process_ratchet_shape(&mut shape_context, shape, index, event)
+                .map_err(|err| {
+                    format!(
+                        "ratchet shape error process={} track={} step={} index={} err={}",
+                        process_runtime_id, track, step, index, err
+                    )
+                })?;
         }
         let event = clamp_ratchet_event(event);
         let step_event = step_event_with_process_overlay(
@@ -3558,16 +3554,18 @@ fn materialize_process_ratchet(
             event.resolved,
             overlay,
         );
-        process_runtime.schedule_step_event_at(
-            process_runtime_id,
+        scheduled_events.push((
             absolute_beats + event.offset_beats as f64,
             crate::process::ProcessScheduledStepEvent {
                 event: step_event,
                 midi_fx_params: overlay.midi_fx_params.clone(),
             },
-        );
+        ));
     }
-    true
+    for (beat, event) in scheduled_events {
+        process_runtime.schedule_step_event_at(process_runtime_id, beat, event);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3586,30 +3584,24 @@ fn apply_step_process_commands(
     overlay: &mut ProcessTargetOverlay,
     process_base_alive: &mut bool,
     commands: &[crate::process::ProcessRunCommand],
-    process_inlet_context: Option<&mut ProcessInletWriteContext<'_>>,
+    mut process_inlet_context: Option<&mut ProcessInletWriteContext<'_>>,
     debug_accum: bool,
-) -> bool {
-    let target_writes = commands
-        .iter()
-        .filter_map(|command| match command {
-            crate::process::ProcessRunCommand::TargetWrite(write) => Some(write.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    apply_process_target_writes(
-        snapshot,
-        midi_fx_descriptors,
-        track,
-        step,
-        resolved,
-        overlay,
-        slot,
-        &target_writes,
-        process_inlet_context,
-    );
+) {
     for command in commands {
         match command {
-            crate::process::ProcessRunCommand::TargetWrite(_) => {}
+            crate::process::ProcessRunCommand::TargetWrite(write) => {
+                apply_process_target_writes(
+                    snapshot,
+                    midi_fx_descriptors,
+                    track,
+                    step,
+                    resolved,
+                    overlay,
+                    slot,
+                    std::slice::from_ref(write),
+                    process_inlet_context.as_deref_mut(),
+                );
+            }
             crate::process::ProcessRunCommand::VetoBaseEvent => {
                 *process_base_alive = false;
                 process_trace(snapshot, || {
@@ -3622,7 +3614,7 @@ fn apply_step_process_commands(
                 });
             }
             crate::process::ProcessRunCommand::Ratchet(request) => {
-                if !materialize_process_ratchet(
+                if let Err(err) = materialize_process_ratchet(
                     scratch,
                     process_runtime,
                     process_runtime_id,
@@ -3634,14 +3626,14 @@ fn apply_step_process_commands(
                     *resolved,
                     overlay,
                     request,
-                    debug_accum,
                 ) {
-                    return false;
+                    if debug_accum || debug_routing_enabled() {
+                        eprintln!("[process] {err}");
+                    }
                 }
             }
         }
     }
-    true
 }
 
 fn apply_process_midi_fx_overrides_to_slot(
@@ -3683,7 +3675,7 @@ where
         &mut crate::process::ProcessRuntime,
         u64,
         &[crate::process::ProcessRunCommand],
-    ) -> bool,
+    ),
 {
     let mut pending_invocations = vec![initial];
     let mut processed_invocations = 0usize;
@@ -3706,9 +3698,7 @@ where
         match scratch.invoke_process_run(invocation) {
             Ok(result) => {
                 let runtime_id = result.runtime_id;
-                if !apply_commands(scratch, process_runtime, runtime_id, &result.commands) {
-                    return false;
-                }
+                apply_commands(scratch, process_runtime, runtime_id, &result.commands);
                 let mut followups = process_runtime.apply_run_result(result);
                 followups.reverse();
                 pending_invocations.extend(followups);
@@ -9702,6 +9692,39 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_process_commands_apply_target_writes_in_authored_order() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process ordered-command-stream
+                      :target (step-param :transpose)
+                      :run (do
+                        (ratchet! :times 1 :mode :repeat :span 0)
+                        (target-add! 7)
+                        (veto!)))
+                    (processes :track 0 (ordered-command-stream))
+                    "#,
+                )
+                .expect("define ordered command fixture");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 6_000);
+            assert_eq!(events.len(), 1, "{events:?}");
+            assert_eq!(events[0].transpose, 0.0, "{events:?}");
+        });
+    }
+
+    #[test]
     fn scheduler_process_ratchet_subdivide_offsets_and_scales_duration() {
         run_with_scheduler_stack(|| {
             let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -9773,6 +9796,49 @@ mod tests {
             assert!(events
                 .iter()
                 .all(|event| (event.duration - 1.0).abs() < 1e-6));
+        });
+    }
+
+    #[test]
+    fn scheduler_process_ratchet_shape_error_drops_burst_without_aborting_lookahead() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[0].set_step_active(1, true);
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process broken-ratchet-shape
+                      :run (ratchet! :times 3
+                                      :mode :subdivide
+                                      :span 0.25
+                                      :shape (lambda (i ev)
+                                               (if (= i 1)
+                                                 (vel! ev "not-a-number")
+                                                 ev))))
+                    (processes :track 0 (broken-ratchet-shape))
+                    "#,
+                )
+                .expect("define broken ratchet shape fixture");
+
+            let events = schedule_process_observed_fixture(&state, scratch, 12_000);
+            let sample_times = events
+                .iter()
+                .map(|event| event.sample_time)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                sample_times,
+                vec![0, 6_000],
+                "a bad shape should drop each burst atomically while base scheduling continues: {events:?}"
+            );
         });
     }
 

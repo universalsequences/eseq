@@ -1378,7 +1378,11 @@ impl ProcessRuntime {
                     event: None,
                     step_context: None,
                     ports: ports.clone(),
-                    seed: process_rng_seed(instance.runtime_id, seed_policy, target_beat, None),
+                    seed: process_rng_seed(
+                        instance.runtime_id,
+                        seed_policy,
+                        ProcessRngPosition::Temporal { beat: target_beat },
+                    ),
                 });
                 continue;
             }
@@ -1411,7 +1415,11 @@ impl ProcessRuntime {
                         event: None,
                         step_context: None,
                         ports: ports.clone(),
-                        seed: process_rng_seed(runtime_id, class_seed_policy, beat, None),
+                        seed: process_rng_seed(
+                            runtime_id,
+                            class_seed_policy,
+                            ProcessRngPosition::Temporal { beat },
+                        ),
                     });
                 },
             );
@@ -1684,8 +1692,7 @@ impl ProcessRuntime {
                             .get(&instance.class_name)
                             .map(|def| def.seed_policy)
                             .unwrap_or_default(),
-                        beat,
-                        None,
+                        ProcessRngPosition::Temporal { beat },
                     ),
                 });
             }
@@ -1831,7 +1838,14 @@ impl ProcessRuntime {
                 resolved: ctx.resolved,
             }),
             ports,
-            seed: process_rng_seed(instance_id.0, seed_policy, ctx.beat, Some(ctx.cycle)),
+            seed: process_rng_seed(
+                instance_id.0,
+                seed_policy,
+                ProcessRngPosition::Step {
+                    cycle: ctx.cycle,
+                    step: ctx.step,
+                },
+            ),
         })
     }
 }
@@ -2315,15 +2329,31 @@ fn apply_accumulator_range(value: f32, lo: f32, hi: f32, mode: ProcessAccumulato
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ProcessRngPosition {
+    Temporal { beat: f64 },
+    Step { cycle: u64, step: usize },
+}
+
 fn process_rng_seed(
     runtime_id: u64,
     seed_policy: ProcessSeedPolicy,
-    beat: f64,
-    cycle: Option<u64>,
+    position: ProcessRngPosition,
 ) -> u64 {
     let mut seed = stable_mix64(runtime_id ^ 0xA2F7_0D64_3B1D_9A91);
-    if matches!(seed_policy, ProcessSeedPolicy::PerCycle) {
-        seed ^= stable_mix64(cycle.unwrap_or_else(|| beat.floor().max(0.0) as u64));
+    match position {
+        ProcessRngPosition::Step { cycle, step } => {
+            seed ^= stable_mix64((step as u64).wrapping_add(0xD1B5_4A32_D192_ED03));
+            if matches!(seed_policy, ProcessSeedPolicy::PerCycle) {
+                seed ^= stable_mix64(cycle.wrapping_add(0x8CB9_2BA7_2F3D_8DD7));
+            }
+        }
+        ProcessRngPosition::Temporal { beat } => {
+            if matches!(seed_policy, ProcessSeedPolicy::PerCycle) {
+                let cycle = beat.floor().max(0.0) as u64;
+                seed ^= stable_mix64(cycle.wrapping_add(0x8CB9_2BA7_2F3D_8DD7));
+            }
+        }
     }
     if seed == 0 {
         0x9E37_79B9_7F4A_7C15
@@ -2417,6 +2447,50 @@ mod tests {
             every,
             run_source: Some("(emit :track 0)".to_string()),
         }
+    }
+
+    #[test]
+    fn step_process_rng_seed_is_step_locked_and_optionally_cycle_variant() {
+        let runtime_id = 41;
+        let locked_step_zero_cycle_zero = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::Locked,
+            ProcessRngPosition::Step { cycle: 0, step: 0 },
+        );
+        let locked_step_zero_later_cycle = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::Locked,
+            ProcessRngPosition::Step { cycle: 9, step: 0 },
+        );
+        let locked_step_one = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::Locked,
+            ProcessRngPosition::Step { cycle: 0, step: 1 },
+        );
+
+        assert_eq!(
+            locked_step_zero_cycle_zero, locked_step_zero_later_cycle,
+            "locked process randomness should repeat the same pattern each cycle"
+        );
+        assert_ne!(
+            locked_step_zero_cycle_zero, locked_step_one,
+            "different steps need independent deterministic rolls"
+        );
+
+        let per_cycle_zero = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::PerCycle,
+            ProcessRngPosition::Step { cycle: 0, step: 0 },
+        );
+        let per_cycle_one = process_rng_seed(
+            runtime_id,
+            ProcessSeedPolicy::PerCycle,
+            ProcessRngPosition::Step { cycle: 1, step: 0 },
+        );
+        assert_ne!(
+            per_cycle_zero, per_cycle_one,
+            "per-cycle process randomness should vary the pattern between cycles"
+        );
     }
 
     #[test]

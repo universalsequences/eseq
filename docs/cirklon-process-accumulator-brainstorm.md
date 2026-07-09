@@ -345,9 +345,12 @@ Rules:
 
   ;; inline selector — the declarative one-block surface
   (processes :track 0
-    (dice :lo 1 :hi 4 :map ((out (process-inlet :repeater :times))))
+    (dice :lo 1 :hi 4 :map '((out (process-inlet :repeater :times))))
     (repeater :decay 0.7))
   ```
+
+  The inline `:map` value is quoted because it is declarative selector data;
+  ordinary `:map` keyword arguments elsewhere retain normal expression evaluation.
 
   `(process-inlet :class :inlet)` is a selector, not an address — it resolves
   against the finished chain (first matching slot), which is why the inline
@@ -756,7 +759,7 @@ attachment site; `repeater` is unchanged and doesn't know it's being driven:
     (target-set! :out held)))
 
 (processes :track 0
-  (dice :lo 1 :hi 4 :map ((out (process-inlet :repeater :times))))
+  (dice :lo 1 :hi 4 :map '((out (process-inlet :repeater :times))))
   (repeater :decay 0.7))
 ```
 

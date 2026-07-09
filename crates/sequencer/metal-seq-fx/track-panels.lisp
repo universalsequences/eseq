@@ -358,32 +358,33 @@
 
 (def fx-track-accumulator-panel ()
   (h-stack :debug-name "track-accumulator-panel" :padding 0.00 
-    ;(box  :padding 0.5
-    ;  :background-color :mixer-strip-bg 
-    ;  :corner-radius 16
-    ;  :border-color :mixer-strip-border 
-    ;  (h-stack :gap 0.55 :align :center
-    ;    (v-stack :align :center :gap 0.40
-    ;      (label "acc fn" :font-size 8 :color :dim :bg :transparent)
-    ;      (dropdown :value SEQ.tp-accumulator
-    ;        :options SEQ.accumulator-options
-    ;        :on-change (lambda (v) (do (cool-off-follow) (seq-set-accumulator v)))
-    ;        :width 7.0 :height 1.25 :font-size 9))
-    ;    (v-stack :align :center :gap 0.40
-    ;      (label "acc mode" :font-size 8 :color :dim :bg :transparent)
-    ;      (dropdown :value SEQ.tp-accum-mode
-    ;        :options SEQ.accum-mode-options
-    ;        :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-mode v)))
-    ;        :width 6.0 :height 1.25 :font-size 9))
-    ;    (v-stack :align :center :gap 0.22
-    ;      (v-stack :gap 0.5 :align :center
-    ;        (label "acc lim" :font-size 8 :color :dim :bg :transparent)
-    ;        (number-picker :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
-    ;          :noui false :font-size 8 :text-color :dim
-    ;          :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))
-    ;          :width 5.2 :height 1.15))
-    ;      )))
-    ))
+    (box :padding 0.5
+      :background-color :mixer-strip-bg
+      :corner-radius 16
+      :border-color :mixer-strip-border
+      (h-stack :gap 0.55 :align :center
+        (v-stack :align :center :gap 0.40
+          (label "acc fn" :font-size 8 :color :dim :bg :transparent)
+          (dropdown :key "fx-track-accumulator-function"
+            :value SEQ.tp-accumulator
+            :options SEQ.accumulator-options
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accumulator v)))
+            :width 7.0 :height 1.25 :font-size 9))
+        (v-stack :align :center :gap 0.40
+          (label "acc mode" :font-size 8 :color :dim :bg :transparent)
+          (dropdown :key "fx-track-accumulator-mode"
+            :value SEQ.tp-accum-mode
+            :options SEQ.accum-mode-options
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-mode v)))
+            :width 6.0 :height 1.25 :font-size 9))
+        (v-stack :align :center :gap 0.22
+          (v-stack :gap 0.5 :align :center
+            (label "acc lim" :font-size 8 :color :dim :bg :transparent)
+            (number-picker :key "fx-track-accumulator-limit"
+              :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
+              :noui false :font-size 8 :text-color :dim
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))
+              :width 5.2 :height 1.15)))))))
 
 (def fx-track-parameters-panel ()
   (box :debug-name "track-parameters-strip" :padding 0.0

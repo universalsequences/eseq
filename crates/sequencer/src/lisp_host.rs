@@ -22789,7 +22789,7 @@ mod tests {
                   :run nil)
 
                 (def inline-src
-                  (dice-like :map ((out (process-inlet :repeater-like :times)))))
+                  (dice-like :map '((out (process-inlet :repeater-like :times)))))
                 (def mapped-src (dice-like))
                 (def mapped-sink (repeater-like))
 

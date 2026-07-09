@@ -21564,11 +21564,13 @@ mod tests {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.refresh_runtime_side_effects();
 
-        editor
-            .runtime_mut()
-            .eval_str(r#"(set-window-buffer "*step*")"#)
-            .expect("switch to step buffer");
-        editor.refresh_runtime_side_effects();
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
         editor.set_layout_viewport(80, 60);
         editor
             .runtime_mut()
@@ -21607,6 +21609,36 @@ mod tests {
         let dropdown =
             find_dropdown_by_value(track_params_panel, "Off").expect("mute group dropdown");
         assert_finite_nonzero_rect(dropdown, "mute group dropdown");
+    }
+
+    #[test]
+    fn metal_seq_track_accumulator_controls_have_visible_layout() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.refresh_runtime_side_effects();
+
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
+        editor.set_layout_viewport(80, 24);
+
+        let layout = editor.widget_layout().expect("track panel layout");
+        let panel = find_layout_node_by_debug_name(&layout, "track-accumulator-panel")
+            .expect("track accumulator panel");
+        assert_finite_nonzero_rect(panel, "track accumulator panel");
+
+        for (key, label) in [
+            ("fx-track-accumulator-function", "accumulator function"),
+            ("fx-track-accumulator-mode", "accumulator mode"),
+            ("fx-track-accumulator-limit", "accumulator limit"),
+        ] {
+            let control = find_layout_node_by_stable_key(panel, key)
+                .unwrap_or_else(|| panic!("{label} control should render"));
+            assert_finite_nonzero_rect(control, label);
+        }
     }
 
     #[test]

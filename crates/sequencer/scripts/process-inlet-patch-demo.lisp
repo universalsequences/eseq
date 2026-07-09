@@ -22,7 +22,7 @@
 ;; Equivalent inline map shape:
 ;;   (processes :track 0
 ;;     (process-inlet-demo-dice
-;;       :map ((out (process-inlet :process-inlet-demo-repeater :times))))
+;;       :map '((out (process-inlet :process-inlet-demo-repeater :times))))
 ;;     process-inlet-demo-repeater-h)
 
 (seq-register-script-source-tab "Process Inlet Patch Demo")
