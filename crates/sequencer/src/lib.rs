@@ -86,6 +86,8 @@ pub mod project;
 pub mod recorder;
 #[allow(dead_code)]
 pub mod reverb;
+#[allow(dead_code)]
+pub mod roar;
 pub mod sample_db;
 pub mod sample_import;
 pub mod sampler;

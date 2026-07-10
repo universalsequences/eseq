@@ -10596,6 +10596,7 @@ mod tests {
             "metal-seq-fx/builtin/space-echo.lisp",
             "metal-seq-fx/builtin/dimension.lisp",
             "metal-seq-fx/builtin/phaser-flanger.lisp",
+            "metal-seq-fx/builtin/roar.lisp",
             "metal-seq-fx/builtin/filter-panel.lisp",
             "metal-seq-fx/builtin/dynamics.lisp",
             "metal-seq-fx/builtin/multiband.lisp",
@@ -14949,6 +14950,145 @@ mod tests {
                 Rc::new(RefCell::new(Value::String(format!(
                     "test-phaser-flanger-param-{idx}"
                 )))),
+            );
+        }
+        params
+    }
+
+    fn test_roar_params() -> Vec<Value> {
+        let divs = vec![
+            "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2", "1",
+        ];
+        let shapers = vec![
+            "soft sine",
+            "digital clip",
+            "bit crusher",
+            "diode clipper",
+            "tube preamp",
+            "half wave",
+            "full wave",
+            "polynomial",
+            "fractal",
+            "tri fold",
+            "noise",
+            "shards",
+        ];
+        let filters = vec![
+            "lp",
+            "bp",
+            "hp",
+            "notch",
+            "peak",
+            "morph",
+            "comb",
+            "resample",
+            "dispersion",
+        ];
+        let mut params = vec![
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("drive", 1, 0.0, -12.0, 36.0)),
+            Value::Map(test_param_map("tone", 2, 0.0, -1.0, 1.0)),
+            Value::Map(test_param_map("tone freq", 3, 180.0, 50.0, 18000.0)),
+            Value::Map(test_enum_param_map("tone mode", 4, 0.0, vec!["tilt", "shelf"])),
+            Value::Map(test_enum_param_map(
+                "routing",
+                5,
+                0.0,
+                vec![
+                    "single",
+                    "serial",
+                    "parallel",
+                    "multi band",
+                    "mid side",
+                    "feedback",
+                    "delay",
+                ],
+            )),
+            Value::Map(test_param_map("blend", 6, 0.5, 0.0, 1.0)),
+            Value::Map(test_param_map("xover low", 7, 200.0, 40.0, 1000.0)),
+            Value::Map(test_param_map("xover high", 8, 2000.0, 500.0, 10000.0)),
+            Value::Map(test_enum_param_map("fb mode", 9, 0.0, vec!["time", "note"])),
+            Value::Map(test_param_map("fb time", 10, 18.2, 0.5, 1000.0)),
+            Value::Map(test_enum_param_map("fb div", 11, 3.0, divs)),
+            Value::Map(test_param_map("fb amount", 12, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("fb invert", 13, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("fb duck", 14, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("fb freq", 15, 1000.0, 30.0, 18000.0)),
+            Value::Map(test_param_map("fb width", 16, 8.0, 0.5, 9.0)),
+            Value::Map(test_param_map("compress", 17, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("sc hpf", 18, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("output", 19, 0.0, -24.0, 24.0)),
+            Value::Map(test_param_map("dry/wet", 20, 1.0, 0.0, 1.0)),
+        ];
+        for stage in 0..3usize {
+            let base = 21 + stage * 8;
+            let prefix = format!("s{}", stage + 1);
+            params.push(Value::Map(test_enum_param_map(
+                &format!("{prefix} shaper"),
+                base,
+                0.0,
+                shapers.clone(),
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("{prefix} amount"),
+                base + 1,
+                0.0,
+                0.0,
+                1.0,
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("{prefix} bias"),
+                base + 2,
+                0.0,
+                -1.0,
+                1.0,
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("{prefix} level"),
+                base + 3,
+                0.0,
+                -24.0,
+                24.0,
+            )));
+            params.push(Value::Map(test_enum_param_map(
+                &format!("{prefix} filter"),
+                base + 4,
+                0.0,
+                filters.clone(),
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("{prefix} freq"),
+                base + 5,
+                16000.0,
+                20.0,
+                16000.0,
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("{prefix} res"),
+                base + 6,
+                0.1,
+                0.0,
+                1.0,
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("{prefix} pre"),
+                base + 7,
+                0.0,
+                0.0,
+                1.0,
+            )));
+        }
+        // Live value-fields for the controls and widget bindings the default
+        // panel view (stage 1 tab) reads.
+        for idx in [
+            1, 2, 3, 6, 7, 8, 10, 12, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+        ] {
+            let Value::Map(param) = &mut params[idx] else {
+                unreachable!("roar test params are maps")
+            };
+            param.insert(
+                "value-field".to_string(),
+                Rc::new(RefCell::new(Value::String(format!("test-roar-param-{idx}")))),
             );
         }
         params
@@ -30836,6 +30976,170 @@ mod tests {
                 "phaser-flanger {label} should parse display percentages such as 50 as model value 0.5"
             );
         }
+    }
+
+    #[test]
+    fn metal_seq_fx_roar_layout_contains_stage_tabs_and_shaper_display() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let mut fields = vec![
+            ("num-tracks", Value::Number(1.0)),
+            ("compiling", Value::Bool(false)),
+            ("bpm", Value::Number(120.0)),
+            ("available-effects", test_list(vec![])),
+            (
+                "available-builtin-effects",
+                test_list(vec![Value::String("Roar".to_string())]),
+            ),
+            ("available-midi-effects", test_list(vec![])),
+            (
+                "bus-names",
+                test_list(vec![Value::String("Mix".to_string())]),
+            ),
+            (
+                "effects",
+                test_list(vec![Value::Map(test_fx_map("Roar", 0, test_roar_params()))]),
+            ),
+            ("midi-effects", test_list(vec![])),
+            (
+                "instrument-panel",
+                test_list(vec![Value::Map(test_instrument_map())]),
+            ),
+            ("bus-effects", test_list(vec![test_list(vec![])])),
+        ];
+        // Live value-fields for the fixture's globals and stage-1 params.
+        let reactive_values: Vec<(usize, f64)> = vec![
+            (1, 0.0),
+            (2, 0.0),
+            (3, 180.0),
+            (6, 0.5),
+            (7, 200.0),
+            (8, 2000.0),
+            (10, 18.2),
+            (12, 0.0),
+            (15, 1000.0),
+            (16, 8.0),
+            (17, 0.0),
+            (19, 0.0),
+            (20, 1.0),
+            (21, 0.0),
+            (22, 0.0),
+            (23, 0.0),
+            (24, 0.0),
+            (25, 0.0),
+            (26, 16000.0),
+            (27, 0.1),
+            (28, 0.0),
+        ];
+        let reactive_keys: Vec<String> = reactive_values
+            .iter()
+            .map(|(idx, _)| format!("test-roar-param-{idx}"))
+            .collect();
+        for (slot, (_, value)) in reactive_keys.iter().zip(reactive_values.iter()) {
+            fields.push((slot.as_str(), Value::Number(*value)));
+        }
+        editor.runtime_mut().register_reactive("SEQ", fields, true);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe roar ui")
+            .expect("roar ui probe value");
+        assert!(
+            value_contains_string(&ui_probe, "Stage 1"),
+            "roar custom UI probe should contain the stage tab: {ui_probe:?}"
+        );
+        for label in ["INPUT", "ROUTING", "FEEDBACK", "OUT", "soft sine", "drive"] {
+            assert!(
+                value_contains_string(&ui_probe, label),
+                "roar custom UI probe should contain {label:?}"
+            );
+        }
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("roar fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(160, 22);
+        let layout = editor.widget_layout().expect("roar fx layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Roar"),
+            "layout should contain the built-in Roar panel"
+        );
+        for label in ["INPUT", "ROUTING", "FEEDBACK", "OUT", "Stage 1"] {
+            let node = find_layout_node_by_text(&layout, label)
+                .unwrap_or_else(|| panic!("roar layout should contain {label:?}"));
+            assert_finite_nonzero_rect(node, &format!("roar {label} label"));
+        }
+        let shaper_view = find_layout_node_by_widget_type(&layout, "roar-shaper")
+            .expect("roar shaper display widget");
+        assert_finite_nonzero_rect(shaper_view, "roar shaper display");
+        for prop in ["shaper", "amount", "bias"] {
+            assert!(
+                matches!(shaper_view.props.get(prop), Some(Value::ReactiveRef { .. })),
+                "roar shaper prop {prop:?} must retain its live parameter binding: {:?}",
+                shaper_view.props.get(prop)
+            );
+        }
+        let filter_view = find_layout_node_by_widget_type(&layout, "roar-filter")
+            .expect("roar filter display widget");
+        assert_finite_nonzero_rect(filter_view, "roar filter display");
+        for prop in ["filter", "freq", "res"] {
+            assert!(
+                matches!(filter_view.props.get(prop), Some(Value::ReactiveRef { .. })),
+                "roar filter prop {prop:?} must retain its live parameter binding: {:?}",
+                filter_view.props.get(prop)
+            );
+        }
+        for (key, label) in [
+            ("roar-param-1-base", "drive knob"),
+            ("roar-param-20-base", "dry/wet knob"),
+        ] {
+            let wrapper = find_layout_node_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("roar layout should contain {label}"));
+            let knob = find_layout_node_by_widget_type(wrapper, "knob-number")
+                .unwrap_or_else(|| panic!("roar {label} should build a knob-number"));
+            assert_finite_nonzero_rect(knob, &format!("roar {label}"));
+        }
+        let routing_control = find_layout_node_by_stable_key(&layout, "roar-routing-control")
+            .expect("roar p-lockable routing control");
+        let routing_dropdown = find_layout_node_by_widget_type(routing_control, "dropdown")
+            .expect("roar routing dropdown");
+        assert_eq!(
+            routing_dropdown.props.get("options"),
+            Some(&test_list(vec![
+                Value::String("single".to_string()),
+                Value::String("serial".to_string()),
+                Value::String("parallel".to_string()),
+                Value::String("multi band".to_string()),
+                Value::String("mid side".to_string()),
+                Value::String("feedback".to_string()),
+                Value::String("delay".to_string()),
+            ]))
+        );
     }
 
     #[test]

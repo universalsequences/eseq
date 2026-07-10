@@ -146,7 +146,7 @@ fn dynamics_gain_db(
 
 /// Biquad coefficients (a0-normalized) processed in transposed direct form II.
 #[derive(Clone, Copy)]
-struct Coefs {
+pub(crate) struct Coefs {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -154,7 +154,7 @@ struct Coefs {
     a2: f32,
 }
 
-fn butterworth(freq: f32, sample_rate: f32, kind: u8) -> Coefs {
+pub(crate) fn butterworth(freq: f32, sample_rate: f32, kind: u8) -> Coefs {
     let q = std::f32::consts::FRAC_1_SQRT_2;
     let w0 = 2.0 * std::f32::consts::PI * (freq / sample_rate).clamp(1.0e-5, 0.49);
     let (sin_w0, cos_w0) = w0.sin_cos();
@@ -175,7 +175,7 @@ fn butterworth(freq: f32, sample_rate: f32, kind: u8) -> Coefs {
 }
 
 #[inline]
-unsafe fn biquad(x: f32, c: &Coefs, z: *mut f32) -> f32 {
+pub(crate) unsafe fn biquad(x: f32, c: &Coefs, z: *mut f32) -> f32 {
     let y = c.b0 * x + *z;
     *z = c.b1 * x - c.a1 * y + *z.add(1);
     *z.add(1) = c.b2 * x - c.a2 * y;
@@ -185,7 +185,7 @@ unsafe fn biquad(x: f32, c: &Coefs, z: *mut f32) -> f32 {
 /// Split one sample into (low, mid, high) bands. `z` points at this
 /// channel's 10 biquads (20 f32): lp1 x2, ap2 x2, hp1 x2, lp2 x2, hp2 x2.
 #[inline]
-unsafe fn split_bands(x: f32, c: &[Coefs; 5], z: *mut f32) -> (f32, f32, f32) {
+pub(crate) unsafe fn split_bands(x: f32, c: &[Coefs; 5], z: *mut f32) -> (f32, f32, f32) {
     let lo = biquad(biquad(x, &c[0], z), &c[0], z.add(2));
     let lo = biquad(biquad(lo, &c[4], z.add(4)), &c[4], z.add(6));
     let hi1 = biquad(biquad(x, &c[1], z.add(8)), &c[1], z.add(10));
