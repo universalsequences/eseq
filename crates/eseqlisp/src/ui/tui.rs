@@ -109,7 +109,7 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
     frame.render_widget(status_widget, chunks[1]);
 
     // ── Widget overlay (with scroll offset) ─────────────────────────────────
-    let wscroll = render_frame.widget_scroll_top;
+    let wscroll = render_frame.widget_scroll_top + render_frame.text_scroll_top as f32;
     if let Some(ref layout) = render_frame.widget_layout {
         let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
         let total_h = (layout.rect.row + layout.rect.height).ceil() as u16;
@@ -123,7 +123,7 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
             frame,
             inner,
             wscroll,
-            render_frame.widget_scroll_left,
+            render_frame.widget_layout_scroll_left,
         );
     }
 
@@ -143,10 +143,16 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                         continue;
                     }
                     let y = inner.y + vis_row as u16;
-                    let col_start = node.rect.col.floor() as u16;
-                    let col_end = (node.rect.col + node.rect.width).ceil() as u16;
+                    let col_start =
+                        (node.rect.col - render_frame.widget_layout_scroll_left).floor() as i32;
+                    let col_end = (node.rect.col + node.rect.width
+                        - render_frame.widget_layout_scroll_left)
+                        .ceil() as i32;
                     for col in col_start..col_end {
-                        let x = inner.x + col;
+                        if col < 0 {
+                            continue;
+                        }
+                        let x = inner.x + col as u16;
                         if x >= inner.right() {
                             break;
                         }
@@ -525,7 +531,7 @@ fn render_tile_in_area(
     }
 
     // ── Widget overlay ─────────────────────────────────────────────────────
-    let wscroll = render_frame.widget_scroll_top;
+    let wscroll = render_frame.widget_scroll_top + render_frame.text_scroll_top as f32;
     if let Some(ref layout) = render_frame.widget_layout {
         let inner = content_area.inner(ratatui::layout::Margin::new(1, 1));
         let total_h = (layout.rect.row + layout.rect.height).ceil() as u16;
@@ -539,7 +545,7 @@ fn render_tile_in_area(
             frame,
             inner,
             wscroll,
-            render_frame.widget_scroll_left,
+            render_frame.widget_layout_scroll_left,
         );
     }
 
@@ -564,10 +570,16 @@ fn render_tile_in_area(
                         continue;
                     }
                     let y = inner.y + vis_row as u16;
-                    let col_start = node.rect.col.floor() as u16;
-                    let col_end = (node.rect.col + node.rect.width).ceil() as u16;
+                    let col_start =
+                        (node.rect.col - render_frame.widget_layout_scroll_left).floor() as i32;
+                    let col_end = (node.rect.col + node.rect.width
+                        - render_frame.widget_layout_scroll_left)
+                        .ceil() as i32;
                     for col in col_start..col_end {
-                        let x = inner.x + col;
+                        if col < 0 {
+                            continue;
+                        }
+                        let x = inner.x + col as u16;
                         if x >= inner.right() {
                             break;
                         }
@@ -603,9 +615,9 @@ fn render_inspect_overlay(
         - render_frame.text_scroll_top as f32
         - render_frame.widget_scroll_top)
         .ceil() as i32;
-    let col_start = (overlay.rect.col - render_frame.widget_scroll_left).floor() as i32;
-    let col_end =
-        (overlay.rect.col + overlay.rect.width - render_frame.widget_scroll_left).ceil() as i32;
+    let col_start = (overlay.rect.col - render_frame.widget_layout_scroll_left).floor() as i32;
+    let col_end = (overlay.rect.col + overlay.rect.width - render_frame.widget_layout_scroll_left)
+        .ceil() as i32;
     if row_end <= 0
         || col_end <= 0
         || row_start >= inner.height as i32

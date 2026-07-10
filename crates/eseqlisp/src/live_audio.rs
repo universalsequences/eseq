@@ -53,6 +53,54 @@ pub fn clear_spectrogram_frames() {
     spectrogram_frames().lock().unwrap().clear();
 }
 
+#[derive(Clone, Debug)]
+pub struct ScopeFrame {
+    pub revision: u64,
+    pub sample_rate: f32,
+    pub samples: Arc<Vec<f32>>,
+}
+
+impl ScopeFrame {
+    pub fn is_well_formed(&self) -> bool {
+        self.sample_rate.is_finite()
+            && self.sample_rate > 0.0
+            && !self.samples.is_empty()
+            && self.samples.iter().all(|sample| sample.is_finite())
+    }
+}
+
+static SCOPE_FRAMES: OnceLock<Mutex<HashMap<String, Arc<ScopeFrame>>>> = OnceLock::new();
+
+fn scope_frames() -> &'static Mutex<HashMap<String, Arc<ScopeFrame>>> {
+    SCOPE_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn publish_scope_frame(key: impl Into<String>, frame: ScopeFrame) {
+    if !frame.is_well_formed() {
+        return;
+    }
+    scope_frames()
+        .lock()
+        .unwrap()
+        .insert(key.into(), Arc::new(frame));
+    crate::widget_render::bump_widget_state_generation();
+}
+
+pub fn scope_frame(key: &str) -> Option<Arc<ScopeFrame>> {
+    scope_frames().lock().unwrap().get(key).cloned()
+}
+
+pub fn retain_scope_frames(active_keys: &HashSet<String>) {
+    scope_frames()
+        .lock()
+        .unwrap()
+        .retain(|key, _| active_keys.contains(key));
+}
+
+pub fn clear_scope_frames() {
+    scope_frames().lock().unwrap().clear();
+}
+
 /// Live meter snapshot for one multiband dynamics effect instance: per-band
 /// (low, mid, high) L/R detector levels and the applied dynamics gain, in dB.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -144,5 +192,21 @@ mod tests {
             },
         );
         assert_eq!(spectrogram_frame("ok").unwrap().revision, 7);
+    }
+
+    #[test]
+    fn scope_frames_round_trip_and_retain() {
+        clear_scope_frames();
+        publish_scope_frame(
+            "scope",
+            ScopeFrame {
+                revision: 2,
+                sample_rate: 48_000.0,
+                samples: Arc::new(vec![-0.5, 0.0, 0.5]),
+            },
+        );
+        assert_eq!(scope_frame("scope").unwrap().revision, 2);
+        retain_scope_frames(&HashSet::new());
+        assert!(scope_frame("scope").is_none());
     }
 }

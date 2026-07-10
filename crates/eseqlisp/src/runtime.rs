@@ -56,6 +56,12 @@ pub(crate) struct ClearedEffectSource {
     pub runtime_generation: u64,
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingInlineWidgets {
+    pub source_buffer_id: BufferId,
+    pub widgets: Vec<Value>,
+}
+
 struct ActiveSubtreeReplacement {
     source_buffer_id: Option<BufferId>,
     source_module: Option<PathBuf>,
@@ -746,6 +752,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_open_file: Option<String>,
     pub pending_widget_tree: Option<Value>,
     pub pending_buffer_widget_trees: Vec<PendingUiUpdate>,
+    pub pending_inline_widgets: Option<PendingInlineWidgets>,
     pub pending_create_buffer: Option<String>,
     pub pending_cleared_effect_sources: Vec<ClearedEffectSource>,
     pub pending_switch_buffer: Option<String>,
@@ -1495,6 +1502,13 @@ impl Runtime {
         self.vm.add_global_store_hook(hook);
     }
 
+    pub fn set_inline_widget_metadata_resolver(
+        &mut self,
+        resolver: crate::vm::InlineWidgetMetadataResolver,
+    ) {
+        self.vm.set_inline_widget_metadata_resolver(resolver);
+    }
+
     pub fn document_symbol(
         &mut self,
         name: impl Into<String>,
@@ -1723,12 +1737,14 @@ impl Runtime {
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
+        self.vm.begin_inline_widget_capture();
         if src.contains("(effect") || src.contains("(effect-buffer") {
             self.clear_layout_effects();
         }
 
         let result = self.vm.eval_str(src);
         if result.is_ok() {
+            self.publish_inline_widget_capture(current_buffer_id, false);
             self.flush_vm_reactive_sets();
             if self.sync_theme_to_global {
                 self.sync_theme_from_vm();
@@ -1744,25 +1760,28 @@ impl Runtime {
         path: PathBuf,
         source: &str,
     ) -> Result<Option<Value>, crate::vm::VMError> {
-        let current_buffer_id = self.shared.borrow().current_buffer_id;
-        self.vm.set_current_effect_context(current_buffer_id);
+        let source_buffer_id = self.source_buffer_id_for_path(Some(&path));
+        self.vm.set_current_effect_context(source_buffer_id);
+        self.vm.begin_inline_widget_capture();
         let path = self.vm.source_manager.canonicalize_path(&path);
         let revision = crate::hot_reload::hash_source(source);
         let result = self.vm.eval_module_source(path, source, revision);
+        let load_errors = self.vm.take_source_load_errors();
+        if !load_errors.is_empty() {
+            for error in load_errors {
+                self.vm.source_manager.push_diagnostic(error);
+            }
+            let _ = self.vm.take_inline_widgets();
+            return Err(crate::vm::VMError::CompileError);
+        }
         if result.is_ok() {
+            self.publish_inline_widget_capture(source_buffer_id, true);
             self.flush_vm_reactive_sets();
             if self.sync_theme_to_global {
                 self.sync_theme_from_vm();
             }
             self.invalidate_symbol_cache();
             self.flush_widget_trees();
-        }
-        let load_errors = self.vm.take_source_load_errors();
-        if !load_errors.is_empty() {
-            for error in load_errors {
-                self.vm.source_manager.push_diagnostic(error);
-            }
-            return Err(crate::vm::VMError::CompileError);
         }
         result
     }
@@ -1774,9 +1793,12 @@ impl Runtime {
         overlays: Vec<SourceOverlay>,
     ) -> ReloadReport {
         let snapshot = self.snapshot_state();
+        let source_buffer_id = self.source_buffer_id_for_path(path.as_deref());
+        self.vm.set_current_effect_context(source_buffer_id);
         self.vm.source_manager.set_overlays(overlays);
         self.vm.source_manager.begin_transaction();
         self.vm.set_preserve_state_on_redefinition(true);
+        self.vm.begin_inline_widget_capture();
 
         let requested_path = path
             .as_ref()
@@ -1865,6 +1887,7 @@ impl Runtime {
         }
         self.invalidate_symbol_cache();
         self.flush_widget_trees();
+        self.publish_inline_widget_capture(source_buffer_id, true);
         self.vm.set_preserve_state_on_redefinition(false);
 
         let mut changed_symbols = changed_symbols.into_iter().collect::<Vec<_>>();
@@ -1881,12 +1904,56 @@ impl Runtime {
         }
     }
 
+    fn publish_inline_widget_capture(
+        &mut self,
+        source_buffer_id: Option<BufferId>,
+        replace_even_empty: bool,
+    ) {
+        let widgets = self.vm.take_inline_widgets();
+        if !replace_even_empty && widgets.is_empty() {
+            return;
+        }
+        if std::env::var("ESEQ_INLINE_TRACE").is_ok_and(|value| value != "0") {
+            eprintln!(
+                "[inline-widgets] publish source_buffer_id={source_buffer_id:?} count={} replace_even_empty={replace_even_empty}",
+                widgets.len()
+            );
+        }
+        let Some(source_buffer_id) = source_buffer_id else {
+            return;
+        };
+        self.shared.borrow_mut().pending_inline_widgets = Some(PendingInlineWidgets {
+            source_buffer_id,
+            widgets,
+        });
+    }
+
+    fn source_buffer_id_for_path(
+        &self,
+        requested_path: Option<&std::path::Path>,
+    ) -> Option<BufferId> {
+        let shared = self.shared.borrow();
+        let buffer_id = shared.current_buffer_id?;
+        let Some(requested_path) = requested_path else {
+            return Some(buffer_id);
+        };
+        let current_buffer_path = shared.current_buffer_path.as_deref()?;
+        let current_path = self
+            .vm
+            .source_manager
+            .canonicalize_path(current_buffer_path);
+        let requested_path = self.vm.source_manager.canonicalize_path(requested_path);
+        (current_path == requested_path).then_some(buffer_id)
+    }
+
     pub fn reload_paths_transactional(
         &mut self,
         paths: Vec<PathBuf>,
         overlays: Vec<SourceOverlay>,
     ) -> ReloadReport {
         let snapshot = self.snapshot_state();
+        self.vm.set_current_effect_context(None);
+        self.vm.begin_inline_widget_capture();
         self.vm.source_manager.set_overlays(overlays);
         self.vm.source_manager.begin_transaction();
         self.vm.set_preserve_state_on_redefinition(true);
@@ -1983,6 +2050,7 @@ impl Runtime {
         }
         self.invalidate_symbol_cache();
         self.flush_widget_trees();
+        let _ = self.vm.take_inline_widgets();
         self.vm.set_preserve_state_on_redefinition(false);
 
         let mut changed_symbols = changed_symbols.into_iter().collect::<Vec<_>>();
@@ -2571,6 +2639,10 @@ impl Runtime {
         std::mem::take(&mut self.shared.borrow_mut().pending_buffer_widget_trees)
     }
 
+    pub(crate) fn take_pending_inline_widgets(&mut self) -> Option<PendingInlineWidgets> {
+        self.shared.borrow_mut().pending_inline_widgets.take()
+    }
+
     pub fn clear_subtree_effects_for_named_target(&mut self, target_name: &str) {
         self.vm.clear_subtree_effects_for_named_target(target_name);
         self.shared
@@ -2855,6 +2927,20 @@ impl Runtime {
             Vec::new(),
         )));
         self.relayout_current_tree();
+    }
+
+    pub(crate) fn position_current_layout(
+        &mut self,
+        positioner: impl FnOnce(&mut LayoutNode) -> bool,
+    ) {
+        let Some(current) = self.current_layout.as_ref() else {
+            return;
+        };
+        let mut positioned = (**current).clone();
+        if positioner(&mut positioned) {
+            self.current_layout = Some(Arc::new(positioned));
+            self.layout_revision = self.layout_revision.wrapping_add(1);
+        }
     }
 
     /// Restore a previously saved widget tree for display only,

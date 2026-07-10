@@ -678,7 +678,7 @@ impl Editor {
                     return handled;
                 };
                 let layout_pos = (
-                    local_col + self.active_leaf().widget_scroll_left,
+                    local_col + self.widget_layout_scroll_left(),
                     local_row + self.widget_scroll_top() + self.active_buffer().scroll_top as f32,
                 );
                 let output = patch_drop_output(layout, layout_pos.0, layout_pos.1);
@@ -758,7 +758,7 @@ impl Editor {
             self.widget_cursor = WidgetCursor::Default;
             return;
         };
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
+        let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
         self.widget_cursor = widget_render::cursor_for_node(&node, scrolled_col, scrolled_row);
     }
@@ -830,7 +830,7 @@ impl Editor {
         ) {
             if let Some(layout) = self.runtime.current_layout.as_ref() {
                 let layout_pos = (
-                    local_col + self.active_leaf().widget_scroll_left,
+                    local_col + self.widget_layout_scroll_left(),
                     local_row + self.widget_scroll_top() + self.active_buffer().scroll_top as f32,
                 );
                 match mouse.kind {
@@ -968,7 +968,7 @@ impl Editor {
             self.mark_needs_redraw();
         }
 
-        let widget_col = local_col + self.active_leaf().widget_scroll_left - node.rect.col;
+        let widget_col = local_col + self.widget_layout_scroll_left() - node.rect.col;
         let widget_row = local_row + self.total_scroll_top() - node.rect.row;
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let px_w = node.rect.width * cell_w;
@@ -1032,12 +1032,21 @@ impl Editor {
             return;
         };
 
+        let (text_width_scale, text_height_scale) = self.text_cell_scales_for_buffer(buffer);
+        let has_inline_widgets = !buffer.inline_code_widgets().is_empty();
         let text_scroll = if buffer.view_mode == super::ViewMode::UiOnly {
             0.0
+        } else if has_inline_widgets {
+            buffer.scroll_top as f32 * text_height_scale
         } else {
             buffer.scroll_top as f32
         };
-        let layout_col = local_col + leaf.widget_scroll_left;
+        let layout_scroll_left = if has_inline_widgets {
+            leaf.widget_scroll_left * text_width_scale
+        } else {
+            leaf.widget_scroll_left
+        };
+        let layout_col = local_col + layout_scroll_left;
         let layout_row = local_row + leaf.widget_scroll_top + text_scroll;
 
         let Some(node) = hit_test_layout(&layout, layout_row, layout_col).cloned() else {
@@ -1113,7 +1122,7 @@ impl Editor {
         if !self.is_double_click_candidate(node.widget_id, precise_col, precise_row) {
             return false;
         }
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
+        let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
         let event_scroll_offset = self
             .runtime
@@ -1234,7 +1243,7 @@ impl Editor {
         let Some(hit_node) = self.widget_node_at_local(local_col, local_row) else {
             return;
         };
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
+        let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
         let event_scroll_offset = self
             .runtime
@@ -1301,12 +1310,14 @@ impl Editor {
             } else {
                 // Clamp drag to widget bounds in terminal-cell screen space
                 let scroll = self.total_scroll_top();
+                let horizontal_scroll = self.widget_layout_scroll_left();
+                let screen_col = node.rect.col - horizontal_scroll;
                 let screen_row = node.rect.row - scroll;
                 let screen_height = node.rect.height;
                 (
                     end.0.clamp(
-                        content_col as f32 + node.rect.col,
-                        content_col as f32 + node.rect.col + (node.rect.width - 1.0).max(0.0),
+                        content_col as f32 + screen_col,
+                        content_col as f32 + screen_col + (node.rect.width - 1.0).max(0.0),
                     ),
                     end.1.clamp(
                         content_row as f32 + screen_row,
@@ -1425,12 +1436,10 @@ impl Editor {
         local_row: f32,
     ) -> Option<LayoutNode> {
         let layout = self.runtime.current_layout.as_ref()?;
-        let widget_scroll = self.widget_scroll_top();
-        let text_scroll = self.active_buffer().scroll_top as f32;
-        let hscroll = self.active_leaf().widget_scroll_left;
+        let hscroll = self.widget_layout_scroll_left();
 
         let layout_col = local_col + hscroll;
-        let layout_row = local_row + widget_scroll + text_scroll;
+        let layout_row = local_row + self.total_scroll_top();
 
         hit_test_layout(layout, layout_row, layout_col).cloned()
     }
@@ -1581,12 +1590,16 @@ impl Editor {
         } else {
             0
         };
-        let absolute_row = buffer
+        let display_map = buffer.inline_display_row_map();
+        let display_row = buffer
             .scroll_top
             .saturating_add(local_row as usize)
-            .min(buffer.lines.len().saturating_sub(1));
-        let absolute_col =
-            (local_col as usize + scroll_left).min(buffer.lines[absolute_row].chars().count());
+            .min(display_map.len().saturating_sub(1));
+        let absolute_row = display_map.buffer_line_for_display_row(display_row)?;
+        let display_col = local_col as usize + scroll_left;
+        let absolute_col = buffer
+            .buffer_col_for_display_col(absolute_row, display_col)?
+            .min(buffer.lines[absolute_row].chars().count());
         Some((absolute_row, absolute_col))
     }
 
@@ -1603,7 +1616,7 @@ impl Editor {
         modifiers: KeyModifiers,
     ) -> Option<crate::widget_render::EventOutput> {
         let total_scroll_top = self.total_scroll_top();
-        let total_scroll_left = self.active_leaf().widget_scroll_left;
+        let total_scroll_left = self.widget_layout_scroll_left();
         let local_col = precise_col - content_col as f32 + total_scroll_left;
         let local_row = precise_row - content_row as f32 + total_scroll_top;
         let event_scroll_offset = self
@@ -1676,7 +1689,7 @@ impl Editor {
     ) -> Option<crate::widget_render::EventOutput> {
         let (drag_type, payload) = active_widget_drag(gesture)?;
         let layout = self.runtime.current_layout.as_ref()?;
-        let local_col = precise_col - content_col as f32 + self.active_leaf().widget_scroll_left;
+        let local_col = precise_col - content_col as f32 + self.widget_layout_scroll_left();
         let local_row = precise_row - content_row as f32 + self.total_scroll_top();
         let (target, hit_row, hit_col) =
             deepest_drop_target(layout, local_row, local_col, &drag_type)?;
@@ -1745,8 +1758,7 @@ impl Editor {
             return false;
         };
         let target = self.runtime.current_layout.as_ref().and_then(|layout| {
-            let local_col =
-                precise_col - content_col as f32 + self.active_leaf().widget_scroll_left;
+            let local_col = precise_col - content_col as f32 + self.widget_layout_scroll_left();
             let local_row = precise_row - content_row as f32 + self.total_scroll_top();
             deepest_drop_target(layout, local_row, local_col, &drag_type)
                 .map(|(target, _, _)| target)
@@ -1778,7 +1790,7 @@ impl Editor {
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
             return;
         };
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
+        let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
         let gen_before = widget_render::widget_state_generation();
         let Some(widget_event) = map_magnify_event(&node, scrolled_col, scrolled_row, delta) else {
@@ -1819,7 +1831,7 @@ impl Editor {
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
             return false;
         };
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
+        let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
 
         // Try the leaf widget first

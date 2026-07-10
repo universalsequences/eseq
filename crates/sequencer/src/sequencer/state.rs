@@ -4955,6 +4955,21 @@ impl SequencerState {
             })
             .sum()
     }
+    pub fn process_inlet_value(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+        inlet_name: &str,
+    ) -> Option<crate::process::ProcessLiteral> {
+        self.pattern
+            .process_chains
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|chain| chain.slots.iter())
+            .find(|slot| slot.instance_id == instance_id)
+            .and_then(|slot| slot.inlets.get(inlet_name))
+            .cloned()
+    }
     pub fn scratch_runtime_descriptors(
         &self,
     ) -> (Vec<Vec<EffectDescriptor>>, Vec<EffectDescriptor>) {

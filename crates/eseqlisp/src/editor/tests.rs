@@ -10045,3 +10045,449 @@ fn slider_material_caches_identical_expressions() {
         "identical materials should produce the same shader name"
     );
 }
+#[test]
+fn inline_slider_evaluates_to_plain_value_and_registers_in_editor_buffers() {
+    let mut headless = Runtime::new();
+    let value = headless
+        .eval_str("(~slider 12 :min 0 :max 24)")
+        .expect("headless inline form should evaluate")
+        .expect("inline form should return its value");
+    assert_eq!(value, Value::Number(12.0));
+    assert!(headless.take_pending_inline_widgets().is_none());
+
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .active_buffer_mut()
+        .set_text("(def amount (~slider 12 :min 0 :max 24))");
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    assert_eq!(editor.active_buffer().view_mode, super::ViewMode::Both);
+    assert_eq!(editor.active_buffer().inline_code_widgets().len(), 1);
+    let inline = &editor.active_buffer().inline_code_widgets()[0];
+    let anchor = editor
+        .active_buffer()
+        .source_anchor(inline.anchor_id)
+        .expect("inline widget source anchor");
+    assert_eq!(
+        &editor.active_buffer().text()[anchor.start_byte..anchor.end_byte],
+        "(~slider 12 :min 0 :max 24)"
+    );
+}
+
+#[test]
+fn inline_widget_snapshot_sync_preserves_code_and_inline_layout() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let source = "(def amount (~slider 12 :min 0 :max 24))";
+    editor.active_buffer_mut().set_text(source);
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    // A later editor refresh adopts the runtime's committed UI snapshot. Inline
+    // roots must remain hybrid code+UI buffers rather than becoming UI-only.
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().view_mode, super::ViewMode::Both);
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
+    let rendered_source = frame.lines[0].iter().map(|cell| cell.ch).collect::<String>();
+    let mut expected = source.to_string();
+    expected.insert_str(source.find("12").unwrap(), "        ");
+    assert_eq!(rendered_source.trim_end(), expected);
+    assert!(
+        frame
+            .widget_layout
+            .as_ref()
+            .is_some_and(|layout| layout.children.iter().any(|node| node.widget_type == "hslider"))
+    );
+}
+
+#[test]
+fn inline_slider_in_dormant_function_body_registers_during_compilation() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().set_text(
+        "(def tune ()\n  (~slider 24 :min 0 :max 48))\n(def untouched 1)",
+    );
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    assert_eq!(editor.active_buffer().inline_code_widgets().len(), 1);
+    let inline = &editor.active_buffer().inline_code_widgets()[0];
+    let anchor = editor
+        .active_buffer()
+        .source_anchor(inline.anchor_id)
+        .expect("body inline widget source anchor");
+    assert_eq!(
+        &editor.active_buffer().text()[anchor.start_byte..anchor.end_byte],
+        "(~slider 24 :min 0 :max 48)"
+    );
+}
+
+#[test]
+fn inline_slider_layout_stays_on_value_line_and_survives_edit_above() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().set_text(
+        "(def header 1)\n(def amount (~slider 12 :min 0 :max 24))\n(def footer 2)",
+    );
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 10);
+    let text_height_scale = frame.text_cell_height_scale;
+    let layout = frame.widget_layout.expect("inline widget layout");
+    let slider = layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "hslider")
+        .expect("inline hslider");
+    assert_eq!(slider.rect.row, text_height_scale);
+
+    editor.active_buffer_mut().cursor = (0, 0);
+    editor.active_buffer_mut().insert_str(";; moved\n");
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 10);
+    let layout = frame.widget_layout.expect("inline widget layout after edit");
+    let slider = layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "hslider")
+        .expect("inline hslider after edit");
+    assert_eq!(slider.rect.row, 2.0 * text_height_scale);
+    assert!(!matches!(slider.props.get("muted"), Some(Value::Bool(true))));
+}
+
+#[test]
+fn nested_inline_knob_inserts_columns_before_its_value_without_reserving_rows() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().set_text(
+        "(def nested\n  (list\n    (~knob 0.5 :min 0 :max 1)))\n(def after 2)",
+    );
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    let map = editor.active_buffer().inline_display_row_map();
+    assert_eq!(map.display_row_for_buffer_line(2), Some(2));
+    assert_eq!(map.display_row_for_buffer_line(3), Some(3));
+
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 10);
+    let text_width_scale = frame.text_cell_width_scale;
+    let text_height_scale = frame.text_cell_height_scale;
+    let layout = frame.widget_layout.expect("inline knob layout");
+    let knob = layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "knob")
+        .expect("inline knob");
+    assert_eq!(knob.rect.row, 2.0 * text_height_scale);
+    assert_eq!(knob.rect.height, text_height_scale);
+    assert_eq!(knob.rect.width, 3.0 * text_width_scale);
+    let value_col = editor.active_buffer().lines[2].find("0.5").unwrap();
+    assert_eq!(knob.rect.col, value_col as f32 * text_width_scale);
+
+    editor.set_text_zoom(1.5).unwrap();
+    let zoomed = crate::frame::build_render_frame(&mut editor, 80, 10);
+    let zoomed_layout = zoomed
+        .widget_layout
+        .expect("zoomed inline knob layout");
+    let knob = zoomed_layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "knob")
+        .expect("zoomed inline knob");
+    assert_eq!(knob.rect.row, 3.0);
+    assert_eq!(knob.rect.col, value_col as f32 * 1.5);
+    assert_eq!(knob.rect.width, 4.5);
+    assert_eq!(knob.rect.height, 1.5);
+}
+
+#[test]
+fn inline_toggle_reserves_five_zoom_scaled_text_cells() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let source = "(def enabled (~toggle 1))";
+    editor.active_buffer_mut().set_text(source);
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
+    let text_width_scale = frame.text_cell_width_scale;
+    let text_height_scale = frame.text_cell_height_scale;
+    let layout = frame.widget_layout.expect("inline toggle layout");
+    let toggle = layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "toggle")
+        .expect("inline toggle");
+    let value_col = source.find('1').expect("toggle value");
+    assert_eq!(toggle.rect.col, value_col as f32 * text_width_scale);
+    assert_eq!(toggle.rect.width, 5.0 * text_width_scale);
+    assert_eq!(toggle.rect.height, text_height_scale);
+}
+
+#[test]
+fn inline_slider_shifts_cursor_and_mouse_columns_around_inserted_widget() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let source = "(def amount (~slider 12 :min 0 :max 24))";
+    editor.active_buffer_mut().set_text(source);
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+    let value_col = source.find("12").unwrap();
+
+    editor.active_buffer_mut().cursor = (0, value_col);
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
+    assert_eq!(frame.cursor, Some((0, value_col + 8)));
+    let clicked_display_col = (value_col + 8) as f32 * frame.text_cell_width_scale;
+
+    editor.active_buffer_mut().cursor = (0, 0);
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            clicked_display_col.floor() as u16,
+            0,
+        ),
+        0,
+        0,
+        80,
+        8,
+        clicked_display_col + 0.1,
+        0.1,
+    );
+    assert_eq!(editor.active_buffer().cursor, (0, value_col));
+
+    editor.active_leaf_mut().widget_scroll_left = 4.0;
+    assert_eq!(
+        editor.widget_layout_scroll_left(),
+        4.0 * frame.text_cell_width_scale
+    );
+}
+
+#[test]
+fn inline_scope_reserves_display_rows_and_keeps_following_source_line_identity() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .active_buffer_mut()
+        .set_text("(def before 1)\n(~scope :track 0 :height 3)\n(def after 2)");
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    let map = editor.active_buffer().inline_display_row_map();
+    assert_eq!(map.display_row_for_buffer_line(0), Some(0));
+    assert_eq!(map.display_row_for_buffer_line(1), Some(1));
+    assert_eq!(map.display_row_for_buffer_line(2), Some(5));
+
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
+    assert_eq!(frame.lines.len(), 6);
+    assert!(frame.lines[2].is_empty());
+    assert!(frame.lines[3].is_empty());
+    assert!(frame.lines[4].is_empty());
+    let text_height_scale = frame.text_cell_height_scale;
+    let layout = frame.widget_layout.expect("scope layout");
+    let scope = layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "scope")
+        .expect("inline scope node");
+    assert_eq!(scope.rect.row, 2.0 * text_height_scale);
+    assert_eq!(scope.rect.height, 3.0 * text_height_scale);
+    assert!(scope.rect.width > 0.0);
+}
+
+#[test]
+fn inline_slider_infers_range_from_enclosing_keyword_call_metadata() {
+    let mut runtime = Runtime::new();
+    runtime.register_native("synth", |_args, _ctx| Ok(Value::Nil));
+    runtime.set_inline_widget_metadata_resolver(std::rc::Rc::new(|callee, inlet| {
+        (callee == "synth" && inlet == "cutoff").then_some(crate::vm::InlineWidgetMetadata {
+            min: Some(20.0),
+            max: Some(20_000.0),
+            step: Some(1.0),
+        })
+    }));
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .active_buffer_mut()
+        .set_text("(synth :cutoff (~slider 440))");
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    let widget = &editor.active_buffer().inline_code_widgets()[0].widget;
+    let Value::Map(map) = widget else {
+        panic!("inline slider should be a widget map");
+    };
+    assert!(matches!(&*map["min"].borrow(), Value::Number(20.0)));
+    assert!(matches!(&*map["max"].borrow(), Value::Number(20_000.0)));
+    assert!(matches!(&*map["step"].borrow(), Value::Number(1.0)));
+}
+
+#[test]
+fn inline_slider_drag_writes_literal_and_re_evaluates_once_on_release() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .active_buffer_mut()
+        .set_text("(def amount (~slider 12 :min 0 :max 24))");
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+    editor.active_buffer_mut().cursor = (0, editor.active_buffer().lines[0].chars().count());
+
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
+    let layout = frame.widget_layout.expect("inline slider layout");
+    let slider = layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "hslider")
+        .expect("inline slider")
+        .clone();
+    let start_col = slider.rect.col + slider.rect.width * 0.5;
+    let end_col = slider.rect.col + slider.rect.width - 0.1;
+    let row = slider.rect.row + 0.5;
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), start_col as u16, row as u16),
+        0,
+        0,
+        80,
+        8,
+        start_col,
+        row,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), end_col as u16, row as u16),
+        0,
+        0,
+        80,
+        8,
+        end_col,
+        row,
+    );
+    assert!(
+        !editor.active_buffer().text().contains("(~slider 12"),
+        "drag should rewrite the literal: {}",
+        editor.active_buffer().text()
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), end_col as u16, row as u16),
+        0,
+        0,
+        80,
+        8,
+        end_col,
+        row,
+    );
+
+    assert!(!editor.active_buffer().text().contains("(~slider 12"));
+    assert_eq!(editor.active_buffer().inline_code_widgets().len(), 1);
+    assert_eq!(editor.undo_stack.len(), 1);
+}
+
+#[test]
+fn tiled_inline_slider_drag_reapplies_anchor_after_pointer_viewport_relayout() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .active_buffer_mut()
+        .set_text("(def amount (~slider 12 :min 0 :max 24))");
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+    editor.active_buffer_mut().cursor = (0, editor.active_buffer().lines[0].chars().count());
+
+    let tile_id = editor.active_tile;
+    if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.show_border = false;
+    }
+    let tile_rect = crate::layout::Rect {
+        col: 7.25,
+        row: 3.5,
+        width: 80.0,
+        height: 9.0,
+    };
+    editor.cached_tile_rects = vec![(tile_id, tile_rect)];
+    editor.set_layout_viewport_exact(80.0, 8.0);
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
+    let slider = frame
+        .widget_layout
+        .expect("inline slider layout")
+        .children
+        .iter()
+        .find(|node| node.widget_type == "hslider")
+        .expect("inline slider")
+        .clone();
+
+    // Reproduce the tiled event router's viewport transition. A raw runtime
+    // relayout puts the v-stack child back at its natural left edge; the
+    // Editor must restore source-anchor placement before hit-testing.
+    editor.runtime.set_layout_viewport_exact(12.0, 4.0);
+    let start = (
+        tile_rect.col + slider.rect.col + slider.rect.width * 0.25,
+        tile_rect.row + slider.rect.row + slider.rect.height * 0.5,
+    );
+    let end = (
+        tile_rect.col + slider.rect.col + slider.rect.width * 0.75,
+        start.1,
+    );
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            start.0.floor() as u16,
+            start.1.floor() as u16,
+        ),
+        start.0,
+        start.1,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            end.0.floor() as u16,
+            end.1.floor() as u16,
+        ),
+        end.0,
+        end.1,
+        0,
+    );
+    assert!(
+        !editor.active_buffer().text().contains("(~slider 12"),
+        "drag at the rendered inline position must rewrite the literal"
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            end.0.floor() as u16,
+            end.1.floor() as u16,
+        ),
+        end.0,
+        end.1,
+        0,
+    );
+}
+
+#[test]
+fn inline_widget_dims_in_place_when_its_source_form_is_edited() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .active_buffer_mut()
+        .set_text("(def amount (~slider 12 :min 0 :max 24))");
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+    let literal = editor.active_buffer().text().find("12").unwrap();
+    editor
+        .active_buffer_mut()
+        .apply_text_edit(crate::buffer::TextEdit::new(literal, literal + 2, "oops"))
+        .unwrap();
+
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
+    let layout = frame.widget_layout.expect("stale inline layout");
+    let slider = layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "hslider")
+        .expect("stale slider remains visible");
+    assert!(matches!(slider.props.get("muted"), Some(Value::Bool(true))));
+}

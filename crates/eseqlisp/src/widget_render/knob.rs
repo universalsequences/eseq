@@ -74,12 +74,6 @@ fn normalized_value(props: &HashMap<String, Value>) -> f32 {
     }
 }
 
-fn knob_t_from_local_row(node: &LayoutNode, local_row: f32) -> f32 {
-    let denom = (node.rect.height - 1.0).max(1.0);
-    let offset = (local_row - node.rect.row) / denom;
-    (1.0 - offset).clamp(0.0, 1.0)
-}
-
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let t = normalized_value(props);
     let size = rect.width.min(rect.height).max(1.0);
@@ -154,36 +148,74 @@ impl WidgetDefinition for KnobWidget {
         &self,
         node: &LayoutNode,
         mouse_kind: MouseEventKind,
-        _local_col: f32,
+        local_col: f32,
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
-        _gesture: Option<&Value>,
+        gesture: Option<&Value>,
         _modifiers: KeyModifiers,
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
-                MouseEventOutcome::Dispatch(WidgetEvent::SetNormalized(knob_t_from_local_row(
-                    node, local_row,
+            MouseEventKind::Down(MouseButton::Left) => MouseEventOutcome::Consume,
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(Value::List(gesture)) = gesture else {
+                    return MouseEventOutcome::Consume;
+                };
+                let number = |index: usize| {
+                    gesture.get(index).and_then(|value| match &*value.borrow() {
+                        Value::Number(value) => Some(*value as f32),
+                        _ => None,
+                    })
+                };
+                let (Some(start_value), Some(start_col), Some(start_row)) =
+                    (number(0), number(1), number(2))
+                else {
+                    return MouseEventOutcome::Consume;
+                };
+                let min = get_f32_prop(&node.props, "min", 0.0);
+                let max = get_f32_prop(&node.props, "max", 1.0);
+                let range = (max - min).max(0.0001);
+                let delta = ((start_row - local_row) + (local_col - start_col) * 0.15) / 8.0;
+                MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(
+                    (start_value + delta * range).clamp(min, max) as f64,
                 )))
             }
             _ => MouseEventOutcome::Ignore,
         }
     }
 
+    fn begin_gesture(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> Option<Value> {
+        Some(Value::List(vec![
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(get_f32_prop(
+                &node.props,
+                "value",
+                0.0,
+            ) as f64))),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(local_col as f64))),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(local_row as f64))),
+        ]))
+    }
+
     fn captures_drag(&self) -> bool {
         true
     }
 
+    fn unclamped_drag(&self) -> bool {
+        true
+    }
+
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
-        let WidgetEvent::SetNormalized(t) = event else {
-            return None;
+        let value = match event {
+            WidgetEvent::SetNormalized(t) => {
+                let min = get_f32_prop(&node.props, "min", 0.0);
+                let max = get_f32_prop(&node.props, "max", 1.0);
+                min + (max - min) * t.clamp(0.0, 1.0)
+            }
+            WidgetEvent::Custom(Value::Number(value)) => value as f32,
+            _ => return None,
         };
         let callback = node.props.get("on-change")?.clone();
-        let min = get_f32_prop(&node.props, "min", 0.0);
-        let max = get_f32_prop(&node.props, "max", 1.0);
-        let value = min + (max - min) * t.clamp(0.0, 1.0);
         Some(EventOutput {
             callback,
             args: vec![Value::Number(value as f64)],

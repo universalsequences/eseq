@@ -12,6 +12,7 @@ pub mod image;
 pub mod knob;
 pub mod knob_number;
 pub mod label;
+pub mod lane_preview;
 pub mod live_audio;
 pub mod matrix;
 pub mod mixer_meter;
@@ -22,6 +23,7 @@ pub mod number_picker;
 pub mod patcher;
 pub mod phaser_notch;
 pub mod response_curve_editor;
+pub mod scope;
 pub mod scroll;
 pub mod sdf_widget;
 pub mod spectrogram;
@@ -862,6 +864,7 @@ pub trait WidgetDefinition: Sync {
 
 static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &label::LABEL_WIDGET,
+    &lane_preview::LANE_PREVIEW_WIDGET,
     &hslider::HSLIDER_WIDGET,
     &vslider::VSLIDER_WIDGET,
     &button::BUTTON_WIDGET,
@@ -895,6 +898,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &dropdown::DROPDOWN_WIDGET,
     &number_picker::NUMBER_PICKER_WIDGET,
     &response_curve_editor::RESPONSE_CURVE_EDITOR_WIDGET,
+    &scope::SCOPE_WIDGET,
     &scroll::SCROLL_WIDGET,
     &text_input::TEXT_INPUT_WIDGET,
     &text_input::TEXTBOX_WIDGET,

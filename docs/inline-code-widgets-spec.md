@@ -1,17 +1,20 @@
 # Inline Code Widgets: Strudel-Style UI in the Buffer
 
-Status: design spec (draft). Scheduled after the Cirklon step-processes work
-(`docs/cirklon-process-accumulator-brainstorm.md`) lands — this feature is what
-makes the process code-prototyping phase actually usable, but it depends on
-process inlet metadata and the handle write-through path being settled first.
+Status: core implementation landed. Persistent anchors, display-row mapping,
+`~slider`/`~knob`/`~toggle`, process-inlet metadata inference and live handle
+write-through, `~scope`, and the `~lane` mini-sequencer band are implemented.
+Phase 5 binding chips/token highlights remain intentionally later work. The
+accumulator curve layer for `~lane` still awaits a production preview-data
+provider; the current band renders the lane itself and does not invent a fold
+that could disagree with the process runtime.
 
 ## The Idea
 
 Strudel renders live UI *inside* the code buffer: `._scope()` injects a
 full-width oscilloscope band between two source lines (line numbers stay
-honest — 6, scope band, 7), `slider(...)` puts a draggable control next to the
-literal it wraps, and active pattern tokens get boxed highlights. The code is
-the instrument panel.
+honest — 6, scope band, 7), `slider(...)` inserts a one-line draggable control
+before its value literal, and active pattern tokens get boxed highlights. The
+code is the instrument panel.
 
 ESeq today forces a binary choice: write a full `ui.lisp` that maps widgets to
 some other buffer, or stay in plain code. The hybrid — code as the primary
@@ -20,7 +23,7 @@ prototyping mode. Concretely:
 
 ```lisp
 (processes :track 0
-  (transpose-climb :limit (~slider 12)             ; slider next to this literal
+  (transpose-climb :limit (~slider 12)             ; slider inserted before 12
                    :delta (lane 0 1 0 0 1 0 0 0))) ; lane band under this line,
                                                    ; with accumulator curve preview
 (~scope :track 0)                                  ; scope band after this line
@@ -93,14 +96,14 @@ display map: buffer line  <->  display row   (bands shift subsequent lines down)
   text → inverse-map to buffer line), and scrolling (scroll in display rows so
   a tall band scrolls smoothly past; viewport fits fewer text lines while
   bands are visible).
-- Two placements, one mechanism:
-  - **Band** (full-width row(s) after the anchor line) — scopes, lane
-    mini-sequencers, accumulator-curve previews. The Strudel look.
-  - **Margin** (right of the anchor line, zero extra rows) — sliders, knobs,
-    toggles, binding chips. A degenerate band of height 0 with an x-offset;
-    do not build it as a separate system.
-
-This subsumes the cheap "right-margin only" version; build the map first.
+- Two presentations share the source-anchor mechanism:
+  - **Band** (full-width row(s) after the containing top-level expression) —
+    scopes, lane mini-sequencers, and accumulator-curve previews.
+  - **Inline insertion** (visual columns immediately before the value literal)
+    — sliders, compact knobs, toggles, and binding controls. The widget is one
+    zoom-scaled text row high; text and cursor columns to its right pass through
+    the same insertion map. Value writeback cannot move the widget because only
+    text after the insertion anchor changes.
 
 ### Span anchors that survive editing
 
@@ -129,9 +132,9 @@ what you'll see). Value arguments are positional only for the value itself;
 everything else is keywords:
 
 ```lisp
-(~slider 12 :min 0 :max 24)   ; margin: horizontal slider; evaluates to 12
-(~knob 0.5 :min 0 :max 1)     ; margin: knob
-(~toggle 1)                   ; margin: toggle; evaluates to 1
+(~slider 12 :min 0 :max 24)   ; compact slider is rendered before 12
+(~knob 0.5 :min 0 :max 1)     ; compact knob, value remains visible in code
+(~toggle 1)                   ; compact toggle before 1
 (~scope :track 0)             ; band: live audio scope (evaluates to nil)
 (~lane ...)                   ; band: lane mini-sequencer under a (lane ...) literal
 ```
@@ -218,7 +221,7 @@ promotion path (hardcode → knob → parameter):
 - Registration rides the existing span-annotation machinery: `~` forms are
   widget-producing expressions whose nodes carry the `__source-*` props plus
   an `:inline-anchor` marker; frame assembly pulls flagged nodes out of the
-  normal widget-tree layout and into bands/margins. Reuses the committed
+  normal widget-tree layout and into bands/inline insertions. Reuses the committed
   snapshot + reactive machinery — no parallel widget pipeline.
 - `~` forms in a file evaluated without an editor (headless/scripts) are
   transparent: value in, value out, no registration. Code with widgets stays
@@ -253,7 +256,7 @@ anchored span (e.g. `12` → `14` inside `(~slider 12)`).
   accumulator-curve preview (pure-fold processes), rendered directly under the
   literal that drives it. This is the killer app of the whole feature.
 - **Binding chips**: a port declaration in code
-  (`(cutoff (param-tag :cutoff))`) renders an inline margin chip showing
+  (`(cutoff (param-tag :cutoff))`) renders an inline insertion showing
   bound/unbound/stale — same badge semantics as the Phase 3B slot UI — and
   clicking it arms the *same* wrapper arm-mode from `MACRO_MAPPING_SPEC.md`.
   One mapping infrastructure, two surfaces (slot UI for UI-people, inline chip
@@ -272,11 +275,11 @@ anchored span (e.g. `12` → `14` inside `(~slider 12)`).
    and receives mouse interaction. Deterministic frame tests for the map
    (cursor round-trip, hit-test round-trip, band at viewport edges).
 
-### Phase 2 — `~` registration + margin value widgets
+### Phase 2 — `~` registration + one-line inline value widgets
 
 1. `~slider` / `~knob` / `~toggle` forms: evaluate-to-value + registration via
-   the existing span-annotation props; `:inline-anchor` flagged nodes pulled
-   from normal layout into margins.
+   the existing span-annotation props; `:inline-anchor` flagged nodes insert
+   display columns before their value literal without changing source bytes.
 2. Headless transparency (no editor ⇒ pure passthrough).
 3. Stale-anchor dimming; re-eval refresh.
 
@@ -301,8 +304,8 @@ anchored span (e.g. `12` → `14` inside `(~slider 12)`).
 
 ## Locked Decisions
 
-- Display-row map first; margin placement is a degenerate band, not a second
-  system.
+- Display-row maps own bands; per-line display-column insertions own compact
+  value widgets. Both map cursor, pointer, scrolling, and zoom explicitly.
 - Line numbers always render from buffer lines (bands own no line number).
 - Anchor table with marker semantics; stale anchors dim, never vanish;
   re-eval refreshes.
@@ -327,8 +330,10 @@ anchored span (e.g. `12` → `14` inside `(~slider 12)`).
 
 ## Open Questions
 
-- Continuous vs. on-release text write-back while dragging (undo-history
-  granularity); likely release-only with continuous runtime preview.
+- Text write-back is continuous during a drag so the code remains the source of
+  truth at every frame, but the entire gesture is one undo group and buffer
+  re-evaluation happens once on release. Process-handle runtime preview remains
+  continuous.
 - Exact `~` vocabulary: is `~scope`/`~lane` right, or does a general
   `(~widget <type> ...)` escape hatch earn its keep alongside the sugar?
 - Band height policy: fixed per widget type vs. author-specified

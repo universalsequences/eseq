@@ -3770,11 +3770,11 @@ fragment float4 live_spectrogram_frag(
                             focused_widget_id: frame.focused_widget_id,
                             focused_branch: false,
                             tile_content_rows: max_rows_exact,
-                            scroll_top: frame.widget_scroll_top,
-                            scroll_left: frame.widget_scroll_left,
+                            scroll_top: frame.widget_scroll_top + frame.text_scroll_top as f32,
+                            scroll_left: frame.widget_layout_scroll_left,
                             inherited_hover: false,
                         },
-                        frame.widget_scroll_top,
+                        frame.widget_scroll_top + frame.text_scroll_top as f32,
                         max_rows,
                     )
                 })
@@ -5043,6 +5043,9 @@ fragment float4 live_spectrogram_frag(
                     let time_seconds = self.elapsed_time_seconds();
                     let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h).max(0.0);
                     let inner_rows = inner_rows_exact.floor() as u16;
+                    let text_scroll = tile.frame.text_scroll_top as f32;
+                    let widget_scroll = tile.frame.widget_scroll_top;
+                    let combined_scroll = text_scroll + widget_scroll;
 
                     let viewport = WidgetViewport {
                         cell_w,
@@ -5053,17 +5056,15 @@ fragment float4 live_spectrogram_frag(
                         focused_widget_id: tile.frame.focused_widget_id,
                         focused_branch: false,
                         tile_content_rows: inner_rows_exact,
-                        scroll_top: tile.frame.widget_scroll_top,
-                        scroll_left: tile.frame.widget_scroll_left,
+                        scroll_top: combined_scroll,
+                        scroll_left: tile.frame.widget_layout_scroll_left,
                         inherited_hover: false,
                     };
                     // Offset primitives to tile's screen position,
                     // shifted by both text scroll (vertical) and hscroll (horizontal)
                     // so widgets move with the text.
-                    let text_scroll = tile.frame.text_scroll_top as f32;
-                    let widget_scroll = tile.frame.widget_scroll_top;
-                    let widget_col_off = content_col - tile.frame.widget_scroll_left;
-                    let widget_row_off = content_row - text_scroll - widget_scroll;
+                    let widget_col_off = content_col - tile.frame.widget_layout_scroll_left;
+                    let widget_row_off = content_row - combined_scroll;
                     collect_mod_patch_ports(
                         layout,
                         widget_col_off,
@@ -5094,7 +5095,7 @@ fragment float4 live_spectrogram_frag(
                                 layout,
                                 &tile.frame.dirty_widget_ids,
                                 viewport,
-                                tile.frame.widget_scroll_top,
+                                combined_scroll,
                                 inner_rows,
                             );
                         let primitive_runs = self
@@ -5146,14 +5147,14 @@ fragment float4 live_spectrogram_frag(
                             layout,
                             &tile.frame.dirty_widget_ids,
                             viewport,
-                            tile.frame.widget_scroll_top,
+                            combined_scroll,
                             inner_rows,
                         );
                         let overlay = if widget_render::overlay_widget_id().is_some() {
                             let (_, overlay) = widget_render::collect_metal_primitives(
                                 layout,
                                 viewport,
-                                tile.frame.widget_scroll_top,
+                                combined_scroll,
                                 inner_rows,
                             );
                             overlay
@@ -5262,8 +5263,9 @@ fragment float4 live_spectrogram_frag(
                 if let Some(overlay) = tile.inspect_overlay {
                     enc.setScissorRect(content_scissor);
                     let text_scroll = tile.frame.text_scroll_top as f32;
-                    let overlay_x =
-                        (content_col + overlay.rect.col - tile.frame.widget_scroll_left) * cell_w;
+                    let overlay_x = (content_col + overlay.rect.col
+                        - tile.frame.widget_layout_scroll_left)
+                        * cell_w;
                     let overlay_y = (content_row + overlay.rect.row
                         - text_scroll
                         - tile.frame.widget_scroll_top)
@@ -6673,11 +6675,11 @@ fragment float4 live_spectrogram_frag(
                             focused_widget_id: frame.focused_widget_id,
                             focused_branch: false,
                             tile_content_rows: max_rows_exact,
-                            scroll_top: frame.widget_scroll_top,
-                            scroll_left: frame.widget_scroll_left,
+                            scroll_top: frame.widget_scroll_top + frame.text_scroll_top as f32,
+                            scroll_left: frame.widget_layout_scroll_left,
                             inherited_hover: false,
                         },
-                        frame.widget_scroll_top,
+                        frame.widget_scroll_top + frame.text_scroll_top as f32,
                         max_rows,
                     );
                     widget_scene_build_time += started.elapsed();

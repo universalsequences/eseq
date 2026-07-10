@@ -16,7 +16,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 
-use crate::buffer::{Buffer, debug_widget_tree_summary};
+use crate::buffer::{Buffer, InlineWidgetPlacement, debug_widget_tree_summary};
 use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
 use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{LayoutNode, Rect};
@@ -50,6 +50,16 @@ struct EditorSubtreeReplacement {
     subtree_root_id: u64,
     tree: Value,
     reactive_dependencies: Vec<ReactiveFieldKey>,
+}
+
+#[derive(Clone, Copy)]
+struct InlineLayoutPlacement {
+    anchor_id: u64,
+    row: f32,
+    col: f32,
+    width: Option<f32>,
+    height: Option<f32>,
+    stale: bool,
 }
 
 enum PatcherSourceTabTarget {
@@ -635,6 +645,7 @@ pub struct Editor {
     hovered_tile_tab: Option<(TileId, usize)>,
     pointer_drag_started_on_slider: bool,
     last_slider_drag_widget_id: Option<u64>,
+    pending_inline_writeback: Option<(BufferId, u64)>,
     text_zoom: f32,
     text_cell_width_scale: f32,
     text_cell_height_scale: f32,
@@ -774,6 +785,7 @@ impl Editor {
             hovered_tile_tab: None,
             pointer_drag_started_on_slider: false,
             last_slider_drag_widget_id: None,
+            pending_inline_writeback: None,
             text_zoom: DEFAULT_TEXT_ZOOM,
             text_cell_width_scale: DEFAULT_TEXT_ZOOM,
             text_cell_height_scale: DEFAULT_TEXT_ZOOM,
@@ -857,9 +869,7 @@ impl Editor {
     }
 
     pub(crate) fn text_cell_scales_for_buffer(&self, buffer: &Buffer) -> (f32, f32) {
-        if buffer.view_mode != ViewMode::UiOnly
-            && (buffer.view_mode == ViewMode::TextOnly || buffer.widget_tree.is_none())
-        {
+        if buffer.view_mode != ViewMode::UiOnly {
             (
                 self.text_cell_width_scale.max(0.001),
                 self.text_cell_height_scale.max(0.001),
@@ -3093,35 +3103,52 @@ impl Editor {
 
     fn move_page_forward(&mut self) {
         let page_height = self.text_page_height();
+        let display_map = self.active_buffer().inline_display_row_map();
+        let current_display = display_map
+            .display_row_for_buffer_line(self.active_buffer().cursor.0)
+            .unwrap_or(self.active_buffer().cursor.0);
+        let target_display =
+            (current_display + page_height).min(display_map.len().saturating_sub(1));
+        let target_line = display_map
+            .nearest_buffer_line_for_display_row(target_display)
+            .unwrap_or(self.active_buffer().cursor.0);
         let buffer = self.active_buffer_mut();
-        let max_row = buffer.lines.len().saturating_sub(1);
-        buffer.cursor.0 = (buffer.cursor.0 + page_height).min(max_row);
+        buffer.cursor.0 = target_line;
         buffer.cursor.1 = buffer
             .cursor
             .1
             .min(buffer.lines[buffer.cursor.0].chars().count());
-        let max_scroll = buffer.lines.len().saturating_sub(page_height);
+        let max_scroll = display_map.len().saturating_sub(page_height);
         buffer.scroll_top = (buffer.scroll_top + page_height).min(max_scroll);
-        buffer.adjust_scroll(page_height);
     }
 
     fn move_page_backward(&mut self) {
         let page_height = self.text_page_height();
+        let display_map = self.active_buffer().inline_display_row_map();
+        let current_display = display_map
+            .display_row_for_buffer_line(self.active_buffer().cursor.0)
+            .unwrap_or(self.active_buffer().cursor.0);
+        let target_line = display_map
+            .nearest_buffer_line_for_display_row(current_display.saturating_sub(page_height))
+            .unwrap_or(0);
         let buffer = self.active_buffer_mut();
-        buffer.cursor.0 = buffer.cursor.0.saturating_sub(page_height);
+        buffer.cursor.0 = target_line;
         buffer.cursor.1 = buffer
             .cursor
             .1
             .min(buffer.lines[buffer.cursor.0].chars().count());
         buffer.scroll_top = buffer.scroll_top.saturating_sub(page_height);
-        buffer.adjust_scroll(page_height);
     }
 
     fn recenter_cursor(&mut self) {
         let page_height = self.text_page_height();
+        let display_map = self.active_buffer().inline_display_row_map();
+        let cursor_display = display_map
+            .display_row_for_buffer_line(self.active_buffer().cursor.0)
+            .unwrap_or(self.active_buffer().cursor.0);
         let buffer = self.active_buffer_mut();
-        let max_scroll = buffer.lines.len().saturating_sub(page_height);
-        let desired_top = buffer.cursor.0.saturating_sub(page_height / 2);
+        let max_scroll = display_map.len().saturating_sub(page_height);
+        let desired_top = cursor_display.saturating_sub(page_height / 2);
         buffer.scroll_top = desired_top.min(max_scroll);
     }
 
@@ -3276,11 +3303,25 @@ impl Editor {
     }
 
     pub fn widget_scroll_top(&self) -> f32 {
-        self.active_leaf().widget_scroll_top
+        if self.active_buffer().inline_code_widgets().is_empty() {
+            self.active_leaf().widget_scroll_top
+        } else {
+            0.0
+        }
     }
 
     pub fn widget_scroll_left(&self) -> f32 {
         self.active_leaf().widget_scroll_left
+    }
+
+    pub(super) fn widget_layout_scroll_left(&self) -> f32 {
+        let scroll_left = self.active_leaf().widget_scroll_left;
+        if self.active_buffer().inline_code_widgets().is_empty() {
+            scroll_left
+        } else {
+            let (text_cell_width_scale, _) = self.text_cell_scales_for_buffer(self.active_buffer());
+            scroll_left * text_cell_width_scale
+        }
     }
 
     pub fn reset_widget_scroll_left(&mut self) {
@@ -3464,6 +3505,10 @@ impl Editor {
     pub fn total_scroll_top(&self) -> f32 {
         let text_scroll = if self.active_buffer().view_mode == ViewMode::UiOnly {
             0.0
+        } else if !self.active_buffer().inline_code_widgets().is_empty() {
+            let (_, text_cell_height_scale) =
+                self.text_cell_scales_for_buffer(self.active_buffer());
+            self.active_buffer().scroll_top as f32 * text_cell_height_scale
         } else {
             self.active_buffer().scroll_top as f32
         };
@@ -3474,7 +3519,9 @@ impl Editor {
     /// True when widgets are visible (UiOnly or Both mode with a widget layout).
     pub fn is_ui_scroll_mode(&self) -> bool {
         let mode = self.active_buffer().view_mode;
-        mode != ViewMode::TextOnly && self.runtime.current_layout.is_some()
+        mode != ViewMode::TextOnly
+            && self.active_buffer().inline_code_widgets().is_empty()
+            && self.runtime.current_layout.is_some()
     }
 
     pub(super) fn max_widget_vertical_scroll(&self) -> f32 {
@@ -3499,6 +3546,7 @@ impl Editor {
     }
 
     pub fn clamp_widget_scroll_offsets(&mut self) {
+        let has_inline_widgets = !self.active_buffer().inline_code_widgets().is_empty();
         let max_v = self.max_widget_vertical_scroll();
         let max_h = {
             let vp = self.runtime.layout_cols_exact();
@@ -3510,13 +3558,21 @@ impl Editor {
                 .unwrap_or(0.0)
         };
         let leaf = self.active_leaf_mut();
-        leaf.widget_scroll_top = leaf.widget_scroll_top.clamp(0.0, max_v);
+        leaf.widget_scroll_top = if has_inline_widgets {
+            0.0
+        } else {
+            leaf.widget_scroll_top.clamp(0.0, max_v)
+        };
         leaf.widget_scroll_left = leaf.widget_scroll_left.clamp(0.0, max_h);
     }
 
     /// Apply smooth (sub-cell) scroll deltas to the widget viewport.
     /// `delta_cells_x` and `delta_cells_y` are in cell units (fractional).
     pub fn apply_smooth_widget_scroll(&mut self, delta_cells_x: f32, delta_cells_y: f32) {
+        if !self.active_buffer().inline_code_widgets().is_empty() {
+            self.active_leaf_mut().widget_scroll_top = 0.0;
+            return;
+        }
         let max_v = self.max_widget_vertical_scroll();
 
         let max_h = {
@@ -3544,6 +3600,58 @@ impl Editor {
         // For active tile, runtime holds the authoritative layout.
         // For other tiles, their cached_layout is used directly.
         self.runtime.current_layout.clone()
+    }
+
+    pub(crate) fn position_inline_widget_layout(&mut self, viewport_width: f32) {
+        let buffer = self.active_buffer();
+        if buffer.inline_code_widgets().is_empty() {
+            return;
+        }
+        let (text_cell_width_scale, text_cell_height_scale) =
+            self.text_cell_scales_for_buffer(buffer);
+        let (placements, root_height) = inline_layout_placements(
+            buffer,
+            viewport_width,
+            text_cell_width_scale,
+            text_cell_height_scale,
+        );
+        self.runtime.position_current_layout(|layout| {
+            position_inline_layout_nodes(layout, &placements, viewport_width, root_height)
+        });
+    }
+
+    pub(crate) fn refresh_inline_widget_runtime_values(&mut self) {
+        let bindings = self.active_buffer().inline_widget_runtime_bindings();
+        if bindings.is_empty() {
+            return;
+        }
+        let mut updates = Vec::new();
+        for (anchor_id, target, inlet) in bindings {
+            if let Ok(Some(value)) = self.runtime.invoke(
+                target,
+                vec![
+                    Value::Keyword("__inline-read".to_string()),
+                    Value::Keyword(inlet),
+                ],
+            ) && !matches!(value, Value::Nil)
+            {
+                updates.push((anchor_id, value));
+            }
+        }
+        let mut changed = false;
+        for (anchor_id, value) in updates {
+            changed |= self
+                .active_buffer_mut()
+                .set_inline_widget_live_value(anchor_id, value);
+        }
+        if changed {
+            let buffer_id = self.active_buffer().id;
+            if let Some(tree) = inline_widget_tree(self.active_buffer()) {
+                self.active_buffer_mut()
+                    .set_widget_tree(Some(tree.deep_clone()), Some(buffer_id));
+                self.runtime.set_widget_tree(tree);
+            }
+        }
     }
 
     pub fn visible_widget_layouts(&self) -> Vec<Arc<crate::layout::LayoutNode>> {
@@ -3582,6 +3690,7 @@ impl Editor {
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
         self.runtime.set_layout_viewport(cols, rows);
+        self.position_inline_widget_layout(cols as f32);
         self.sync_layout_to_active_leaf();
     }
 
@@ -3607,16 +3716,30 @@ impl Editor {
                 Some((cols, rows)),
                 retained.layout_revision,
             );
+            self.position_inline_widget_layout(cols);
+            self.sync_layout_to_active_leaf();
             return;
         }
         self.runtime.set_layout_viewport_exact(cols, rows);
+        self.position_inline_widget_layout(cols);
         self.sync_layout_to_active_leaf();
     }
 
     pub fn sync_text_horizontal_scroll_to_viewport(&mut self) {
         if self.active_buffer().view_mode != ViewMode::UiOnly {
             let viewport_height = self.runtime.layout_rows() as usize;
-            self.active_buffer_mut().adjust_scroll(viewport_height);
+            let display_map = self.active_buffer().inline_display_row_map();
+            let cursor_display = display_map
+                .display_row_for_buffer_line(self.active_buffer().cursor.0)
+                .unwrap_or(self.active_buffer().cursor.0);
+            let max_scroll = display_map.len().saturating_sub(viewport_height);
+            let buffer = self.active_buffer_mut();
+            buffer.scroll_top = buffer.scroll_top.min(max_scroll);
+            if cursor_display < buffer.scroll_top {
+                buffer.scroll_top = cursor_display;
+            } else if cursor_display >= buffer.scroll_top + viewport_height {
+                buffer.scroll_top = cursor_display - viewport_height + 1;
+            }
         }
         self.sync_text_horizontal_scroll(self.runtime.layout_cols());
     }
@@ -4342,8 +4465,22 @@ impl Editor {
         } else {
             leaf.cached_layout.as_ref()
         }?;
-        let layout_col = local_col + leaf.widget_scroll_left;
-        let layout_row = local_row + leaf.widget_scroll_top + buffer.scroll_top as f32;
+        let (text_width_scale, text_height_scale) = self.text_cell_scales_for_buffer(buffer);
+        let has_inline_widgets = !buffer.inline_code_widgets().is_empty();
+        let layout_scroll_left = if has_inline_widgets {
+            leaf.widget_scroll_left * text_width_scale
+        } else {
+            leaf.widget_scroll_left
+        };
+        let text_scroll_top = if buffer.view_mode == ViewMode::UiOnly {
+            0.0
+        } else if has_inline_widgets {
+            buffer.scroll_top as f32 * text_height_scale
+        } else {
+            buffer.scroll_top as f32
+        };
+        let layout_col = local_col + layout_scroll_left;
+        let layout_row = local_row + leaf.widget_scroll_top + text_scroll_top;
         inspect_hit_test_layout(layout, layout_row, layout_col).cloned()
     }
 
@@ -5165,23 +5302,29 @@ impl Editor {
         }
         let (start, end) = self.vim_line_range(count);
         let removed = self.active_buffer().lines[start..end].to_vec();
+        let original_col = self.active_buffer().cursor.1;
         self.record_undo_snapshot();
         self.kill_ring.push(removed.join("\n"));
         self.vim_linewise_yank = Some(removed);
 
         let buffer = self.active_buffer_mut();
         if start == 0 && end == buffer.lines.len() {
-            buffer.lines = vec![String::new()];
-            buffer.cursor = (0, 0);
+            buffer.set_text("");
         } else {
-            buffer.lines.drain(start..end);
+            let (range_start, range_end) = if end < buffer.lines.len() {
+                ((start, 0), (end, 0))
+            } else {
+                let previous_row = start.saturating_sub(1);
+                (
+                    (previous_row, buffer.lines[previous_row].chars().count()),
+                    (end - 1, buffer.lines[end - 1].chars().count()),
+                )
+            };
+            buffer.delete_range(range_start, range_end);
             let next_row = start.min(buffer.lines.len().saturating_sub(1));
-            let next_col = buffer.cursor.1.min(buffer.lines[next_row].chars().count());
+            let next_col = original_col.min(buffer.lines[next_row].chars().count());
             buffer.cursor = (next_row, next_col);
         }
-        buffer.dirty = true;
-        buffer.revision = buffer.revision.wrapping_add(1);
-        buffer.text_styles.clear();
         self.sync_runtime_context();
         self.refresh_completion();
     }
@@ -5228,10 +5371,9 @@ impl Editor {
             .take_while(|ch| ch.is_whitespace())
             .collect::<String>();
         let buffer = self.active_buffer_mut();
-        buffer.lines.insert(row, indent.clone());
+        buffer.cursor = (row, 0);
+        buffer.insert_str(&format!("{indent}\n"));
         buffer.cursor = (row, indent.chars().count());
-        buffer.dirty = true;
-        buffer.revision = buffer.revision.wrapping_add(1);
     }
 
     fn vim_delete_char_under_cursor(&mut self) {
@@ -5281,13 +5423,15 @@ impl Editor {
             let row = self.active_buffer().cursor.0;
             let insert_row = row + 1;
             let buffer = self.active_buffer_mut();
-            for (offset, line) in lines.iter().cloned().enumerate() {
-                buffer.lines.insert(insert_row + offset, line);
+            let insertion = format!("{}\n", lines.join("\n"));
+            buffer.cursor = (insert_row.min(buffer.lines.len().saturating_sub(1)), 0);
+            if insert_row >= buffer.lines.len() {
+                buffer.cursor = (row, buffer.lines[row].chars().count());
+                buffer.insert_str(&format!("\n{}", lines.join("\n")));
+            } else {
+                buffer.insert_str(&insertion);
             }
             buffer.cursor = (insert_row, 0);
-            buffer.dirty = true;
-            buffer.revision = buffer.revision.wrapping_add(1);
-            buffer.text_styles.clear();
             self.sync_runtime_context();
             return;
         }
@@ -5347,16 +5491,11 @@ impl Editor {
             return;
         };
         let buffer = &mut self.buffers[buffer_idx];
-        buffer.lines = snapshot.lines;
-        if buffer.lines.is_empty() {
-            buffer.lines.push(String::new());
-        }
+        buffer.set_text(&snapshot.lines.join("\n"));
         let row = snapshot.cursor.0.min(buffer.lines.len().saturating_sub(1));
         let col = snapshot.cursor.1.min(buffer.lines[row].chars().count());
         buffer.cursor = (row, col);
         buffer.dirty = snapshot.dirty;
-        buffer.revision = buffer.revision.wrapping_add(1);
-        buffer.text_styles.clear();
         self.finish_typing_undo_group();
         if self.active_buffer_idx() == buffer_idx {
             self.sync_text_horizontal_scroll_to_viewport();
@@ -5685,6 +5824,7 @@ impl Editor {
                 crate::widget_render::set_drop_hover_target(None);
                 self.pointer_drag_started_on_slider = false;
                 self.last_slider_drag_widget_id = None;
+                self.finish_inline_widget_writeback();
             }
             MouseEventKind::Moved => {
                 // Update dropdown hover when overlay is open
@@ -5769,7 +5909,7 @@ impl Editor {
                     self.navigate_focus(KeyCode::Down);
                 } else {
                     let buffer = self.active_buffer_mut();
-                    let max_scroll = buffer.lines.len().saturating_sub(1);
+                    let max_scroll = buffer.inline_display_row_map().len().saturating_sub(1);
                     buffer.scroll_top = (buffer.scroll_top + 3).min(max_scroll);
                     self.mark_needs_redraw();
                 }
@@ -5842,7 +5982,15 @@ impl Editor {
             .active_buffer()
             .lines
             .get(self.active_buffer().cursor.0)
-            .map(|line| line.chars().count())
+            .map(|line| {
+                line.chars().count()
+                    + self
+                        .active_buffer()
+                        .inline_column_insertions(self.active_buffer().cursor.0)
+                        .iter()
+                        .map(|insertion| insertion.width_cells)
+                        .sum::<usize>()
+            })
             .unwrap_or(0);
         let max_scroll = line_width.saturating_sub(viewport_width as usize) as u16;
         (max_scroll > 0).then_some(max_scroll)
@@ -5863,7 +6011,10 @@ impl Editor {
             return;
         };
 
-        let cursor_col = self.active_buffer().cursor.1;
+        let cursor_col = self.active_buffer().display_col_for_buffer_col(
+            self.active_buffer().cursor.0,
+            self.active_buffer().cursor.1,
+        );
         let viewport_width = viewport_width as usize;
         let leaf = self.active_leaf_mut();
         let scroll_left = leaf.widget_scroll_left.floor() as usize;
@@ -6188,6 +6339,16 @@ impl Editor {
         let report = self
             .runtime
             .eval_source_transactional(path, &source, overlays);
+        if std::env::var("ESEQ_INLINE_TRACE").is_ok_and(|value| value != "0") {
+            eprintln!(
+                "[inline-widgets] evaluated buffer_id={buffer_id} name={:?} success={} requested_path={:?} evaluated_path={:?} diagnostics={:?}",
+                self.buffers[buffer_idx].name,
+                report.success,
+                report.requested_path,
+                report.evaluated_path,
+                report.diagnostics
+            );
+        }
         self.process_lisp_reload_report(report);
     }
 
@@ -6262,7 +6423,7 @@ impl Editor {
             let buffer = &mut self.buffers[buffer_idx];
             buffer.set_widget_tree(tree.as_ref().map(Value::deep_clone), source_buffer_id);
             if tree.is_some() {
-                buffer.view_mode = ViewMode::UiOnly;
+                buffer.view_mode = view_mode_for_widget_tree(buffer.widget_tree.as_ref());
             }
         }
         if is_active {
@@ -6292,7 +6453,7 @@ impl Editor {
         };
         let buffer = self.active_buffer_mut();
         buffer.adopt_runtime_committed_ui_snapshot(snapshot, runtime_generation);
-        buffer.view_mode = ViewMode::UiOnly;
+        buffer.view_mode = view_mode_for_widget_tree(buffer.widget_tree.as_ref());
     }
 
     fn restore_runtime_widget_tree_from_buffer(&mut self, buffer_idx: usize) {
@@ -6902,7 +7063,7 @@ impl Editor {
                 let buffer = &mut self.buffers[buffer_idx];
                 let replaced = buffer.replace_widget_subtrees(&batch, common_source);
                 if replaced {
-                    buffer.view_mode = ViewMode::UiOnly;
+                    buffer.view_mode = view_mode_for_widget_tree(buffer.widget_tree.as_ref());
                 }
                 replaced
             };
@@ -6918,7 +7079,8 @@ impl Editor {
                             replacement.reactive_dependencies.clone(),
                         );
                         if replaced {
-                            buffer.view_mode = ViewMode::UiOnly;
+                            buffer.view_mode =
+                                view_mode_for_widget_tree(buffer.widget_tree.as_ref());
                         }
                         replaced
                     };
@@ -7129,15 +7291,7 @@ impl Editor {
 
         if let Some(lines) = self.runtime.take_pending_set_lines() {
             let buffer = self.active_buffer_mut();
-            buffer.lines = if lines.is_empty() {
-                vec![String::new()]
-            } else {
-                lines
-            };
-            buffer.cursor = (0, 0);
-            buffer.scroll_top = 0;
-            buffer.revision = buffer.revision.wrapping_add(1);
-            buffer.text_styles.clear();
+            buffer.set_text(&lines.join("\n"));
         }
 
         if let Some(styles) = self.runtime.take_pending_set_buffer_styles() {
@@ -7249,7 +7403,9 @@ impl Editor {
                                 buffer_name, subtree_root_id
                             );
                         }
-                        self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
+                        self.buffers[buffer_idx].view_mode = view_mode_for_widget_tree(
+                            self.buffers[buffer_idx].widget_tree.as_ref(),
+                        );
                         if is_active {
                             crate::widget_render::clear_overlay();
                             let runtime_upgraded = self
@@ -7283,7 +7439,8 @@ impl Editor {
                         {
                             let buffer = &mut self.buffers[buffer_idx];
                             buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
-                            buffer.view_mode = ViewMode::UiOnly;
+                            buffer.view_mode =
+                                view_mode_for_widget_tree(buffer.widget_tree.as_ref());
                         }
                         inactive_buffers_to_refresh.insert(buffer_idx, None);
                     }
@@ -7365,7 +7522,8 @@ impl Editor {
                 buffer.replace_widget_subtrees(&replacements, source_buffer_id)
             };
             if batch_applied {
-                self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
+                self.buffers[buffer_idx].view_mode =
+                    view_mode_for_widget_tree(self.buffers[buffer_idx].widget_tree.as_ref());
                 if let Some(roots) = inactive_buffers_to_refresh
                     .entry(buffer_idx)
                     .or_insert_with(|| Some(Vec::new()))
@@ -7397,7 +7555,7 @@ impl Editor {
                         reactive_dependencies,
                     );
                     if replaced {
-                        buffer.view_mode = ViewMode::UiOnly;
+                        buffer.view_mode = view_mode_for_widget_tree(buffer.widget_tree.as_ref());
                     }
                     replaced
                 };
@@ -7434,6 +7592,70 @@ impl Editor {
         }
         let flush_started = std::time::Instant::now();
         self.flush_active_subtree_replacements(&mut active_subtree_replacements);
+
+        if let Some(pending) = self.runtime.take_pending_inline_widgets()
+            && let Some(buffer_idx) = self
+                .buffers
+                .iter()
+                .position(|buffer| buffer.id == pending.source_buffer_id)
+        {
+            if std::env::var("ESEQ_INLINE_TRACE").is_ok_and(|value| value != "0") {
+                eprintln!(
+                    "[inline-widgets] consume source_buffer_id={} name={:?} count={}",
+                    pending.source_buffer_id,
+                    self.buffers[buffer_idx].name,
+                    pending.widgets.len()
+                );
+            }
+            let inline_result = self.buffers[buffer_idx].set_inline_code_widgets(pending.widgets);
+            match inline_result {
+                Ok(()) => {
+                    let tree = inline_widget_tree(&self.buffers[buffer_idx]);
+                    let is_active = self.active_buffer_idx() == buffer_idx;
+                    if let Some(tree) = tree {
+                        self.buffers[buffer_idx].set_widget_tree(
+                            Some(tree.deep_clone()),
+                            Some(pending.source_buffer_id),
+                        );
+                        self.buffers[buffer_idx].view_mode = ViewMode::Both;
+                        if is_active {
+                            self.active_leaf_mut().widget_scroll_top = 0.0;
+                            self.runtime
+                                .set_widget_id_offset(pending.source_buffer_id as u64 * 100_000);
+                            self.runtime.set_widget_tree(tree);
+                            self.remap_focused_widget_after_layout_change();
+                        } else {
+                            inactive_buffers_to_refresh.insert(buffer_idx, None);
+                        }
+                    } else if self.buffers[buffer_idx]
+                        .widget_tree
+                        .as_ref()
+                        .is_some_and(widget_tree_is_inline_root)
+                    {
+                        self.buffers[buffer_idx].set_widget_tree(None, None);
+                        if is_active {
+                            self.runtime.clear_current_widget_tree();
+                        }
+                    }
+                    if std::env::var("ESEQ_INLINE_TRACE").is_ok_and(|value| value != "0") {
+                        eprintln!(
+                            "[inline-widgets] applied source_buffer_id={} name={:?} registered={} view_mode={} inline_root={}",
+                            pending.source_buffer_id,
+                            self.buffers[buffer_idx].name,
+                            self.buffers[buffer_idx].inline_code_widgets().len(),
+                            self.buffers[buffer_idx].view_mode.label(),
+                            self.buffers[buffer_idx]
+                                .widget_tree
+                                .as_ref()
+                                .is_some_and(widget_tree_is_inline_root)
+                        );
+                    }
+                }
+                Err(error) => {
+                    self.minibuffer = Some(format!("Inline widget registration failed: {error}"));
+                }
+            }
+        }
         if scene_trace {
             eprintln!(
                 "[side-effects-trace] active-flush={:.3}ms",
@@ -7706,6 +7928,55 @@ impl Editor {
         let Some(output) = output else {
             return false;
         };
+        if let Value::String(callback) = &output.callback
+            && let Some(anchor_id) = callback
+                .strip_prefix(crate::vm::INLINE_WRITEBACK_CALLBACK)
+                .and_then(|suffix| suffix.strip_prefix(':'))
+                .and_then(|id| id.parse::<u64>().ok())
+        {
+            let Some(value) = output.args.first().cloned() else {
+                self.minibuffer = Some("Inline widget produced no value".to_string());
+                return true;
+            };
+            let value = self
+                .active_buffer()
+                .normalize_inline_widget_output(anchor_id, value);
+            let buffer_id = self.active_buffer().id;
+            if self.pending_inline_writeback != Some((buffer_id, anchor_id)) {
+                self.record_undo_snapshot();
+                self.pending_inline_writeback = Some((buffer_id, anchor_id));
+            }
+            let runtime_preview_error = self
+                .active_buffer()
+                .inline_widget_runtime_target(anchor_id)
+                .and_then(|(target, inlet)| {
+                    self.runtime
+                        .invoke(target, vec![Value::Keyword(inlet), value.clone()])
+                        .err()
+                });
+            match self
+                .active_buffer_mut()
+                .write_inline_widget_value(anchor_id, value)
+            {
+                Ok(()) => {
+                    if let Some(tree) = inline_widget_tree(self.active_buffer()) {
+                        self.active_buffer_mut()
+                            .set_widget_tree(Some(tree.deep_clone()), Some(buffer_id));
+                        self.runtime.set_widget_tree(tree);
+                        self.position_inline_widget_layout(self.runtime.layout_cols_exact());
+                        self.sync_layout_to_active_leaf();
+                    }
+                    self.minibuffer = runtime_preview_error
+                        .map(|error| format!("Inline runtime preview failed: {error:?}"));
+                }
+                Err(error) => {
+                    self.minibuffer = Some(format!("Inline widget write-back failed: {error}"));
+                }
+            }
+            self.completion = None;
+            self.mark_needs_redraw();
+            return true;
+        }
         if trace_ui_invalidation_enabled() {
             let args = output
                 .args
@@ -7739,6 +8010,14 @@ impl Editor {
         self.completion = None;
         self.mark_needs_redraw();
         true
+    }
+
+    fn finish_inline_widget_writeback(&mut self) {
+        let Some((buffer_id, _)) = self.pending_inline_writeback.take() else {
+            return;
+        };
+        self.finish_typing_undo_group();
+        self.evaluate_buffer_transactional(buffer_id);
     }
 
     fn sync_patcher_emitted_source_buffer(&mut self, args: &[Value]) -> Option<BufferId> {
@@ -8869,6 +9148,197 @@ fn widget_tree_contains_patcher_path(value: &Value, path: &str) -> bool {
             widget_tree_contains_patcher_path(&item, path)
         }),
         _ => false,
+    }
+}
+
+fn inline_widget_tree(buffer: &Buffer) -> Option<Value> {
+    if buffer.inline_code_widgets().is_empty() {
+        return None;
+    }
+    let children = buffer
+        .inline_code_widgets()
+        .iter()
+        .map(|inline| inline.widget.deep_clone())
+        .collect::<Vec<_>>();
+    let mut tree = crate::widgets::build_widget("v-stack", children);
+    if let Value::Map(map) = &mut tree {
+        map.insert(
+            "__inline-root".to_string(),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(true))),
+        );
+        map.insert(
+            "gap".to_string(),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))),
+        );
+    }
+    Some(tree)
+}
+
+fn position_inline_layout_nodes(
+    node: &mut LayoutNode,
+    placements: &[InlineLayoutPlacement],
+    viewport_width: f32,
+    root_height: f32,
+) -> bool {
+    let mut changed = false;
+    if matches!(node.props.get("__inline-root"), Some(Value::Bool(true))) {
+        if (node.rect.width - viewport_width).abs() > f32::EPSILON
+            || (node.rect.height - root_height).abs() > f32::EPSILON
+        {
+            node.rect.width = viewport_width;
+            node.rect.height = root_height;
+            changed = true;
+        }
+    }
+    let anchor_id = node
+        .props
+        .get("__inline-anchor-id")
+        .and_then(|value| match value {
+            Value::Number(number) if number.is_finite() && *number >= 0.0 => Some(*number as u64),
+            _ => None,
+        });
+    if let Some(placement) = anchor_id.and_then(|id| {
+        placements
+            .iter()
+            .find(|placement| placement.anchor_id == id)
+    }) {
+        let next = Rect {
+            row: placement.row,
+            col: placement.col,
+            width: placement.width.unwrap_or(node.rect.width),
+            height: placement.height.unwrap_or(node.rect.height),
+        };
+        if node.rect != next {
+            node.rect = next;
+            changed = true;
+        }
+        let was_stale = matches!(node.props.get("muted"), Some(Value::Bool(true)));
+        if was_stale != placement.stale {
+            if placement.stale {
+                node.props.insert("muted".to_string(), Value::Bool(true));
+            } else {
+                node.props.remove("muted");
+            }
+            changed = true;
+        }
+    }
+    for child in &mut node.children {
+        changed |= position_inline_layout_nodes(child, placements, viewport_width, root_height);
+    }
+    changed
+}
+
+pub(crate) fn positioned_inline_layout_for_buffer(
+    buffer: &Buffer,
+    layout: Arc<LayoutNode>,
+    viewport_width: f32,
+    text_cell_width_scale: f32,
+    text_cell_height_scale: f32,
+) -> Arc<LayoutNode> {
+    if buffer.inline_code_widgets().is_empty() {
+        return layout;
+    }
+    let (placements, root_height) = inline_layout_placements(
+        buffer,
+        viewport_width,
+        text_cell_width_scale,
+        text_cell_height_scale,
+    );
+    let mut positioned = (*layout).clone();
+    position_inline_layout_nodes(&mut positioned, &placements, viewport_width, root_height);
+    Arc::new(positioned)
+}
+
+fn inline_layout_placements(
+    buffer: &Buffer,
+    viewport_width: f32,
+    text_cell_width_scale: f32,
+    text_cell_height_scale: f32,
+) -> (Vec<InlineLayoutPlacement>, f32) {
+    let display_map = buffer.inline_display_row_map();
+    let mut placements = Vec::with_capacity(buffer.inline_code_widgets().len());
+    for inline in buffer.inline_code_widgets() {
+        let Some(anchor) = buffer.source_anchor(inline.anchor_id) else {
+            continue;
+        };
+        let Some((buffer_line, _)) = buffer.position_at_byte_offset(anchor.end_byte) else {
+            continue;
+        };
+        let container = buffer
+            .source_anchor(inline.container_anchor_id)
+            .unwrap_or(anchor);
+        let container_end_line = buffer
+            .position_at_byte_offset(container.end_byte)
+            .map(|position| position.0)
+            .unwrap_or(buffer_line);
+        let visually_stale = anchor.stale
+            || container.stale
+            || matches!(&inline.widget, Value::Map(map) if matches!(map.get("__inline-live-diverged"), Some(value) if matches!(&*value.borrow(), Value::Bool(true))));
+        placements.push(match inline.placement {
+            InlineWidgetPlacement::Margin => {
+                let natural_width = 16.0;
+                InlineLayoutPlacement {
+                    anchor_id: inline.anchor_id,
+                    row: display_map
+                        .display_row_for_buffer_line(buffer_line)
+                        .unwrap_or(buffer_line) as f32
+                        * text_cell_height_scale,
+                    col: ((buffer.lines[buffer_line].chars().count() as f32 + 2.0)
+                        * text_cell_width_scale)
+                        .min((viewport_width - natural_width).max(0.0)),
+                    width: None,
+                    height: None,
+                    stale: visually_stale,
+                }
+            }
+            InlineWidgetPlacement::Inline { width_cells } => {
+                let (inline_line, display_col) = buffer
+                    .inline_widget_display_col(inline.anchor_id)
+                    .unwrap_or((buffer_line, 0));
+                InlineLayoutPlacement {
+                    anchor_id: inline.anchor_id,
+                    row: display_map
+                        .display_row_for_buffer_line(inline_line)
+                        .unwrap_or(inline_line) as f32
+                        * text_cell_height_scale,
+                    col: display_col as f32 * text_cell_width_scale,
+                    width: Some(width_cells as f32 * text_cell_width_scale),
+                    height: Some(text_cell_height_scale),
+                    stale: visually_stale,
+                }
+            }
+            InlineWidgetPlacement::Band { height_cells } => InlineLayoutPlacement {
+                anchor_id: inline.anchor_id,
+                row: display_map
+                    .first_display_row_for_band(inline.anchor_id)
+                    .unwrap_or(container_end_line + 1) as f32
+                    * text_cell_height_scale,
+                col: 0.0,
+                width: Some(viewport_width),
+                height: Some(height_cells as f32 * text_cell_height_scale),
+                stale: visually_stale,
+            },
+        });
+    }
+    (
+        placements,
+        display_map.len() as f32 * text_cell_height_scale,
+    )
+}
+
+fn widget_tree_is_inline_root(value: &Value) -> bool {
+    let Value::Map(map) = value else {
+        return false;
+    };
+    map.get("__inline-root")
+        .is_some_and(|value| matches!(&*value.borrow(), Value::Bool(true)))
+}
+
+fn view_mode_for_widget_tree(tree: Option<&Value>) -> ViewMode {
+    match tree {
+        Some(tree) if widget_tree_is_inline_root(tree) => ViewMode::Both,
+        Some(_) => ViewMode::UiOnly,
+        None => ViewMode::TextOnly,
     }
 }
 

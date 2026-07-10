@@ -4358,6 +4358,29 @@ fn register_process_natives(
     process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     register_execution_natives: bool,
 ) {
+    let process_authoring_for_inline_metadata = Arc::clone(&process_authoring);
+    runtime.set_inline_widget_metadata_resolver(Rc::new(move |callee, inlet| {
+        let registry = process_authoring_for_inline_metadata.lock().ok()?;
+        let inlet = registry
+            .defs
+            .iter()
+            .find(|definition| definition.name == callee)?
+            .inlets
+            .iter()
+            .find(|definition| definition.name == inlet)?;
+        let step = matches!(
+            inlet.kind,
+            crate::process::ProcessInletKind::Int
+                | crate::process::ProcessInletKind::Gate
+                | crate::process::ProcessInletKind::Track
+        )
+        .then_some(1.0);
+        Some(eseqlisp::vm::InlineWidgetMetadata {
+            min: inlet.min.map(f64::from),
+            max: inlet.max.map(f64::from),
+            step,
+        })
+    }));
     let process_authoring_for_hook = Arc::clone(&process_authoring);
     let publish_for_hook = publish.clone();
     runtime.add_global_store_hook(Rc::new(move |name, value| {
@@ -5754,9 +5777,15 @@ fn register_process_constructor_native(
     let chain_state_for_constructor = process_chain_state;
     let publish_for_constructor = publish;
     let class_name = name.to_string();
-    vm.register_native_with_vm(
-        name,
-        move |ctor_args, _vm| match construct_process_instance(
+    vm.register_native_with_vm(name, move |ctor_args, vm| {
+        let inlet_names = ctor_args
+            .iter()
+            .filter_map(|arg| match arg {
+                EValue::Keyword(inlet) => Some(inlet.trim_start_matches(':').to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        match construct_process_instance(
             &process_authoring_for_constructor,
             &class_name,
             ctor_args,
@@ -5769,6 +5798,9 @@ fn register_process_constructor_native(
             publish_for_constructor.clone(),
         ) {
             Ok(value) => {
+                for inlet in inlet_names {
+                    vm.attach_inline_widget_runtime_target(&class_name, &inlet, value.clone());
+                }
                 publish_process_authoring(
                     &process_authoring_for_constructor,
                     &publish_for_constructor,
@@ -5779,8 +5811,8 @@ fn register_process_constructor_native(
                 eprintln!("[process] constructor error: {error}");
                 EValue::Bool(false)
             }
-        },
-    );
+        }
+    });
 }
 
 fn register_process_accumulator_def(
@@ -7273,6 +7305,31 @@ fn process_handle_call(
     handle_id: crate::process::AuthoredHandleId,
     args: Vec<EValue>,
 ) -> Result<EValue, String> {
+    if let [EValue::Keyword(command), key] = args.as_slice() {
+        if command != "__inline-read" {
+            // Fall through to the public process-handle call forms below.
+        } else {
+            let inlet = process_symbol_name(key)?;
+            if let Some(value) = process_chain_state.and_then(|state| {
+                state.process_inlet_value(crate::process::ProcessInstanceId(handle_id.0), &inlet)
+            }) {
+                return Ok(value.to_value());
+            }
+            let registry = process_authoring
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            return Ok(registry
+                .instances
+                .iter()
+                .find(|instance| instance.handle_id == handle_id)
+                .and_then(|instance| instance.inlets.get(&inlet))
+                .and_then(|value| match value {
+                    crate::process::ProcessInletValue::Literal(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .unwrap_or(EValue::Nil));
+        }
+    }
     match args.as_slice() {
         [key] => {
             let outlet = process_symbol_name(key)?;
@@ -21730,6 +21787,43 @@ mod tests {
         assert_eq!(
             chain.slots[0].lanes.get("amount").map(|lane| &lane.values),
             Some(&vec![0.0, 2.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            scratch
+                .eval("(climb :__inline-read :limit)")
+                .expect("read current pattern-scoped inlet"),
+            Some(Value::Number(6.0))
+        );
+    }
+
+    #[test]
+    fn inline_code_widgets_demo_evaluates_and_attaches_its_process_chain() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str("(def seq-register-script-source-tab (label) nil)")
+            .expect("install source-tab stub");
+        register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let source = include_str!("../scripts/inline-code-widgets-demo.lisp");
+
+        runtime
+            .eval_str(source)
+            .expect("evaluate inline code widgets demo");
+
+        let chain = state.track_process_chain(0).expect("track 0 chain");
+        assert_eq!(chain.slots.len(), 1);
+        assert_eq!(chain.slots[0].class_name, "inline-demo-transpose");
+        assert_eq!(
+            chain.slots[0].inlets.get("limit"),
+            Some(&crate::process::ProcessLiteral::Number(7.0))
+        );
+        assert_eq!(
+            chain.slots[0].lanes.get("amount").map(|lane| &lane.values),
+            Some(&vec![0.0, 2.0, 0.0, 0.0, -4.0, 0.0, 7.0, 0.0])
         );
     }
 
