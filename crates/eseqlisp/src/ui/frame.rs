@@ -2,13 +2,14 @@ use crate::backend::{
     Cell, CellStyle, Color, CompletionEntry, CompletionFrame, InspectOverlay, RenderFrame,
     StatusIndicator, TileFrame, TiledRenderFrame,
 };
-use crate::buffer::{Buffer, BufferTextStyle};
+use crate::buffer::{Buffer, BufferTextStyle, DisplayRow};
 use crate::editor::{Editor, ViewMode};
 use crate::layout::{Rect, layout_contains_widget_id};
 use crate::mode::{TokenClass, TokenSpan, highlight_lines};
 use crate::text::matching_paren;
 use crate::theme;
 use crate::tile::{tile_body_rect, tile_tab_layouts_with_hover};
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -274,7 +275,9 @@ fn build_render_frame_with_layout_viewport(
     layout_width: f32,
     layout_height: f32,
 ) -> RenderFrame {
+    editor.refresh_inline_widget_runtime_values();
     editor.set_layout_viewport_exact(layout_width, layout_height);
+    editor.position_inline_widget_layout(layout_width);
     {
         let leaf = editor.active_leaf_mut();
         leaf.widget_viewport_width = layout_width;
@@ -334,6 +337,7 @@ fn build_render_frame_with_layout_viewport(
             focused_widget_id: editor.focused_widget_id(),
             widget_scroll_top: editor.widget_scroll_top(),
             widget_scroll_left: editor.widget_scroll_left(),
+            widget_layout_scroll_left: editor.widget_layout_scroll_left(),
             text_scroll_top: 0,
             text_cell_width_scale: 1.0,
             text_cell_height_scale: 1.0,
@@ -341,10 +345,12 @@ fn build_render_frame_with_layout_viewport(
     }
 
     editor.sync_text_horizontal_scroll(text_viewport_width as u16);
+
+    let display_map = editor.active_buffer().inline_display_row_map();
     if view_mode != ViewMode::UiOnly {
-        editor
-            .active_buffer_mut()
-            .clamp_scroll(text_viewport_height);
+        let max_scroll = display_map.len().saturating_sub(text_viewport_height);
+        let buffer = editor.active_buffer_mut();
+        buffer.scroll_top = buffer.scroll_top.min(max_scroll);
     }
 
     let region_range = editor.active_region_range();
@@ -353,24 +359,33 @@ fn build_render_frame_with_layout_viewport(
     let (scroll_top, match_pos, cursor_row, cursor_col) = {
         let buf = editor.active_buffer();
         (
-            buf.scroll_top.min(buf.lines.len()),
+            buf.scroll_top.min(display_map.len()),
             matching_paren(&buf.lines, buf.cursor),
             buf.cursor.0,
             buf.cursor.1,
         )
     };
+    let visible_display_end = (scroll_top + text_viewport_height).min(display_map.len());
+    let visible_buffer_lines = (scroll_top..visible_display_end)
+        .filter_map(|display_row| display_map.buffer_line_for_display_row(display_row))
+        .collect::<Vec<_>>();
+    let highlight_start = visible_buffer_lines.first().copied().unwrap_or(0);
+    let highlight_count = visible_buffer_lines
+        .last()
+        .copied()
+        .map(|last| last - highlight_start + 1)
+        .unwrap_or(0);
     let highlight_spans =
-        editor.active_highlight_spans_for_visible(scroll_top, text_viewport_height);
+        editor.active_highlight_spans_for_visible(highlight_start, highlight_count);
     let buf = editor.active_buffer();
-    let visible = scroll_top..(scroll_top + text_viewport_height).min(buf.lines.len());
-
-    let lines: Vec<Vec<Cell>> = buf.lines[visible]
-        .iter()
-        .enumerate()
-        .map(|(i, content)| {
-            let row = scroll_top + i;
+    let lines: Vec<Vec<Cell>> = (scroll_top..visible_display_end)
+        .map(|display_row| {
+            let Some(DisplayRow::Text { buffer_line: row }) = display_map.row(display_row) else {
+                return Vec::new();
+            };
+            let content = &buf.lines[row];
             let match_col = match_pos.and_then(|(mr, mc)| if mr == row { Some(mc) } else { None });
-            let row_spans = highlight_spans.get(i);
+            let row_spans = highlight_spans.get(row.saturating_sub(highlight_start));
             let row_styles = buf
                 .text_styles
                 .iter()
@@ -424,13 +439,22 @@ fn build_render_frame_with_layout_viewport(
                     ch: chars.get(col).copied().unwrap_or(' '),
                 });
             }
+            insert_inline_widget_cells(buf, row, &mut cells);
             cells
         })
         .collect();
 
     // Cursor in visible-area coordinates
-    let cursor = if cursor_row >= scroll_top && cursor_row < scroll_top + text_viewport_height {
-        Some((cursor_row - scroll_top, cursor_col))
+    let cursor_display_row = display_map
+        .display_row_for_buffer_line(cursor_row)
+        .unwrap_or(cursor_row);
+    let cursor = if cursor_display_row >= scroll_top
+        && cursor_display_row < scroll_top + text_viewport_height
+    {
+        Some((
+            cursor_display_row - scroll_top,
+            buf.display_col_for_buffer_col(cursor_row, cursor_col),
+        ))
     } else {
         None
     };
@@ -441,8 +465,8 @@ fn build_render_frame_with_layout_viewport(
 
     let completion = build_completion(
         editor,
-        cursor_row,
-        cursor_col,
+        cursor_display_row,
+        buf.display_col_for_buffer_col(cursor_row, cursor_col),
         scroll_top,
         text_cell_width_scale,
         text_cell_height_scale,
@@ -463,6 +487,10 @@ fn build_render_frame_with_layout_viewport(
         let mut hasher = DefaultHasher::new();
         editor.active_buffer().id.hash(&mut hasher);
         editor.active_buffer().revision.hash(&mut hasher);
+        editor
+            .active_buffer()
+            .inline_widget_revision
+            .hash(&mut hasher);
         editor.active_buffer().mode.hash(&mut hasher);
         viewport_width.hash(&mut hasher);
         viewport_height.hash(&mut hasher);
@@ -529,8 +557,10 @@ fn build_render_frame_with_layout_viewport(
         dirty_widget_ids,
         widget_layout: frame_widget_layout,
         focused_widget_id: frame_focused_id,
-        widget_scroll_top: editor.widget_scroll_top(),
+        widget_scroll_top: editor.widget_scroll_top()
+            + inline_text_scroll_compensation(buf, scroll_top, text_cell_height_scale),
         widget_scroll_left: editor.widget_scroll_left(),
+        widget_layout_scroll_left: editor.widget_layout_scroll_left(),
         text_scroll_top: frame_text_scroll_top,
         text_cell_width_scale,
         text_cell_height_scale,
@@ -579,6 +609,19 @@ fn style_applies_to_col(style: &BufferTextStyle, col: usize) -> bool {
 fn text_viewport_cells(layout_extent: f32, text_cell_scale: f32) -> usize {
     let scale = text_cell_scale.max(0.001);
     (layout_extent / scale).floor().max(1.0) as usize
+}
+
+fn insert_inline_widget_cells(buffer: &Buffer, buffer_line: usize, cells: &mut Vec<Cell>) {
+    let mut inserted = 0usize;
+    for insertion in buffer.inline_column_insertions(buffer_line) {
+        let display_col = insertion.buffer_col + inserted;
+        let blanks = std::iter::repeat_with(|| Cell::plain(' ')).take(insertion.width_cells);
+        cells.splice(
+            display_col.min(cells.len())..display_col.min(cells.len()),
+            blanks,
+        );
+        inserted += insertion.width_cells;
+    }
 }
 
 // ── Tiled frame builder ──────────────────────────────────────────────────────
@@ -898,7 +941,11 @@ fn build_tiled_render_frame_impl(
                 leaf.background_color,
                 leaf.background_color_name.clone(),
                 leaf.focused_widget_id,
-                leaf.widget_scroll_top,
+                if buf.inline_code_widgets().is_empty() {
+                    leaf.widget_scroll_top
+                } else {
+                    0.0
+                },
                 leaf.widget_scroll_left,
                 leaf.layout_revision,
                 leaf.cached_layout.clone(),
@@ -1159,10 +1206,20 @@ fn build_inactive_tile_frame_from_parts(
     text_cell_width_scale: f32,
     text_cell_height_scale: f32,
 ) -> RenderFrame {
-    let scroll_top = buffer.scroll_top.min(buffer.lines.len());
+    let display_map = buffer.inline_display_row_map();
+    let scroll_top = buffer.scroll_top.min(display_map.len());
     let (cursor_row, cursor_col) = buffer.cursor;
     let text_viewport_width = text_viewport_cells(viewport_width as f32, text_cell_width_scale);
     let text_viewport_height = text_viewport_cells(viewport_height as f32, text_cell_height_scale);
+    let cached_layout = cached_layout.map(|layout| {
+        crate::editor::positioned_inline_layout_for_buffer(
+            buffer,
+            layout,
+            viewport_width as f32,
+            text_cell_width_scale,
+            text_cell_height_scale,
+        )
+    });
 
     let (status_cells, status_indicator, status_signature) = build_buffer_status_row(
         buffer,
@@ -1177,6 +1234,7 @@ fn build_inactive_tile_frame_from_parts(
         let mut hasher = DefaultHasher::new();
         buffer.id.hash(&mut hasher);
         buffer.revision.hash(&mut hasher);
+        buffer.inline_widget_revision.hash(&mut hasher);
         buffer.mode.hash(&mut hasher);
         buffer.view_mode.hash(&mut hasher);
         viewport_width.hash(&mut hasher);
@@ -1207,24 +1265,43 @@ fn build_inactive_tile_frame_from_parts(
             focused_widget_id,
             widget_scroll_top,
             widget_scroll_left,
+            widget_layout_scroll_left: inline_layout_scroll_left(
+                buffer,
+                widget_scroll_left,
+                text_cell_width_scale,
+            ),
             text_scroll_top: 0,
             text_cell_width_scale: 1.0,
             text_cell_height_scale: 1.0,
         };
     }
 
-    let visible = scroll_top..(scroll_top + text_viewport_height).min(buffer.lines.len());
+    let visible_end = (scroll_top + text_viewport_height).min(display_map.len());
+    let visible_buffer_lines = (scroll_top..visible_end)
+        .filter_map(|display_row| display_map.buffer_line_for_display_row(display_row))
+        .collect::<Vec<_>>();
     let symbols = symbols.expect("inactive text frame requires completion symbols");
 
     // Only highlight visible lines — not the entire buffer.
-    let visible_lines = &buffer.lines[visible];
-    let highlight_spans = highlight_lines(&buffer.mode, visible_lines.iter(), symbols, buffer);
-
-    let lines: Vec<Vec<Cell>> = visible_lines
+    let highlight_spans = highlight_lines(
+        &buffer.mode,
+        visible_buffer_lines.iter().map(|line| &buffer.lines[*line]),
+        symbols,
+        buffer,
+    );
+    let highlight_by_buffer_line = visible_buffer_lines
         .iter()
-        .enumerate()
-        .map(|(i, content)| {
-            let row_spans = highlight_spans.get(i);
+        .copied()
+        .zip(highlight_spans.iter())
+        .collect::<HashMap<_, _>>();
+
+    let lines: Vec<Vec<Cell>> = (scroll_top..visible_end)
+        .map(|display_row| {
+            let Some(DisplayRow::Text { buffer_line }) = display_map.row(display_row) else {
+                return Vec::new();
+            };
+            let content = &buffer.lines[buffer_line];
+            let row_spans = highlight_by_buffer_line.get(&buffer_line).copied();
             let chars: Vec<char> = content.chars().collect();
             let line_len = chars.len();
             let mut cells: Vec<Cell> = Vec::with_capacity(line_len + 1);
@@ -1239,15 +1316,23 @@ fn build_inactive_tile_frame_from_parts(
                     ch: chars.get(col).copied().unwrap_or(' '),
                 });
             }
+            insert_inline_widget_cells(buffer, buffer_line, &mut cells);
             cells
         })
         .collect();
 
     let cursor = if !buffer.read_only
-        && cursor_row >= scroll_top
-        && cursor_row < scroll_top + text_viewport_height
+        && display_map
+            .display_row_for_buffer_line(cursor_row)
+            .is_some_and(|row| row >= scroll_top && row < scroll_top + text_viewport_height)
     {
-        Some((cursor_row - scroll_top, cursor_col))
+        Some((
+            display_map
+                .display_row_for_buffer_line(cursor_row)
+                .unwrap_or(cursor_row)
+                - scroll_top,
+            buffer.display_col_for_buffer_col(cursor_row, cursor_col),
+        ))
     } else {
         None
     };
@@ -1266,11 +1351,41 @@ fn build_inactive_tile_frame_from_parts(
         dirty_widget_ids,
         widget_layout: cached_layout,
         focused_widget_id,
-        widget_scroll_top,
+        widget_scroll_top: widget_scroll_top
+            + inline_text_scroll_compensation(buffer, scroll_top, text_cell_height_scale),
         widget_scroll_left,
+        widget_layout_scroll_left: inline_layout_scroll_left(
+            buffer,
+            widget_scroll_left,
+            text_cell_width_scale,
+        ),
         text_scroll_top: scroll_top,
         text_cell_width_scale,
         text_cell_height_scale,
+    }
+}
+
+fn inline_text_scroll_compensation(
+    buffer: &Buffer,
+    text_scroll_top: usize,
+    text_cell_height_scale: f32,
+) -> f32 {
+    if buffer.inline_code_widgets().is_empty() {
+        0.0
+    } else {
+        text_scroll_top as f32 * (text_cell_height_scale - 1.0)
+    }
+}
+
+fn inline_layout_scroll_left(
+    buffer: &Buffer,
+    text_scroll_left: f32,
+    text_cell_width_scale: f32,
+) -> f32 {
+    if buffer.inline_code_widgets().is_empty() {
+        text_scroll_left
+    } else {
+        text_scroll_left * text_cell_width_scale
     }
 }
 
@@ -1293,7 +1408,7 @@ fn apply_view_mode(mut frame: RenderFrame, mode: ViewMode) -> RenderFrame {
 
 fn build_completion(
     editor: &Editor,
-    cursor_row: usize,
+    cursor_display_row: usize,
     cursor_col: usize,
     scroll_top: usize,
     text_cell_width_scale: f32,
@@ -1304,7 +1419,7 @@ fn build_completion(
             eprintln!(
                 "{} build_completion=none reason=no-editor-completion-state anchor=({}, {}) scroll_top={}",
                 editor.completion_debug_summary("render:build-completion"),
-                cursor_row.saturating_sub(scroll_top),
+                cursor_display_row.saturating_sub(scroll_top),
                 cursor_col,
                 scroll_top
             );
@@ -1340,7 +1455,7 @@ fn build_completion(
         });
         CompletionFrame {
             entries,
-            anchor: (cursor_row.saturating_sub(scroll_top), cursor_col),
+            anchor: (cursor_display_row.saturating_sub(scroll_top), cursor_col),
             text_cell_width_scale,
             text_cell_height_scale,
             doc,

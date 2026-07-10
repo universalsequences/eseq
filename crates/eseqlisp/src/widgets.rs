@@ -2,10 +2,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::vm::{SOURCE_MODULE_PATH_PROP, SOURCE_SYMBOL_PROP, VM, Value, format_lisp_value};
+use crate::vm::{
+    INLINE_ANCHOR_PROP, INLINE_PLACEMENT_PROP, INLINE_WRITEBACK_CALLBACK, SOURCE_MODULE_PATH_PROP,
+    SOURCE_SYMBOL_PROP, VM, Value, format_lisp_value,
+};
 
 pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "label",
+    "lane-preview",
     "button",
     "badge",
     "slider",
@@ -43,6 +47,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "waveform",
     "wavetable-viewer",
     "spectrogram",
+    "scope",
     "multiband-meter",
     "phaser-notch",
     "roar-shaper",
@@ -79,6 +84,229 @@ pub fn register_widget_natives(vm: &mut VM) {
             widget
         });
     }
+    register_inline_value_widget_natives(vm);
+    register_inline_scope_native(vm);
+    register_inline_lane_native(vm);
+}
+
+fn register_inline_value_widget_natives(vm: &mut VM) {
+    for (form_name, widget_type, requires_range) in [
+        ("~slider", "hslider", true),
+        ("~knob", "inline-knob", true),
+        ("~toggle", "toggle", false),
+    ] {
+        let widget_type = widget_type.to_string();
+        vm.register_native_with_vm(form_name, move |args, vm| {
+            let value = args.first().cloned().unwrap_or(Value::Nil);
+            if !vm.inline_widget_registration_enabled() {
+                return value;
+            }
+
+            let mut has_min = args
+                .iter()
+                .any(|arg| matches!(arg, Value::Keyword(key) if key == "min"));
+            let mut has_max = args
+                .iter()
+                .any(|arg| matches!(arg, Value::Keyword(key) if key == "max"));
+            let parent_callee = keyword_string_arg(&args, crate::vm::INLINE_PARENT_CALLEE_PROP);
+            let parent_inlet = keyword_string_arg(&args, crate::vm::INLINE_PARENT_INLET_PROP);
+            let inferred = parent_callee
+                .as_deref()
+                .zip(parent_inlet.as_deref())
+                .and_then(|(callee, inlet)| vm.resolve_inline_widget_metadata(callee, inlet));
+            has_min |= inferred.is_some_and(|metadata| metadata.min.is_some());
+            has_max |= inferred.is_some_and(|metadata| metadata.max.is_some());
+            let mut widget = if requires_range && (!has_min || !has_max) {
+                build_widget(
+                    "label",
+                    vec![
+                        Value::String(format!(
+                            "{form_name}: :min and :max are required outside a process inlet"
+                        )),
+                        Value::Keyword("color".to_string()),
+                        Value::Keyword("red".to_string()),
+                    ],
+                )
+            } else {
+                let display_value = if form_name == "~toggle" {
+                    match &value {
+                        Value::Number(number) => Value::Bool(*number != 0.0),
+                        _ => value.clone(),
+                    }
+                } else {
+                    value.clone()
+                };
+                let mut widget_args = vec![Value::Keyword("value".to_string()), display_value];
+                widget_args.extend(args.iter().skip(1).cloned());
+                if !args
+                    .iter()
+                    .any(|arg| matches!(arg, Value::Keyword(key) if key == "min"))
+                    && let Some(min) = inferred.and_then(|metadata| metadata.min)
+                {
+                    widget_args.extend([Value::Keyword("min".to_string()), Value::Number(min)]);
+                }
+                if !args
+                    .iter()
+                    .any(|arg| matches!(arg, Value::Keyword(key) if key == "max"))
+                    && let Some(max) = inferred.and_then(|metadata| metadata.max)
+                {
+                    widget_args.extend([Value::Keyword("max".to_string()), Value::Number(max)]);
+                }
+                if !args
+                    .iter()
+                    .any(|arg| matches!(arg, Value::Keyword(key) if key == "step"))
+                    && let Some(step) = inferred.and_then(|metadata| metadata.step)
+                {
+                    widget_args.extend([Value::Keyword("step".to_string()), Value::Number(step)]);
+                }
+                widget_args.extend([
+                    Value::Keyword("on-change".to_string()),
+                    Value::String(INLINE_WRITEBACK_CALLBACK.to_string()),
+                ]);
+                build_widget(&widget_type, widget_args)
+            };
+            if let Value::Map(map) = &mut widget {
+                let mut index = 1usize;
+                while index + 1 < args.len() {
+                    if let Value::Keyword(key) = &args[index]
+                        && (key.starts_with("__source-") || key.starts_with("__inline-value-"))
+                    {
+                        map.insert(key.clone(), Rc::new(RefCell::new(args[index + 1].clone())));
+                    }
+                    index += 2;
+                }
+                map.insert(
+                    INLINE_ANCHOR_PROP.to_string(),
+                    Rc::new(RefCell::new(Value::Bool(true))),
+                );
+                if form_name == "~toggle" && matches!(value, Value::Number(_)) {
+                    map.insert(
+                        "__inline-toggle-numeric".to_string(),
+                        Rc::new(RefCell::new(Value::Bool(true))),
+                    );
+                }
+                map.insert(
+                    "__inline-text-value".to_string(),
+                    Rc::new(RefCell::new(value.clone())),
+                );
+                map.insert(
+                    INLINE_PLACEMENT_PROP.to_string(),
+                    Rc::new(RefCell::new(Value::Keyword("inline".to_string()))),
+                );
+                let inline_width = match form_name {
+                    "~slider" => 8.0,
+                    "~knob" => 3.0,
+                    "~toggle" => 5.0,
+                    _ => 4.0,
+                };
+                map.insert(
+                    "__inline-width".to_string(),
+                    Rc::new(RefCell::new(Value::Number(inline_width))),
+                );
+            }
+            vm.register_inline_widget(widget);
+            value
+        });
+    }
+}
+
+fn keyword_string_arg(args: &[Value], key: &str) -> Option<String> {
+    args.windows(2).find_map(|pair| match pair {
+        [Value::Keyword(current), Value::String(value)] if current == key => Some(value.clone()),
+        _ => None,
+    })
+}
+
+fn register_inline_scope_native(vm: &mut VM) {
+    vm.register_native_with_vm("~scope", |args, vm| {
+        if !vm.inline_widget_registration_enabled() {
+            return Value::Nil;
+        }
+        let track = args.windows(2).find_map(|pair| match pair {
+            [Value::Keyword(key), Value::Number(index)] if key == "track" && *index >= 0.0 => {
+                Some(*index)
+            }
+            _ => None,
+        });
+        let mut widget_args = Vec::new();
+        let mut index = 0usize;
+        while index + 1 < args.len() {
+            if !matches!(&args[index], Value::Keyword(key) if key == "track") {
+                widget_args.push(args[index].clone());
+                widget_args.push(args[index + 1].clone());
+            }
+            index += 2;
+        }
+        if !widget_args
+            .iter()
+            .any(|arg| matches!(arg, Value::Keyword(key) if key == "source"))
+        {
+            let source = if let Some(track) = track {
+                Value::Map(HashMap::from([
+                    (
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword("track".to_string()))),
+                    ),
+                    (
+                        "index".to_string(),
+                        Rc::new(RefCell::new(Value::Number(track))),
+                    ),
+                ]))
+            } else {
+                Value::Keyword("master".to_string())
+            };
+            widget_args.extend([Value::Keyword("source".to_string()), source]);
+        }
+        if !widget_args
+            .iter()
+            .any(|arg| matches!(arg, Value::Keyword(key) if key == "height"))
+        {
+            widget_args.extend([Value::Keyword("height".to_string()), Value::Number(6.0)]);
+        }
+        let mut widget = build_widget("scope", widget_args);
+        if let Value::Map(map) = &mut widget {
+            map.insert(
+                INLINE_ANCHOR_PROP.to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+            map.insert(
+                INLINE_PLACEMENT_PROP.to_string(),
+                Rc::new(RefCell::new(Value::Keyword("band".to_string()))),
+            );
+        }
+        vm.register_inline_widget(widget);
+        Value::Nil
+    });
+}
+
+fn register_inline_lane_native(vm: &mut VM) {
+    vm.register_native_with_vm("~lane", |args, vm| {
+        let value = args.first().cloned().unwrap_or(Value::Nil);
+        if !vm.inline_widget_registration_enabled() {
+            return value;
+        }
+        let mut widget_args = vec![Value::Keyword("values".to_string()), value.clone()];
+        widget_args.extend(args.iter().skip(1).cloned());
+        if !widget_args
+            .iter()
+            .any(|arg| matches!(arg, Value::Keyword(key) if key == "height"))
+        {
+            widget_args.extend([Value::Keyword("height".to_string()), Value::Number(4.0)]);
+        }
+        let mut widget = build_widget("lane-preview", widget_args);
+        if let Value::Map(map) = &mut widget {
+            map.insert(
+                INLINE_ANCHOR_PROP.to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+            map.insert(
+                INLINE_PLACEMENT_PROP.to_string(),
+                Rc::new(RefCell::new(Value::Keyword("band".to_string()))),
+            );
+        }
+        vm.register_inline_widget(widget);
+        value
+    });
 }
 
 pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {

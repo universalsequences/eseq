@@ -7,6 +7,7 @@ use std::time::Instant;
 use eseqlisp::live_audio::BandMeterFrame;
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
 use eseqlisp::widget_render::multiband_meter::{collect_band_meter_requests, BandMeterRequest};
+use eseqlisp::widget_render::scope::{collect_scope_requests, ScopeRequest};
 use eseqlisp::widget_render::roar_shaper::collect_roar_meter_requests;
 use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, SpectrogramRequest};
 use sequencer::audio_tap::{self, SpectrogramProcessor};
@@ -24,6 +25,13 @@ struct TapKey {
 
 impl TapKey {
     fn from_request(request: &SpectrogramRequest) -> Self {
+        Self {
+            source: request.source.clone(),
+            tap_point: request.tap_point,
+        }
+    }
+
+    fn from_scope_request(request: &ScopeRequest) -> Self {
         Self {
             source: request.source.clone(),
             tap_point: request.tap_point,
@@ -79,11 +87,18 @@ impl LiveAudioAnalyzerManager {
         }
 
         let mut grouped: HashMap<TapKey, Vec<SpectrogramRequest>> = HashMap::new();
+        let mut scope_grouped: HashMap<TapKey, Vec<ScopeRequest>> = HashMap::new();
         let mut meter_requests: HashMap<String, BandMeterRequest> = HashMap::new();
         for layout in editor.visible_widget_layouts() {
             for request in collect_spectrogram_requests(layout.as_ref()) {
                 grouped
                     .entry(TapKey::from_request(&request))
+                    .or_default()
+                    .push(request);
+            }
+            for request in collect_scope_requests(layout.as_ref()) {
+                scope_grouped
+                    .entry(TapKey::from_scope_request(&request))
                     .or_default()
                     .push(request);
             }
@@ -107,42 +122,63 @@ impl LiveAudioAnalyzerManager {
         let meters_changed = self.sync_band_meters(app, meter_requests, poll_due);
 
         let mut active_keys = HashSet::new();
+        let mut active_scope_keys = HashSet::new();
         let mut topology_changed = false;
         let mut active_tap_keys = HashSet::new();
-        for (tap_key, requests) in &grouped {
-            let Some(source_node) = resolve_source_node(app, tap_key) else {
+        let requested_tap_keys = grouped
+            .keys()
+            .chain(scope_grouped.keys())
+            .cloned()
+            .collect::<HashSet<_>>();
+        for tap_key in requested_tap_keys {
+            let Some(source_node) = resolve_source_node(app, &tap_key) else {
                 continue;
             };
             active_tap_keys.insert(tap_key.clone());
-            for request in requests {
+            for request in grouped.get(&tap_key).into_iter().flatten() {
                 active_keys.insert(request.data_key.clone());
             }
-            let required_ring_frames = requests
-                .iter()
+            for request in scope_grouped.get(&tap_key).into_iter().flatten() {
+                active_scope_keys.insert(request.data_key.clone());
+            }
+            let required_ring_frames = grouped
+                .get(&tap_key)
+                .into_iter()
+                .flatten()
                 .map(|request| request.required_ring_frames)
+                .chain(
+                    scope_grouped
+                        .get(&tap_key)
+                        .into_iter()
+                        .flatten()
+                        .map(|request| request.frame_count),
+                )
                 .max()
                 .map(audio_tap::normalize_ring_frames)
                 .unwrap_or(audio_tap::MIN_TAP_RING_FRAMES);
 
             let needs_recreate = self
                 .taps
-                .get(tap_key)
+                .get(&tap_key)
                 .map(|tap| tap.source_node != source_node || tap.ring_frames < required_ring_frames)
                 .unwrap_or(true);
             if needs_recreate {
-                if let Some(old_tap) = self.taps.remove(tap_key) {
+                if let Some(old_tap) = self.taps.remove(&tap_key) {
                     self.destroy_tap(old_tap);
                 }
-                match self.create_tap(tap_key, source_node, required_ring_frames) {
+                match self.create_tap(&tap_key, source_node, required_ring_frames) {
                     Some(tap) => {
                         self.taps.insert(tap_key.clone(), tap);
                         topology_changed = true;
                     }
                     None => {
-                        for request in requests {
+                        for request in grouped.get(&tap_key).into_iter().flatten() {
                             active_keys.remove(&request.data_key);
                         }
-                        active_tap_keys.remove(tap_key);
+                        for request in scope_grouped.get(&tap_key).into_iter().flatten() {
+                            active_scope_keys.remove(&request.data_key);
+                        }
+                        active_tap_keys.remove(&tap_key);
                     }
                 }
             }
@@ -164,10 +200,11 @@ impl LiveAudioAnalyzerManager {
         self.processors
             .retain(|data_key, _| active_keys.contains(data_key));
         eseqlisp::live_audio::retain_spectrogram_frames(&active_keys);
+        eseqlisp::live_audio::retain_scope_frames(&active_scope_keys);
 
         let mut published_frame = false;
         if self.last_poll_at.elapsed() >= LIVE_AUDIO_ANALYZER_POLL_INTERVAL {
-            for (tap_key, requests) in grouped {
+            for tap_key in active_tap_keys.iter().cloned().collect::<Vec<_>>() {
                 if !active_tap_keys.contains(&tap_key) {
                     continue;
                 }
@@ -190,7 +227,7 @@ impl LiveAudioAnalyzerManager {
                 let floats = state_size / std::mem::size_of::<f32>();
                 let state = &tap.state[..floats.min(tap.state.len())];
                 let mut unique_requests = HashMap::<String, SpectrogramRequest>::new();
-                for request in requests {
+                for request in grouped.remove(&tap_key).unwrap_or_default() {
                     unique_requests
                         .entry(request.data_key.clone())
                         .or_insert(request);
@@ -234,6 +271,31 @@ impl LiveAudioAnalyzerManager {
                         );
                         published_frame = true;
                     }
+                }
+                let metadata = audio_tap::tap_metadata(state);
+                let mut unique_scope_requests = HashMap::<String, ScopeRequest>::new();
+                for request in scope_grouped.remove(&tap_key).unwrap_or_default() {
+                    unique_scope_requests
+                        .entry(request.data_key.clone())
+                        .or_insert(request);
+                }
+                for request in unique_scope_requests.into_values() {
+                    let Some(samples) = audio_tap::read_latest_mono(state, request.frame_count)
+                    else {
+                        continue;
+                    };
+                    let Some(metadata) = metadata else {
+                        continue;
+                    };
+                    eseqlisp::live_audio::publish_scope_frame(
+                        request.data_key,
+                        eseqlisp::live_audio::ScopeFrame {
+                            revision: metadata.write_head as u64,
+                            sample_rate: metadata.sample_rate,
+                            samples: Arc::new(samples),
+                        },
+                    );
+                    published_frame = true;
                 }
             }
             self.last_poll_at = Instant::now();
@@ -371,6 +433,7 @@ impl LiveAudioAnalyzerManager {
         self.processors.clear();
         self.clear_meter_nodes();
         eseqlisp::live_audio::retain_spectrogram_frames(&HashSet::<String>::new());
+        eseqlisp::live_audio::retain_scope_frames(&HashSet::<String>::new());
         eseqlisp::live_audio::retain_band_meter_frames(&HashSet::<String>::new());
         had_live_data
     }

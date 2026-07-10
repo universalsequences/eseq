@@ -174,6 +174,10 @@ pub struct RenderFrame {
     pub widget_scroll_top: f32,
     /// Widget horizontal scroll offset (cols to skip when rendering widget overlay).
     pub widget_scroll_left: f32,
+    /// Horizontal scroll expressed in widget/layout cells. Inline code layouts
+    /// use zoomed text-cell geometry, while `widget_scroll_left` remains in
+    /// logical text columns for text rendering.
+    pub widget_layout_scroll_left: f32,
     /// Text scroll offset — how many rows the text has scrolled.
     /// Used by Metal to sync widget vertical position with text scrolling.
     pub text_scroll_top: usize,

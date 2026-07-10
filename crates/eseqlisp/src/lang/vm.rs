@@ -18,6 +18,13 @@ pub const SOURCE_SYMBOL_PROP: &str = "__source-symbol";
 pub const SOURCE_START_BYTE_PROP: &str = "__source-start-byte";
 pub const SOURCE_END_BYTE_PROP: &str = "__source-end-byte";
 pub const SOURCE_REVISION_PROP: &str = "__source-revision";
+pub const INLINE_ANCHOR_PROP: &str = "inline-anchor";
+pub const INLINE_PLACEMENT_PROP: &str = "__inline-placement";
+pub const INLINE_VALUE_START_BYTE_PROP: &str = "__inline-value-start-byte";
+pub const INLINE_VALUE_END_BYTE_PROP: &str = "__inline-value-end-byte";
+pub const INLINE_WRITEBACK_CALLBACK: &str = "__inline-code-widget-writeback";
+pub const INLINE_PARENT_CALLEE_PROP: &str = "__inline-parent-callee";
+pub const INLINE_PARENT_INLET_PROP: &str = "__inline-parent-inlet";
 const SOURCE_ORIGIN_NATIVE: &str = "__source-origin";
 
 #[derive(Debug, PartialEq)]
@@ -36,7 +43,15 @@ pub enum VMError {
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
 pub type GlobalStoreHook = Rc<dyn Fn(&str, &Value)>;
+pub type InlineWidgetMetadataResolver = Rc<dyn Fn(&str, &str) -> Option<InlineWidgetMetadata>>;
 pub type NodeId = u32;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InlineWidgetMetadata {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
+}
 
 fn debug_lisp_callback_errors_enabled() -> bool {
     std::env::var("ESEQLISP_DEBUG_LISP_ERRORS")
@@ -715,8 +730,82 @@ fn is_source_prop_keyword(expr: &Expr) -> bool {
 
 fn is_widget_constructor_name(name: &str, local_defwidgets: &HashSet<String>) -> bool {
     crate::widgets::is_builtin_widget_name(name)
+        || is_inline_widget_constructor_name(name)
         || local_defwidgets.contains(name)
         || crate::widget_render::sdf_widget::sdf_widget_def(name).is_some()
+}
+
+fn is_inline_widget_constructor_name(name: &str) -> bool {
+    matches!(name, "~slider" | "~knob" | "~toggle" | "~scope" | "~lane")
+}
+
+fn static_inline_args(items: &[Expr]) -> Option<Vec<Value>> {
+    items.iter().skip(1).map(static_inline_value).collect()
+}
+
+fn static_inline_value(expr: &Expr) -> Option<Value> {
+    match &expr.kind {
+        ExprKind::Number(value) => Some(Value::Number(*value)),
+        ExprKind::String(value) => Some(Value::String(value.clone())),
+        ExprKind::Keyword(value) => Some(Value::Keyword(value.clone())),
+        ExprKind::Symbol(value) if value == "nil" => Some(Value::Nil),
+        ExprKind::List(items) if matches!(items.first().map(|item| &item.kind), Some(ExprKind::Symbol(name)) if name == "lane") =>
+        {
+            let mut values = vec![Rc::new(RefCell::new(Value::Keyword(
+                "__process-lane".to_string(),
+            )))];
+            for item in items.iter().skip(1) {
+                values.push(Rc::new(RefCell::new(static_inline_value(item)?)));
+            }
+            Some(Value::List(values))
+        }
+        _ => None,
+    }
+}
+
+type InlineWidgetSourceIdentity = (String, usize, usize);
+
+fn inline_widget_source_identity(widget: &Value) -> Option<InlineWidgetSourceIdentity> {
+    let Value::Map(map) = widget else {
+        return None;
+    };
+    let revision = map.get(SOURCE_REVISION_PROP).and_then(|value| {
+        let value = value.borrow();
+        match &*value {
+            Value::String(revision) => Some(revision.clone()),
+            _ => None,
+        }
+    })?;
+    let source_byte = |key: &str| {
+        map.get(key).and_then(|value| {
+            let value = value.borrow();
+            match &*value {
+                Value::Number(byte) if byte.is_finite() && *byte >= 0.0 => Some(*byte as usize),
+                _ => None,
+            }
+        })
+    };
+    Some((
+        revision,
+        source_byte(SOURCE_START_BYTE_PROP)?,
+        source_byte(SOURCE_END_BYTE_PROP)?,
+    ))
+}
+
+fn inline_widget_parent_identity(widget: &Value) -> Option<(String, String)> {
+    let Value::Map(map) = widget else {
+        return None;
+    };
+    let string_prop = |key: &str| {
+        map.get(key).and_then(|value| match &*value.borrow() {
+            Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+    };
+    Some((
+        string_prop(INLINE_PARENT_CALLEE_PROP)?,
+        string_prop(INLINE_PARENT_INLET_PROP)?,
+    ))
 }
 
 fn is_source_quoted_prop_key(key: &str) -> bool {
@@ -994,13 +1083,38 @@ fn convert_source_expr(
                     idx += 2;
                     continue;
                 }
-                converted.push(convert_source_expr(
+                let mut converted_item = convert_source_expr(
                     item,
                     source_revision,
                     local_defwidgets,
                     macro_names,
                     annotate_widgets,
-                ));
+                );
+                if let (
+                    Some(parent_callee),
+                    Some(ExprKind::Keyword(parent_inlet)),
+                    ExprKind::List(child_items),
+                    Expression::List(child_converted),
+                ) = (
+                    head_name,
+                    idx.checked_sub(1)
+                        .and_then(|previous| items.get(previous))
+                        .map(|expr| &expr.kind),
+                    &item.kind,
+                    &mut converted_item,
+                ) && child_items.first().is_some_and(|head| {
+                    matches!(&head.kind, ExprKind::Symbol(name) if is_inline_widget_constructor_name(name))
+                }) {
+                    child_converted.push(Expression::Keyword(
+                        INLINE_PARENT_CALLEE_PROP.to_string(),
+                    ));
+                    child_converted.push(Expression::String(parent_callee.to_string()));
+                    child_converted.push(Expression::Keyword(
+                        INLINE_PARENT_INLET_PROP.to_string(),
+                    ));
+                    child_converted.push(Expression::String(parent_inlet.clone()));
+                }
+                converted.push(converted_item);
                 if let ExprKind::Keyword(key) = &item.kind
                     && is_source_quoted_prop_key(key)
                     && let Some(next) = items.get(idx + 1)
@@ -1018,6 +1132,21 @@ fn convert_source_expr(
                 idx += 1;
             }
             if should_annotate && !converted.is_empty() {
+                if head_name
+                    .is_some_and(|name| matches!(name, "~slider" | "~knob" | "~toggle" | "~lane"))
+                    && let Some(value_expr) = items.get(1)
+                {
+                    converted.push(Expression::Keyword(
+                        INLINE_VALUE_START_BYTE_PROP.to_string(),
+                    ));
+                    converted.push(Expression::Number(
+                        value_expr.origin.primary_span.start_byte as f64,
+                    ));
+                    converted.push(Expression::Keyword(INLINE_VALUE_END_BYTE_PROP.to_string()));
+                    converted.push(Expression::Number(
+                        value_expr.origin.primary_span.end_byte as f64,
+                    ));
+                }
                 converted.push(Expression::Keyword(SOURCE_START_BYTE_PROP.to_string()));
                 converted.push(Expression::Number(
                     expr.origin.primary_span.start_byte as f64,
@@ -1456,6 +1585,9 @@ pub struct VM {
     globals: Vec<Option<Rc<RefCell<Value>>>>,
     pub global_names: Vec<String>,
     pub pending_widget_trees: Vec<PendingUiUpdate>,
+    pending_inline_widgets: Vec<Value>,
+    registering_static_inline_widget: bool,
+    recent_runtime_inline_widgets: HashMap<(String, String), InlineWidgetSourceIdentity>,
     pub dag: ReactiveDag,
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
@@ -1479,6 +1611,7 @@ pub struct VM {
     pub(crate) source_load_errors: Vec<String>,
     preserve_state_on_redefinition: bool,
     global_store_hooks: Vec<GlobalStoreHook>,
+    inline_widget_metadata_resolver: Option<InlineWidgetMetadataResolver>,
 }
 
 pub struct VmStateSnapshot {
@@ -1487,6 +1620,9 @@ pub struct VmStateSnapshot {
     globals: Vec<Option<Rc<RefCell<Value>>>>,
     global_names: Vec<String>,
     pending_widget_trees: Vec<PendingUiUpdate>,
+    pending_inline_widgets: Vec<Value>,
+    registering_static_inline_widget: bool,
+    recent_runtime_inline_widgets: HashMap<(String, String), InlineWidgetSourceIdentity>,
     dag: ReactiveDag,
     tracking_stack: Vec<NodeId>,
     reactive_namespaces: HashSet<String>,
@@ -2780,6 +2916,9 @@ impl VM {
             globals: vec![None; 4096],
             global_names: vec![],
             pending_widget_trees: Vec::new(),
+            pending_inline_widgets: Vec::new(),
+            registering_static_inline_widget: false,
+            recent_runtime_inline_widgets: HashMap::new(),
             dag: ReactiveDag::new(),
             tracking_stack: Vec::new(),
             reactive_namespaces: HashSet::new(),
@@ -2803,6 +2942,7 @@ impl VM {
             source_load_errors: Vec::new(),
             preserve_state_on_redefinition: false,
             global_store_hooks: Vec::new(),
+            inline_widget_metadata_resolver: None,
         };
         vm.register_native(SOURCE_ORIGIN_NATIVE, source_origin_native);
         vm
@@ -2824,6 +2964,20 @@ impl VM {
 
     pub fn add_global_store_hook(&mut self, hook: GlobalStoreHook) {
         self.global_store_hooks.push(hook);
+    }
+
+    pub fn set_inline_widget_metadata_resolver(&mut self, resolver: InlineWidgetMetadataResolver) {
+        self.inline_widget_metadata_resolver = Some(resolver);
+    }
+
+    pub fn resolve_inline_widget_metadata(
+        &self,
+        callee: &str,
+        inlet: &str,
+    ) -> Option<InlineWidgetMetadata> {
+        self.inline_widget_metadata_resolver
+            .as_ref()
+            .and_then(|resolver| resolver(callee, inlet))
     }
 
     pub fn current_source_symbol(&self) -> Option<String> {
@@ -2857,6 +3011,7 @@ impl VM {
             source_revision,
             &existing_macro_names,
         );
+        self.register_static_inline_widgets(&spanned_exprs, source_revision);
 
         let entry_idx = self.chunks.len();
         let existing = self.chunks.clone();
@@ -2942,6 +3097,9 @@ impl VM {
             globals: clone_globals_for_snapshot(&self.globals),
             global_names: self.global_names.clone(),
             pending_widget_trees: self.pending_widget_trees.clone(),
+            pending_inline_widgets: self.pending_inline_widgets.clone(),
+            registering_static_inline_widget: self.registering_static_inline_widget,
+            recent_runtime_inline_widgets: self.recent_runtime_inline_widgets.clone(),
             dag: self.dag.clone(),
             tracking_stack: self.tracking_stack.clone(),
             reactive_namespaces: self.reactive_namespaces.clone(),
@@ -2973,6 +3131,9 @@ impl VM {
         self.globals = snapshot.globals;
         self.global_names = snapshot.global_names;
         self.pending_widget_trees = snapshot.pending_widget_trees;
+        self.pending_inline_widgets = snapshot.pending_inline_widgets;
+        self.registering_static_inline_widget = snapshot.registering_static_inline_widget;
+        self.recent_runtime_inline_widgets = snapshot.recent_runtime_inline_widgets;
         self.dag = snapshot.dag;
         self.tracking_stack = snapshot.tracking_stack;
         self.reactive_namespaces = snapshot.reactive_namespaces;
@@ -3307,6 +3468,147 @@ impl VM {
     pub fn set_current_effect_context(&mut self, source_buffer_id: Option<BufferId>) {
         self.current_effect_source_buffer_id = source_buffer_id;
         self.current_effect_target = EffectTarget::BufferId(source_buffer_id);
+    }
+
+    pub fn inline_widget_registration_enabled(&self) -> bool {
+        self.current_effect_source_buffer_id.is_some()
+    }
+
+    pub fn begin_inline_widget_capture(&mut self) {
+        self.pending_inline_widgets.clear();
+        self.recent_runtime_inline_widgets.clear();
+    }
+
+    pub fn register_inline_widget(&mut self, widget: Value) {
+        if !self.inline_widget_registration_enabled() {
+            return;
+        }
+        let identity = inline_widget_source_identity(&widget);
+        let runtime_parent = (!self.registering_static_inline_widget)
+            .then(|| inline_widget_parent_identity(&widget))
+            .flatten();
+        if let Some(identity) = identity.as_ref()
+            && let Some(existing) = self
+                .pending_inline_widgets
+                .iter_mut()
+                .find(|existing| inline_widget_source_identity(existing).as_ref() == Some(identity))
+        {
+            *existing = widget;
+        } else {
+            self.pending_inline_widgets.push(widget);
+        }
+        if let (Some(parent), Some(identity)) = (runtime_parent, identity) {
+            self.recent_runtime_inline_widgets.insert(parent, identity);
+        }
+    }
+
+    /// Registers literal-backed inline forms while their source is compiled.
+    ///
+    /// Inline forms normally register when their native function executes. A
+    /// form inside a function or process body may not execute during authoring,
+    /// however, and must still have an editor widget. This source pass invokes
+    /// the same native constructors for statically representable forms. Later
+    /// execution of the form replaces the registration with the same source
+    /// identity, allowing process call sites to add runtime metadata/targets.
+    fn register_static_inline_widgets(&mut self, exprs: &[Expr], source_revision: u64) {
+        if !self.inline_widget_registration_enabled() {
+            return;
+        }
+        for expr in exprs {
+            self.register_static_inline_widget_expr(expr, source_revision, None);
+        }
+    }
+
+    fn register_static_inline_widget_expr(
+        &mut self,
+        expr: &Expr,
+        source_revision: u64,
+        parent: Option<(&str, &str)>,
+    ) {
+        let ExprKind::List(items) = &expr.kind else {
+            return;
+        };
+        let head = items.first().and_then(|item| match &item.kind {
+            ExprKind::Symbol(name) => Some(name.as_str()),
+            _ => None,
+        });
+
+        if let Some(form_name) = head.filter(|name| is_inline_widget_constructor_name(name))
+            && let Some(mut args) = static_inline_args(items)
+        {
+            if let Some((parent_callee, parent_inlet)) = parent {
+                args.extend([
+                    Value::Keyword(INLINE_PARENT_CALLEE_PROP.to_string()),
+                    Value::String(parent_callee.to_string()),
+                    Value::Keyword(INLINE_PARENT_INLET_PROP.to_string()),
+                    Value::String(parent_inlet.to_string()),
+                ]);
+            }
+            if matches!(form_name, "~slider" | "~knob" | "~toggle" | "~lane")
+                && let Some(value_expr) = items.get(1)
+            {
+                args.extend([
+                    Value::Keyword(INLINE_VALUE_START_BYTE_PROP.to_string()),
+                    Value::Number(value_expr.origin.primary_span.start_byte as f64),
+                    Value::Keyword(INLINE_VALUE_END_BYTE_PROP.to_string()),
+                    Value::Number(value_expr.origin.primary_span.end_byte as f64),
+                ]);
+            }
+            args.extend([
+                Value::Keyword(SOURCE_START_BYTE_PROP.to_string()),
+                Value::Number(expr.origin.primary_span.start_byte as f64),
+                Value::Keyword(SOURCE_END_BYTE_PROP.to_string()),
+                Value::Number(expr.origin.primary_span.end_byte as f64),
+                Value::Keyword(SOURCE_REVISION_PROP.to_string()),
+                Value::String(source_revision.to_string()),
+            ]);
+            if let Some(Value::NativeFunction(function)) = self.global_value(form_name) {
+                let previous_static_registration = self.registering_static_inline_widget;
+                self.registering_static_inline_widget = true;
+                function(args, self);
+                self.registering_static_inline_widget = previous_static_registration;
+            }
+        }
+
+        for (index, item) in items.iter().enumerate().skip(1) {
+            let child_parent = head.and_then(|callee| {
+                index
+                    .checked_sub(1)
+                    .and_then(|previous| items.get(previous))
+                    .and_then(|previous| match &previous.kind {
+                        ExprKind::Keyword(inlet) => Some((callee, inlet.as_str())),
+                        _ => None,
+                    })
+            });
+            self.register_static_inline_widget_expr(item, source_revision, child_parent);
+        }
+    }
+
+    pub fn attach_inline_widget_runtime_target(
+        &mut self,
+        callee: &str,
+        inlet: &str,
+        target: Value,
+    ) -> bool {
+        let parent = (callee.to_string(), inlet.to_string());
+        let Some(source_identity) = self.recent_runtime_inline_widgets.remove(&parent) else {
+            return false;
+        };
+        let Some(Value::Map(map)) = self.pending_inline_widgets.iter_mut().find(|widget| {
+            inline_widget_source_identity(widget).as_ref() == Some(&source_identity)
+        }) else {
+            return false;
+        };
+        map.insert(
+            "__inline-runtime-target".to_string(),
+            Rc::new(RefCell::new(target)),
+        );
+        true
+    }
+
+    pub fn take_inline_widgets(&mut self) -> Vec<Value> {
+        self.recent_runtime_inline_widgets.clear();
+        std::mem::take(&mut self.pending_inline_widgets)
     }
 
     pub fn take_reactive_exec_timings(&mut self) -> Vec<ReactiveExecTiming> {
@@ -5155,6 +5457,82 @@ mod tests {
         assert_eq!(
             map_prop(&child, SOURCE_BUFFER_ID_PROP).as_deref(),
             Some(&Value::Number(42.0))
+        );
+    }
+
+    #[test]
+    fn runtime_targets_follow_executed_inline_call_sites_not_static_registration_order() {
+        fn inline_widget(start_byte: usize) -> Value {
+            let mut widget = crate::widgets::build_widget(
+                "hslider",
+                vec![
+                    Value::Keyword("value".to_string()),
+                    Value::Number(start_byte as f64),
+                ],
+            );
+            let Value::Map(map) = &mut widget else {
+                panic!("inline widget map");
+            };
+            for (key, value) in [
+                (
+                    SOURCE_REVISION_PROP,
+                    Value::String("runtime-target-order".to_string()),
+                ),
+                (SOURCE_START_BYTE_PROP, Value::Number(start_byte as f64)),
+                (SOURCE_END_BYTE_PROP, Value::Number((start_byte + 1) as f64)),
+                (
+                    super::INLINE_PARENT_CALLEE_PROP,
+                    Value::String("process-class".to_string()),
+                ),
+                (
+                    super::INLINE_PARENT_INLET_PROP,
+                    Value::String("amount".to_string()),
+                ),
+            ] {
+                map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+            }
+            widget
+        }
+
+        let mut vm = VM::new(Vec::new());
+        vm.set_current_effect_context(Some(42));
+        vm.begin_inline_widget_capture();
+
+        let first = inline_widget(10);
+        let second = inline_widget(20);
+        vm.registering_static_inline_widget = true;
+        vm.register_inline_widget(first.deep_clone());
+        vm.register_inline_widget(second.deep_clone());
+        vm.registering_static_inline_widget = false;
+
+        vm.register_inline_widget(first);
+        assert!(vm.attach_inline_widget_runtime_target(
+            "process-class",
+            "amount",
+            Value::String("first-handle".to_string()),
+        ));
+        vm.register_inline_widget(second);
+        assert!(vm.attach_inline_widget_runtime_target(
+            "process-class",
+            "amount",
+            Value::String("second-handle".to_string()),
+        ));
+
+        let widgets = vm.take_inline_widgets();
+        let target_at = |start_byte| {
+            widgets
+                .iter()
+                .find(|widget| source_byte_prop(widget, SOURCE_START_BYTE_PROP) == start_byte)
+                .and_then(|widget| map_prop(widget, "__inline-runtime-target"))
+                .map(|value| value.clone())
+        };
+        assert_eq!(
+            target_at(10),
+            Some(Value::String("first-handle".to_string()))
+        );
+        assert_eq!(
+            target_at(20),
+            Some(Value::String("second-handle".to_string()))
         );
     }
 

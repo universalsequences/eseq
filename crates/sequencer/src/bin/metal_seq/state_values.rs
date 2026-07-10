@@ -21105,6 +21105,131 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_inline_demo_source_tab_eval_publishes_widgets_to_source_buffer() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let process_state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            editor.runtime_mut(),
+            process_state,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let script_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/inline-code-widgets-demo.lisp");
+        let load_form = format!(
+            "(seq-script-load-file {:?})",
+            script_path.display().to_string()
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&load_form)
+            .expect("load inline demo through script picker path");
+        editor.refresh_runtime_side_effects();
+
+        let commands = editor.drain_host_commands();
+        let (source_path, label) = commands
+            .iter()
+            .find_map(|command| match command {
+                eseqlisp::host::HostCommand::Custom { name, payload }
+                    if name == "open-script-source-tab" =>
+                {
+                    Some((
+                        extract_string_from_payload(payload, "path")?,
+                        extract_string_from_payload(payload, "label")?,
+                    ))
+                }
+                _ => None,
+            })
+            .expect("inline demo should request a source tab");
+        let buffer_name =
+            register_script_source_tab(&mut editor, Path::new(&source_path), &label, &source_path)
+                .expect("register inline demo source tab");
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == buffer_name)
+            .expect("inline demo source buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+
+        editor
+            .runtime_mut()
+            .eval_str("(eval-current-buffer)")
+            .expect("request source buffer evaluation");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.active_buffer().view_mode,
+            eseqlisp::editor::ViewMode::Both
+        );
+        assert_eq!(
+            editor.active_buffer().inline_code_widgets().len(),
+            8,
+            "three bare controls, one body slider, three call-site widgets, and one scope"
+        );
+        let display_map = editor.active_buffer().inline_display_row_map();
+        assert!(
+            display_map.len() > editor.active_buffer().lines.len(),
+            "lane and scope bands should reserve display rows"
+        );
+        editor.set_layout_viewport(120, 40);
+        let frame = eseqlisp::frame::build_render_frame(&mut editor, 120, 40);
+        assert!(
+            !frame.lines.is_empty(),
+            "both mode should retain source text"
+        );
+        assert_eq!(
+            frame
+                .widget_layout
+                .as_ref()
+                .expect("both mode should retain inline layout")
+                .children
+                .len(),
+            8
+        );
+        assert!(
+            !editor.is_ui_scroll_mode(),
+            "inline buffers must use the shared text/display-row scroll path"
+        );
+        editor.apply_smooth_widget_scroll(0.0, -120.0);
+        assert_eq!(
+            editor.widget_scroll_top(),
+            0.0,
+            "inline buffers must not retain an independent widget scroll"
+        );
+        editor.active_buffer_mut().scroll_top = 5;
+        let scrolled_frame = eseqlisp::frame::build_render_frame(&mut editor, 120, 40);
+        assert_eq!(scrolled_frame.text_scroll_top, 5);
+        let combined_widget_scroll =
+            scrolled_frame.text_scroll_top as f32 + scrolled_frame.widget_scroll_top;
+        assert!(
+            (combined_widget_scroll - 5.0 * scrolled_frame.text_cell_height_scale).abs() < 0.001,
+            "inline widgets and zoomed text must share the same physical scroll offset"
+        );
+
+        // Project/custom-UI reloads run while the source tab remains active.
+        // They must not publish their empty capture against the active buffer
+        // and erase its inline widgets.
+        for index in 0..3 {
+            let report = editor.runtime_mut().eval_source_transactional(
+                Some(PathBuf::from(format!(
+                    "generated-inline-demo-background-{index}.lisp"
+                ))),
+                &format!("(def inline-demo-background-{index} {index})"),
+                Vec::new(),
+            );
+            assert!(report.success, "background reload should succeed");
+            editor.process_lisp_reload_report(report);
+        }
+        assert_eq!(editor.active_buffer().inline_code_widgets().len(), 8);
+        assert!(editor.active_buffer().widget_tree.as_ref().is_some_and(
+            |tree| matches!(tree, Value::Map(map) if map.contains_key("__inline-root"))
+        ));
+    }
+
+    #[test]
     fn metal_seq_process_chain_demo_script_picker_opens_source_tab_when_no_ui() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let process_state = Arc::new(SequencerState::new(
