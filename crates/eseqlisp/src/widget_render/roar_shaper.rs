@@ -1,10 +1,13 @@
 //! Transfer-curve display for the Roar builtin effect's selected stage.
 //!
-//! Draws the stage's shaper curve in the stage color, a dashed vertical bias
-//! marker, and a translucent live drive-region overlay: the horizontal span
-//! of the curve currently exercised by the input, from the per-stage
-//! pre-shaper min/max meters the host publishes as `roar-meter:` keyed
-//! `BandMeterFrame`s (level_db\[stage\] carries the linear min/max pair).
+//! Draws the stage's composite transfer curve (the Amount pre-gain and Bias
+//! baked in, like Ableton: `y = shaper(gain(amount) * x + bias)` over the
+//! stage-input domain), a dashed marker at the curve's shifted center, and a
+//! translucent live drive-region overlay: the horizontal span of the curve
+//! currently exercised by the input, from the per-stage pre-shaper min/max
+//! meters the host publishes as `roar-meter:` keyed `BandMeterFrame`s
+//! (level_db\[stage\] carries the linear min/max pair, in the *shaper input*
+//! domain, i.e. post gain+bias).
 //!
 //! The curve formulas are dual-maintained with
 //! `sequencer::roar::shaper_transfer` — keep the two in sync.
@@ -26,8 +29,13 @@ pub struct RoarShaperWidget;
 
 pub static ROAR_SHAPER_WIDGET: RoarShaperWidget = RoarShaperWidget;
 
-// Curve domain drawn along x.
-const X_SPAN: f32 = 2.0;
+// Stage-input domain drawn along x (pre Amount gain).
+const X_SPAN: f32 = 1.5;
+
+/// Amount 0..1 -> 1x..64x pre-shaper gain; mirror of the DSP's gain law.
+fn amount_gain(amount: f32) -> f32 {
+    (amount.clamp(0.0, 1.0) * 6.0).exp2()
+}
 
 // Default stage colors (stage 1 orange, stage 2 cyan, stage 3 pink).
 const STAGE_COLORS: [Color; 3] = [
@@ -132,7 +140,7 @@ struct Display {
     amount: f32,
     bias: f32,
     stage: usize,
-    // Live drive region in curve-x units, already clamped to the domain.
+    // Live drive region in stage-input-domain units, clamped to the domain.
     drive_min: f32,
     drive_max: f32,
 }
@@ -142,12 +150,15 @@ fn display_from_props(props: &HashMap<String, Value>, frame: Option<BandMeterFra
     let amount = prop_num(props, "amount", 0.0).clamp(0.0, 1.0);
     let bias = prop_num(props, "bias", 0.0).clamp(-1.0, 1.0);
     let stage = prop_num(props, "stage", 0.0).round().clamp(0.0, 2.0) as usize;
+    // Meters record the driven signal (post gain+bias); map back to the
+    // stage-input domain the curve is drawn over.
+    let gain = amount_gain(amount);
     let (drive_min, drive_max) = frame
         .map(|frame| {
             let pair = frame.level_db[stage];
             (
-                pair[0].clamp(-X_SPAN, X_SPAN),
-                pair[1].clamp(-X_SPAN, X_SPAN),
+                ((pair[0] - bias) / gain).clamp(-X_SPAN, X_SPAN),
+                ((pair[1] - bias) / gain).clamp(-X_SPAN, X_SPAN),
             )
         })
         .unwrap_or((0.0, 0.0));
@@ -204,9 +215,11 @@ impl WidgetDefinition for RoarShaperWidget {
         let height = rect.height.round().max(1.0) as usize;
         let col_start = rect.col.round() as u16;
         let row_start = rect.row.round() as u16;
+        let gain = amount_gain(display.amount);
         for col in 0..width {
             let x = (col as f32 / (width.saturating_sub(1)).max(1) as f32) * 2.0 * X_SPAN - X_SPAN;
-            let y = shaper_transfer(display.shaper, display.amount, x).clamp(-1.2, 1.2);
+            let y = shaper_transfer(display.shaper, display.amount, gain * x + display.bias)
+                .clamp(-1.2, 1.2);
             let row = ((1.0 - (y / 1.2 + 1.0) * 0.5) * (height.saturating_sub(1)) as f32).round()
                 as usize;
             buf.set(
@@ -339,7 +352,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float driveMin = clamp(in.uniform_a.z, -2.0, 2.0);
     float driveMax = clamp(in.uniform_a.w, -2.0, 2.0);
 
-    float x = (uv.x * 2.0 - 1.0) * 2.0; // curve domain -2..2
+    float x = (uv.x * 2.0 - 1.0) * 1.5; // stage-input domain -1.5..1.5
     float4 col = in.color_b;
 
     // Axis grid: center lines and ±1 ticks.
@@ -356,14 +369,15 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         col.rgb = mix(col.rgb, in.color_a.rgb, band * 0.14);
     }
 
-    // Dashed bias marker.
-    float biasU = (bias * 0.5 + 2.0) / 4.0;
+    // Dashed marker at the curve's shifted center (shaper input = 0).
+    float gain = exp2(amount * 6.0);
+    float biasU = clamp((-bias / gain) / 3.0 + 0.5, 0.0, 1.0);
     float dash = step(0.5, fract(uv.y * 9.0));
     float biasLine = smoothstep(aa * 1.8, aa * 0.3, abs(uv.x - biasU)) * dash;
     col.rgb = mix(col.rgb, in.color_d.rgb, biasLine * in.color_d.a);
 
-    // Transfer curve, y in -1.4..1.4 of widget height.
-    float y = roarShaperCurve(shaper, amount, x);
+    // Composite transfer curve (gain + bias applied), y in -1.4..1.4.
+    float y = roarShaperCurve(shaper, amount, gain * x + bias);
     float curveV = 0.5 - y / 2.8;
     float aaY = max(fwidth(uv.y), 0.0015);
     float line = smoothstep(aaY * 2.6, aaY * 0.5, abs(uv.y - curveV));
@@ -395,6 +409,24 @@ mod tests {
         let display = display_from_props(&props, Some(frame));
         assert!((display.drive_min + 0.4).abs() < 1.0e-6);
         assert!((display.drive_max - 1.3).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn drive_region_is_mapped_back_to_the_input_domain() {
+        // The meters report the driven signal (post gain+bias); the overlay
+        // must divide the Amount gain back out so it lines up with the
+        // composite curve.
+        let mut props = HashMap::new();
+        props.insert("amount".to_string(), Value::Number(0.5)); // gain = 8
+        props.insert("bias".to_string(), Value::Number(0.25));
+        let frame = BandMeterFrame {
+            revision: 1,
+            level_db: [[-0.75, 2.25], [0.0, 0.0], [0.0, 0.0]],
+            gain_db: [0.0; 3],
+        };
+        let display = display_from_props(&props, Some(frame));
+        assert!((display.drive_min + 0.125).abs() < 1.0e-6, "{}", display.drive_min);
+        assert!((display.drive_max - 0.25).abs() < 1.0e-6, "{}", display.drive_max);
     }
 
     #[test]
