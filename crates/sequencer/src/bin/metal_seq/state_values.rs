@@ -523,6 +523,8 @@ struct ProcessLaneUiEntry {
     target: String,
     map_ports: Vec<Value>,
     values: Vec<f32>,
+    project: bool,
+    forked: bool,
 }
 
 fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral) -> Option<f32> {
@@ -784,7 +786,7 @@ fn process_lane_entries_for_track(
     state: &Arc<SequencerState>,
     track: usize,
 ) -> Vec<ProcessLaneUiEntry> {
-    let Some(chain) = state.track_process_chain(track) else {
+    let Some(chain) = state.composed_track_process_chain(track) else {
         return Vec::new();
     };
     let published = state.published_process_authoring();
@@ -845,6 +847,13 @@ fn process_lane_entries_for_track(
                     .unwrap_or_default(),
                 map_ports,
                 values,
+                project: slot.project_layer,
+                forked: slot.project_layer
+                    && state.has_project_process_lane_override(
+                        track,
+                        slot.instance_id,
+                        &inlet_name,
+                    ),
             });
         }
     }
@@ -864,6 +873,8 @@ fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) -> Value {
         ("process", Value::String(entry.class_name.clone())),
         ("inlet", Value::String(entry.inlet_name.clone())),
         ("name", Value::String(entry.inlet_name.clone())),
+        ("project", Value::Bool(entry.project)),
+        ("forked", Value::Bool(entry.forked)),
         ("label", Value::String(entry.label.clone())),
         ("short-label", Value::String(entry.short_label.clone())),
         ("kind", Value::String(entry.kind.clone())),
@@ -1018,7 +1029,7 @@ fn process_scalar_inlet_entry_value(
 }
 
 pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usize) -> Value {
-    let Some(chain) = state.track_process_chain(track) else {
+    let Some(chain) = state.composed_track_process_chain(track) else {
         return list_value(Vec::<Value>::new());
     };
     let published = state.published_process_authoring();
@@ -1063,6 +1074,7 @@ pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usiz
                 ),
             ),
             ("enabled", Value::Bool(slot.enabled)),
+            ("project", Value::Bool(slot.project_layer)),
             (
                 "target",
                 Value::String(
@@ -14989,7 +15001,12 @@ mod tests {
             Value::Map(test_param_map("drive", 1, 0.0, -12.0, 36.0)),
             Value::Map(test_param_map("tone", 2, 0.0, -1.0, 1.0)),
             Value::Map(test_param_map("tone freq", 3, 180.0, 50.0, 18000.0)),
-            Value::Map(test_enum_param_map("tone mode", 4, 0.0, vec!["tilt", "shelf"])),
+            Value::Map(test_enum_param_map(
+                "tone mode",
+                4,
+                0.0,
+                vec!["tilt", "shelf"],
+            )),
             Value::Map(test_enum_param_map(
                 "routing",
                 5,
@@ -15088,7 +15105,9 @@ mod tests {
             };
             param.insert(
                 "value-field".to_string(),
-                Rc::new(RefCell::new(Value::String(format!("test-roar-param-{idx}")))),
+                Rc::new(RefCell::new(Value::String(format!(
+                    "test-roar-param-{idx}"
+                )))),
             );
         }
         params

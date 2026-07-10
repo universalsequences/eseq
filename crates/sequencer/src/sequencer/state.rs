@@ -348,6 +348,8 @@ pub struct PatternSnapshot {
     pub graph_overrides: Vec<ProjectGraphOverrides>,
     pub rack_tracks: Vec<Option<RackTrackSnapshot>>,
     pub process_chains: Vec<crate::process::TrackProcessChain>,
+    pub project_process_lane_overrides: Vec<crate::process::ProjectLaneOverrides>,
+    pub project_process_chain: crate::process::TrackProcessChain,
     pub plock_variant_registries: Vec<PlockVariantRegistry>,
     pub key_lock_variant_registries: Vec<PlockVariantRegistry>,
 }
@@ -465,6 +467,7 @@ pub struct TrackPatternData {
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub rack_track: Option<RackTrackSnapshot>,
     pub process_chain: crate::process::TrackProcessChain,
+    pub project_process_lane_overrides: crate::process::ProjectLaneOverrides,
     pub plock_variant_registry: PlockVariantRegistry,
     pub key_lock_variant_registry: PlockVariantRegistry,
 }
@@ -611,6 +614,12 @@ impl TrackPatternData {
             let mut process_chains = state.pattern.process_chains.lock().unwrap();
             if track < process_chains.len() {
                 process_chains[track] = refreshed_process_chain;
+            }
+        }
+        {
+            let mut overrides = state.pattern.project_process_lane_overrides.lock().unwrap();
+            if track < overrides.len() {
+                overrides[track] = self.project_process_lane_overrides.clone();
             }
         }
         {
@@ -894,6 +903,9 @@ pub struct Scene {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    /// Project-level default process chain: composed ahead of every track's
+    /// own chain at snapshot capture, so present and future tracks inherit it.
+    pub project_process_chain: crate::process::TrackProcessChain,
 }
 
 #[derive(Clone)]
@@ -931,6 +943,7 @@ impl ProjectScenes {
                 mod_connections: snapshot.mod_connections.clone(),
                 neural_networks: snapshot.neural_networks.clone(),
                 graph_overrides: snapshot.graph_overrides.clone(),
+                project_process_chain: snapshot.project_process_chain.clone(),
             });
         }
 
@@ -942,6 +955,7 @@ impl ProjectScenes {
                 mod_connections: Vec::new(),
                 neural_networks: Vec::new(),
                 graph_overrides: Vec::new(),
+                project_process_chain: crate::process::TrackProcessChain::default(),
             });
         }
 
@@ -999,6 +1013,7 @@ impl ProjectScenes {
         snapshot.mod_connections = scene.mod_connections.clone();
         snapshot.neural_networks = scene.neural_networks.clone();
         snapshot.graph_overrides = scene.graph_overrides.clone();
+        snapshot.project_process_chain = scene.project_process_chain.clone();
         for track in 0..self.track_pools.len() {
             let Some(id) = scene.cells.get(track).copied().flatten() else {
                 continue;
@@ -1034,6 +1049,11 @@ impl ProjectScenes {
         scene.mod_connections = snapshot.mod_connections.clone();
         scene.neural_networks = snapshot.neural_networks.clone();
         scene.graph_overrides = snapshot.graph_overrides.clone();
+        // Deliberately NOT copied from the snapshot: the scene itself is the
+        // live authority for `project_process_chain` (edited in place via
+        // edit_current_project_process_chain), and several callers save
+        // snapshots that never carried it. Snapshot→scene transfer happens
+        // only in from_pattern_snapshots (project load).
 
         for track in 0..snapshot.track_bits.len() {
             let Some(data) = snapshot.track_pattern_data(track) else {
@@ -1120,6 +1140,24 @@ impl ProjectScenes {
             .get(self.current_scene)
             .map(|scene| scene.graph_overrides.clone())
             .unwrap_or_default()
+    }
+
+    pub fn current_project_process_chain(&self) -> crate::process::TrackProcessChain {
+        self.scenes
+            .get(self.current_scene)
+            .map(|scene| scene.project_process_chain.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn edit_current_project_process_chain<F, R>(&mut self, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut crate::process::TrackProcessChain) -> Result<R, String>,
+    {
+        let scene = self
+            .scenes
+            .get_mut(self.current_scene)
+            .ok_or_else(|| "current scene out of range".to_string())?;
+        edit(&mut scene.project_process_chain)
     }
 
     pub fn edit_current_graph_overrides<F, R>(&mut self, edit: F) -> Result<R, String>
@@ -1315,13 +1353,20 @@ impl ProjectScenes {
         }
 
         let scene_idx = self.scenes.len();
-        let (bus_patterns, mod_connections, neural_networks, graph_overrides) = source_scene
+        let (
+            bus_patterns,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            project_process_chain,
+        ) = source_scene
             .map(|scene| {
                 (
                     scene.bus_patterns,
                     scene.mod_connections,
                     scene.neural_networks,
                     scene.graph_overrides,
+                    scene.project_process_chain,
                 )
             })
             .unwrap_or_default();
@@ -1332,6 +1377,7 @@ impl ProjectScenes {
             mod_connections,
             neural_networks,
             graph_overrides,
+            project_process_chain,
         });
         self.current_scene = scene_idx;
         self.track_overrides.fill(None);
@@ -1446,6 +1492,7 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.instrument_run_modes, track_idx);
         remove_track_lane_if_present(&mut self.rack_tracks, track_idx);
         remove_track_lane_if_present(&mut self.process_chains, track_idx);
+        remove_track_lane_if_present(&mut self.project_process_lane_overrides, track_idx);
         remove_track_lane_if_present(&mut self.plock_variant_registries, track_idx);
         remove_track_lane_if_present(&mut self.key_lock_variant_registries, track_idx);
         self.mod_connections = self
@@ -1629,6 +1676,9 @@ impl PatternSnapshot {
             self.process_chains
                 .push(crate::process::TrackProcessChain::default());
         }
+        while self.project_process_lane_overrides.len() < track_count {
+            self.project_process_lane_overrides.push(Default::default());
+        }
         while self.plock_variant_registries.len() < track_count {
             self.plock_variant_registries
                 .push(PlockVariantRegistry::default());
@@ -1674,6 +1724,7 @@ impl PatternSnapshot {
         self.instrument_run_modes.truncate(track_count);
         self.rack_tracks.truncate(track_count);
         self.process_chains.truncate(track_count);
+        self.project_process_lane_overrides.truncate(track_count);
         self.plock_variant_registries.truncate(track_count);
         self.key_lock_variant_registries.truncate(track_count);
         self.mod_connections.retain(|connection| {
@@ -1870,6 +1921,16 @@ impl PatternSnapshot {
             graph_overrides: Vec::new(),
             rack_tracks,
             process_chains,
+            project_process_lane_overrides: state
+                .pattern
+                .project_process_lane_overrides
+                .lock()
+                .unwrap()
+                .iter()
+                .take(num_tracks)
+                .cloned()
+                .collect(),
+            project_process_chain: crate::process::TrackProcessChain::default(),
             plock_variant_registries,
             key_lock_variant_registries,
         }
@@ -1979,6 +2040,11 @@ impl PatternSnapshot {
                 .unwrap_or(CustomInstrumentRunMode::Instrument),
             rack_track: self.rack_tracks.get(track).cloned().unwrap_or(None),
             process_chain: self.process_chains.get(track).cloned().unwrap_or_default(),
+            project_process_lane_overrides: self
+                .project_process_lane_overrides
+                .get(track)
+                .cloned()
+                .unwrap_or_default(),
             plock_variant_registry: self
                 .plock_variant_registries
                 .get(track)
@@ -2016,6 +2082,7 @@ impl PatternSnapshot {
         self.instrument_run_modes[track] = data.instrument_run_mode;
         self.rack_tracks[track] = data.rack_track;
         self.process_chains[track] = data.process_chain;
+        self.project_process_lane_overrides[track] = data.project_process_lane_overrides;
         self.plock_variant_registries[track] = data.plock_variant_registry;
         self.key_lock_variant_registries[track] = data.key_lock_variant_registry;
     }
@@ -2053,6 +2120,7 @@ impl PatternSnapshot {
         self.instrument_run_modes[track] = CustomInstrumentRunMode::Instrument;
         self.rack_tracks[track] = None;
         self.process_chains[track] = crate::process::TrackProcessChain::default();
+        self.project_process_lane_overrides[track] = Default::default();
         self.plock_variant_registries[track] = PlockVariantRegistry::default();
         self.key_lock_variant_registries[track] = PlockVariantRegistry::default();
     }
@@ -2116,6 +2184,7 @@ impl PatternSnapshot {
         self.rack_tracks.push(None);
         self.process_chains
             .push(crate::process::TrackProcessChain::default());
+        self.project_process_lane_overrides.push(Default::default());
         self.plock_variant_registries
             .push(PlockVariantRegistry::default());
         self.key_lock_variant_registries
@@ -2145,6 +2214,8 @@ impl PatternSnapshot {
             graph_overrides: Vec::new(),
             rack_tracks: Vec::with_capacity(num_tracks),
             process_chains: Vec::with_capacity(num_tracks),
+            project_process_lane_overrides: Vec::with_capacity(num_tracks),
+            project_process_chain: crate::process::TrackProcessChain::default(),
             plock_variant_registries: Vec::with_capacity(num_tracks),
             key_lock_variant_registries: Vec::with_capacity(num_tracks),
         };
@@ -2188,6 +2259,7 @@ impl PatternSnapshot {
             && self.instrument_run_modes.len() == n
             && self.rack_tracks.len() == n
             && self.process_chains.len() == n
+            && self.project_process_lane_overrides.len() == n
             && self.plock_variant_registries.len() == n
             && self.key_lock_variant_registries.len() == n
             && self.step_data.iter().all(|steps| steps.len() == MAX_STEPS)
@@ -2495,6 +2567,7 @@ pub struct PatternState {
     pub track_sound_state: Mutex<Vec<TrackSoundState>>,
     pub rack_tracks: Mutex<Vec<Option<RackTrackSnapshot>>>,
     pub process_chains: Mutex<Vec<crate::process::TrackProcessChain>>,
+    pub project_process_lane_overrides: Mutex<Vec<crate::process::ProjectLaneOverrides>>,
     pub plock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
     pub key_lock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
 }
@@ -2688,6 +2761,7 @@ impl SequencerState {
             neural_networks,
             graph_overrides,
         );
+        snapshot.project_process_chain = self.project_process_chain();
         let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
         let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();
         snapshot.refresh_process_binding_param_ids(&effect_descriptors, &instrument_descriptors);
@@ -2760,6 +2834,9 @@ impl SequencerState {
                     (0..MAX_TRACKS)
                         .map(|_| crate::process::TrackProcessChain::default())
                         .collect(),
+                ),
+                project_process_lane_overrides: Mutex::new(
+                    (0..MAX_TRACKS).map(|_| Default::default()).collect(),
                 ),
                 plock_variant_registries: Mutex::new(
                     (0..MAX_TRACKS)
@@ -3954,12 +4031,14 @@ impl SequencerState {
         snapshot
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn publish_scheduler_snapshot_from_track_pattern_data(
         &self,
         tracks: &[TrackPatternData],
         mod_connections: Vec<ModConnection>,
         neural_networks: Vec<ProjectNeuralNetwork>,
         graph_overrides: Vec<ProjectGraphOverrides>,
+        project_process_chain: crate::process::TrackProcessChain,
     ) -> Arc<SequencerSnapshot> {
         self.publish_scheduler_snapshot_arc(Arc::new(
             SequencerSnapshot::capture_from_track_pattern_data(
@@ -3968,6 +4047,7 @@ impl SequencerState {
                 mod_connections,
                 neural_networks,
                 graph_overrides,
+                project_process_chain,
             ),
         ))
     }
@@ -4163,6 +4243,15 @@ impl SequencerState {
         }
         if let Some(chain) = self.pattern.process_chains.lock().unwrap().get_mut(track) {
             *chain = crate::process::TrackProcessChain::default();
+        }
+        if let Some(overrides) = self
+            .pattern
+            .project_process_lane_overrides
+            .lock()
+            .unwrap()
+            .get_mut(track)
+        {
+            overrides.clear();
         }
         if let Some(registry) = self
             .pattern
@@ -4587,6 +4676,85 @@ impl SequencerState {
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
     }
+    /// A track's effective chain as the scheduler sees it: project-layer
+    /// slots ahead of the track's own slots. UI surfaces read this composed
+    /// view so project slots appear (badged) in every track's process column.
+    pub fn composed_track_process_chain(
+        &self,
+        track: usize,
+    ) -> Option<crate::process::TrackProcessChain> {
+        let track_chain = self.track_process_chain(track)?;
+        let mut project_chain = self.project_process_chain();
+        if let Some(overrides) = self
+            .pattern
+            .project_process_lane_overrides
+            .lock()
+            .unwrap()
+            .get(track)
+        {
+            crate::process::apply_project_lane_overrides(&mut project_chain, overrides);
+        }
+        Some(crate::process::compose_effective_process_chain(
+            &project_chain,
+            &track_chain,
+        ))
+    }
+    /// The project-level default process chain for the current scene. Every
+    /// track — present and future — runs these slots ahead of its own chain.
+    pub fn project_process_chain(&self) -> crate::process::TrackProcessChain {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .current_project_process_chain()
+    }
+    /// Whole-layer replace of the project process chain (`(processes :project ...)`).
+    pub fn set_project_process_chain(&self, chain: crate::process::TrackProcessChain) -> bool {
+        let identities = chain
+            .slots
+            .iter()
+            .map(crate::process::project_slot_identity_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let updated = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            scenes
+                .edit_current_project_process_chain(|current| {
+                    *current = chain;
+                    Ok(())
+                })
+                .is_ok()
+        };
+        if updated {
+            for overrides in self
+                .pattern
+                .project_process_lane_overrides
+                .lock()
+                .unwrap()
+                .iter_mut()
+            {
+                overrides.retain(|identity, _| identities.contains(identity));
+            }
+            self.publish_process_chain_edit();
+        }
+        updated
+    }
+    fn edit_project_process_chain_slot<R>(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+        edit: impl FnOnce(&mut crate::process::TrackProcessSlot) -> R,
+    ) -> Option<R> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes
+            .edit_current_project_process_chain(|chain| {
+                Ok(chain
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.instance_id == instance_id)
+                    .map(edit))
+            })
+            .ok()
+            .flatten()
+    }
     /// Enable or bypass one pattern-scoped process-chain slot.
     ///
     /// Returns `false` only when the track or instance does not exist. A
@@ -4605,16 +4773,29 @@ impl SequencerState {
             let Some(chain) = chains.get_mut(track) else {
                 return false;
             };
-            let Some(slot) = chain
+            match chain
                 .slots
                 .iter_mut()
                 .find(|slot| slot.instance_id == instance_id)
-            else {
-                return false;
-            };
-            let changed = slot.enabled != enabled;
-            slot.enabled = enabled;
-            changed
+            {
+                Some(slot) => {
+                    let changed = slot.enabled != enabled;
+                    slot.enabled = enabled;
+                    Some(changed)
+                }
+                None => None,
+            }
+        };
+        // Project-layer slots are editable from any track's panel; the toggle
+        // lands on the one shared object.
+        let Some(changed) = changed.or_else(|| {
+            self.edit_project_process_chain_slot(instance_id, |slot| {
+                let changed = slot.enabled != enabled;
+                slot.enabled = enabled;
+                changed
+            })
+        }) else {
+            return false;
         };
         if changed {
             self.publish_process_chain_edit();
@@ -4633,25 +4814,22 @@ impl SequencerState {
         if track >= self.active_track_count() {
             return false;
         }
-        let changed = {
-            let mut chains = self.pattern.process_chains.lock().unwrap();
-            let Some(chain) = chains.get_mut(track) else {
-                return false;
-            };
-            let Some(source_index) = chain
+        fn move_slot_within_chain(
+            chain: &mut crate::process::TrackProcessChain,
+            instance_id: crate::process::ProcessInstanceId,
+            before: Option<crate::process::ProcessInstanceId>,
+        ) -> Option<bool> {
+            let source_index = chain
                 .slots
                 .iter()
-                .position(|slot| slot.instance_id == instance_id)
-            else {
-                return false;
-            };
+                .position(|slot| slot.instance_id == instance_id)?;
             if before == Some(instance_id) {
-                return true;
+                return Some(false);
             }
             if before
                 .is_some_and(|target| !chain.slots.iter().any(|slot| slot.instance_id == target))
             {
-                return false;
+                return None;
             }
             let previous_order = chain
                 .slots
@@ -4668,12 +4846,34 @@ impl SequencerState {
                 })
                 .unwrap_or(chain.slots.len());
             chain.slots.insert(target_index, slot);
-            previous_order
-                != chain
-                    .slots
-                    .iter()
-                    .map(|slot| slot.instance_id)
-                    .collect::<Vec<_>>()
+            Some(
+                previous_order
+                    != chain
+                        .slots
+                        .iter()
+                        .map(|slot| slot.instance_id)
+                        .collect::<Vec<_>>(),
+            )
+        }
+        let changed = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            move_slot_within_chain(chain, instance_id, before)
+        };
+        // Reordering a project slot moves it within the project layer only.
+        let changed = changed.or_else(|| {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            scenes
+                .edit_current_project_process_chain(|chain| {
+                    Ok(move_slot_within_chain(chain, instance_id, before))
+                })
+                .ok()
+                .flatten()
+        });
+        let Some(changed) = changed else {
+            return false;
         };
         if changed {
             self.publish_process_chain_edit();
@@ -4698,7 +4898,30 @@ impl SequencerState {
             chain.slots.retain(|slot| slot.instance_id != instance_id);
             chain.slots.len() != previous_len
         };
+        // A project slot has no per-track detach: removing it from any track's
+        // panel removes the shared slot from the project layer.
+        let mut removed_identity = None;
+        let removed = removed || {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            scenes
+                .edit_current_project_process_chain(|chain| {
+                    removed_identity = chain
+                        .slots
+                        .iter()
+                        .find(|slot| slot.instance_id == instance_id)
+                        .map(crate::process::project_slot_identity_id);
+                    let previous_len = chain.slots.len();
+                    chain.slots.retain(|slot| slot.instance_id != instance_id);
+                    Ok(chain.slots.len() != previous_len)
+                })
+                .unwrap_or(false)
+        };
         if removed {
+            if let Some(identity) = removed_identity {
+                for overrides in self.pattern.project_process_lane_overrides.lock().unwrap().iter_mut() {
+                    overrides.remove(&identity);
+                }
+            }
             self.publish_process_chain_edit();
         }
         removed
@@ -4715,26 +4938,92 @@ impl SequencerState {
             return false;
         }
         let inlet_name = inlet_name.into();
-        let mut chains = self.pattern.process_chains.lock().unwrap();
-        let Some(chain) = chains.get_mut(track) else {
-            return false;
+        let write_lane_step = |slot: &mut crate::process::TrackProcessSlot| {
+            let lane = slot.lanes.entry(inlet_name.clone()).or_default();
+            if lane.values.len() <= step {
+                lane.values.resize(step + 1, 0.0);
+            }
+            lane.values[step] = value;
         };
-        let Some(slot) = chain
-            .slots
-            .iter_mut()
-            .find(|slot| slot.instance_id == instance_id)
-        else {
-            return false;
+        let updated = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            match chain
+                .slots
+                .iter_mut()
+                .find(|slot| slot.instance_id == instance_id)
+            {
+                Some(slot) => {
+                    write_lane_step(slot);
+                    true
+                }
+                None => false,
+            }
         };
-        let lane = slot.lanes.entry(inlet_name).or_default();
-        if lane.values.len() <= step {
-            lane.values.resize(step + 1, 0.0);
+        if !updated {
+            let project_slot = self
+                .project_process_chain()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == instance_id);
+            let Some(project_slot) = project_slot else { return false };
+            let identity = crate::process::project_slot_identity_id(&project_slot);
+            let mut overrides = self.pattern.project_process_lane_overrides.lock().unwrap();
+            let Some(track_overrides) = overrides.get_mut(track) else { return false };
+            let lane = track_overrides
+                .entry(identity)
+                .or_default()
+                .entry(inlet_name.clone())
+                .or_insert_with(|| project_slot.lanes.get(&inlet_name).cloned().unwrap_or_default());
+            if lane.values.len() <= step {
+                lane.values.resize(step + 1, 0.0);
+            }
+            lane.values[step] = value;
         }
-        lane.values[step] = value;
-        drop(chains);
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
         true
+    }
+    pub fn clear_project_process_lane_override(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        inlet_name: &str,
+    ) -> bool {
+        let Some(slot) = self.project_process_chain().slots.into_iter().find(|slot| slot.instance_id == instance_id) else {
+            return false;
+        };
+        let identity = crate::process::project_slot_identity_id(&slot);
+        let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
+        let Some(track_overrides) = all.get_mut(track) else { return false };
+        let removed = track_overrides.get_mut(&identity).is_some_and(|lanes| lanes.remove(inlet_name).is_some());
+        if track_overrides.get(&identity).is_some_and(|lanes| lanes.is_empty()) {
+            track_overrides.remove(&identity);
+        }
+        drop(all);
+        if removed {
+            self.publish_process_chain_edit();
+        }
+        removed
+    }
+    pub fn has_project_process_lane_override(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        inlet_name: &str,
+    ) -> bool {
+        let Some(slot) = self.project_process_chain().slots.into_iter().find(|slot| slot.instance_id == instance_id) else {
+            return false;
+        };
+        self.pattern
+            .project_process_lane_overrides
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(|overrides| overrides.get(&crate::process::project_slot_identity_id(&slot)))
+            .is_some_and(|lanes| lanes.contains_key(inlet_name))
     }
     /// Replace a scalar inlet on every current-pattern chain slot owned by
     /// `instance_id`. This is the durable counterpart to authoring-handle knob
@@ -4760,6 +5049,14 @@ impl SequencerState {
                 }
             }
         }
+        if self
+            .edit_project_process_chain_slot(instance_id, |slot| {
+                slot.inlets.insert(inlet_name.to_string(), value.clone());
+            })
+            .is_some()
+        {
+            updated += 1;
+        }
         if updated > 0 {
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             self.publish_scheduler_snapshot();
@@ -4784,16 +5081,24 @@ impl SequencerState {
             let Some(chain) = chains.get_mut(track) else {
                 return false;
             };
-            let Some(slot) = chain
+            chain
                 .slots
                 .iter_mut()
                 .find(|slot| slot.instance_id == instance_id)
-            else {
-                return false;
-            };
-            let changed = slot.inlets.get(inlet_name) != Some(&value);
-            slot.inlets.insert(inlet_name.to_string(), value);
-            changed
+                .map(|slot| {
+                    let changed = slot.inlets.get(inlet_name) != Some(&value);
+                    slot.inlets.insert(inlet_name.to_string(), value.clone());
+                    changed
+                })
+        };
+        let Some(changed) = changed.or_else(|| {
+            self.edit_project_process_chain_slot(instance_id, |slot| {
+                let changed = slot.inlets.get(inlet_name) != Some(&value);
+                slot.inlets.insert(inlet_name.to_string(), value.clone());
+                changed
+            })
+        }) else {
+            return false;
         };
         if changed {
             self.publish_process_chain_edit();
@@ -4811,25 +5116,31 @@ impl SequencerState {
             return false;
         }
 
+        let apply = |slot: &mut crate::process::TrackProcessSlot| {
+            let current = slot.bindings.get(port_name);
+            if matches!(current, Some(Some(existing)) if existing == &target) {
+                false
+            } else {
+                slot.bindings
+                    .insert(port_name.to_string(), Some(target.clone()));
+                true
+            }
+        };
         let changed = {
             let mut chains = self.pattern.process_chains.lock().unwrap();
             let Some(chain) = chains.get_mut(track) else {
                 return false;
             };
-            let Some(slot) = chain
+            chain
                 .slots
                 .iter_mut()
                 .find(|slot| slot.instance_id == instance_id)
-            else {
-                return false;
-            };
-            let current = slot.bindings.get(port_name);
-            if matches!(current, Some(Some(existing)) if existing == &target) {
-                false
-            } else {
-                slot.bindings.insert(port_name.to_string(), Some(target));
-                true
-            }
+                .map(apply)
+        };
+        let Some(changed) =
+            changed.or_else(|| self.edit_project_process_chain_slot(instance_id, apply))
+        else {
+            return false;
         };
         if changed {
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
@@ -4867,6 +5178,19 @@ impl SequencerState {
                 }
             }
         }
+        if let Some(project_changed) = self.edit_project_process_chain_slot(instance_id, |slot| {
+            let current = slot.bindings.get(port_name);
+            if matches!(current, Some(Some(existing)) if existing == &target) {
+                false
+            } else {
+                slot.bindings
+                    .insert(port_name.to_string(), Some(target.clone()));
+                true
+            }
+        }) {
+            updated += 1;
+            changed |= project_changed;
+        }
         if changed {
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             self.publish_scheduler_snapshot();
@@ -4888,14 +5212,18 @@ impl SequencerState {
             let Some(chain) = chains.get_mut(track) else {
                 return false;
             };
-            let Some(slot) = chain
+            chain
                 .slots
                 .iter_mut()
                 .find(|slot| slot.instance_id == instance_id)
-            else {
-                return false;
-            };
-            slot.bindings.remove(port_name).is_some()
+                .map(|slot| slot.bindings.remove(port_name).is_some())
+        };
+        let Some(changed) = changed.or_else(|| {
+            self.edit_project_process_chain_slot(instance_id, |slot| {
+                slot.bindings.remove(port_name).is_some()
+            })
+        }) else {
+            return false;
         };
         if changed {
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
@@ -4931,6 +5259,19 @@ impl SequencerState {
                 }
             }
         }
+        if self
+            .edit_project_process_chain_slot(instance_id, |slot| {
+                slot.lanes.insert(
+                    inlet_name.to_string(),
+                    crate::process::ProcessLane {
+                        values: values.clone(),
+                    },
+                );
+            })
+            .is_some()
+        {
+            updated += 1;
+        }
         if updated > 0 {
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             self.publish_scheduler_snapshot();
@@ -4941,7 +5282,8 @@ impl SequencerState {
         &self,
         instance_id: crate::process::ProcessInstanceId,
     ) -> usize {
-        self.pattern
+        let track_attachments: usize = self
+            .pattern
             .process_chains
             .lock()
             .unwrap()
@@ -4953,7 +5295,14 @@ impl SequencerState {
                     .filter(|slot| slot.instance_id == instance_id)
                     .count()
             })
-            .sum()
+            .sum();
+        let project_attachments = self
+            .project_process_chain()
+            .slots
+            .iter()
+            .filter(|slot| slot.instance_id == instance_id)
+            .count();
+        track_attachments + project_attachments
     }
     pub fn process_inlet_value(
         &self,
@@ -5190,10 +5539,19 @@ impl SequencerState {
             profile.update_pattern_atoms = started.elapsed();
 
             let metadata = scenes.current_scene_metadata();
+            let project_process_chain = scenes.current_project_process_chain();
             let snapshot_source = launched
                 .into_iter()
                 .collect::<Option<Vec<_>>>()
-                .map(|tracks| (tracks, metadata.0, metadata.1, metadata.2));
+                .map(|tracks| {
+                    (
+                        tracks,
+                        metadata.0,
+                        metadata.1,
+                        metadata.2,
+                        project_process_chain,
+                    )
+                });
 
             (sample_ids, snapshot_source)
         };
@@ -5203,12 +5561,20 @@ impl SequencerState {
         profile.schedule_mod_resync = started.elapsed();
 
         let started = Instant::now();
-        if let Some((tracks, mod_connections, neural_networks, graph_overrides)) = snapshot_source {
+        if let Some((
+            tracks,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            project_process_chain,
+        )) = snapshot_source
+        {
             self.publish_scheduler_snapshot_from_track_pattern_data(
                 &tracks,
                 mod_connections,
                 neural_networks,
                 graph_overrides,
+                project_process_chain,
             );
         } else {
             self.publish_scheduler_snapshot();
@@ -6762,6 +7128,8 @@ mod tests {
             graph_overrides: Vec::new(),
             rack_tracks: vec![None; num_tracks],
             process_chains: vec![crate::process::TrackProcessChain::default(); num_tracks],
+            project_process_lane_overrides: vec![Default::default(); num_tracks],
+            project_process_chain: crate::process::TrackProcessChain::default(),
             plock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
             key_lock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
         }
@@ -8170,6 +8538,8 @@ mod tests {
             graph_overrides: Vec::new(),
             rack_tracks: vec![None; 4],
             process_chains: vec![crate::process::TrackProcessChain::default(); 4],
+            project_process_lane_overrides: vec![Default::default(); 4],
+            project_process_chain: crate::process::TrackProcessChain::default(),
             plock_variant_registries: vec![PlockVariantRegistry::default(); 4],
             key_lock_variant_registries: vec![PlockVariantRegistry::default(); 4],
         };
@@ -8298,6 +8668,7 @@ mod tests {
                 instance_name: Some("sparse-h".to_string()),
                 class_name: "sparse".to_string(),
                 enabled: true,
+                project_layer: false,
                 inlets: std::collections::BTreeMap::new(),
                 lanes: std::collections::BTreeMap::from([(
                     "amount".to_string(),
@@ -8322,6 +8693,7 @@ mod tests {
                 instance_name: Some("phase3b-writer-h".to_string()),
                 class_name: "phase3b-mappable-writer".to_string(),
                 enabled: true,
+                project_layer: false,
                 inlets: std::collections::BTreeMap::new(),
                 lanes: std::collections::BTreeMap::new(),
                 bindings: std::collections::BTreeMap::from([(
@@ -8670,6 +9042,129 @@ mod tests {
             state.track_process_chain(0),
             Some(first.process_chains[0].clone())
         );
+    }
+
+    #[test]
+    fn project_process_chain_is_scene_scoped_and_survives_scene_switching() {
+        let state = make_state_with_tracks(2);
+        let mut project_chain = sample_process_chain();
+        project_chain.slots[0].project_layer = true;
+
+        let mut first = PatternSnapshot::new_default(2, &[]);
+        first.project_process_chain = project_chain.clone();
+        let second = PatternSnapshot::new_default(2, &[]);
+
+        let buffer_ids = [-1, -1];
+        let sample_rates = [44_100, 44_100];
+        let names = [String::new(), String::new()];
+        let instrument_types = [InstrumentType::Sampler, InstrumentType::Sampler];
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+
+        assert_eq!(state.project_process_chain(), project_chain);
+        // Every track's effective chain starts with the shared project slot.
+        for track in 0..2 {
+            let composed = state
+                .composed_track_process_chain(track)
+                .expect("composed chain");
+            assert_eq!(composed.slots.len(), 1);
+            assert!(composed.slots[0].project_layer);
+        }
+        // The scheduler snapshot sees the composed chain on every track.
+        let snapshot = state.publish_scheduler_snapshot();
+        for track in 0..2 {
+            assert_eq!(snapshot.tracks[track].process_chain.slots.len(), 1);
+            assert!(snapshot.tracks[track].process_chain.slots[0].project_layer);
+        }
+
+        // Settings are pattern-scoped: scene 2 has its own (empty) layer.
+        state
+            .switch_pattern(1, 2, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .expect("switch to scene 2");
+        assert!(state.project_process_chain().slots.is_empty());
+        let snapshot = state.latest_scheduler_snapshot();
+        assert!(snapshot.tracks[0].process_chain.slots.is_empty());
+
+        state
+            .switch_pattern(0, 2, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .expect("switch back to scene 1");
+        assert_eq!(state.project_process_chain(), project_chain);
+
+        // Whole-layer replace + export roundtrip.
+        assert!(state.set_project_process_chain(crate::process::TrackProcessChain::default()));
+        assert!(state.project_process_chain().slots.is_empty());
+        assert!(state.set_project_process_chain(project_chain.clone()));
+        let bank = state.export_pattern_repository();
+        assert_eq!(bank[0].project_process_chain, project_chain);
+        assert!(bank[1].project_process_chain.slots.is_empty());
+    }
+
+    #[test]
+    fn project_lane_ui_edits_fork_per_track_and_can_revert_to_live_template() {
+        let state = make_state_with_tracks(2);
+        let mut project_chain = sample_process_chain();
+        let slot = &mut project_chain.slots[0];
+        slot.project_layer = true;
+        slot.instance_name = Some("shared".to_string());
+        slot.lanes.get_mut("amount").unwrap().values = vec![0.1, 0.2, 0.3];
+        let instance_id = slot.instance_id;
+        assert!(state.set_project_process_chain(project_chain));
+
+        assert!(state.set_process_lane_value(0, instance_id, "amount", 1, 9.0));
+        assert_eq!(
+            state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values,
+            vec![0.1, 9.0, 0.3]
+        );
+        assert_eq!(
+            state.composed_track_process_chain(1).unwrap().slots[0].lanes["amount"].values,
+            vec![0.1, 0.2, 0.3]
+        );
+        assert_eq!(state.project_process_chain().slots[0].lanes["amount"].values, vec![0.1, 0.2, 0.3]);
+        assert!(state.has_project_process_lane_override(0, instance_id, "amount"));
+
+        assert_eq!(state.set_process_lane_values(instance_id, "amount", vec![4.0, 5.0]), 1);
+        assert_eq!(state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values, vec![0.1, 9.0, 0.3]);
+        assert_eq!(state.composed_track_process_chain(1).unwrap().slots[0].lanes["amount"].values, vec![4.0, 5.0]);
+
+        assert!(state.clear_project_process_lane_override(0, instance_id, "amount"));
+        assert_eq!(state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values, vec![4.0, 5.0]);
+    }
+
+    #[test]
+    fn project_process_chain_slot_edits_reach_the_shared_slot_from_any_track() {
+        let state = make_state_with_tracks(2);
+        let mut project_chain = sample_process_chain();
+        project_chain.slots[0].project_layer = true;
+        let instance_id = project_chain.slots[0].instance_id;
+        assert!(state.set_project_process_chain(project_chain));
+
+        // Track-scoped mutators fall back to the shared project slot when the
+        // instance is not in that track's own chain (edit-from-any-track).
+        assert!(state.set_track_process_slot_enabled(1, instance_id, false));
+        assert!(!state.project_process_chain().slots[0].enabled);
+        assert!(state.set_track_process_slot_enabled(0, instance_id, true));
+        assert!(state.project_process_chain().slots[0].enabled);
+
+        assert!(state.set_process_lane_value(1, instance_id, "amount", 2, 7.0));
+        assert_eq!(
+            state.project_process_chain().slots[0]
+                .lanes
+                .get("amount")
+                .map(|lane| lane.values.clone()),
+            Some(vec![0.0, 1.0, 7.0])
+        );
+
+        // Instance-wide mutators (lane! / handle knob writes) reach it too.
+        assert_eq!(
+            state.set_process_lane_values(instance_id, "amount", vec![0.0, 3.0]),
+            1
+        );
+        assert_eq!(state.process_instance_attachment_count(instance_id), 1);
+
+        // Removing from any track's panel removes the shared slot.
+        assert!(state.remove_track_process_slot(0, instance_id));
+        assert!(state.project_process_chain().slots.is_empty());
+        assert!(!state.remove_track_process_slot(0, instance_id));
     }
 
     #[test]

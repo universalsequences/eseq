@@ -37,7 +37,7 @@ impl ProcessTimeExpr {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProcessInstanceId(pub u64);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,6 +343,11 @@ pub struct TrackProcessSlot {
     pub class_name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Slot belongs to the project-level default layer shared by every track.
+    /// Project slots share configuration (knobs, lanes) but never runtime
+    /// state: their runtime ids are keyed `(instance, track)` at fire time.
+    #[serde(default)]
+    pub project_layer: bool,
     #[serde(default)]
     pub inlets: BTreeMap<String, ProcessLiteral>,
     #[serde(default)]
@@ -359,6 +364,48 @@ fn default_true() -> bool {
 pub struct TrackProcessChain {
     #[serde(default)]
     pub slots: Vec<TrackProcessSlot>,
+}
+
+/// Forked lanes for one track, keyed by durable project-slot identity and inlet.
+pub type ProjectLaneOverrides =
+    BTreeMap<ProcessInstanceId, BTreeMap<String, ProcessLane>>;
+
+pub fn project_slot_identity_id(slot: &TrackProcessSlot) -> ProcessInstanceId {
+    ProcessInstanceId(if let Some(name) = slot.instance_name.as_deref() {
+        named_process_runtime_id(&slot.class_name, name)
+    } else {
+        slot.instance_id.0
+    })
+}
+
+pub fn apply_project_lane_overrides(
+    chain: &mut TrackProcessChain,
+    overrides: &ProjectLaneOverrides,
+) {
+    for slot in &mut chain.slots {
+        let Some(lanes) = overrides.get(&project_slot_identity_id(slot)) else {
+            continue;
+        };
+        for (inlet, lane) in lanes {
+            slot.lanes.insert(inlet.clone(), lane.clone());
+        }
+    }
+}
+
+/// A track's effective chain at fire time: project-layer slots run first,
+/// then the track's own slots (the project layer is a policy composed at
+/// snapshot capture, never stamped into per-track storage).
+pub fn compose_effective_process_chain(
+    project: &TrackProcessChain,
+    track: &TrackProcessChain,
+) -> TrackProcessChain {
+    if project.slots.is_empty() {
+        return track.clone();
+    }
+    let mut slots = Vec::with_capacity(project.slots.len() + track.slots.len());
+    slots.extend(project.slots.iter().cloned());
+    slots.extend(track.slots.iter().cloned());
+    TrackProcessChain { slots }
 }
 
 fn process_param_index_by_tag_or_name(
@@ -1858,7 +1905,7 @@ impl ProcessRuntime {
         let source = def.run_source.clone()?;
         let ports = def.ports.clone();
         let seed_policy = def.seed_policy;
-        let instance_id = track_process_slot_runtime_id(slot);
+        let instance_id = track_process_slot_runtime_id(slot, ctx.track);
         self.step_process_runtime_ids.insert(instance_id.0);
         let existing_state = self
             .step_process_states
@@ -2429,11 +2476,19 @@ fn runtime_instance_id(instance: &AuthoredProcessInstance) -> u64 {
     }
 }
 
-fn track_process_slot_runtime_id(slot: &TrackProcessSlot) -> ProcessInstanceId {
-    if let Some(name) = slot.instance_name.as_deref() {
-        ProcessInstanceId(named_process_runtime_id(&slot.class_name, name))
+fn track_process_slot_runtime_id(slot: &TrackProcessSlot, track: usize) -> ProcessInstanceId {
+    let base = if let Some(name) = slot.instance_name.as_deref() {
+        named_process_runtime_id(&slot.class_name, name)
     } else {
-        slot.instance_id
+        slot.instance_id.0
+    };
+    if slot.project_layer {
+        // Project-layer slots share configuration but never state: every
+        // track gets its own runtime identity (and therefore its own state
+        // map entry and RNG stream).
+        ProcessInstanceId(base ^ stable_mix64((track as u64).wrapping_add(0x51ED_2701_A6C3_49B5)))
+    } else {
+        ProcessInstanceId(base)
     }
 }
 
@@ -2864,6 +2919,7 @@ mod tests {
             instance_name: None,
             class_name: "sparse".to_string(),
             enabled: true,
+            project_layer: false,
             inlets: BTreeMap::new(),
             lanes: BTreeMap::from([(
                 "amount".to_string(),

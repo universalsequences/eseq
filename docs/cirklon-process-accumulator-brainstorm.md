@@ -1,7 +1,13 @@
 # Cirklon-Style Step Processes: Design Spec
 
 Status: design spec (evolved from brainstorm). Phase 5 has landed through the
-fx-panel process-chain surface. Rack-slot write application remains a follow-up.
+fx-panel process-chain surface, and the Phase 5B project layer (items 1-3 + 6)
+has landed: `(processes :project ...)`, fire-time composition, per-track
+runtime state, and the badged fx-panel rows. Phase 5C (per-track
+copy-on-write lanes on project slots) is designed and ready to implement —
+it fixes the shipped-and-immediately-bitten singular-lane UI behavior.
+Latched brain wires and `target-mul!` (5B items 4-5) remain. Rack-slot write
+application remains a follow-up.
 Covers accumulators, masks, ratchets, grabs, and the track-attached process
 chain, all built on the existing scheduler-owned `def-process` framework.
 
@@ -576,16 +582,15 @@ Rules:
 - Writes go to the *current pattern's* chain (settings/lanes pattern-scoped,
   identity track-level). `:patterns :all` can come later with preset tier 2.
 - `processes` returns the handle when given one instance, a list otherwise.
-- **`:track :all` is deprecated** in favor of `(processes :project ...)` —
-  see the project layer below. The implemented `:all` form stamps a snapshot
-  of the current tracks (new tracks don't inherit) and, worse, shares one
+- **`:track :all` is removed** in favor of `(processes :project ...)` — it
+  now errors with a pointer to the project layer. The old `:all` form stamped
+  a snapshot of the current tracks (new tracks didn't inherit) and shared one
   runtime id across all tracks — shared mutable state, shared RNG stream
   (identical rolls on every track at the same `(cycle, step)`), and global
-  `lane!` edits. None of that is what "attach everywhere" means. Once
-  `:project` lands, `:track :all` should error with a pointer to it;
+  `lane!` edits. None of that is what "attach everywhere" means.
   `(list ...)` remains for deliberately stamping copies on a track set.
 
-### Project process layer: extending the DAW (design)
+### Project process layer: extending the DAW (landed)
 
 "Attach this to every track" done right is a **policy, not a snapshot**: a
 project-level default chain that every track — present and future — runs in
@@ -625,10 +630,19 @@ Rules:
   rolls its own dice; `:seed :locked` locks each track's *own* roll pattern.
   A project prob-mask thins each track independently instead of dropping the
   whole mix on the same steps.
-- **Knobs and lanes stay singular.** One `prob` lane, edited once (handle or
-  UI), read by every track — "the extension defines the pedal; every channel
-  runs its own copy." Per-track lane *overrides* on a project slot are
-  deliberately out of scope for v1 (mixer-group territory).
+- **Knobs stay singular; lanes are per-track copy-on-write (revised
+  2026-07-10).** The original v1 shipped fully singular lanes ("one `prob`
+  lane, edited once, read by every track") with per-track overrides deferred
+  "until they bite." They bit on day one: editing a project lane from one
+  track's expanded step editor visibly moved every other track's lane, which
+  reads as cross-track leakage, not "editing the shared pedal." Revised
+  decision: the authored lane is a shared *template*; any per-track UI edit
+  forks that track's own copy (initialized from the template — copied state),
+  and from then on the track owns it. Tracks that never edit keep following
+  the template live, so the singular-lane behavior still exists — it is just
+  no longer what a UI edit does. Scalar knobs and enable/bypass stay
+  singular. Full design + implementation plan: "Project-slot lanes:
+  per-track copy-on-write" below (Phase 5C).
 - **Wiring stays within a layer.** `connect!` between project slots follows
   the normal chain rules (a project slot is one logical inlet, so a wire to
   it is one binding — the per-track fan-out is implicit and does not violate
@@ -639,6 +653,236 @@ Rules:
   any track but clearly one shared object. A per-track bypass toggle on a
   project slot is the natural "everywhere except the drums" escape hatch —
   requires per-track storage for that flag; fine to defer.
+
+### Project-slot lanes: per-track copy-on-write (design — Phase 5C)
+
+Status: designed 2026-07-10 (user decision after playing the landed 5B
+build), not yet implemented. This section is written to be implementable
+without further design work; file/function references were verified against
+the Phase 5B implementation on branch `worktree-project-process-layer`.
+
+#### Semantics
+
+- **Template.** The lanes stored on the project slot itself
+  (`TrackProcessSlot.lanes` inside `Scene.project_process_chain`) are the
+  shared *template* — authored by the `(lane ...)` literal at attach time and
+  re-authored by `lane!` on the instance handle. The template is one object,
+  scene-level, exactly as today.
+- **Override = fork-on-first-edit.** A per-track lane edit (expanded step
+  editor slider, soft-edit keys — anything that lands in
+  `SequencerState::set_process_lane_value`) on a *project* slot does not
+  touch the template. Instead it forks: copy the track's current effective
+  lane (override if one already exists, else a verbatim clone of the
+  template's `ProcessLane`), apply the edit to the copy, store it as that
+  track's override. "Copied state": the fork starts as what the user was
+  looking at, then diverges.
+- **Resolution.** A track's effective lane for a project slot =
+  `override(track, slot, inlet)` if present, else the template lane, else
+  the inlet default (unchanged `ProcessLane::value_at` behavior for steps
+  past the lane's length). Tracks that never edit keep following the
+  template *live* — re-author the template and every unforked track hears
+  it; forked tracks keep their copies.
+- **Revert.** Each `(track, slot, inlet)` override is individually
+  clearable — "revert to shared" — after which the track follows the
+  template again. This is the escape hatch back to singular-lane behavior.
+- **Scope of the fork: lanes only.** Scalar (non-lane) inlets, the
+  enabled/bypass flag, port bindings, and chain order remain singular shared
+  state. (Per-track bypass stays its own deferred item.)
+- **`lane!` writes the template.** Handle-level `lane!` (and `(instance
+  :inlet (lane ...))` knob-style writes routed through
+  `set_process_lane_values`) re-author the template and leave overrides
+  alone — a fork is a deliberate per-track decision and script re-evaluation
+  must not silently undo it. Symmetrically, script re-eval of `(processes
+  :project ...)` preserves overrides for retained slot identities (see
+  Reconciliation).
+
+#### Storage
+
+Follow the `process_chains` precedent exactly (live per-track store +
+`TrackPatternData` field + `PatternSnapshot` field + project-file serde):
+
+- **Identity key.** Overrides are keyed by the slot's durable identity, not
+  its raw handle id: define in `process.rs`
+
+  ```rust
+  pub fn project_slot_identity_id(slot: &TrackProcessSlot) -> ProcessInstanceId
+  ```
+
+  = `named_process_runtime_id(class_name, instance_name)` when the slot is
+  named, else `slot.instance_id` — i.e. the same base as
+  `track_process_slot_runtime_id` *without* the per-track mix-in. Named
+  instances (`(def ext (cls ...)) (processes :project ext)`) therefore keep
+  their overrides across script re-evals; anonymous inline instances get
+  fresh handle ids per eval and drop them — exact parity with the existing
+  lane-preservation rule, and the same reason the demo script uses named
+  handles.
+- **Override map type** (in `process.rs`):
+
+  ```rust
+  /// inlet name -> forked lane, per project-slot identity.
+  pub type ProjectLaneOverrides =
+      BTreeMap<ProcessInstanceId /* identity id */, BTreeMap<String, ProcessLane>>;
+  ```
+
+  Serde caveat: project files are JSON, and JSON map keys must be strings.
+  serde_json stringifies integer keys, and `ProcessInstanceId` is a u64
+  newtype, so this should roundtrip — but prove it in the roundtrip test
+  first; if the newtype key fails, either mark `ProcessInstanceId`
+  `#[serde(transparent)]` or serialize the overrides as `Vec<(u64, ...)>`
+  at the `ProjectPattern` boundary.
+
+- **Live state**: `state.pattern.project_process_lane_overrides:
+  Mutex<Vec<ProjectLaneOverrides>>`, indexed by track — declared next to
+  `process_chains` (`sequencer/state.rs` `PatternState`, ~line 2528) and
+  initialized alongside it (`vec![Default::default(); num_tracks]`, two
+  construction sites: `SequencerState::new` and the test helper near line
+  6780).
+- **Pattern scoping**: add `project_process_lane_overrides:
+  ProjectLaneOverrides` to `TrackPatternData` and
+  `project_process_lane_overrides: Vec<ProjectLaneOverrides>` to
+  `PatternSnapshot`, wired through every place `process_chains` already
+  appears (grep for `process_chains` in `sequencer/state.rs` and mirror each
+  site): `PatternSnapshot::capture` (~line 1808), `restore_to` (~line 611),
+  `track_pattern_data` / `set_track_pattern_data` / `clear_track` (~lines
+  1981/2018/2055), `push_default_track` / `normalize_track_count` /
+  `truncate_tracks` / `remove_track` (track add/delete compaction),
+  `new_default`, and `track_lane_count_is_consistent`. Overrides are
+  therefore **pattern-cell-scoped per track** (like track-chain lanes): a
+  per-track pattern launch swaps that track's overrides while the scene-level
+  project chain stays put — per-pattern lane content, which is the desired
+  composition of the two scopes.
+- **Persistence**: `ProjectPattern` (`project.rs` ~line 320) gains
+  `#[serde(default)] pub project_process_lane_overrides:
+  Vec<crate::process::ProjectLaneOverrides>`; wire both conversion
+  directions — `ProjectPattern::from_snapshot` (~line 621) and the load-side
+  destructure + `PatternSnapshot` literal in `ui/projects.rs` (~lines 2289 /
+  2542, plus the test literal at ~2934). Old project files deserialize to
+  empty overrides (serde default). Extend `current_project_format_roundtrips`
+  with a populated override entry.
+
+#### Composition (where forks become audible)
+
+All composition already funnels through `compose_track_process_chain` in
+`sequencer/snapshot.rs` (both `SequencerSnapshot::capture` and
+`track_snapshot_from_pattern_data` call it) and through
+`SequencerState::composed_track_process_chain` (the UI's effective view).
+Add one shared overlay helper in `process.rs`:
+
+```rust
+pub fn apply_project_lane_overrides(
+    chain: &mut TrackProcessChain,          // project slots only, already cloned per track
+    overrides: &ProjectLaneOverrides,
+) {
+    for slot in &mut chain.slots {
+        let Some(lanes) = overrides.get(&project_slot_identity_id(slot)) else { continue };
+        for (inlet, lane) in lanes {
+            slot.lanes.insert(inlet.clone(), lane.clone());
+        }
+    }
+}
+```
+
+and call it in `compose_track_process_chain` (which gains an
+`overrides: Option<&ProjectLaneOverrides>` parameter) after the per-track
+binding-refresh clone, before concatenating with the track chain. Thread the
+per-track override map from:
+
+- `SequencerSnapshot::capture` — read the live
+  `project_process_lane_overrides[track_idx]` (lock it where
+  `live_process_chains` is locked; it is another `pattern.*` mutex, same
+  order rules).
+- `track_snapshot_from_pattern_data` — read
+  `data.project_process_lane_overrides` (scene-launch path).
+- `SequencerState::composed_track_process_chain` — same overlay so the UI
+  sees effective lanes.
+
+The scheduler is untouched (it iterates the composed snapshot chain), and
+per-track runtime ids are untouched (the runtime id already mixes the track
+in; the override only changes lane *data*). Pure-fold preview reads the
+composed slot's lanes, so accumulator curve previews are automatically
+per-track correct.
+
+#### Mutators (`sequencer/state.rs`)
+
+- **`set_process_lane_value(track, instance_id, inlet, step, value)`** — the
+  UI write path, and the site of the current wrong behavior: its Phase 5B
+  fallback edits the shared project slot directly
+  (`edit_project_process_chain_slot`). Replace that fallback with
+  fork-on-write: if `instance_id` matches no track-chain slot but matches a
+  project slot (by `instance_id` — the UI passes the slot's raw id — then map
+  to `project_slot_identity_id` for storage), build the forked lane (clone
+  override else template), resize/pad + apply the step write exactly as the
+  track-slot branch does, store into
+  `project_process_lane_overrides[track][identity][inlet]`, bump the pattern
+  epoch, publish. Note the existing resize pads with `0.0`, not the inlet
+  default — a pre-existing quirk shared with track slots; keep parity, don't
+  fix here.
+- **`set_process_lane_values(instance_id, inlet, values)`** (`lane!`) — keep
+  the Phase 5B behavior: writes the template on the project slot (plus any
+  track-chain attachments), never touches overrides.
+- **New: `clear_project_process_lane_override(track, instance_id, inlet) ->
+  bool`** — remove the entry (empty inner maps pruned), epoch bump + publish
+  when something was removed. Expose as a metal_seq native
+  (`seq-clear-project-lane-override`, `natives.rs`) for the revert gesture.
+- **`set_track_process_inlet_value` / `set_track_process_slot_enabled` /
+  binding mutators** — unchanged: scalar knobs and bypass stay shared
+  (their Phase 5B project-slot fallbacks are correct behavior).
+
+#### Reconciliation and lifecycle
+
+- **Whole-layer replace** (`(processes :project ...)` in `lisp_host.rs`):
+  after `preserve_process_slot_state` computes the retained chain, prune
+  every track's override map to the identity ids present in the new chain
+  (a helper on `SequencerState`, called from `set_project_process_chain` or
+  the native — pruning at replace time keeps the store from accumulating
+  orphans). Retained named identities keep their overrides with zero remap
+  work because the identity id is name-derived.
+- **Layer cleared** (`(processes :project)`): the prune empties all override
+  maps.
+- **Track add**: new track gets an empty override map (follows the template)
+  — the policy property is preserved. Track delete: the per-track `Vec`
+  compacts with the other track-indexed lanes (`remove_track_lane_if_present`).
+- **Scene switch / per-track pattern launch**: rides the
+  `TrackPatternData` capture/restore added above; nothing new.
+- **Slot removed from the panel** (`remove_track_process_slot` project
+  fallback): also drop that identity's overrides on every track.
+
+#### UI
+
+- **Lane entry metadata** (`state_values.rs`,
+  `process_lane_entries_for_track` / `process_lane_entry_value`): the
+  composed chain already yields effective values; add two fields to
+  `ProcessLaneUiEntry` and the published map — `("project", Bool)` (slot is
+  project-layer; the flag is already on the slot) and `("forked", Bool)`
+  (this track has an override for this inlet — needs the override map, or
+  simplest: compare composed lane identity against the template). The
+  expanded step editor lane header shows a PROJECT tag, styled
+  linked-vs-forked (dim when following the template, solid when forked),
+  with a "revert to shared" action calling the new native. This is the
+  legibility fix for the day-one confusion: the first edit visibly flips
+  the row from linked to forked.
+- **Template editing from the UI is out of scope** for 5C: the template is
+  authored via script (`lane!`); the UI edits per-track copies. If a
+  "push my lane to the template / to all tracks" gesture is wanted later it
+  is a small additive native, not a storage change.
+
+#### Acceptance tests
+
+1. Fork isolation: two tracks, project slot with a template lane; UI-path
+   `set_process_lane_value` on track 0 changes only track 0's composed lane
+   (scheduler snapshot per-track `process_chain` lanes differ); template and
+   track 1 unchanged. The pre-5C behavior (both tracks moving) is the
+   regression this guards.
+2. Fold correctness: scheduler test — one project `def-accumulator`, two
+   tracks with different forked `delta` lanes → different per-track
+   transpose sequences (extend
+   `scheduler_project_layer_runs_on_every_track_with_independent_state`).
+3. Template stays live for unforked tracks: `lane!` after track 0 forked —
+   track 1's composed lane follows the new template, track 0 keeps its fork.
+4. Revert: clearing the override returns the track to the template.
+5. Lifecycle: overrides survive scene switch round-trip and project
+   save/load; named-instance script re-eval preserves them; layer clear and
+   slot removal prune them; a newly added track follows the template.
 
 ### Shared brains: self-clocked processes + latched inlet wires (design)
 
@@ -1257,34 +1501,68 @@ Non-track processes (conductors, field publishers) do not get a patch editor
 badges on track process slots showing field subscriptions, with a
 publishers/listeners list per field name — an inspector, not a graph.
 
-### Phase 5B — Project layer + shared brains (next candidate)
+### Phase 5B — Project layer + shared brains (items 1-3 + 6 landed)
 
 Depends only on Phase 4 (process-inlet machinery) and Phase 5 (fx panel), both
 landed; gates nothing in Phases 6–9. See the two design sections above for
 full semantics.
 
-1. `ProjectProcessChain` store beside `process_chains[track]`; fire-time chain
-   composition (`project slots ++ track slots`) in the scheduler's slot
-   iteration; `(processes :project ...)` authoring form (whole-layer replace).
-2. Per-`(instance, track)` runtime state and RNG seeds for project-layer
-   slots: track component in `track_process_slot_runtime_id` and
-   `ProcessRngPosition::Step`.
-3. Deprecate `:track :all` (error with a pointer to `:project`).
-4. Latched inlet wires: self-clocked producer → chain-slot inlet, sample-and-
+1. **Landed.** The project chain lives as scene-level state (the
+   `mod_connections` precedent: `Scene.project_process_chain`, pattern-scoped
+   settings, persisted per pattern in the project file). Composition
+   (`project slots ++ track slots`) happens at scheduler-snapshot capture
+   against live state — the scheduler's slot iteration is untouched and new
+   tracks inherit automatically. Project slots carry a `project_layer` flag;
+   per-track manual device bindings refresh per track at capture.
+   `(processes :project ...)` is whole-layer replace with the same
+   named-instance reconciliation rules as track chains; the empty form clears
+   the layer. Demo: `crates/sequencer/scripts/process-project-layer-demo.lisp`.
+2. **Landed.** `track_process_slot_runtime_id` mixes the track index into the
+   runtime id for project-layer slots, which keys both the state map and the
+   RNG seed per `(instance, track)` — every track rolls its own dice and runs
+   its own accumulator/state copy (no `ProcessRngPosition` change needed).
+   Covered by a scheduler test proving two tracks count independently.
+3. **Landed.** `:track :all` errors with a pointer to `:project`.
+4. **Remaining.** Latched inlet wires: self-clocked producer → chain-slot inlet, sample-and-
    hold register keyed by target inlet, timestamp-interleaved with track fires
    in lookahead. Two authoring surfaces: `connect!` from a standalone process
    handle (concrete address), and the instance-level `:connect` selector hint
    with mandatory `:scope` — which requires `process-inlet`/`wire` becoming
    constructor natives (unquoted selector values; migrate the Phase 4 quoted
    form).
-5. `target-mul!` joins the op vocabulary (continuous/ordered domains; inlet
-   and param-target writes).
-6. fx panel: project slots rendered at the top of every track's process
-   column, badged as the shared project layer.
-7. Acceptance: energy-brain → project prob-mask via `add`/`mul` — per-track
-   independent veto patterns, latch visible only to fires at-or-after the
-   brain tick, defaults-inert before the first tick, replay test across a
-   scene switch mid-lookahead.
+5. **Remaining.** `target-mul!` joins the op vocabulary (continuous/ordered
+   domains; inlet and param-target writes).
+6. **Landed.** fx panel: project slots render at the top of every track's
+   process column with a PROJECT badge; slot edits (bypass, knobs, lanes,
+   bindings, remove, reorder-within-layer) from any track's panel land on the
+   one shared object. Cross-layer process-inlet wires are rejected at
+   fire-time resolution (same-layer match only).
+7. **Remaining** (with item 4). Acceptance: energy-brain → project prob-mask
+   via `add`/`mul` — per-track independent veto patterns, latch visible only
+   to fires at-or-after the brain tick, defaults-inert before the first tick,
+   replay test across a scene switch mid-lookahead.
+
+### Phase 5C — Project-slot per-track lanes (next: designed, unimplemented)
+
+Full design in "Project-slot lanes: per-track copy-on-write" above — written
+to be implementable as-is, with file/function anchors. Summary of the slice:
+
+1. `project_slot_identity_id` + `ProjectLaneOverrides` type +
+   `apply_project_lane_overrides` overlay helper (`process.rs`).
+2. Per-track override store following the `process_chains` precedent end to
+   end: live `PatternState` mutex, `TrackPatternData` / `PatternSnapshot`
+   fields with capture/restore/track-compaction, `ProjectPattern` serde
+   (+ roundtrip test).
+3. Overlay threaded through `compose_track_process_chain` (both call sites)
+   and `composed_track_process_chain`; scheduler untouched.
+4. `set_process_lane_value` project fallback becomes fork-on-write (this is
+   the behavior fix); `lane!` keeps writing the template; new
+   `clear_project_process_lane_override` + `seq-clear-project-lane-override`
+   native; prune overrides on whole-layer replace / slot removal.
+5. UI: `project` + `forked` fields on lane entries; linked-vs-forked PROJECT
+   tag on expanded-editor lane rows with a revert action.
+6. Acceptance tests 1-5 from the design section (fork isolation is the
+   regression guard for the day-one bug).
 
 ### Phase 6 — Pattern scoping polish + presets
 
@@ -1448,7 +1726,11 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
   slots (policy, not snapshot — new tracks inherit automatically; track
   chains never clobber it). Project-slot runtime state and RNG seeds are
   keyed `(instance, track)` — shared configuration, independent state.
-  Knobs/lanes singular; per-track lane overrides deferred.
+  Knobs singular. Lanes revised 2026-07-10 after v1 bit in practice: the
+  authored lane is a shared template; per-track UI edits fork a per-track
+  copy-on-write override (copied state), `lane!` re-authors the template,
+  unforked tracks follow it live, per-`(track, slot, inlet)` revert. See
+  "Project-slot lanes: per-track copy-on-write" (Phase 5C).
 - Shared brains are standalone self-clocked processes, never chain slots —
   their output is a cold outlet. Wires from a self-clocked producer to a
   chain-slot inlet are **latched** (sample-and-hold, value as of the last
@@ -1515,8 +1797,9 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
   than single lanes — confirm this stays cheap enough for the lane UI.
 - Project layer: does a track slot ever need to run *ahead of* the project
   layer (splice point), or is project-first always right?
-- Project layer: per-track lane overrides on a project slot, and per-track
-  bypass of a project slot (needs per-track storage for the flag) — both
-  deferred from v1; add only when they bite.
+- Project layer: per-track lane overrides bit on day one and are now
+  designed (Phase 5C, copy-on-write). Per-track *bypass* of a project slot
+  (needs per-track storage for the flag) remains deferred; when it lands it
+  should reuse the Phase 5C override store shape.
 - Whether the pack granularity (brain + project chain + wires) folds into the
   chain-preset question or is its own tier.

@@ -43,7 +43,7 @@ fn process_slot_port_def(
     instance_id: sequencer::process::ProcessInstanceId,
     port_name: &str,
 ) -> Option<sequencer::process::ProcessPortDef> {
-    let Some(chain) = state.track_process_chain(track) else {
+    let Some(chain) = state.composed_track_process_chain(track) else {
         return None;
     };
     let Some(slot) = chain
@@ -1925,6 +1925,33 @@ pub(crate) fn init_runtime(
         }
         ui_inv.push(UiInvalidation::ProcessChain { track });
         Ok(Value::Number(value as f64))
+    });
+
+    let state_for_clear_project_lane = Arc::clone(&state);
+    let ui_for_clear_project_lane = ui_invalidations.clone();
+    runtime.register_native("seq-clear-project-lane-override", move |args, _ctx| {
+        if args.len() != 3 {
+            return Err("seq-clear-project-lane-override: expected (track instance-id inlet)".into());
+        }
+        let Value::Number(track) = args[0] else {
+            return Err("seq-clear-project-lane-override: track must be a number".into());
+        };
+        let Value::Number(instance_id) = args[1] else {
+            return Err("seq-clear-project-lane-override: instance-id must be a number".into());
+        };
+        let inlet = value_symbol_name(&args[2])
+            .ok_or_else(|| "seq-clear-project-lane-override: inlet must be a name".to_string())?;
+        let cleared = state_for_clear_project_lane.clear_project_process_lane_override(
+            track as usize,
+            sequencer::process::ProcessInstanceId(instance_id as u64),
+            &inlet,
+        );
+        if cleared {
+            ui_for_clear_project_lane.push(UiInvalidation::ProcessChain {
+                track: track as usize,
+            });
+        }
+        Ok(Value::Bool(cleared))
     });
 
     let st = state.clone();

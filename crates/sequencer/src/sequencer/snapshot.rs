@@ -92,8 +92,17 @@ impl SequencerSnapshot {
             num_tracks,
         };
         let mut tracks = Vec::with_capacity(num_tracks);
+        // Fetched before the process-chains lock: scene launches lock scenes
+        // before restoring per-track chains, so keep the opposite nesting out
+        // of this path.
+        let project_process_chain = state.project_process_chain();
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let live_process_chains = state.pattern.process_chains.lock().unwrap();
+        let live_project_lane_overrides = state
+            .pattern
+            .project_process_lane_overrides
+            .lock()
+            .unwrap();
         let (effect_descriptors_by_track, instrument_descriptors) =
             state.scratch_runtime_descriptors();
 
@@ -140,7 +149,7 @@ impl SequencerSnapshot {
                 u32::MAX => None,
                 id => Some(id as usize),
             };
-            let effect_slots = state.pattern.effect_chains[track_idx]
+            let effect_slots: Vec<EffectSlotSnapshot> = state.pattern.effect_chains[track_idx]
                 .iter()
                 .map(EffectSlotSnapshot::capture)
                 .collect();
@@ -194,6 +203,15 @@ impl SequencerSnapshot {
                 });
             }
 
+            let process_chain = compose_track_process_chain(
+                &project_process_chain,
+                live_process_chains.get(track_idx),
+                &instrument_descriptor,
+                &instrument_slot,
+                &effect_descriptors,
+                &effect_slots,
+                live_project_lane_overrides.get(track_idx),
+            );
             tracks.push(SequencerTrackSnapshot {
                 params,
                 scene_silenced: state.is_scene_silenced(track_idx),
@@ -202,10 +220,7 @@ impl SequencerSnapshot {
                 instrument_base_note_offset,
                 engine_id,
                 rack_track: live_rack_tracks.get(track_idx).cloned().unwrap_or(None),
-                process_chain: live_process_chains
-                    .get(track_idx)
-                    .cloned()
-                    .unwrap_or_default(),
+                process_chain,
                 effect_descriptors,
                 effect_slots,
                 midi_fx_slots,
@@ -233,6 +248,7 @@ impl SequencerSnapshot {
         mod_connections: Vec<ModConnection>,
         neural_networks: Vec<ProjectNeuralNetwork>,
         graph_overrides: Vec<ProjectGraphOverrides>,
+        project_process_chain: crate::process::TrackProcessChain,
     ) -> Self {
         let num_tracks = tracks.len();
         let transport = SequencerTransportSnapshot {
@@ -262,6 +278,7 @@ impl SequencerSnapshot {
                     false,
                     effect_descriptors,
                     instrument_descriptor,
+                    &project_process_chain,
                 )
             })
             .collect();
@@ -282,10 +299,20 @@ fn track_snapshot_from_pattern_data(
     scene_silenced: bool,
     effect_descriptors: Vec<EffectDescriptor>,
     instrument_descriptor: EffectDescriptor,
+    project_process_chain: &crate::process::TrackProcessChain,
 ) -> SequencerTrackSnapshot {
     let engine_id = data.track_sound_state.engine_id;
-    let process_chain =
+    let track_chain =
         data.refreshed_process_chain(Some(&instrument_descriptor), &effect_descriptors);
+    let process_chain = compose_track_process_chain(
+        project_process_chain,
+        Some(&track_chain),
+        &instrument_descriptor,
+        &data.instrument_slot,
+        &effect_descriptors,
+        &data.effect_slots,
+        Some(&data.project_process_lane_overrides),
+    );
     let steps = (0..MAX_STEPS)
         .map(|step_idx| {
             let params = data
@@ -339,6 +366,38 @@ fn track_snapshot_from_pattern_data(
         instrument_slot: data.instrument_slot.clone(),
         steps,
     }
+}
+
+/// Compose a track's effective process chain: project-layer slots (refreshed
+/// against *this* track's descriptors so manual device bindings resolve
+/// per-track) run ahead of the track's own slots. Composition happens here —
+/// at snapshot capture against live state — so new tracks inherit the project
+/// layer automatically and nothing is ever stamped into per-track storage.
+fn compose_track_process_chain(
+    project_process_chain: &crate::process::TrackProcessChain,
+    track_chain: Option<&crate::process::TrackProcessChain>,
+    instrument_descriptor: &EffectDescriptor,
+    instrument_slot: &EffectSlotSnapshot,
+    effect_descriptors: &[EffectDescriptor],
+    effect_slots: &[EffectSlotSnapshot],
+    overrides: Option<&crate::process::ProjectLaneOverrides>,
+) -> crate::process::TrackProcessChain {
+    let track_chain = track_chain.cloned().unwrap_or_default();
+    if project_process_chain.slots.is_empty() {
+        return track_chain;
+    }
+    let mut project_chain = project_process_chain.clone();
+    crate::process::refresh_track_process_chain_binding_param_ids(
+        &mut project_chain,
+        Some(instrument_descriptor),
+        Some(instrument_slot),
+        effect_descriptors,
+        effect_slots,
+    );
+    if let Some(overrides) = overrides {
+        crate::process::apply_project_lane_overrides(&mut project_chain, overrides);
+    }
+    crate::process::compose_effective_process_chain(&project_chain, &track_chain)
 }
 
 fn track_pattern_bit(bits: [u64; super::data::TRACK_PATTERN_WORDS], step: usize) -> bool {
