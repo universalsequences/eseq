@@ -1,10 +1,9 @@
 //! Ableton-style Phaser-Flanger: one device, three sweep engines.
 //!
-//! * **Phaser** — a cascade of up to 12 second-order allpass sections, each
-//!   summed with its own input, one exact notch per section. The BLEND control morphs
-//!   the notch layout from exponential spacing around CENTER (the classic
-//!   phaser voicing) toward linear spacing (the harmonic comb of a flanger),
-//!   so the phaser end of the device can already lean flanger-ish.
+//! * **Phaser** — up to 12 second-order allpass sections with two circuits:
+//!   Stack preserves the original per-stage notch sums and feedback character;
+//!   Classic feeds back the un-mixed cascade and performs one dry/allpass sum
+//!   at the output for high-Q regenerative sweeps.
 //! * **Flanger** — a short Hermite-read delay (TIME, 0.1–20 ms) summed with
 //!   the input; the LFO sweeps the delay in log-time so the sweep reads as a
 //!   tape flange rather than a siren.
@@ -14,8 +13,8 @@
 //!
 //! Shared frame: one LFO (sine/tri/ramp/square, free Hz or beat-synced, the
 //! right channel reading STEREO degrees later), a ±feedback path conditioned
-//! by a 30 Hz DC blocker and tanh so full regeneration blooms instead of
-//! blowing up, WARMTH (compensated tanh drive plus low-frequency weight on
+//! by a circuit-specific DC blocker and tanh so full regeneration blooms
+//! instead of blowing up, WARMTH (compensated tanh drive plus low-frequency weight on
 //! the effect path only), equal-power dry/wet, and an output trim.
 
 use crate::audiograph::NodeVTable;
@@ -31,15 +30,28 @@ pub const MAX_NOTCHES: usize = 12;
 // Sweep ranges in octaves at AMOUNT = 100 % (multiplicative, so the phaser
 // sweeps center frequency and the delay modes sweep time in log domain).
 const PHASER_SWEEP_OCT: f32 = 2.5;
+const PHASER_SPREAD_SWEEP: f32 = 0.5;
 const FLANGER_SWEEP_OCT: f32 = 1.0;
 const DOUBLER_SWEEP_OCT: f32 = 0.35;
 
-// Notch layout scaling: octaves between adjacent notches at SPREAD = 100 %
-// (exponential set) and the per-notch linear-factor step (linear set).
+// Octaves between adjacent allpass centers at SPREAD = 100 %.
 const SPREAD_OCT_PER_NOTCH: f32 = 1.2;
-const SPREAD_LIN_PER_NOTCH: f32 = 1.6;
+// The Stack circuit preserves the original exponential-to-linear layout.
+const STACK_SPREAD_LIN_PER_NOTCH: f32 = 1.6;
 
 const ALLPASS_Q: f32 = 0.7;
+// Full feedback must get close enough to unity for the cascade's phase
+// crossings to become high-Q resonances, while remaining asymptotically
+// stable when the in-loop saturator is in its linear region.
+const FEEDBACK_MAX: f32 = 0.995;
+const STACK_FEEDBACK_MAX: f32 = 0.95;
+// This is DC protection, not a user-facing bass cut. Keep it below the useful
+// phaser range; a higher Safe Bass control should be modeled separately.
+const FEEDBACK_DC_HZ: f32 = 5.0;
+const STACK_FEEDBACK_DC_HZ: f32 = 30.0;
+
+const PHASER_CIRCUIT_STACK: usize = 0;
+const PHASER_CIRCUIT_CLASSIC: usize = 1;
 
 // Doubler drift uses independent sample-and-hold noise per channel, then a
 // slow one-pole filter. The 24-bit generator state is exactly representable
@@ -69,7 +81,7 @@ const STATE_MODE: usize = 1; // 0 phaser, 1 flanger, 2 doubler
 const STATE_NOTCHES: usize = 2; // 1..12
 const STATE_CENTER: usize = 3; // Hz
 const STATE_SPREAD: usize = 4; // 0..1
-const STATE_BLEND: usize = 5; // 0 exponential .. 1 linear notch spacing
+const STATE_BLEND: usize = 5; // LFO routing: 0 center .. 1 spread
 const STATE_FLANGER_TIME: usize = 6; // ms
 const STATE_DOUBLER_TIME: usize = 7; // ms
 const STATE_SYNC: usize = 8;
@@ -135,8 +147,12 @@ const STATE_AP_NOTCHES: usize = STATE_AP_ACTIVE + 1;
 
 const STATE_BUF_L: usize = STATE_AP_NOTCHES + 1;
 const STATE_BUF_R: usize = STATE_BUF_L + DELAY_BUF_LEN;
+// Appended cells preserve every established parameter/runtime/buffer index.
+// Parameter cells need not be contiguous in the node state arena.
+const STATE_PHASER_CIRCUIT: usize = STATE_BUF_R + DELAY_BUF_LEN;
+const STATE_AP_CIRCUIT: usize = STATE_PHASER_CIRCUIT + 1;
 
-pub const PHASER_FLANGER_STATE_SIZE: usize = STATE_BUF_R + DELAY_BUF_LEN;
+pub const PHASER_FLANGER_STATE_SIZE: usize = STATE_AP_CIRCUIT + 1;
 
 pub const PHASER_FLANGER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 pub const PHASER_FLANGER_PARAM_MODE: u64 = STATE_MODE as u64;
@@ -158,6 +174,7 @@ pub const PHASER_FLANGER_PARAM_WARMTH: u64 = STATE_WARMTH as u64;
 pub const PHASER_FLANGER_PARAM_MIX: u64 = STATE_MIX as u64;
 pub const PHASER_FLANGER_PARAM_OUTPUT: u64 = STATE_OUTPUT as u64;
 pub const PHASER_FLANGER_PARAM_BPM: u64 = STATE_BPM as u64;
+pub const PHASER_FLANGER_PARAM_PHASER_CIRCUIT: u64 = STATE_PHASER_CIRCUIT as u64;
 pub const PHASER_FLANGER_PARAM_MOD_AMOUNT_DEPTH_1: u64 = STATE_MOD_AMOUNT_DEPTH_1 as u64;
 pub const PHASER_FLANGER_PARAM_MOD_CENTER_DEPTH_1: u64 = STATE_MOD_CENTER_DEPTH_1 as u64;
 pub const PHASER_FLANGER_PARAM_MOD_FEEDBACK_DEPTH_1: u64 = STATE_MOD_FEEDBACK_DEPTH_1 as u64;
@@ -322,12 +339,26 @@ unsafe fn line_read(buf: *const f32, wpos: usize, delay: f32) -> f32 {
     ((c3 * frac + c2) * frac + c1) * frac + x0
 }
 
-/// Static notch layout for the phaser (before LFO sweep). BLEND morphs each
-/// notch geometrically between the exponential set (constant octave spacing
-/// around `center`) and the linear set (constant Hz spacing, flanger-comb
-/// flavored). Dual-maintained with the `phaser-notch` UI widget — keep the
-/// two in sync.
-pub fn notch_frequencies(
+/// Allpass center-frequency layout for the phaser, before modulation. The
+/// resulting global dry/allpass sum has one notch near each center. This math
+/// is dual-maintained with the `phaser-notch` UI widget.
+pub fn notch_frequencies(notches: usize, center: f32, spread: f32, sr: f32) -> Vec<f32> {
+    let n = notches.clamp(1, MAX_NOTCHES);
+    let center = center.clamp(20.0, sr * 0.45);
+    let spread = spread.clamp(0.0, 1.0);
+    let mid = (n as f32 - 1.0) * 0.5;
+    (0..n)
+        .map(|k| {
+            let off = k as f32 - mid;
+            let f = center * (spread * off * SPREAD_OCT_PER_NOTCH).exp2();
+            f.clamp(20.0, sr * 0.45)
+        })
+        .collect()
+}
+
+/// Original Stack-circuit layout. Unlike Classic BLEND, Stack BLEND is a
+/// static morph from octave spacing to linear-Hz spacing.
+fn stack_notch_frequencies(
     notches: usize,
     center: f32,
     spread: f32,
@@ -343,11 +374,28 @@ pub fn notch_frequencies(
         .map(|k| {
             let off = k as f32 - mid;
             let exp_f = center * (spread * off * SPREAD_OCT_PER_NOTCH).exp2();
-            let lin_f = center * (1.0 + spread * off * SPREAD_LIN_PER_NOTCH).max(0.1);
+            let lin_f = center * (1.0 + spread * off * STACK_SPREAD_LIN_PER_NOTCH).max(0.1);
             let f = exp_f.powf(1.0 - blend) * lin_f.powf(blend);
             f.clamp(20.0, sr * 0.45)
         })
         .collect()
+}
+
+/// Apply Phaser BLEND semantics to the two parameters the LFO can move.
+/// Keeping this as an explicit mapping makes CENTER-only and SPREAD-only
+/// modulation independently testable.
+#[inline]
+fn modulated_phaser_layout(
+    center_l2: f32,
+    spread: f32,
+    blend: f32,
+    amount: f32,
+    lfo: f32,
+) -> (f32, f32) {
+    let blend = blend.clamp(0.0, 1.0);
+    let center = (center_l2 + amount * lfo * PHASER_SWEEP_OCT * (1.0 - blend)).exp2();
+    let spread = (spread + amount * lfo * PHASER_SPREAD_SWEEP * blend).clamp(0.0, 1.0);
+    (center, spread)
 }
 
 unsafe extern "C" fn phaser_flanger_init(
@@ -379,6 +427,7 @@ unsafe extern "C" fn phaser_flanger_init(
     *s.add(STATE_OUTPUT) = 0.0;
     *s.add(STATE_SAMPLE_RATE) = sample_rate as f32;
     *s.add(STATE_BPM) = 120.0;
+    *s.add(STATE_PHASER_CIRCUIT) = PHASER_CIRCUIT_CLASSIC as f32;
     *s.add(STATE_DRIFT_RNG_L) = 0x51_7c_c1 as f32;
     *s.add(STATE_DRIFT_RNG_R) = 0xa3_42_19 as f32;
     *s.add(STATE_SM_CENTER_L2) = 400.0_f32.log2();
@@ -391,6 +440,7 @@ unsafe extern "C" fn phaser_flanger_init(
     *s.add(STATE_SM_TIME_DB_L2) = 80.0_f32.log2();
     *s.add(STATE_SM_SPREAD) = 0.35;
     *s.add(STATE_AP_NOTCHES) = 4.0;
+    *s.add(STATE_AP_CIRCUIT) = PHASER_CIRCUIT_CLASSIC as f32;
 }
 
 unsafe extern "C" fn phaser_flanger_process(
@@ -416,6 +466,13 @@ unsafe extern "C" fn phaser_flanger_process(
 
     let sr = finite_clamp(*s.add(STATE_SAMPLE_RATE), 1_000.0, 384_000.0, 48_000.0);
     let mode = finite_clamp(*s.add(STATE_MODE), 0.0, 2.0, 0.0).round() as usize;
+    let phaser_circuit = finite_clamp(
+        *s.add(STATE_PHASER_CIRCUIT),
+        PHASER_CIRCUIT_STACK as f32,
+        PHASER_CIRCUIT_CLASSIC as f32,
+        PHASER_CIRCUIT_CLASSIC as f32,
+    )
+    .round() as usize;
     let notches =
         finite_clamp(*s.add(STATE_NOTCHES), 1.0, MAX_NOTCHES as f32, 4.0).round() as usize;
     let shape = finite_clamp(*s.add(STATE_SHAPE), 0.0, 3.0, 0.0).round() as usize;
@@ -442,6 +499,11 @@ unsafe extern "C" fn phaser_flanger_process(
         1.0
     };
     let feedback_knob = finite_clamp(*s.add(STATE_FEEDBACK), 0.0, 1.0, 0.0);
+    let feedback_max = if mode == 0 && phaser_circuit == PHASER_CIRCUIT_STACK {
+        STACK_FEEDBACK_MAX
+    } else {
+        FEEDBACK_MAX
+    };
     let stereo_target = finite_clamp(*s.add(STATE_STEREO), 0.0, 180.0, 20.0) / 360.0;
     let warmth_target = finite_clamp(*s.add(STATE_WARMTH), 0.0, 1.0, 0.0);
     let mix_knob = finite_clamp(*s.add(STATE_MIX), 0.0, 1.0, 0.5);
@@ -450,8 +512,14 @@ unsafe extern "C" fn phaser_flanger_process(
     let knob_coef = one_pole_coef(20.0, sr);
     let warm_lp_coef = one_pole_coef(200.0, sr);
     let drift_coef = one_pole_coef(DRIFT_SMOOTH_HZ, sr);
-    // 30 Hz one-pole DC blocker for the feedback path.
-    let dc_r = 1.0 - (std::f32::consts::TAU * 30.0 / sr).min(0.5);
+    let dc_r = if mode == 0 && phaser_circuit == PHASER_CIRCUIT_STACK {
+        // Preserve the original Stack circuit exactly, including its
+        // approximate 30 Hz pole placement.
+        1.0 - (std::f32::consts::TAU * STACK_FEEDBACK_DC_HZ / sr).min(0.5)
+    } else {
+        // The Classic circuit uses an accurately placed sub-audio DC blocker.
+        (-std::f32::consts::TAU * FEEDBACK_DC_HZ / sr).exp()
+    };
 
     let amount_mod_amt = [
         finite_clamp(*s.add(STATE_MOD_AMOUNT_DEPTH_1), -1.0, 1.0, 0.0),
@@ -497,7 +565,7 @@ unsafe extern "C" fn phaser_flanger_process(
         center_l2_target,
     );
     let mut sm_amount = finite_clamp(*s.add(STATE_SM_AMOUNT), 0.0, 1.0, amount_knob);
-    let mut sm_feedback = finite_clamp(*s.add(STATE_SM_FEEDBACK), -0.95, 0.95, 0.0);
+    let mut sm_feedback = finite_clamp(*s.add(STATE_SM_FEEDBACK), -feedback_max, feedback_max, 0.0);
     let mut sm_mix = finite_clamp(*s.add(STATE_SM_MIX), 0.0, 1.0, mix_knob);
     let mut sm_output = finite_clamp(*s.add(STATE_SM_OUTPUT), 0.25, 4.0, output_target);
     let mut sm_warmth = finite_clamp(*s.add(STATE_SM_WARMTH), 0.0, 1.0, warmth_target);
@@ -541,6 +609,13 @@ unsafe extern "C" fn phaser_flanger_process(
     let mut ap_control_remaining = *s.add(STATE_AP_CONTROL_REMAINING) as usize;
     let mut ap_active = *s.add(STATE_AP_ACTIVE) > 0.5;
     let mut ap_notches = (*s.add(STATE_AP_NOTCHES)).round() as usize;
+    let mut ap_circuit = finite_clamp(
+        *s.add(STATE_AP_CIRCUIT),
+        PHASER_CIRCUIT_STACK as f32,
+        PHASER_CIRCUIT_CLASSIC as f32,
+        PHASER_CIRCUIT_CLASSIC as f32,
+    )
+    .round() as usize;
     if coeffs_l
         .iter()
         .chain(&coeffs_r)
@@ -574,7 +649,8 @@ unsafe extern "C" fn phaser_flanger_process(
             knob_coef * ((center_l2_target + center_mod).clamp(4.32, 14.5) - sm_center_l2);
         sm_amount += knob_coef * ((amount_knob + amount_mod).clamp(0.0, 1.0) - sm_amount);
         sm_feedback += knob_coef
-            * ((feedback_knob + feedback_mod).clamp(0.0, 1.0) * 0.95 * fb_sign - sm_feedback);
+            * ((feedback_knob + feedback_mod).clamp(0.0, 1.0) * feedback_max * fb_sign
+                - sm_feedback);
         sm_mix += knob_coef * ((mix_knob + mix_mod).clamp(0.0, 1.0) - sm_mix);
         sm_output += knob_coef * (output_target - sm_output);
         sm_warmth += knob_coef * (warmth_target - sm_warmth);
@@ -624,12 +700,36 @@ unsafe extern "C" fn phaser_flanger_process(
         let (wet_l, wet_r, fb_src_l, fb_src_r) = match mode {
             0 => {
                 let structural_change = !ap_active || ap_notches != notches;
-                if structural_change || ap_control_remaining == 0 {
-                    let center = sm_center_l2.exp2();
-                    let c_l = center * (sm_amount * lfo_l * PHASER_SWEEP_OCT).exp2();
-                    let c_r = center * (sm_amount * lfo_r * PHASER_SWEEP_OCT).exp2();
-                    let freqs_l = notch_frequencies(notches, c_l, sm_spread, sm_blend, sr);
-                    let freqs_r = notch_frequencies(notches, c_r, sm_spread, sm_blend, sr);
+                let circuit_change = ap_circuit != phaser_circuit;
+                if structural_change || circuit_change || ap_control_remaining == 0 {
+                    let (freqs_l, freqs_r) = if phaser_circuit == PHASER_CIRCUIT_STACK {
+                        let center = sm_center_l2.exp2();
+                        let center_l = center * (sm_amount * lfo_l * PHASER_SWEEP_OCT).exp2();
+                        let center_r = center * (sm_amount * lfo_r * PHASER_SWEEP_OCT).exp2();
+                        (
+                            stack_notch_frequencies(notches, center_l, sm_spread, sm_blend, sr),
+                            stack_notch_frequencies(notches, center_r, sm_spread, sm_blend, sr),
+                        )
+                    } else {
+                        let (center_l, spread_l) = modulated_phaser_layout(
+                            sm_center_l2,
+                            sm_spread,
+                            sm_blend,
+                            sm_amount,
+                            lfo_l,
+                        );
+                        let (center_r, spread_r) = modulated_phaser_layout(
+                            sm_center_l2,
+                            sm_spread,
+                            sm_blend,
+                            sm_amount,
+                            lfo_r,
+                        );
+                        (
+                            notch_frequencies(notches, center_l, spread_l, sr),
+                            notch_frequencies(notches, center_r, spread_r, sr),
+                        )
+                    };
                     for k in 0..notches {
                         let target_l = allpass_coeffs(freqs_l[k], sr);
                         let target_r = allpass_coeffs(freqs_r[k], sr);
@@ -652,22 +752,38 @@ unsafe extern "C" fn phaser_flanger_process(
                     }
                     ap_active = true;
                     ap_notches = notches;
+                    ap_circuit = phaser_circuit;
                     ap_control_remaining = 32;
                 }
-                // Per-stage notch mix (y ← ½(y + AP(y))) instead of one
-                // global dry+cascade sum: the response is then a product of
-                // exact nulls at each section center, so the notches land
-                // precisely where `notch_frequencies` says they do.
-                let mut y_l = xw_l + sm_feedback * fb_l;
-                let mut y_r = xw_r + sm_feedback * fb_r;
-                for k in 0..notches {
-                    y_l = 0.5 * (y_l + biquad_sample(y_l, coeffs_l[k], ap_z.add(k * 4)));
-                    y_r = 0.5 * (y_r + biquad_sample(y_r, coeffs_r[k], ap_z.add(k * 4 + 2)));
-                    coeffs_l[k].advance(coeff_steps_l[k]);
-                    coeffs_r[k].advance(coeff_steps_r[k]);
+                if phaser_circuit == PHASER_CIRCUIT_STACK {
+                    // Original circuit: every stage becomes a notch before
+                    // feeding the next, and the already-notched result closes
+                    // the feedback loop.
+                    let mut y_l = xw_l + sm_feedback * fb_l;
+                    let mut y_r = xw_r + sm_feedback * fb_r;
+                    for k in 0..notches {
+                        y_l = 0.5 * (y_l + biquad_sample(y_l, coeffs_l[k], ap_z.add(k * 4)));
+                        y_r = 0.5 * (y_r + biquad_sample(y_r, coeffs_r[k], ap_z.add(k * 4 + 2)));
+                        coeffs_l[k].advance(coeff_steps_l[k]);
+                        coeffs_r[k].advance(coeff_steps_r[k]);
+                    }
+                    ap_control_remaining = ap_control_remaining.saturating_sub(1);
+                    (y_l, y_r, y_l, y_r)
+                } else {
+                    // Classic circuit: the unity-magnitude allpass cascade is
+                    // the feedback signal, with a single dry/allpass sum at
+                    // the output so every phase crossing can regenerate.
+                    let mut ap_l = xw_l + sm_feedback * fb_l;
+                    let mut ap_r = xw_r + sm_feedback * fb_r;
+                    for k in 0..notches {
+                        ap_l = biquad_sample(ap_l, coeffs_l[k], ap_z.add(k * 4));
+                        ap_r = biquad_sample(ap_r, coeffs_r[k], ap_z.add(k * 4 + 2));
+                        coeffs_l[k].advance(coeff_steps_l[k]);
+                        coeffs_r[k].advance(coeff_steps_r[k]);
+                    }
+                    ap_control_remaining = ap_control_remaining.saturating_sub(1);
+                    (0.5 * (xw_l + ap_l), 0.5 * (xw_r + ap_r), ap_l, ap_r)
                 }
-                ap_control_remaining = ap_control_remaining.saturating_sub(1);
-                (y_l, y_r, y_l, y_r)
             }
             1 => {
                 ap_active = false;
@@ -699,7 +815,7 @@ unsafe extern "C" fn phaser_flanger_process(
             }
         };
 
-        // Condition the feedback source: 30 Hz DC block, then tanh so full
+        // Condition the feedback source: sub-audio DC block, then tanh so full
         // regeneration saturates instead of running away.
         dc_l_y = fb_src_l - dc_l_x + dc_r * dc_l_y;
         dc_l_x = fb_src_l;
@@ -748,6 +864,7 @@ unsafe extern "C" fn phaser_flanger_process(
     *s.add(STATE_AP_CONTROL_REMAINING) = ap_control_remaining as f32;
     *s.add(STATE_AP_ACTIVE) = ap_active as u8 as f32;
     *s.add(STATE_AP_NOTCHES) = ap_notches as f32;
+    *s.add(STATE_AP_CIRCUIT) = ap_circuit as f32;
     for k in 0..MAX_NOTCHES {
         store_coeff(s.add(STATE_AP_COEFFS), k * 2, coeffs_l[k]);
         store_coeff(s.add(STATE_AP_COEFFS), k * 2 + 1, coeffs_r[k]);
@@ -800,8 +917,15 @@ mod tests {
         // steady state rather than the 20 Hz parameter glide.
         state[STATE_SM_CENTER_L2] = state[STATE_CENTER].clamp(20.0, SR as f32 * 0.45).log2();
         state[STATE_SM_AMOUNT] = state[STATE_AMOUNT];
+        let feedback_max = if state[STATE_MODE].round() as usize == 0
+            && state[STATE_PHASER_CIRCUIT].round() as usize == PHASER_CIRCUIT_STACK
+        {
+            STACK_FEEDBACK_MAX
+        } else {
+            FEEDBACK_MAX
+        };
         state[STATE_SM_FEEDBACK] = state[STATE_FEEDBACK]
-            * 0.95
+            * feedback_max
             * if state[STATE_FB_INVERT] > 0.5 {
                 -1.0
             } else {
@@ -891,37 +1015,246 @@ mod tests {
     }
 
     /// Steady-state gain at one frequency: full-wet render, no sweep.
-    fn gain_at(extra: &[(usize, f32)], freq: f32) -> f32 {
-        let n = SR;
+    fn gain_at_with(extra: &[(usize, f32)], freq: f32, amp: f32, n: usize) -> f32 {
         let mut params = vec![(STATE_AMOUNT, 0.0), (STATE_STEREO, 0.0), (STATE_MIX, 1.0)];
         params.extend_from_slice(extra);
-        let r = render(&params, sine(freq, 0.25), n);
-        let tail = SR / 2;
+        let r = render(&params, sine(freq, amp), n);
+        let tail = (SR / 2).min(n);
         rms(&r.out_l[n - tail..]) / rms(&r.in_l[n - tail..])
     }
 
-    /// Phaser notches land where `notch_frequencies` predicts, in both the
-    /// exponential (blend 0) and linear (blend 1) layouts.
+    fn gain_at(extra: &[(usize, f32)], freq: f32) -> f32 {
+        gain_at_with(extra, freq, 0.25, SR)
+    }
+
+    #[derive(Clone, Copy)]
+    struct Complex {
+        re: f32,
+        im: f32,
+    }
+
+    impl Complex {
+        const ONE: Self = Self { re: 1.0, im: 0.0 };
+
+        fn add(self, rhs: Self) -> Self {
+            Self {
+                re: self.re + rhs.re,
+                im: self.im + rhs.im,
+            }
+        }
+
+        fn sub(self, rhs: Self) -> Self {
+            Self {
+                re: self.re - rhs.re,
+                im: self.im - rhs.im,
+            }
+        }
+
+        fn mul(self, rhs: Self) -> Self {
+            Self {
+                re: self.re * rhs.re - self.im * rhs.im,
+                im: self.re * rhs.im + self.im * rhs.re,
+            }
+        }
+
+        fn scale(self, value: f32) -> Self {
+            Self {
+                re: self.re * value,
+                im: self.im * value,
+            }
+        }
+
+        fn div(self, rhs: Self) -> Self {
+            let denominator = rhs.re * rhs.re + rhs.im * rhs.im;
+            Self {
+                re: (self.re * rhs.re + self.im * rhs.im) / denominator,
+                im: (self.im * rhs.re - self.re * rhs.im) / denominator,
+            }
+        }
+
+        fn magnitude(self) -> f32 {
+            self.re.hypot(self.im)
+        }
+    }
+
+    fn static_allpass_cascade(freq: f32, notches: usize, center: f32, spread: f32) -> Complex {
+        let phase = std::f32::consts::TAU * freq / SR as f32;
+        let z1 = Complex {
+            re: phase.cos(),
+            im: -phase.sin(),
+        };
+        let z2 = z1.mul(z1);
+        notch_frequencies(notches, center, spread, SR as f32)
+            .into_iter()
+            .fold(Complex::ONE, |cascade, section_freq| {
+                let c = allpass_coeffs(section_freq, SR as f32);
+                let numerator = Complex::ONE
+                    .scale(c.b0)
+                    .add(z1.scale(c.b1))
+                    .add(z2.scale(c.b2));
+                let denominator = Complex::ONE.add(z1.scale(c.a1)).add(z2.scale(c.a2));
+                cascade.mul(numerator.div(denominator))
+            })
+    }
+
+    /// Linearized frozen response of the implemented Phaser topology. This is
+    /// used only to locate its narrow peaks accurately enough for process-level
+    /// sine tests; the assertions below measure the actual renderer.
+    fn static_phaser_gain(freq: f32, feedback: f32) -> f32 {
+        let cascade = static_allpass_cascade(freq, 4, 400.0, 0.35);
+        let phase = std::f32::consts::TAU * freq / SR as f32;
+        let z1 = Complex {
+            re: phase.cos(),
+            im: -phase.sin(),
+        };
+        let dc_r = (-std::f32::consts::TAU * FEEDBACK_DC_HZ / SR as f32).exp();
+        let dc_block = Complex::ONE.sub(z1).div(Complex::ONE.sub(z1.scale(dc_r)));
+        let loop_response = cascade.mul(z1).mul(dc_block);
+        let allpass_branch = cascade.div(Complex::ONE.sub(loop_response.scale(feedback)));
+        Complex::ONE.add(allpass_branch).scale(0.5).magnitude()
+    }
+
+    fn static_phaser_extrema(feedback: f32, maxima: bool) -> Vec<f32> {
+        const POINTS: usize = 40_000;
+        let mut frequencies = Vec::with_capacity(POINTS);
+        let mut gains = Vec::with_capacity(POINTS);
+        for i in 0..POINTS {
+            let t = i as f32 / (POINTS - 1) as f32;
+            let freq = 20.0_f32 * (16_000.0_f32 / 20.0).powf(t);
+            frequencies.push(freq);
+            gains.push(static_phaser_gain(freq, feedback));
+        }
+        (1..POINTS - 1)
+            .filter_map(|i| {
+                let is_extremum = if maxima {
+                    gains[i] > gains[i - 1] && gains[i] >= gains[i + 1] && gains[i] > 3.0
+                } else {
+                    gains[i] < gains[i - 1] && gains[i] <= gains[i + 1] && gains[i] < 0.02
+                };
+                is_extremum.then_some(frequencies[i])
+            })
+            .collect()
+    }
+
+    /// Stack is the original implementation, including per-stage notch sums,
+    /// its exponential-to-linear BLEND layout, and feedback around the final
+    /// already-notched signal.
     #[test]
-    fn phaser_notches_match_prediction() {
+    fn phaser_stack_preserves_original_per_stage_notches() {
         for &(spread, blend) in &[(0.35_f32, 0.0_f32), (0.5, 1.0)] {
             let base = [
                 (STATE_MODE, 0.0),
+                (STATE_PHASER_CIRCUIT, PHASER_CIRCUIT_STACK as f32),
                 (STATE_NOTCHES, 2.0),
                 (STATE_CENTER, 400.0),
                 (STATE_SPREAD, spread),
                 (STATE_BLEND, blend),
+                (STATE_FEEDBACK, 1.0),
             ];
-            let freqs = notch_frequencies(2, 400.0, spread, blend, SR as f32);
-            for &f in &freqs {
-                let notch = gain_at(&base, f);
-                let shoulder = gain_at(&base, f * 2.0);
+            let frequencies = stack_notch_frequencies(2, 400.0, spread, blend, SR as f32);
+            for freq in frequencies {
+                let notch = gain_at(&base, freq);
+                let shoulder = gain_at(&base, freq * 2.0);
                 assert!(
                     notch < shoulder * 0.35,
-                    "spread {spread} blend {blend}: expected notch at {f} Hz, gain {notch} vs shoulder {shoulder}"
+                    "Stack spread {spread} blend {blend}: expected notch at {freq} Hz, gain {notch} vs shoulder {shoulder}"
                 );
             }
         }
+    }
+
+    /// The global dry/allpass sum must retain one deep notch per section when
+    /// feedback is off.
+    #[test]
+    fn phaser_global_mix_has_one_notch_per_allpass_section() {
+        let notches = static_phaser_extrema(0.0, false);
+        assert_eq!(
+            notches.len(),
+            4,
+            "expected four analytical notches: {notches:?}"
+        );
+        let base = [
+            (STATE_MODE, 0.0),
+            (STATE_NOTCHES, 4.0),
+            (STATE_CENTER, 400.0),
+            (STATE_SPREAD, 0.35),
+            (STATE_FEEDBACK, 0.0),
+        ];
+        for freq in notches {
+            let gain = gain_at(&base, freq);
+            assert!(gain < 0.08, "expected deep notch at {freq} Hz, gain {gain}");
+        }
+    }
+
+    /// Full positive feedback creates a high-Q resonance at every in-phase
+    /// crossing of the allpass cascade. This is the characteristic response
+    /// lost when dry/allpass mixing is performed inside every stage.
+    #[test]
+    fn phaser_full_feedback_regenerates_multiple_resonant_bands() {
+        let resonances = static_phaser_extrema(FEEDBACK_MAX, true);
+        assert_eq!(
+            resonances.len(),
+            4,
+            "expected one positive-feedback resonance per section: {resonances:?}"
+        );
+        for freq in resonances {
+            let without = gain_at_with(&[(STATE_MODE, 0.0)], freq, 1.0e-4, SR * 3);
+            let with = gain_at_with(
+                &[(STATE_MODE, 0.0), (STATE_FEEDBACK, 1.0)],
+                freq,
+                1.0e-4,
+                SR * 3,
+            );
+            assert!(
+                with > without * 12.0,
+                "feedback failed to regenerate {freq} Hz: {with} vs {without}"
+            );
+        }
+    }
+
+    #[test]
+    fn phaser_feedback_invert_moves_the_resonant_bands() {
+        let inverted_resonances = static_phaser_extrema(-FEEDBACK_MAX, true);
+        assert_eq!(inverted_resonances.len(), 4);
+        let freq = inverted_resonances[1];
+        let positive = gain_at_with(
+            &[(STATE_MODE, 0.0), (STATE_FEEDBACK, 1.0)],
+            freq,
+            1.0e-4,
+            SR * 3,
+        );
+        let inverted = gain_at_with(
+            &[
+                (STATE_MODE, 0.0),
+                (STATE_FEEDBACK, 1.0),
+                (STATE_FB_INVERT, 1.0),
+            ],
+            freq,
+            1.0e-4,
+            SR * 3,
+        );
+        assert!(
+            inverted > positive * 12.0,
+            "inverted feedback should select the opposite phase crossing at {freq} Hz: {inverted} vs {positive}"
+        );
+    }
+
+    #[test]
+    fn phaser_blend_routes_lfo_between_center_and_spread() {
+        let center_l2 = 400.0_f32.log2();
+        let (center_low, spread_low) = modulated_phaser_layout(center_l2, 0.5, 0.0, 1.0, -1.0);
+        let (center_high, spread_high) = modulated_phaser_layout(center_l2, 0.5, 0.0, 1.0, 1.0);
+        assert!(center_high > center_low * 16.0);
+        assert!((spread_low - 0.5).abs() < 1.0e-6);
+        assert!((spread_high - 0.5).abs() < 1.0e-6);
+
+        let (center_narrow, spread_narrow) =
+            modulated_phaser_layout(center_l2, 0.5, 1.0, 1.0, -1.0);
+        let (center_wide, spread_wide) = modulated_phaser_layout(center_l2, 0.5, 1.0, 1.0, 1.0);
+        assert!((center_narrow - 400.0).abs() < 1.0e-3);
+        assert!((center_wide - 400.0).abs() < 1.0e-3);
+        assert!(spread_narrow < 1.0e-6);
+        assert!((spread_wide - 1.0).abs() < 1.0e-6);
     }
 
     /// Flanger's first comb notch sits at 1/(2·time).
@@ -940,34 +1273,42 @@ mod tests {
     /// Full regeneration in either polarity stays bounded (tanh + DC block).
     #[test]
     fn full_feedback_is_stable() {
-        for invert in [0.0, 1.0] {
-            for mode in [0.0, 1.0] {
-                let n = SR * 5;
-                let r = render(
-                    &[
-                        (STATE_MODE, mode),
-                        (STATE_FEEDBACK, 1.0),
-                        (STATE_FB_INVERT, invert),
-                        (STATE_AMOUNT, 0.5),
-                        (STATE_MIX, 1.0),
-                        (STATE_RATE, 1.0),
-                    ],
-                    |i| {
-                        if i < SR / 10 {
-                            let v =
-                                0.8 * (std::f32::consts::TAU * 220.0 * i as f32 / SR as f32).sin();
-                            (v, v)
-                        } else {
-                            (0.0, 0.0)
-                        }
-                    },
-                    n,
+        for circuit in [PHASER_CIRCUIT_STACK, PHASER_CIRCUIT_CLASSIC] {
+            for invert in [0.0, 1.0] {
+                for mode in [0.0, 1.0] {
+                    let n = SR * 5;
+                    let r = render(
+                        &[
+                            (STATE_MODE, mode),
+                            (STATE_PHASER_CIRCUIT, circuit as f32),
+                            (STATE_NOTCHES, 12.0),
+                            (STATE_FEEDBACK, 1.0),
+                            (STATE_FB_INVERT, invert),
+                            (STATE_AMOUNT, 1.0),
+                            (STATE_MIX, 1.0),
+                            (STATE_RATE, 20.0),
+                        ],
+                        |i| {
+                            if i < SR / 10 {
+                                let v = 0.8
+                                    * (std::f32::consts::TAU * 220.0 * i as f32 / SR as f32).sin();
+                                (v, v)
+                            } else {
+                                (0.0, 0.0)
+                            }
+                        },
+                        n,
+                    );
+                    let peak = r.out_l.iter().fold(0.0_f32, |a, v| a.max(v.abs()));
+                    // This effect deliberately permits resonant gain above 0 dB;
+                    // it is not an output limiter. The generous float-headroom
+                    // ceiling catches a runaway loop while allowing the extreme
+                    // 12-section/20 Hz stress case to bloom naturally.
+                    assert!(
+                    peak.is_finite() && peak < 32.0,
+                    "circuit {circuit} mode {mode} invert {invert}: unbounded output, peak {peak}"
                 );
-                let peak = r.out_l.iter().fold(0.0_f32, |a, v| a.max(v.abs()));
-                assert!(
-                    peak.is_finite() && peak < 4.0,
-                    "mode {mode} invert {invert}: unbounded output, peak {peak}"
-                );
+                }
             }
         }
     }

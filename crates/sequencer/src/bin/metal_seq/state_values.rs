@@ -14933,8 +14933,14 @@ mod tests {
             Value::Map(test_param_map("warmth", 16, 0.0, 0.0, 1.0)),
             Value::Map(test_param_map("dry/wet", 17, 0.5, 0.0, 1.0)),
             Value::Map(test_param_map("output", 18, 0.0, -12.0, 12.0)),
+            Value::Map(test_enum_param_map(
+                "phaser circuit",
+                19,
+                1.0,
+                vec!["stack", "classic"],
+            )),
         ];
-        for idx in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15] {
+        for idx in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 19] {
             let Value::Map(param) = &mut params[idx] else {
                 unreachable!("phaser-flanger test params are maps")
             };
@@ -15012,7 +15018,13 @@ mod tests {
                     -24.0,
                     24.0,
                 )),
-                Value::Map(test_param_map(&format!("{prefix} on"), base + 8, 1.0, 0.0, 1.0)),
+                Value::Map(test_param_map(
+                    &format!("{prefix} on"),
+                    base + 8,
+                    1.0,
+                    0.0,
+                    1.0,
+                )),
                 Value::Map(test_param_map(
                     &format!("{prefix} solo"),
                     base + 9,
@@ -30634,6 +30646,7 @@ mod tests {
                 ("test-phaser-flanger-param-11", Value::Number(0.0)),
                 ("test-phaser-flanger-param-12", Value::Number(0.25)),
                 ("test-phaser-flanger-param-15", Value::Number(20.0)),
+                ("test-phaser-flanger-param-19", Value::Number(1.0)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -30689,6 +30702,8 @@ mod tests {
         );
         assert!(value_contains_string(&ui_probe, "Flanger"));
         assert!(value_contains_string(&ui_probe, "Doubler"));
+        assert!(value_contains_string(&ui_probe, "stack"));
+        assert!(value_contains_string(&ui_probe, "classic"));
         assert!(value_contains_string(&ui_probe, "LFO"));
         assert!(value_contains_string(&ui_probe, "SWEEP"));
         assert!(value_contains_string(&ui_probe, "amount"));
@@ -30725,6 +30740,7 @@ mod tests {
         );
         for prop in [
             "mode",
+            "circuit",
             "notches",
             "center",
             "spread",
@@ -30745,11 +30761,9 @@ mod tests {
                 display.props.get(prop)
             );
         }
-        let notches_control = find_layout_node_by_stable_key(
-            &layout,
-            "phaser-flanger-notches-control",
-        )
-        .expect("phaser-flanger integer notches control");
+        let notches_control =
+            find_layout_node_by_stable_key(&layout, "phaser-flanger-notches-control")
+                .expect("phaser-flanger integer notches control");
         let notches_picker = find_layout_node_by_widget_type(notches_control, "number-picker")
             .expect("phaser-flanger notches number picker");
         assert_eq!(notches_picker.props.get("step"), Some(&Value::Number(1.0)));
@@ -30757,6 +30771,56 @@ mod tests {
             notches_picker.props.get("decimals"),
             Some(&Value::Number(0.0))
         );
+        let circuit_control =
+            find_layout_node_by_stable_key(&layout, "phaser-flanger-circuit-control")
+                .expect("phaser-flanger p-lockable circuit control");
+        assert_finite_nonzero_rect(circuit_control, "phaser-flanger circuit control");
+        let circuit_dropdown = find_layout_node_by_widget_type(circuit_control, "dropdown")
+            .expect("phaser-flanger circuit dropdown");
+        assert_finite_nonzero_rect(circuit_dropdown, "phaser-flanger circuit dropdown");
+        assert_eq!(
+            circuit_dropdown.props.get("options"),
+            Some(&test_list(vec![
+                Value::String("stack".to_string()),
+                Value::String("classic".to_string()),
+            ]))
+        );
+        assert!(
+            circuit_dropdown.props.contains_key("plock-active"),
+            "circuit dropdown must expose p-lock state"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(def seq-has-selection? () true)")
+            .expect("enable selected-step p-lock authoring");
+        let on_change = circuit_dropdown
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("circuit dropdown on-change callback");
+        editor
+            .runtime_mut()
+            .invoke(on_change, vec![Value::String("stack".to_string())])
+            .expect("invoke circuit dropdown p-lock change");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "circuit commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-effect-plock-option");
+                let Value::Map(payload) = payload else {
+                    panic!("circuit p-lock payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(19.0))
+                );
+                assert_eq!(
+                    payload.get("label").map(|value| value.borrow().clone()),
+                    Some(Value::String("stack".to_string()))
+                );
+            }
+            other => panic!("expected circuit p-lock host command, got {other:?}"),
+        }
         for (key, label) in [
             ("phaser-flanger-param-12-base", "amount knob"),
             ("phaser-flanger-param-17-base", "dry/wet knob"),

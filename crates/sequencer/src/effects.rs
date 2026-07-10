@@ -3645,6 +3645,21 @@ impl EffectDescriptor {
                     host_control: None,
                     ui_metadata: None,
                 },
+                ParamDescriptor {
+                    name: "phaser circuit".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["stack".to_string(), "classic".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_PHASER_CIRCUIT
+                        as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
             ],
         };
         desc.params

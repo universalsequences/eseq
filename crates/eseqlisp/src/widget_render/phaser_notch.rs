@@ -1,7 +1,8 @@
 //! Display strip for the Phaser-Flanger builtin effect (Ableton-style).
 //!
 //! Phaser mode draws one vertical marker per notch on a log-frequency axis
-//! with a dim band showing how far the LFO sweep (amount) can carry it.
+//! with a dim band showing how far the LFO can move it through CENTER and
+//! SPREAD modulation.
 //! Flanger/Doubler modes draw the two channel dots (L orange, R cyan) on a
 //! log-time axis with the sweep range behind them.
 //!
@@ -13,11 +14,11 @@ use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use super::MetalLiveSpectrogramPrimitive;
 use super::{
-    CellBuffer, MetalPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
-    resolve_named_color, styled_cell,
+    ndc_bounds, resolve_named_color, styled_cell, CellBuffer, MetalPrimitive, WidgetDefinition,
+    WidgetInstance, WidgetViewport,
 };
 use crate::backend::Color;
-use crate::layout::{Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num};
+use crate::layout::{f64_to_f32, get_prop_num, Constraints, LayoutNode, MeasureCtx, Size};
 use crate::theme;
 use crate::vm::Value;
 
@@ -29,10 +30,11 @@ const MAX_NOTCHES: usize = 12;
 
 // Mirror of the DSP constants in sequencer::phaser_flanger.
 const PHASER_SWEEP_OCT: f32 = 2.5;
+const PHASER_SPREAD_SWEEP: f32 = 0.5;
 const FLANGER_SWEEP_OCT: f32 = 1.0;
 const DOUBLER_SWEEP_OCT: f32 = 0.35;
 const SPREAD_OCT_PER_NOTCH: f32 = 1.2;
-const SPREAD_LIN_PER_NOTCH: f32 = 1.6;
+const STACK_SPREAD_LIN_PER_NOTCH: f32 = 1.6;
 const SYNC_BEATS: [f32; 11] = [
     0.125,
     0.25,
@@ -66,8 +68,23 @@ fn prop_num(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     props.get(key).and_then(value_num).unwrap_or(default)
 }
 
-/// Static notch layout — mirror of `phaser_flanger::notch_frequencies`.
-fn notch_frequencies(notches: usize, center: f32, spread: f32, blend: f32) -> Vec<f32> {
+/// Static allpass-center layout — mirror of
+/// `phaser_flanger::notch_frequencies`.
+fn notch_frequencies(notches: usize, center: f32, spread: f32) -> Vec<f32> {
+    let n = notches.clamp(1, MAX_NOTCHES);
+    let center = center.clamp(20.0, 20000.0);
+    let spread = spread.clamp(0.0, 1.0);
+    let mid = (n as f32 - 1.0) * 0.5;
+    (0..n)
+        .map(|k| {
+            let off = k as f32 - mid;
+            let f = center * (spread * off * SPREAD_OCT_PER_NOTCH).exp2();
+            f.clamp(20.0, 20000.0)
+        })
+        .collect()
+}
+
+fn stack_notch_frequencies(notches: usize, center: f32, spread: f32, blend: f32) -> Vec<f32> {
     let n = notches.clamp(1, MAX_NOTCHES);
     let center = center.clamp(20.0, 20000.0);
     let spread = spread.clamp(0.0, 1.0);
@@ -77,7 +94,7 @@ fn notch_frequencies(notches: usize, center: f32, spread: f32, blend: f32) -> Ve
         .map(|k| {
             let off = k as f32 - mid;
             let exp_f = center * (spread * off * SPREAD_OCT_PER_NOTCH).exp2();
-            let lin_f = center * (1.0 + spread * off * SPREAD_LIN_PER_NOTCH).max(0.1);
+            let lin_f = center * (1.0 + spread * off * STACK_SPREAD_LIN_PER_NOTCH).max(0.1);
             let f = exp_f.powf(1.0 - blend) * lin_f.powf(blend);
             f.clamp(20.0, 20000.0)
         })
@@ -94,6 +111,7 @@ fn time_to_x(ms: f32) -> f32 {
 
 struct Display {
     mode: usize,
+    circuit: usize,
     // Marker x positions (normalized 0..1 on the log axis); count entries.
     xs: Vec<f32>,
     // Sweep half-width in normalized axis units.
@@ -104,10 +122,12 @@ struct Display {
     anchor_x: f32,
     spread: f32,
     blend: f32,
+    amount: f32,
 }
 
 fn display_from_props(props: &HashMap<String, Value>) -> Display {
     let mode = prop_num(props, "mode", 0.0).round().clamp(0.0, 2.0) as usize;
+    let circuit = prop_num(props, "circuit", 1.0).round().clamp(0.0, 1.0) as usize;
     let amount = prop_num(props, "amount", 0.25).clamp(0.0, 1.0);
     let sync = prop_num(props, "sync", 0.0) > 0.5;
     let rate_hz = if sync {
@@ -126,12 +146,15 @@ fn display_from_props(props: &HashMap<String, Value>) -> Display {
             let center = prop_num(props, "center", 400.0);
             let spread = prop_num(props, "spread", 0.35).clamp(0.0, 1.0);
             let blend = prop_num(props, "blend", 0.0).clamp(0.0, 1.0);
-            let xs = notch_frequencies(notches, center, spread, blend)
-                .into_iter()
-                .map(freq_to_x)
-                .collect();
+            let frequencies = if circuit == 0 {
+                stack_notch_frequencies(notches, center, spread, blend)
+            } else {
+                notch_frequencies(notches, center, spread)
+            };
+            let xs = frequencies.into_iter().map(freq_to_x).collect();
             Display {
                 mode,
+                circuit,
                 xs,
                 sweep: amount * PHASER_SWEEP_OCT / FREQ_SPAN_OCT,
                 rate_hz,
@@ -140,12 +163,14 @@ fn display_from_props(props: &HashMap<String, Value>) -> Display {
                 anchor_x: freq_to_x(center.clamp(20.0, 20_000.0)),
                 spread,
                 blend,
+                amount,
             }
         }
         1 => {
             let anchor_x = time_to_x(prop_num(props, "flanger-time", 2.5).clamp(0.1, 20.0));
             Display {
                 mode,
+                circuit,
                 xs: vec![anchor_x],
                 sweep: amount * FLANGER_SWEEP_OCT / TIME_SPAN_OCT,
                 rate_hz,
@@ -154,12 +179,14 @@ fn display_from_props(props: &HashMap<String, Value>) -> Display {
                 anchor_x,
                 spread: 0.0,
                 blend: 0.0,
+                amount,
             }
         }
         _ => {
             let anchor_x = time_to_x(prop_num(props, "doubler-time", 80.0).clamp(2.0, 100.0));
             Display {
                 mode,
+                circuit,
                 xs: vec![anchor_x],
                 sweep: amount * DOUBLER_SWEEP_OCT / TIME_SPAN_OCT,
                 rate_hz,
@@ -168,6 +195,7 @@ fn display_from_props(props: &HashMap<String, Value>) -> Display {
                 anchor_x,
                 spread: 0.0,
                 blend: 0.0,
+                amount,
             }
         }
     }
@@ -185,6 +213,7 @@ impl WidgetDefinition for PhaserNotchWidget {
     fn bindable_props(&self) -> &'static [&'static str] {
         &[
             "mode",
+            "circuit",
             "notches",
             "center",
             "spread",
@@ -331,7 +360,12 @@ impl WidgetDefinition for PhaserNotchWidget {
                     display.blend,
                     display.stereo_phase,
                 ],
-                uniform_c: [0.0; 4],
+                uniform_c: [
+                    display.amount,
+                    PHASER_SPREAD_SWEEP,
+                    display.circuit as f32,
+                    0.0,
+                ],
                 uniform_d: [0.0; 4],
                 color_a: left_color.to_rgba(),
                 color_b: bg_color.to_rgba(),
@@ -370,11 +404,16 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     int shape = clamp(int(round(in.value_t)), 0, 3);
     float phaseL = fract(in.itime * rateHz);
     float phaseR = fract(phaseL + clamp(in.uniform_b.w, 0.0, 0.5));
-    float sweepL = sweep * phaserFlangerLfo(shape, phaseL);
-    float sweepR = sweep * phaserFlangerLfo(shape, phaseR);
+    float lfoL = phaserFlangerLfo(shape, phaseL);
+    float lfoR = phaserFlangerLfo(shape, phaseR);
+    float sweepL = sweep * lfoL;
+    float sweepR = sweep * lfoR;
     float anchorX = in.uniform_b.x;
     float spread = clamp(in.uniform_b.y, 0.0, 1.0);
     float blend = clamp(in.uniform_b.z, 0.0, 1.0);
+    float amount = clamp(in.uniform_c.x, 0.0, 1.0);
+    float spreadSweep = max(in.uniform_c.y, 0.0);
+    int circuit = clamp(int(round(in.uniform_c.z)), 0, 1);
 
     float4 col = in.color_b;
 
@@ -388,19 +427,64 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float aa = max(fwidth(uv.x), 0.0008);
     if (mode == 0) {
-        // One vertical marker per notch with the LFO sweep band behind it.
+        // BLEND routes the LFO from common CENTER motion to SPREAD motion,
+        // where outer notches fan in opposite directions around the anchor.
         float yPad = smoothstep(0.04, 0.14, uv.y) * smoothstep(0.96, 0.86, uv.y);
         for (int i = 0; i < 12; i++) {
             if (i >= count) { break; }
             float offset = float(i) - (float(count) - 1.0) * 0.5;
-            float exponentialX = anchorX + spread * offset * 1.2 / 10.0;
-            float linearFactor = max(0.1, 1.0 + spread * offset * 1.6);
-            float linearX = anchorX + log2(linearFactor) / 10.0;
-            float baseX = clamp(mix(exponentialX, linearX, blend), 0.0, 1.0);
-            float band = step(baseX - sweep, uv.x) * step(uv.x, baseX + sweep);
+            if (circuit == 0) {
+                // Stack preserves the original layout and common center sweep.
+                float exponentialX = anchorX + spread * offset * 1.2 / 10.0;
+                float linearFactor = max(0.1, 1.0 + spread * offset * 1.6);
+                float linearX = anchorX + log2(linearFactor) / 10.0;
+                float baseX = clamp(mix(exponentialX, linearX, blend), 0.0, 1.0);
+                float band = step(baseX - sweep, uv.x) * step(uv.x, baseX + sweep);
+                col.rgb = mix(col.rgb, in.color_a.rgb, band * 0.10 * yPad);
+                float lineL = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - (baseX + sweepL)));
+                float lineR = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - (baseX + sweepR)));
+                col.rgb = mix(col.rgb, in.color_a.rgb, lineL * 0.92 * yPad);
+                col.rgb = mix(col.rgb, in.color_d.rgb, lineR * 0.88 * yPad);
+                continue;
+            }
+            float spreadL = clamp(
+                spread + amount * lfoL * spreadSweep * blend,
+                0.0,
+                1.0
+            );
+            float spreadR = clamp(
+                spread + amount * lfoR * spreadSweep * blend,
+                0.0,
+                1.0
+            );
+            float lineXL = clamp(
+                anchorX + sweepL * (1.0 - blend) + spreadL * offset * 1.2 / 10.0,
+                0.0,
+                1.0
+            );
+            float lineXR = clamp(
+                anchorX + sweepR * (1.0 - blend) + spreadR * offset * 1.2 / 10.0,
+                0.0,
+                1.0
+            );
+            float spreadNeg = clamp(spread - amount * spreadSweep * blend, 0.0, 1.0);
+            float spreadPos = clamp(spread + amount * spreadSweep * blend, 0.0, 1.0);
+            float rangeNeg = clamp(
+                anchorX - sweep * (1.0 - blend) + spreadNeg * offset * 1.2 / 10.0,
+                0.0,
+                1.0
+            );
+            float rangePos = clamp(
+                anchorX + sweep * (1.0 - blend) + spreadPos * offset * 1.2 / 10.0,
+                0.0,
+                1.0
+            );
+            float bandMin = min(rangeNeg, rangePos);
+            float bandMax = max(rangeNeg, rangePos);
+            float band = step(bandMin, uv.x) * step(uv.x, bandMax);
             col.rgb = mix(col.rgb, in.color_a.rgb, band * 0.10 * yPad);
-            float lineL = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - (baseX + sweepL)));
-            float lineR = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - (baseX + sweepR)));
+            float lineL = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - lineXL));
+            float lineR = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - lineXR));
             col.rgb = mix(col.rgb, in.color_a.rgb, lineL * 0.92 * yPad);
             col.rgb = mix(col.rgb, in.color_d.rgb, lineR * 0.88 * yPad);
         }
@@ -428,8 +512,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
 
     #[test]
     fn freq_axis_maps_edges() {
@@ -445,6 +529,38 @@ mod tests {
         props.insert("center".to_string(), Value::Number(400.0));
         let d = display_from_props(&props);
         assert_eq!(d.xs.len(), 6);
+    }
+
+    #[test]
+    fn phaser_display_preserves_each_circuits_blend_semantics() {
+        let base = HashMap::from([
+            ("mode".to_string(), Value::Number(0.0)),
+            ("notches".to_string(), Value::Number(2.0)),
+            ("center".to_string(), Value::Number(400.0)),
+            ("spread".to_string(), Value::Number(0.5)),
+        ]);
+
+        let mut stack_exponential = base.clone();
+        stack_exponential.insert("circuit".to_string(), Value::Number(0.0));
+        stack_exponential.insert("blend".to_string(), Value::Number(0.0));
+        let mut stack_linear = stack_exponential.clone();
+        stack_linear.insert("blend".to_string(), Value::Number(1.0));
+        assert_ne!(
+            display_from_props(&stack_exponential).xs,
+            display_from_props(&stack_linear).xs,
+            "Stack BLEND must retain the original static layout morph"
+        );
+
+        let mut classic_center = base.clone();
+        classic_center.insert("circuit".to_string(), Value::Number(1.0));
+        classic_center.insert("blend".to_string(), Value::Number(0.0));
+        let mut classic_spread = classic_center.clone();
+        classic_spread.insert("blend".to_string(), Value::Number(1.0));
+        assert_eq!(
+            display_from_props(&classic_center).xs,
+            display_from_props(&classic_spread).xs,
+            "Classic BLEND routes modulation and must not alter the static layout"
+        );
     }
 
     #[test]

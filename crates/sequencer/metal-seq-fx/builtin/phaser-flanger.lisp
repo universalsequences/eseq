@@ -2,7 +2,8 @@
 ;;
 ;; Layout mirrors the device: notch/sweep display on top of the mode buttons
 ;; (Phaser / Flanger / Doubler) with the per-mode control row underneath
-;; (phaser: notches/center/spread/blend; delay modes: their own TIME), then
+;; (phaser: Stack/Classic circuit plus notches/center/spread/blend; delay
+;; modes: their own TIME), then
 ;; the LFO section (free Hz knob or sync grid + shape), the sweep section
 ;; (amount / feedback / Ø / stereo), and output (warmth / dry-wet / output).
 
@@ -82,7 +83,7 @@
     (builtin-fx-phaser-flanger-mode-button fx p 1 "Flanger")
     (builtin-fx-phaser-flanger-mode-button fx p 2 "Doubler")))
 
-(def builtin-fx-phaser-flanger-display (fx mode-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
+(def builtin-fx-phaser-flanger-display (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
   (phaser-notch
     :width 14.9 :height 3.05
     :source (builtin-fx-phaser-flanger-source fx)
@@ -91,6 +92,7 @@
     ;; These must be the base-value bindings, not the snapshot :value fields.
     ;; Knob drags update :value-field in place and do not rebuild the panel.
     :mode (instrument-param-base-value mode-p)
+    :circuit (instrument-param-base-value circuit-p)
     :notches (instrument-param-base-value notches-p)
     :center (instrument-param-base-value center-p)
     :spread (instrument-param-base-value spread-p)
@@ -120,27 +122,42 @@
           :on-change (lambda (v) (param-set-control-value fx p (round v)))
           :width 4.6 :height 1.0)))))
 
-(def builtin-fx-phaser-flanger-mode-controls (fx mode-p notches-p center-p spread-p blend-p flt-p dbt-p)
+(def builtin-fx-phaser-flanger-circuit-control (fx p)
+  (subtree :key "phaser-flanger-circuit-control"
+    (h-stack :gap 0.18 :align :center
+      (label "circ" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+      (dropdown :value (get p :text-value)
+        :options (get p :options)
+        :on-change (lambda (v) (param-set-option fx p v))
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
+        :width 6.4 :height 1.05 :font-size 9.0))))
+
+(def builtin-fx-phaser-flanger-mode-controls (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p)
   (let ((m (round (get mode-p :value))))
     (if (= m 0)
-      (h-stack :gap 0.45 :align :start
-        (v-stack :gap 0.22 :align :baseline
-          (builtin-fx-phaser-flanger-notches-control fx notches-p)
-          (builtin-fx-filter-mini-percent fx "sprd" spread-p))
-        (v-stack :gap 0.22 :align :baseline
-          (builtin-fx-filter-mini-number fx "cntr" center-p)
-          (builtin-fx-filter-mini-number fx "blnd" blend-p)))
+      (v-stack :gap 0.16 :align :center
+        (h-stack :gap 0.45 :align :start
+          (v-stack :gap 0.22 :align :baseline
+            (builtin-fx-phaser-flanger-notches-control fx notches-p)
+            (builtin-fx-filter-mini-percent fx "sprd" spread-p))
+          (v-stack :gap 0.22 :align :baseline
+            (builtin-fx-filter-mini-number fx "cntr" center-p)
+            (builtin-fx-filter-mini-number fx "blnd" blend-p)))
+        (builtin-fx-phaser-flanger-circuit-control fx circuit-p))
       (if (= m 1)
         (builtin-fx-filter-mini-number fx "time" flt-p)
         (builtin-fx-filter-mini-number fx "time" dbt-p)))))
 
-(def builtin-fx-phaser-flanger-mode-box (fx mode-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
-  (box :width 16.0 :height 8.55 :padding 0.36
+(def builtin-fx-phaser-flanger-mode-box (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
+  (box :width 16.0 :height 9.70 :padding 0.36
        :background-color :fx-inner-panel-bg :corner-radius 7
-    (v-stack :gap 0.22 :align :center
-      (builtin-fx-phaser-flanger-display fx mode-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
+    (v-stack :gap 0.16 :align :center
+      (builtin-fx-phaser-flanger-display fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
       (builtin-fx-phaser-flanger-mode-row fx mode-p)
-      (builtin-fx-phaser-flanger-mode-controls fx mode-p notches-p center-p spread-p blend-p flt-p dbt-p))))
+      (builtin-fx-phaser-flanger-mode-controls fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p))))
 
 ;; ── LFO section (free/sync rate + shape) ──
 
@@ -259,6 +276,7 @@
 (def builtin-fx-phaser-flanger-ui (fx)
   (let ((params (get fx :params)))
     (let ((mode-p (builtin-fx-param params "mode"))
+          (circuit-p (builtin-fx-param params "phaser circuit"))
           (notches-p (builtin-fx-param params "notches"))
           (center-p (builtin-fx-param params "center"))
           (spread-p (builtin-fx-param params "spread"))
@@ -276,11 +294,11 @@
           (warmth-p (builtin-fx-param params "warmth"))
           (mix-p (builtin-fx-param params "dry/wet"))
           (output-p (builtin-fx-param params "output")))
-      (if (and mode-p notches-p center-p spread-p blend-p flt-p dbt-p
+      (if (and mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p
                sync-p rate-p div-p shape-p amount-p feedback-p invert-p
                stereo-p warmth-p mix-p output-p)
         (h-stack :gap 0.35 :align :start
-          (builtin-fx-phaser-flanger-mode-box fx mode-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
+          (builtin-fx-phaser-flanger-mode-box fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
           (builtin-fx-phaser-flanger-lfo-box fx sync-p rate-p div-p shape-p)
           (builtin-fx-phaser-flanger-sweep-box fx amount-p feedback-p invert-p stereo-p)
           (builtin-fx-phaser-flanger-out-box fx warmth-p mix-p output-p))
