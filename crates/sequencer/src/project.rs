@@ -319,6 +319,8 @@ pub struct ProjectPattern {
     #[serde(default)]
     pub process_chains: Vec<crate::process::TrackProcessChain>,
     #[serde(default)]
+    pub project_process_chain: crate::process::TrackProcessChain,
+    #[serde(default)]
     pub plock_variant_registries: Vec<PlockVariantRegistry>,
     #[serde(default)]
     pub key_lock_variant_registries: Vec<PlockVariantRegistry>,
@@ -619,6 +621,7 @@ impl ProjectPattern {
                 .map(|rack| rack.map(ProjectRackTrackPattern::from))
                 .collect(),
             process_chains: snapshot.process_chains.clone(),
+            project_process_chain: snapshot.project_process_chain.clone(),
             plock_variant_registries: snapshot.plock_variant_registries.clone(),
             key_lock_variant_registries: snapshot.key_lock_variant_registries.clone(),
         }
@@ -1913,6 +1916,7 @@ mod tests {
                             instance_name: Some("json-sparse-h".to_string()),
                             class_name: "json-sparse".to_string(),
                             enabled: true,
+                            project_layer: false,
                             inlets: std::collections::BTreeMap::new(),
                             lanes: std::collections::BTreeMap::from([(
                                 "amount".to_string(),
@@ -1931,6 +1935,23 @@ mod tests {
                     },
                     crate::process::TrackProcessChain::default(),
                 ],
+                project_process_chain: crate::process::TrackProcessChain {
+                    slots: vec![crate::process::TrackProcessSlot {
+                        instance_id: crate::process::ProcessInstanceId(77),
+                        instance_name: Some("json-project-mask-h".to_string()),
+                        class_name: "json-project-mask".to_string(),
+                        enabled: true,
+                        project_layer: true,
+                        inlets: std::collections::BTreeMap::new(),
+                        lanes: std::collections::BTreeMap::from([(
+                            "prob".to_string(),
+                            crate::process::ProcessLane {
+                                values: vec![1.0, 0.5],
+                            },
+                        )]),
+                        bindings: std::collections::BTreeMap::new(),
+                    }],
+                },
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
             }],
@@ -2003,6 +2024,14 @@ mod tests {
                 param_id: None,
             })
         );
+        let project_slot = &restored.patterns[0].project_process_chain.slots[0];
+        assert_eq!(
+            project_slot.instance_id,
+            crate::process::ProcessInstanceId(77)
+        );
+        assert_eq!(project_slot.class_name, "json-project-mask");
+        assert!(project_slot.project_layer);
+        assert_eq!(project_slot.lanes["prob"].values, vec![1.0, 0.5]);
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);
         assert_eq!(restored.patterns[0].track_params[0].accum_mode, 2);

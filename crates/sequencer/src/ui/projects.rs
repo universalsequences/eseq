@@ -2287,6 +2287,7 @@ impl App {
             sample_names: _,
             rack_tracks,
             process_chains,
+            project_process_chain,
             plock_variant_registries,
             key_lock_variant_registries,
         } = pattern;
@@ -2540,6 +2541,7 @@ impl App {
             graph_overrides,
             rack_tracks: self.rebind_project_rack_tracks_to_graph(rack_tracks, num_tracks),
             process_chains,
+            project_process_chain,
             plock_variant_registries,
             key_lock_variant_registries,
         };
@@ -2932,6 +2934,7 @@ mod tests {
                 sample_names: Vec::new(),
                 rack_tracks: Vec::new(),
                 process_chains: Vec::new(),
+                project_process_chain: crate::process::TrackProcessChain::default(),
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
             }],

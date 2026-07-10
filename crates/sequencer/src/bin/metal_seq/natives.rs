@@ -43,7 +43,7 @@ fn process_slot_port_def(
     instance_id: sequencer::process::ProcessInstanceId,
     port_name: &str,
 ) -> Option<sequencer::process::ProcessPortDef> {
-    let Some(chain) = state.track_process_chain(track) else {
+    let Some(chain) = state.composed_track_process_chain(track) else {
         return None;
     };
     let Some(slot) = chain

@@ -1,7 +1,11 @@
 # Cirklon-Style Step Processes: Design Spec
 
 Status: design spec (evolved from brainstorm). Phase 5 has landed through the
-fx-panel process-chain surface. Rack-slot write application remains a follow-up.
+fx-panel process-chain surface, and the Phase 5B project layer (items 1-3 + 6)
+has landed: `(processes :project ...)`, fire-time composition, per-track
+runtime state, and the badged fx-panel rows. Latched brain wires and
+`target-mul!` (5B items 4-5) remain. Rack-slot write application remains a
+follow-up.
 Covers accumulators, masks, ratchets, grabs, and the track-attached process
 chain, all built on the existing scheduler-owned `def-process` framework.
 
@@ -576,16 +580,15 @@ Rules:
 - Writes go to the *current pattern's* chain (settings/lanes pattern-scoped,
   identity track-level). `:patterns :all` can come later with preset tier 2.
 - `processes` returns the handle when given one instance, a list otherwise.
-- **`:track :all` is deprecated** in favor of `(processes :project ...)` —
-  see the project layer below. The implemented `:all` form stamps a snapshot
-  of the current tracks (new tracks don't inherit) and, worse, shares one
+- **`:track :all` is removed** in favor of `(processes :project ...)` — it
+  now errors with a pointer to the project layer. The old `:all` form stamped
+  a snapshot of the current tracks (new tracks didn't inherit) and shared one
   runtime id across all tracks — shared mutable state, shared RNG stream
   (identical rolls on every track at the same `(cycle, step)`), and global
-  `lane!` edits. None of that is what "attach everywhere" means. Once
-  `:project` lands, `:track :all` should error with a pointer to it;
+  `lane!` edits. None of that is what "attach everywhere" means.
   `(list ...)` remains for deliberately stamping copies on a track set.
 
-### Project process layer: extending the DAW (design)
+### Project process layer: extending the DAW (landed)
 
 "Attach this to every track" done right is a **policy, not a snapshot**: a
 project-level default chain that every track — present and future — runs in
@@ -1257,34 +1260,46 @@ Non-track processes (conductors, field publishers) do not get a patch editor
 badges on track process slots showing field subscriptions, with a
 publishers/listeners list per field name — an inspector, not a graph.
 
-### Phase 5B — Project layer + shared brains (next candidate)
+### Phase 5B — Project layer + shared brains (items 1-3 + 6 landed)
 
 Depends only on Phase 4 (process-inlet machinery) and Phase 5 (fx panel), both
 landed; gates nothing in Phases 6–9. See the two design sections above for
 full semantics.
 
-1. `ProjectProcessChain` store beside `process_chains[track]`; fire-time chain
-   composition (`project slots ++ track slots`) in the scheduler's slot
-   iteration; `(processes :project ...)` authoring form (whole-layer replace).
-2. Per-`(instance, track)` runtime state and RNG seeds for project-layer
-   slots: track component in `track_process_slot_runtime_id` and
-   `ProcessRngPosition::Step`.
-3. Deprecate `:track :all` (error with a pointer to `:project`).
-4. Latched inlet wires: self-clocked producer → chain-slot inlet, sample-and-
+1. **Landed.** The project chain lives as scene-level state (the
+   `mod_connections` precedent: `Scene.project_process_chain`, pattern-scoped
+   settings, persisted per pattern in the project file). Composition
+   (`project slots ++ track slots`) happens at scheduler-snapshot capture
+   against live state — the scheduler's slot iteration is untouched and new
+   tracks inherit automatically. Project slots carry a `project_layer` flag;
+   per-track manual device bindings refresh per track at capture.
+   `(processes :project ...)` is whole-layer replace with the same
+   named-instance reconciliation rules as track chains; the empty form clears
+   the layer. Demo: `crates/sequencer/scripts/process-project-layer-demo.lisp`.
+2. **Landed.** `track_process_slot_runtime_id` mixes the track index into the
+   runtime id for project-layer slots, which keys both the state map and the
+   RNG seed per `(instance, track)` — every track rolls its own dice and runs
+   its own accumulator/state copy (no `ProcessRngPosition` change needed).
+   Covered by a scheduler test proving two tracks count independently.
+3. **Landed.** `:track :all` errors with a pointer to `:project`.
+4. **Remaining.** Latched inlet wires: self-clocked producer → chain-slot inlet, sample-and-
    hold register keyed by target inlet, timestamp-interleaved with track fires
    in lookahead. Two authoring surfaces: `connect!` from a standalone process
    handle (concrete address), and the instance-level `:connect` selector hint
    with mandatory `:scope` — which requires `process-inlet`/`wire` becoming
    constructor natives (unquoted selector values; migrate the Phase 4 quoted
    form).
-5. `target-mul!` joins the op vocabulary (continuous/ordered domains; inlet
-   and param-target writes).
-6. fx panel: project slots rendered at the top of every track's process
-   column, badged as the shared project layer.
-7. Acceptance: energy-brain → project prob-mask via `add`/`mul` — per-track
-   independent veto patterns, latch visible only to fires at-or-after the
-   brain tick, defaults-inert before the first tick, replay test across a
-   scene switch mid-lookahead.
+5. **Remaining.** `target-mul!` joins the op vocabulary (continuous/ordered
+   domains; inlet and param-target writes).
+6. **Landed.** fx panel: project slots render at the top of every track's
+   process column with a PROJECT badge; slot edits (bypass, knobs, lanes,
+   bindings, remove, reorder-within-layer) from any track's panel land on the
+   one shared object. Cross-layer process-inlet wires are rejected at
+   fire-time resolution (same-layer match only).
+7. **Remaining** (with item 4). Acceptance: energy-brain → project prob-mask
+   via `add`/`mul` — per-track independent veto patterns, latch visible only
+   to fires at-or-after the brain tick, defaults-inert before the first tick,
+   replay test across a scene switch mid-lookahead.
 
 ### Phase 6 — Pattern scoping polish + presets
 

@@ -226,6 +226,12 @@
       (label (substring (get slot :process) 0 (min 24 (len (get slot :process))))
         :flex 1 :font-size 9.4
         :color (if (get slot :enabled) :white :dim) :bg :transparent)
+      ;; Project-layer slots are one shared object shown atop every track's
+      ;; column; badge them so edits read as project-wide.
+      (if (get slot :project)
+        (label "PROJECT" :width 4.6 :font-size 7.5
+          :color (rgba 0.55 0.72 0.95 1.0) :bg :transparent)
+        (box :width 0))
       (if (not (get slot :enabled))
         (label "BYPASS" :width 4.2 :font-size 7.5 :color :dim :bg :transparent)
         (box :width 0))

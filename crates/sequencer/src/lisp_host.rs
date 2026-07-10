@@ -5240,7 +5240,12 @@ fn parse_process_track_spec(value: &EValue, active_tracks: usize) -> Result<Vec<
     match value {
         EValue::Number(number) => Ok(vec![parse_index(*number)?]),
         EValue::Keyword(name) | EValue::Symbol(name) if name.trim_start_matches(':') == "all" => {
-            Ok((0..active_tracks).collect())
+            Err(
+                "(processes :track :all) is deprecated: use (processes :project ...) for a \
+                 project-wide layer every track (present and future) runs, or (list 0 1 ...) \
+                 to stamp independent copies on a track set"
+                    .to_string(),
+            )
         }
         EValue::List(items) => {
             let mut tracks = Vec::with_capacity(items.len());
@@ -5252,7 +5257,7 @@ fn parse_process_track_spec(value: &EValue, active_tracks: usize) -> Result<Vec<
             }
             Ok(tracks)
         }
-        _ => Err("processes expects :track <index | :all | (list ...)>".to_string()),
+        _ => Err("processes expects :track <index | (list ...)>".to_string()),
     }
 }
 
@@ -5319,6 +5324,7 @@ fn process_chain_slot_from_handle(
         instance_name: instance.name.clone(),
         class_name: instance.class_name.clone(),
         enabled: true,
+        project_layer: false,
         inlets,
         lanes,
         bindings,
@@ -5493,30 +5499,36 @@ fn register_process_chain_natives(
     let publish_for_processes = publish.clone();
     runtime.register_native_with_docs(
         "processes",
-        "(processes :track <index | :all | (list ...)> instance...)",
-        "Declare a track's step-process chain, in order. Replaces the current pattern's chain; no instances clears it. Returns the instance handle (or a list of them) for lane!/knob tweaks.",
+        "(processes :track <index | (list ...)> instance...) | (processes :project instance...)",
+        "Declare a step-process chain, in order. :track replaces the current pattern's chain on those tracks; :project replaces the project-level layer every track (present and future) runs ahead of its own chain. No instances clears it. Returns the instance handle (or a list of them) for lane!/knob tweaks.",
         move |args, _ctx| {
             let (EValue::Keyword(key) | EValue::Symbol(key)) = args
                 .first()
-                .ok_or_else(|| "processes expects :track first".to_string())?
+                .ok_or_else(|| "processes expects :track or :project first".to_string())?
             else {
-                return Err("processes expects :track first".to_string());
+                return Err("processes expects :track or :project first".to_string());
             };
-            if key.trim_start_matches(':') != "track" {
-                return Err("processes expects :track first".to_string());
-            }
-            let tracks = parse_process_track_spec(
-                args.get(1)
-                    .ok_or_else(|| "processes expects a track spec after :track".to_string())?,
-                state_for_processes.active_track_count(),
-            )?;
+            let (tracks, instance_args) = match key.trim_start_matches(':') {
+                "track" => {
+                    let tracks = parse_process_track_spec(
+                        args.get(1).ok_or_else(|| {
+                            "processes expects a track spec after :track".to_string()
+                        })?,
+                        state_for_processes.active_track_count(),
+                    )?;
+                    (Some(tracks), args.get(2..).unwrap_or(&[]))
+                }
+                "project" => (None, args.get(1..).unwrap_or(&[])),
+                _ => return Err("processes expects :track or :project first".to_string()),
+            };
+            let project_layer = tracks.is_none();
             let mut slots = Vec::new();
             let mut handles = Vec::new();
             let defs = {
                 let registry = authoring_for_processes
                     .lock()
                     .map_err(|_| "failed to lock process registry".to_string())?;
-                for arg in &args[2..] {
+                for arg in instance_args {
                     let EValue::HostHandle { kind, id, .. } = arg else {
                         return Err(
                             "processes expects process instances, e.g. (transpose-climb :limit 12)"
@@ -5530,24 +5542,39 @@ fn register_process_chain_natives(
                         |slot: &crate::process::TrackProcessSlot| slot.instance_id.0 == *id,
                     ) {
                         return Err(
-                            "the same process instance cannot appear twice in one track chain; construct a second instance instead"
+                            "the same process instance cannot appear twice in one chain; construct a second instance instead"
                                 .to_string(),
                         );
                     }
-                    slots.push(process_chain_slot_from_handle(&registry, *id)?);
+                    let mut slot = process_chain_slot_from_handle(&registry, *id)?;
+                    slot.project_layer = project_layer;
+                    slots.push(slot);
                     handles.push(arg.clone());
                 }
                 registry.defs.clone()
             };
             let chain = crate::process::TrackProcessChain { slots };
             if write_process_chain_state {
-                for track in &tracks {
-                    let mut track_chain = chain.clone();
-                    if let Some(existing) = state_for_processes.track_process_chain(*track) {
-                        preserve_process_slot_state(&defs, &existing, &mut track_chain);
+                match &tracks {
+                    Some(tracks) => {
+                        for track in tracks {
+                            let mut track_chain = chain.clone();
+                            if let Some(existing) = state_for_processes.track_process_chain(*track)
+                            {
+                                preserve_process_slot_state(&defs, &existing, &mut track_chain);
+                            }
+                            if !state_for_processes.set_track_process_chain(*track, track_chain) {
+                                return Err(format!("track {track} out of range"));
+                            }
+                        }
                     }
-                    if !state_for_processes.set_track_process_chain(*track, track_chain) {
-                        return Err(format!("track {track} out of range"));
+                    None => {
+                        let mut project_chain = chain.clone();
+                        let existing = state_for_processes.project_process_chain();
+                        preserve_process_slot_state(&defs, &existing, &mut project_chain);
+                        if !state_for_processes.set_project_process_chain(project_chain) {
+                            return Err("failed to update the project process layer".to_string());
+                        }
                     }
                 }
                 publish_process_authoring(&authoring_for_processes, &publish_for_processes);
@@ -21662,14 +21689,19 @@ mod tests {
             Some(&vec![0.0, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0])
         );
 
-        // :track :all stamps the slot on every track; empty form clears.
+        // :track :all is deprecated: the native errors (status + false) and no
+        // track chain is stamped; :project is the attach-everywhere surface.
         scratch
             .eval("(processes :track :all (sparse-transpose :amount (lane 1 1)))")
-            .expect("attach to all tracks");
-        for track in 0..2 {
-            let chain = state.track_process_chain(track).expect("chain");
-            assert_eq!(chain.slots.len(), 1, "track {track} should have a slot");
-        }
+            .expect("eval itself should not fail");
+        assert!(
+            state
+                .track_process_chain(1)
+                .expect("track 1 chain")
+                .slots
+                .is_empty(),
+            "deprecated :all must not stamp track chains"
+        );
         scratch.eval("(processes :track 0)").expect("clear chain");
         assert!(state
             .track_process_chain(0)
@@ -21689,6 +21721,135 @@ mod tests {
                 .slots
                 .is_empty(),
             "rejected attach must not modify the chain"
+        );
+    }
+
+    #[test]
+    fn processes_project_form_declares_shared_layer_composed_ahead_of_track_chains() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(2),
+            fallback_instrument_descriptors(2),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-accumulator sparse-transpose
+                  :target (step-param :transpose)
+                  :amount (amount :lane true :default 0)
+                  :range (-128 128)
+                  :mode :clip)
+
+                (def ext (sparse-transpose :amount (lane 0 1 0 0 1 0 0 0)))
+                (processes :project ext)
+
+                (def climb
+                  (processes :track 0
+                    (sparse-transpose :amount (lane 1 1 1 1))))
+                "#,
+            )
+            .expect("attach project layer and track chain");
+
+        // The layer lives in its own store: track chains are untouched.
+        let project_chain = state.project_process_chain();
+        assert_eq!(project_chain.slots.len(), 1);
+        assert!(project_chain.slots[0].project_layer);
+        assert_eq!(project_chain.slots[0].class_name, "sparse-transpose");
+        assert_eq!(
+            project_chain.slots[0]
+                .lanes
+                .get("amount")
+                .map(|lane| &lane.values),
+            Some(&vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            state.track_process_chain(0).expect("track 0").slots.len(),
+            1,
+            "track chain composes on top, never clobbered"
+        );
+        assert!(state
+            .track_process_chain(1)
+            .expect("track 1")
+            .slots
+            .is_empty());
+
+        // Every track's effective chain runs project slots first.
+        for track in 0..2 {
+            let composed = state
+                .composed_track_process_chain(track)
+                .expect("composed chain");
+            assert!(
+                composed.slots[0].project_layer,
+                "track {track} composed chain must start with the project slot"
+            );
+        }
+        assert_eq!(
+            state
+                .composed_track_process_chain(0)
+                .expect("composed")
+                .slots
+                .len(),
+            2
+        );
+        assert_eq!(
+            state
+                .composed_track_process_chain(1)
+                .expect("composed")
+                .slots
+                .len(),
+            1
+        );
+
+        // lane! on the project handle edits the single shared lane.
+        scratch
+            .eval("(lane! ext :amount 0 2 0 0)")
+            .expect("lane! on project slot");
+        assert_eq!(
+            state.project_process_chain().slots[0]
+                .lanes
+                .get("amount")
+                .map(|lane| &lane.values),
+            Some(&vec![0.0, 2.0, 0.0, 0.0])
+        );
+
+        // Re-evaluating the same block preserves the edited lane (idempotent
+        // whole-layer replace, matching the track-chain reconciliation rules:
+        // named instances keep their pattern-owned lane edits).
+        scratch
+            .eval(
+                r#"
+                (def ext (sparse-transpose :amount (lane 0 1 0 0 1 0 0 0)))
+                (processes :project ext)
+                "#,
+            )
+            .expect("re-eval project layer");
+        assert_eq!(state.project_process_chain().slots.len(), 1);
+        assert_eq!(
+            state.project_process_chain().slots[0]
+                .lanes
+                .get("amount")
+                .map(|lane| &lane.values),
+            Some(&vec![0.0, 2.0, 0.0, 0.0]),
+            "re-eval must not erase the edited shared lane"
+        );
+
+        // Empty form clears the whole layer.
+        scratch.eval("(processes :project)").expect("clear layer");
+        assert!(state.project_process_chain().slots.is_empty());
+        assert_eq!(
+            state
+                .composed_track_process_chain(0)
+                .expect("composed")
+                .slots
+                .len(),
+            1,
+            "clearing the layer leaves track chains alone"
         );
     }
 
@@ -22861,6 +23022,54 @@ mod tests {
     }
 
     #[test]
+    fn process_project_layer_demo_loads_and_declares_the_shared_layer() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            (0..2).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(2),
+            fallback_instrument_descriptors(2),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-project-layer-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read project layer demo");
+
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate project layer demo");
+
+        let project_chain = state.project_process_chain();
+        assert_eq!(project_chain.slots.len(), 2);
+        assert!(project_chain.slots.iter().all(|slot| slot.project_layer));
+        assert_eq!(project_chain.slots[0].class_name, "project-prob-mask");
+        assert_eq!(project_chain.slots[1].class_name, "project-climb");
+        assert!(project_chain.slots[0].lanes.contains_key("prob"));
+        assert!(project_chain.slots[1].lanes.contains_key("delta"));
+        // No track chain is stamped; composition happens at fire time.
+        for track in 0..2 {
+            assert!(state
+                .track_process_chain(track)
+                .expect("track chain")
+                .slots
+                .is_empty());
+            assert_eq!(
+                state
+                    .composed_track_process_chain(track)
+                    .expect("composed chain")
+                    .slots
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
     fn process_inlet_connections_attach_inline_and_via_connect_bang() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
@@ -23200,6 +23409,7 @@ mod tests {
             instance_name: None,
             class_name: class_name.to_string(),
             enabled: true,
+            project_layer: false,
             inlets: std::collections::BTreeMap::new(),
             lanes: std::collections::BTreeMap::new(),
             bindings: std::collections::BTreeMap::new(),

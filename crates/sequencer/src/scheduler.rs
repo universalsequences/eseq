@@ -2916,6 +2916,7 @@ fn process_resolve_hint_to_target(
 
 fn resolve_process_inlet_target(
     chain: &crate::process::TrackProcessChain,
+    source_project_layer: Option<bool>,
     target: &crate::process::ParamTarget,
 ) -> Option<(usize, crate::process::ProcessInstanceId, String)> {
     let crate::process::ParamTarget::ProcessInlet {
@@ -2926,15 +2927,19 @@ fn resolve_process_inlet_target(
     else {
         return None;
     };
+    // Wiring stays within a layer: a project slot only drives project slots,
+    // a track slot only track slots (cross-layer traffic is channels' job).
+    let same_layer = |slot: &crate::process::TrackProcessSlot| {
+        source_project_layer.is_none_or(|layer| slot.project_layer == layer)
+    };
     let slot_idx = match instance_id {
-        Some(instance_id) => chain
-            .slots
-            .iter()
-            .position(|slot| slot.instance_id == *instance_id && slot.class_name == *process),
+        Some(instance_id) => chain.slots.iter().position(|slot| {
+            slot.instance_id == *instance_id && slot.class_name == *process && same_layer(slot)
+        }),
         None => chain
             .slots
             .iter()
-            .position(|slot| slot.class_name == *process),
+            .position(|slot| slot.class_name == *process && same_layer(slot)),
     }?;
     let slot = &chain.slots[slot_idx];
     Some((slot_idx, slot.instance_id, inlet.clone()))
@@ -2960,8 +2965,12 @@ fn process_apply_inlet_write(
         });
         return;
     };
+    let source_project_layer = context
+        .current_slot_index
+        .and_then(|index| context.chain.slots.get(index))
+        .map(|slot| slot.project_layer);
     let Some((target_slot_index, instance_id, inlet)) =
-        resolve_process_inlet_target(context.chain, target)
+        resolve_process_inlet_target(context.chain, source_project_layer, target)
     else {
         process_trace(snapshot, || {
             format!(
@@ -9202,6 +9211,7 @@ mod tests {
                         instance_name: None,
                         class_name: "sparse-transpose".to_string(),
                         enabled: true,
+                        project_layer: false,
                         inlets: std::collections::BTreeMap::new(),
                         lanes: std::collections::BTreeMap::from([(
                             "amount".to_string(),
@@ -9426,6 +9436,85 @@ mod tests {
             .map(|event| event.transpose)
             .collect::<Vec<_>>();
         assert_eq!(transposes, vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn scheduler_project_layer_runs_on_every_track_with_independent_state() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            for track in 0..2 {
+                state.pattern.track_params[track].set_num_steps(8);
+                for step in 0..8 {
+                    state.pattern.patterns[track].set_step_active(step, true);
+                }
+            }
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![
+                    EffectDescriptor::builtin_sampler(),
+                    EffectDescriptor::builtin_sampler(),
+                ],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process count-up
+                      :target (step-param :transpose)
+                      :state ((acc 0))
+                      :run (do
+                        (set! acc (+ acc 1))
+                        (target-add! acc)))
+
+                    (def-accumulator sparse-transpose
+                      :target (step-param :transpose)
+                      :amount (amount :lane true :default 0)
+                      :range (-128 128)
+                      :mode :clip)
+
+                    (processes :project (count-up))
+                    (processes :track 1
+                      (sparse-transpose :amount (lane 10 0 0 0 0 0 0 0)))
+                    "#,
+                )
+                .expect("attach project layer and track chain");
+
+            let project_chain = state.project_process_chain();
+            assert_eq!(project_chain.slots.len(), 1);
+            assert!(project_chain.slots[0].project_layer);
+
+            schedule_process_observed_fixture(&state, scratch, 102_000)
+        });
+
+        let track_transposes = |track: usize| {
+            events
+                .iter()
+                .filter(|event| event.track == track)
+                .take(8)
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>()
+        };
+        // The project counter runs on both tracks with independent state:
+        // shared configuration, per-(instance, track) runtime state. A shared
+        // state cell would interleave to 1..16 across the two tracks.
+        assert_eq!(
+            track_transposes(0),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "track 0 runs its own copy of the project counter"
+        );
+        // Track 1 composes its own chain after the project layer: the sparse
+        // accumulator holds +10 from step 0 onward on top of the counter.
+        assert_eq!(
+            track_transposes(1),
+            vec![11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0],
+            "track 1 = project counter + its own accumulator"
+        );
     }
 
     #[test]
