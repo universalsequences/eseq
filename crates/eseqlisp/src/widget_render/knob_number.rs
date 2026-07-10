@@ -46,6 +46,17 @@ fn format_value(value: f64, decimals: u32) -> String {
     format!("{:.*}", decimals as usize, value)
 }
 
+/// Display text for the current value: the formatted number plus an optional
+/// `unit` suffix (e.g. "dB", "%"). Edit mode seeds the plain number so typed
+/// input parses without stripping the unit.
+fn format_display(props: &HashMap<String, Value>, value: f32, decimals: u32) -> String {
+    let text = format_value(display_value(props, value) as f64, decimals);
+    match props.get("unit") {
+        Some(Value::String(unit)) if !unit.is_empty() => format!("{text} {unit}"),
+        _ => text,
+    }
+}
+
 fn display_decimals(props: &HashMap<String, Value>) -> u32 {
     let decimals = get_f32_prop(props, "decimals", 2.0) as u32;
     let min = get_f32_prop(props, "min", 0.0);
@@ -698,11 +709,7 @@ impl WidgetDefinition for KnobNumberWidget {
         let decimals = display_decimals(props);
         let show_value = !matches!(props.get("show-value"), Some(Value::Bool(false)));
         let text = if show_value {
-            format!(
-                "{} {}",
-                label,
-                format_value(display_value(props, value) as f64, decimals)
-            )
+            format!("{} {}", label, format_display(props, value, decimals))
         } else {
             label.to_string()
         };
@@ -1031,20 +1038,11 @@ impl WidgetDefinition for KnobNumberWidget {
         let (display_text, fg) = if state.editing {
             (state.edit_text.clone(), edit_color)
         } else if is_focused {
-            (
-                format_value(display_value(&node.props, value) as f64, decimals),
-                edit_color,
-            )
+            (format_display(&node.props, value, decimals), edit_color)
         } else if plock_active {
-            (
-                format_value(display_value(&node.props, value) as f64, decimals),
-                plock_color,
-            )
+            (format_display(&node.props, value, decimals), plock_color)
         } else {
-            (
-                format_value(display_value(&node.props, value) as f64, decimals),
-                text_color,
-            )
+            (format_display(&node.props, value, decimals), text_color)
         };
         let text_width_cells = CHAR_WIDTHS.with(|cw| {
             let cache = cw.borrow();

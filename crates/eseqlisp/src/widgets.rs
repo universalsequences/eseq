@@ -43,6 +43,8 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "waveform",
     "wavetable-viewer",
     "spectrogram",
+    "multiband-meter",
+    "phaser-notch",
     "scroll",
     "tree",
 ];

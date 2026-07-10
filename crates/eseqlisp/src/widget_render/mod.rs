@@ -16,9 +16,11 @@ pub mod live_audio;
 pub mod matrix;
 pub mod mixer_meter;
 pub mod modulator_curve;
+pub mod multiband_meter;
 pub mod number_label;
 pub mod number_picker;
 pub mod patcher;
+pub mod phaser_notch;
 pub mod response_curve_editor;
 pub mod scroll;
 pub mod sdf_widget;
@@ -834,6 +836,11 @@ pub trait WidgetDefinition: Sync {
     fn wants_animation_frames(&self, _node: &LayoutNode) -> bool {
         false
     }
+    /// Whether this widget's Metal shader reads `WidgetInstance::itime`.
+    /// Time-dependent instances must include `itime` in primitive cache keys.
+    fn metal_shader_uses_time(&self) -> bool {
+        false
+    }
     #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         None
@@ -875,6 +882,8 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
     &spectrogram::SPECTROGRAM_WIDGET,
     &eq8_editor::EQ8_EDITOR_WIDGET,
+    &phaser_notch::PHASER_NOTCH_WIDGET,
+    &multiband_meter::MULTIBAND_METER_WIDGET,
     &vstack::VSTACK_WIDGET,
     &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,

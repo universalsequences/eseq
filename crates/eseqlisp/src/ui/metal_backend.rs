@@ -2106,8 +2106,10 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn widget_instance_shader_uses_time(widget_type: &str) -> bool {
-        widget_render::sdf_widget::sdf_widget_def(widget_type)
-            .is_some_and(|definition| definition.animates)
+        widget_render::widget_definition(widget_type)
+            .is_some_and(|definition| definition.metal_shader_uses_time())
+            || widget_render::sdf_widget::sdf_widget_def(widget_type)
+                .is_some_and(|definition| definition.animates)
     }
 
     fn hash_metal_primitive(primitive: &widget_render::MetalPrimitive, hasher: &mut DefaultHasher) {
@@ -10694,6 +10696,20 @@ fragment float4 live_spectrogram_frag(
                 "test-cache-itime-animated",
                 1.0,
             )];
+            let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
+            if let MetalPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
+                instance.itime = 42.0;
+            }
+
+            assert_ne!(
+                base,
+                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
+            );
+        }
+
+        #[test]
+        fn widget_run_cache_key_keeps_itime_for_animated_builtin_widgets() {
+            let mut primitives = vec![test_widget_instance_primitive("phaser-notch", 1.0)];
             let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
             if let MetalPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
                 instance.itime = 42.0;

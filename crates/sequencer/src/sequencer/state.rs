@@ -2587,6 +2587,9 @@ pub struct SequencerState {
     graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     track_output_events: Mutex<Vec<TrackOutputEvent>>,
     track_output_current_beat_bits: AtomicU64,
+    active_note_until_samples: Vec<[AtomicU64; 128]>,
+    live_note_masks: Vec<[AtomicU64; 2]>,
+    audio_rendered_sample: AtomicU64,
     scratch_source: Mutex<String>,
     scratch_source_version: AtomicU64,
     published_sequencers: Mutex<Vec<PublishedSequencer>>,
@@ -2864,6 +2867,13 @@ impl SequencerState {
             graph_visualizations: Mutex::new(Vec::new()),
             track_output_events: Mutex::new(Vec::new()),
             track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
+            active_note_until_samples: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                .collect(),
+            live_note_masks: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                .collect(),
+            audio_rendered_sample: AtomicU64::new(0),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
@@ -3877,6 +3887,53 @@ impl SequencerState {
 
     pub fn track_output_current_beat(&self) -> f64 {
         f64::from_bits(self.track_output_current_beat_bits.load(Ordering::Relaxed))
+    }
+
+    /// Publish the audio clock used to expire scheduled-note activity without
+    /// taking a lock on the realtime thread.
+    pub fn set_audio_rendered_sample(&self, sample: u64) {
+        self.audio_rendered_sample.store(sample, Ordering::Release);
+    }
+
+    /// Keep a scheduled MIDI note active through its gate end. `fetch_max`
+    /// preserves overlapping/retriggered instances of the same pitch.
+    pub fn mark_scheduled_note_active_until(&self, track: usize, note: u8, sample: u64) {
+        if let Some(notes) = self.active_note_until_samples.get(track) {
+            notes[note as usize].fetch_max(sample, Ordering::Relaxed);
+        }
+    }
+
+    /// Live notes have explicit note-off events, so replace their compact mask
+    /// independently from scheduled expirations. The two sources can overlap.
+    pub fn replace_live_notes(&self, track: usize, notes: impl IntoIterator<Item = u8>) {
+        let Some(words) = self.live_note_masks.get(track) else {
+            return;
+        };
+        let mut next = [0_u64; 2];
+        for note in notes {
+            next[note as usize / 64] |= 1_u64 << (note as usize % 64);
+        }
+        for (word, value) in words.iter().zip(next) {
+            word.store(value, Ordering::Release);
+        }
+    }
+
+    pub fn active_notes(&self, track: usize) -> Vec<u8> {
+        let (Some(until), Some(live)) = (
+            self.active_note_until_samples.get(track),
+            self.live_note_masks.get(track),
+        ) else {
+            return Vec::new();
+        };
+        let rendered = self.audio_rendered_sample.load(Ordering::Acquire);
+        (0_u8..=127)
+            .filter(|note| {
+                let idx = *note as usize;
+                let bit = 1_u64 << (idx % 64);
+                live[idx / 64].load(Ordering::Relaxed) & bit != 0
+                    || until[idx].load(Ordering::Relaxed) > rendered
+            })
+            .collect()
     }
 
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
@@ -6455,6 +6512,25 @@ mod tests {
     };
     use crate::neural::ParamNodeId;
     use crate::sequencer::ModDestination;
+
+    #[test]
+    fn active_notes_merge_scheduled_expirations_with_live_note_state() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.set_audio_rendered_sample(100);
+        state.mark_scheduled_note_active_until(0, 60, 200);
+        state.replace_live_notes(0, [64]);
+        assert_eq!(state.active_notes(0), vec![60, 64]);
+
+        state.set_audio_rendered_sample(200);
+        assert_eq!(state.active_notes(0), vec![64]);
+
+        state.mark_scheduled_note_active_until(0, 64, 300);
+        state.replace_live_notes(0, []);
+        assert_eq!(state.active_notes(0), vec![64]);
+
+        state.set_audio_rendered_sample(300);
+        assert!(state.active_notes(0).is_empty());
+    }
 
     fn sample_track_params(id: usize) -> TrackParamsSnapshot {
         TrackParamsSnapshot {

@@ -985,6 +985,7 @@ pub(crate) fn init_runtime(
                         build_instrument_panel_value(&app, 0, &selected_steps)
                     },
                 ),
+                ("instrument-active-notes", Value::List(vec![])),
                 ("track-params", build_track_params(&state, 0)),
                 (
                     "tp-attack",

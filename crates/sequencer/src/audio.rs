@@ -358,17 +358,23 @@ struct ActiveKeyboardVoice {
 #[derive(Clone, Copy, Debug)]
 struct ActiveKeyboardNote {
     source_transpose: f32,
+    midi_note: Option<u8>,
     voice_count: u8,
     voices: [ActiveKeyboardVoice; MAX_RACK_SLOTS],
 }
 
 impl ActiveKeyboardNote {
-    fn new(source_transpose: f32, voices: &[ActiveKeyboardVoice]) -> Option<Self> {
+    fn new(
+        source_transpose: f32,
+        midi_note: Option<u8>,
+        voices: &[ActiveKeyboardVoice],
+    ) -> Option<Self> {
         if voices.is_empty() {
             return None;
         }
         let mut note = Self {
             source_transpose,
+            midi_note,
             voice_count: 0,
             voices: [ActiveKeyboardVoice::default(); MAX_RACK_SLOTS],
         };
@@ -1703,9 +1709,10 @@ fn store_active_keyboard_note(
     active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
     track_idx: usize,
     source_transpose: f32,
+    midi_note: Option<u8>,
     voices: &[ActiveKeyboardVoice],
 ) {
-    let Some(note) = ActiveKeyboardNote::new(source_transpose, voices) else {
+    let Some(note) = ActiveKeyboardNote::new(source_transpose, midi_note, voices) else {
         return;
     };
     for voice in voices {
@@ -4432,6 +4439,13 @@ fn fire_live_keyboard_rack_note(
         &mut data.active_keyboard_notes,
         parent_track_idx,
         trigger.transpose,
+        midi_note_from_transpose(
+            transpose,
+            f32::from_bits(
+                data.state.pattern.instrument_base_note_offsets[parent_track_idx]
+                    .load(Ordering::Relaxed),
+            ),
+        ),
         &active_voices[..active_voice_count],
     );
     true
@@ -4845,6 +4859,58 @@ fn fire_rack_resolved(
 
 /// Fire a resolved step trigger for a track (handles gate, chop setup, envelope params).
 /// Uses voice pool allocation for polyphonic playback.
+fn midi_note_from_transpose(transpose: f32, base_note_offset: f32) -> Option<u8> {
+    let note = (60.0 + transpose + base_note_offset).round();
+    (0.0..=127.0).contains(&note).then_some(note as u8)
+}
+
+fn mark_resolved_note_activity(
+    data: &AudioCallbackData,
+    frame_offset: u32,
+    track_idx: usize,
+    samples_per_step: f64,
+    resolved: crate::accumulator::ResolvedStep,
+    chord: crate::scheduled_event::ScheduledChordData,
+) {
+    let base_note_offset = f32::from_bits(
+        data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
+    );
+    let start_sample = data.rendered_samples.load(Ordering::Acquire) + frame_offset as u64;
+    let mark = |transpose: f32, duration_steps: f32| {
+        let Some(note) = midi_note_from_transpose(transpose, base_note_offset) else {
+            return;
+        };
+        let gate_samples = (duration_steps.max(0.0) as f64 * samples_per_step.max(0.0))
+            .round()
+            .max(1.0) as u64;
+        data.state.mark_scheduled_note_active_until(
+            track_idx,
+            note,
+            start_sample.saturating_add(gate_samples),
+        );
+    };
+
+    if chord.count > 0 {
+        for idx in 0..chord.count.min(MAX_VOICES) {
+            let duration = if chord.durations[idx] > 0.0 {
+                chord.durations[idx]
+            } else {
+                resolved.duration
+            };
+            mark(
+                crate::scheduled_event::resolved_chord_transpose(
+                    chord.notes[idx],
+                    chord.step_transpose,
+                    resolved.transpose,
+                ),
+                duration,
+            );
+        }
+    } else {
+        mark(resolved.transpose, resolved.duration);
+    }
+}
+
 fn fire_resolved(
     data: &mut AudioCallbackData,
     frame_offset: u32,
@@ -4865,6 +4931,14 @@ fn fire_resolved(
     let tp = &data.state.pattern.track_params[track_idx];
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+    );
+    mark_resolved_note_activity(
+        data,
+        frame_offset,
+        track_idx,
+        samples_per_step,
+        resolved,
+        chord,
     );
     if instrument_type == InstrumentType::Rack {
         let rack = data
@@ -5958,6 +6032,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     &mut data.active_keyboard_notes,
                     kt.track,
                     kt.transpose,
+                    midi_note_from_transpose(resolved_transpose, base_note_offset),
                     &[ActiveKeyboardVoice {
                         logical_id: voice_lid,
                         gatepitch_id: 0,
@@ -6082,6 +6157,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     &mut data.active_keyboard_notes,
                     kt.track,
                     kt.transpose,
+                    midi_note_from_transpose(resolved_transpose, base_note_offset),
                     &[ActiveKeyboardVoice {
                         logical_id: voice_lid,
                         gatepitch_id: voice.gatepitch_id,
@@ -6091,6 +6167,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             }
             data.state.transport.trigger_flash[kt.track].store(255, Ordering::Relaxed);
         }
+    }
+    for track in 0..num_tracks {
+        data.state.replace_live_notes(
+            track,
+            data.active_keyboard_notes[track]
+                .iter()
+                .filter_map(|note| note.and_then(|note| note.midi_note)),
+        );
     }
     if processed_keyboard_trigger {
         sync_free_patch_transport_routes(data, num_tracks);
@@ -6228,6 +6312,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     data.rendered_samples
         .store(block_end_sample, Ordering::Release);
+    data.state.set_audio_rendered_sample(block_end_sample);
 
     data.master_recorder.capture(output);
 
@@ -6987,10 +7072,11 @@ mod tests {
             },
         ];
 
-        store_active_keyboard_note(&mut notes, 0, 3.0, &voices);
+        store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), &voices);
         let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
 
         assert_eq!(note.source_transpose, 3.0);
+        assert_eq!(note.midi_note, Some(63));
         assert_eq!(note.voices(), &voices);
     }
 
@@ -7018,7 +7104,7 @@ mod tests {
             },
         ];
 
-        store_active_keyboard_note(&mut notes, 0, 3.0, &voices);
+        store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), &voices);
         clear_active_keyboard_note_by_lid(&mut notes, 12);
         let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
 

@@ -1019,6 +1019,63 @@ mod tests {
     }
 
     #[test]
+    fn builtin_ott_exposes_per_band_dynamics_params_within_state_bounds() {
+        let descriptor = EffectDescriptor::builtin_ott();
+        // The multiband panel (metal-seq-fx/builtin/multiband.lisp) looks
+        // these up by name; renaming any of them breaks the custom UI.
+        for prefix in ["low", "mid", "high"] {
+            for field in [
+                "below thr",
+                "below ratio",
+                "above thr",
+                "above ratio",
+                "attack",
+                "release",
+                "input",
+                "output",
+                "on",
+                "solo",
+            ] {
+                let name = format!("{prefix} {field}");
+                assert!(
+                    descriptor.params.iter().any(|param| param.name == name),
+                    "OTT descriptor should expose {name:?}"
+                );
+            }
+        }
+        for name in [
+            "low split",
+            "high split",
+            "xover low",
+            "xover high",
+            "soft knee",
+            "rms",
+            "output",
+            "time",
+            "amount",
+            "enabled",
+        ] {
+            assert!(
+                descriptor.params.iter().any(|param| param.name == name),
+                "OTT descriptor should expose {name:?}"
+            );
+        }
+        assert_eq!(descriptor.params.len(), 40);
+        for param in &descriptor.params {
+            assert!(
+                (param.node_param_idx as usize) < crate::ott::OTT_STATE_SIZE,
+                "param {:?} writes outside the OTT state array",
+                param.name
+            );
+            assert!(
+                param.default >= param.min && param.default <= param.max,
+                "param {:?} default out of range",
+                param.name
+            );
+        }
+    }
+
+    #[test]
     fn builtin_compressor_names_are_canonical_and_legacy_dynamics_loads() {
         assert_eq!(
             EffectDescriptor::builtin_insert_names(),
@@ -1029,6 +1086,7 @@ mod tests {
                 "Str8 Delay",
                 "Space Echo",
                 "Dimension",
+                "Phaser-Flanger",
                 "DJ Mixer",
                 "Reverb",
                 "444 Compressor",
@@ -1763,6 +1821,7 @@ impl EffectDescriptor {
             "Str8 Delay",
             "Space Echo",
             "Dimension",
+            "Phaser-Flanger",
             "DJ Mixer",
             "Reverb",
             "444 Compressor",
@@ -1812,6 +1871,7 @@ impl EffectDescriptor {
             "Str8 Delay" => Some(Self::builtin_str8_delay()),
             "Space Echo" => Some(Self::builtin_space_echo()),
             "Dimension" => Some(Self::builtin_dimension()),
+            "Phaser-Flanger" => Some(Self::builtin_phaser_flanger()),
             "DJ Mixer" => Some(Self::builtin_dj_mixer()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
             "444 Compressor" => Some(Self::builtin_444_compressor()),
@@ -3302,6 +3362,389 @@ impl EffectDescriptor {
         desc
     }
 
+    pub fn builtin_phaser_flanger() -> Self {
+        let mut desc = Self {
+            name: "Phaser-Flanger".to_string(),
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                Self::enabled_param(
+                    crate::phaser_flanger::PHASER_FLANGER_PARAM_ENABLED as u32,
+                    1.0,
+                ),
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 2.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "phaser".to_string(),
+                            "flanger".to_string(),
+                            "doubler".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_MODE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "notches".to_string(),
+                    min: 1.0,
+                    max: 12.0,
+                    default: 4.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_NOTCHES as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "center".to_string(),
+                    min: 20.0,
+                    max: 18000.0,
+                    default: 400.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_CENTER as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "spread".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.35,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_SPREAD as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "blend".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_BLEND as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "flanger time".to_string(),
+                    min: 0.1,
+                    max: 20.0,
+                    default: 2.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_FLANGER_TIME as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "doubler time".to_string(),
+                    min: 2.0,
+                    max: 100.0,
+                    default: 80.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_DOUBLER_TIME as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "sync".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_SYNC as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "rate".to_string(),
+                    min: 0.01,
+                    max: 20.0,
+                    default: 0.15,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_RATE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "sync div".to_string(),
+                    min: 0.0,
+                    max: 10.0,
+                    default: 6.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "1/32".to_string(),
+                            "1/16".to_string(),
+                            "1/16t".to_string(),
+                            "1/8".to_string(),
+                            "1/8t".to_string(),
+                            "1/8.".to_string(),
+                            "1/4".to_string(),
+                            "1/4t".to_string(),
+                            "1/4.".to_string(),
+                            "1/2".to_string(),
+                            "1".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_SYNC_DIV as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "lfo shape".to_string(),
+                    min: 0.0,
+                    max: 3.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "sine".to_string(),
+                            "triangle".to_string(),
+                            "ramp".to_string(),
+                            "square".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_SHAPE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "amount".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.25,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_AMOUNT as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "feedback".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_FEEDBACK as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "fb invert".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_FB_INVERT as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "stereo".to_string(),
+                    min: 0.0,
+                    max: 180.0,
+                    default: 20.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("°".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_STEREO as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "warmth".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_WARMTH as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "dry/wet".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_MIX as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "output".to_string(),
+                    min: -12.0,
+                    max: 12.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::phaser_flanger::PHASER_FLANGER_PARAM_OUTPUT as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+            ],
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let amount_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "amount")
+            .expect("built-in Phaser-Flanger amount param should exist");
+        let center_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "center")
+            .expect("built-in Phaser-Flanger center param should exist");
+        let feedback_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "feedback")
+            .expect("built-in Phaser-Flanger feedback param should exist");
+        let mix_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "dry/wet")
+            .expect("built-in Phaser-Flanger dry/wet param should exist");
+
+        let mut append_depth_targets =
+            |base_param_idx: usize,
+             destination_name: &str,
+             first_depth_param: u64,
+             depth_min: f32,
+             depth_max: f32,
+             depth_unit: Option<&str>| {
+                for slot in 0..crate::voice_modulator::SLOT_COUNT {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: depth_min,
+                        max: depth_max,
+                        default: 0.0,
+                        kind: ParamKind::Continuous {
+                            unit: depth_unit.map(str::to_string),
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: first_depth_param as u32 + slot as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min,
+                            depth_max,
+                            depth_unit: depth_unit.map(str::to_string),
+                        });
+                }
+            };
+
+        append_depth_targets(
+            amount_idx,
+            "amount",
+            crate::phaser_flanger::PHASER_FLANGER_PARAM_MOD_AMOUNT_DEPTH_1,
+            -1.0,
+            1.0,
+            None,
+        );
+        // Center modulation is applied in log2(Hz): depth is in octaves.
+        append_depth_targets(
+            center_idx,
+            "center",
+            crate::phaser_flanger::PHASER_FLANGER_PARAM_MOD_CENTER_DEPTH_1,
+            -4.0,
+            4.0,
+            Some("oct"),
+        );
+        append_depth_targets(
+            feedback_idx,
+            "feedback",
+            crate::phaser_flanger::PHASER_FLANGER_PARAM_MOD_FEEDBACK_DEPTH_1,
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            mix_idx,
+            "mix",
+            crate::phaser_flanger::PHASER_FLANGER_PARAM_MOD_MIX_DEPTH_1,
+            -1.0,
+            1.0,
+            None,
+        );
+
+        desc
+    }
+
     pub fn builtin_dj_mixer() -> Self {
         let mut desc = Self {
             name: "DJ Mixer".to_string(),
@@ -3878,6 +4321,181 @@ impl EffectDescriptor {
 
     /// OTT-style 3-band upward+downward compressor.
     pub fn builtin_ott() -> Self {
+        use crate::ott::{self, OttBandField};
+
+        fn continuous(
+            name: &str,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            scaling: ParamScaling,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        fn boolean(name: &str, default: f32, node_param_idx: u64) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: 1.0,
+                default,
+                kind: ParamKind::Boolean,
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        let mut params = Vec::new();
+        for (band, prefix) in ["low", "mid", "high"].into_iter().enumerate() {
+            let idx = |field| ott::ott_band_param(band, field);
+            params.extend([
+                continuous(
+                    &format!("{prefix} below thr"),
+                    -80.0,
+                    0.0,
+                    ott::DEFAULT_BELOW_THR_DB,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    idx(OttBandField::BelowThreshold),
+                ),
+                continuous(
+                    &format!("{prefix} below ratio"),
+                    0.1,
+                    100.0,
+                    1.0,
+                    None,
+                    ParamScaling::Exponential,
+                    idx(OttBandField::BelowRatio),
+                ),
+                continuous(
+                    &format!("{prefix} above thr"),
+                    -80.0,
+                    0.0,
+                    ott::DEFAULT_ABOVE_THR_DB,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    idx(OttBandField::AboveThreshold),
+                ),
+                continuous(
+                    &format!("{prefix} above ratio"),
+                    0.1,
+                    100.0,
+                    1.0,
+                    None,
+                    ParamScaling::Exponential,
+                    idx(OttBandField::AboveRatio),
+                ),
+                continuous(
+                    &format!("{prefix} attack"),
+                    0.1,
+                    1000.0,
+                    ott::BAND_DEFAULT_ATTACK_MS[band],
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    idx(OttBandField::Attack),
+                ),
+                continuous(
+                    &format!("{prefix} release"),
+                    1.0,
+                    3000.0,
+                    ott::BAND_DEFAULT_RELEASE_MS[band],
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    idx(OttBandField::Release),
+                ),
+                continuous(
+                    &format!("{prefix} input"),
+                    -24.0,
+                    24.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    idx(OttBandField::Input),
+                ),
+                continuous(
+                    &format!("{prefix} output"),
+                    -24.0,
+                    24.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    idx(OttBandField::Output),
+                ),
+                boolean(&format!("{prefix} on"), 1.0, idx(OttBandField::On)),
+                boolean(&format!("{prefix} solo"), 0.0, idx(OttBandField::Solo)),
+            ]);
+        }
+        params.extend([
+            boolean("low split", 1.0, ott::OTT_PARAM_SPLIT_LOW),
+            boolean("high split", 1.0, ott::OTT_PARAM_SPLIT_HIGH),
+            continuous(
+                "xover low",
+                20.0,
+                2000.0,
+                120.0,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                ott::OTT_PARAM_XOVER_LOW_HZ,
+            ),
+            continuous(
+                "xover high",
+                200.0,
+                18000.0,
+                2500.0,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                ott::OTT_PARAM_XOVER_HIGH_HZ,
+            ),
+            boolean("soft knee", 1.0, ott::OTT_PARAM_SOFT_KNEE),
+            boolean("rms", 0.0, ott::OTT_PARAM_RMS),
+            continuous(
+                "output",
+                -24.0,
+                24.0,
+                0.0,
+                Some("dB"),
+                ParamScaling::Linear,
+                ott::OTT_PARAM_OUTPUT_DB,
+            ),
+            continuous(
+                "time",
+                0.1,
+                10.0,
+                1.0,
+                Some("%".into()),
+                ParamScaling::Exponential,
+                ott::OTT_PARAM_TIME,
+            ),
+            continuous(
+                "amount",
+                0.0,
+                1.0,
+                1.0,
+                Some("%".into()),
+                ParamScaling::Linear,
+                ott::OTT_PARAM_AMOUNT,
+            ),
+            Self::enabled_param(ott::OTT_PARAM_ENABLED as u32, 1.0),
+        ]);
+
         Self {
             name: "OTT".to_string(),
             input_channels: 2,
@@ -3885,161 +4503,7 @@ impl EffectDescriptor {
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
-            params: vec![
-                ParamDescriptor {
-                    name: "depth".to_string(),
-                    min: 0.0,
-                    max: 1.0,
-                    default: 0.5,
-                    kind: ParamKind::Continuous {
-                        unit: Some("%".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::ott::OTT_PARAM_DEPTH as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "time".to_string(),
-                    min: 0.1,
-                    max: 2.5,
-                    default: 1.0,
-                    kind: ParamKind::Continuous { unit: None },
-                    scaling: ParamScaling::Exponential,
-                    node_param_idx: crate::ott::OTT_PARAM_TIME as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "upward".to_string(),
-                    min: 0.0,
-                    max: 1.0,
-                    default: 1.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("%".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::ott::OTT_PARAM_UPWARD as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "downward".to_string(),
-                    min: 0.0,
-                    max: 1.0,
-                    default: 1.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("%".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::ott::OTT_PARAM_DOWNWARD as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "low gain".to_string(),
-                    min: -24.0,
-                    max: 24.0,
-                    default: 0.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("dB".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::ott::OTT_PARAM_LOW_GAIN_DB as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "mid gain".to_string(),
-                    min: -24.0,
-                    max: 24.0,
-                    default: 0.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("dB".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::ott::OTT_PARAM_MID_GAIN_DB as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "high gain".to_string(),
-                    min: -24.0,
-                    max: 24.0,
-                    default: 0.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("dB".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::ott::OTT_PARAM_HIGH_GAIN_DB as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "xover low".to_string(),
-                    min: 40.0,
-                    max: 400.0,
-                    default: 100.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("Hz".to_string()),
-                    },
-                    scaling: ParamScaling::Exponential,
-                    node_param_idx: crate::ott::OTT_PARAM_XOVER_LOW_HZ as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "xover high".to_string(),
-                    min: 1000.0,
-                    max: 8000.0,
-                    default: 2500.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("Hz".to_string()),
-                    },
-                    scaling: ParamScaling::Exponential,
-                    node_param_idx: crate::ott::OTT_PARAM_XOVER_HIGH_HZ as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "input".to_string(),
-                    min: -24.0,
-                    max: 24.0,
-                    default: 0.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("dB".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::ott::OTT_PARAM_INPUT_DB as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "output".to_string(),
-                    min: -24.0,
-                    max: 24.0,
-                    default: 0.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("dB".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::ott::OTT_PARAM_OUTPUT_DB as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                Self::enabled_param(crate::ott::OTT_PARAM_ENABLED as u32, 1.0),
-            ],
+            params,
         }
     }
 

@@ -4354,6 +4354,15 @@ pub(crate) fn build_track_output_current_beat_value(state: &Arc<SequencerState>)
     Value::Number(state.track_output_current_beat())
 }
 
+pub(crate) fn build_active_notes_value(notes: &[u8]) -> Value {
+    Value::List(
+        notes
+            .iter()
+            .map(|note| Rc::new(RefCell::new(Value::Number(*note as f64))))
+            .collect(),
+    )
+}
+
 fn track_output_event_value(event: sequencer::sequencer::TrackOutputEvent) -> Value {
     map_value([
         ("node", Value::Nil),
@@ -10586,8 +10595,10 @@ mod tests {
             "metal-seq-fx/builtin/str8-delay.lisp",
             "metal-seq-fx/builtin/space-echo.lisp",
             "metal-seq-fx/builtin/dimension.lisp",
+            "metal-seq-fx/builtin/phaser-flanger.lisp",
             "metal-seq-fx/builtin/filter-panel.lisp",
             "metal-seq-fx/builtin/dynamics.lisp",
+            "metal-seq-fx/builtin/multiband.lisp",
             "metal-seq-fx/builtin/tape.lisp",
             "metal-seq-fx/builtin/dj-mixer.lisp",
             "metal-seq-fx/builtin/audio-fx.lisp",
@@ -14888,6 +14899,154 @@ mod tests {
         ]
     }
 
+    fn test_phaser_flanger_params() -> Vec<Value> {
+        let divs = vec![
+            "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2", "1",
+        ];
+        let mut params = vec![
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "mode",
+                1,
+                0.0,
+                vec!["phaser", "flanger", "doubler"],
+            )),
+            Value::Map(test_param_map("notches", 2, 4.0, 1.0, 12.0)),
+            Value::Map(test_param_map("center", 3, 400.0, 20.0, 18000.0)),
+            Value::Map(test_param_map("spread", 4, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("blend", 5, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("flanger time", 6, 2.5, 0.1, 20.0)),
+            Value::Map(test_param_map("doubler time", 7, 80.0, 2.0, 100.0)),
+            Value::Map(test_param_map("sync", 8, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("rate", 9, 0.15, 0.01, 20.0)),
+            Value::Map(test_enum_param_map("sync div", 10, 6.0, divs)),
+            Value::Map(test_enum_param_map(
+                "lfo shape",
+                11,
+                0.0,
+                vec!["sine", "triangle", "ramp", "square"],
+            )),
+            Value::Map(test_param_map("amount", 12, 0.25, 0.0, 1.0)),
+            Value::Map(test_param_map("feedback", 13, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("fb invert", 14, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("stereo", 15, 20.0, 0.0, 180.0)),
+            Value::Map(test_param_map("warmth", 16, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("dry/wet", 17, 0.5, 0.0, 1.0)),
+            Value::Map(test_param_map("output", 18, 0.0, -12.0, 12.0)),
+        ];
+        for idx in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15] {
+            let Value::Map(param) = &mut params[idx] else {
+                unreachable!("phaser-flanger test params are maps")
+            };
+            param.insert(
+                "value-field".to_string(),
+                Rc::new(RefCell::new(Value::String(format!(
+                    "test-phaser-flanger-param-{idx}"
+                )))),
+            );
+        }
+        params
+    }
+
+    fn test_ott_params() -> Vec<Value> {
+        // Node-state indices mirror sequencer::ott: per-band blocks of ten
+        // starting at 10 (low, mid, high), globals in the header slots.
+        let mut params = Vec::new();
+        for (band, prefix) in ["low", "mid", "high"].into_iter().enumerate() {
+            let base = 10 + band * 10;
+            let (attack, release) = [(50.0, 300.0), (10.0, 200.0), (5.0, 100.0)][band];
+            params.extend([
+                Value::Map(test_param_map(
+                    &format!("{prefix} below thr"),
+                    base,
+                    -60.0,
+                    -80.0,
+                    0.0,
+                )),
+                Value::Map(test_param_map(
+                    &format!("{prefix} below ratio"),
+                    base + 1,
+                    1.0,
+                    0.1,
+                    100.0,
+                )),
+                Value::Map(test_param_map(
+                    &format!("{prefix} above thr"),
+                    base + 2,
+                    -20.0,
+                    -80.0,
+                    0.0,
+                )),
+                Value::Map(test_param_map(
+                    &format!("{prefix} above ratio"),
+                    base + 3,
+                    1.0,
+                    0.1,
+                    100.0,
+                )),
+                Value::Map(test_param_map(
+                    &format!("{prefix} attack"),
+                    base + 4,
+                    attack,
+                    0.1,
+                    1000.0,
+                )),
+                Value::Map(test_param_map(
+                    &format!("{prefix} release"),
+                    base + 5,
+                    release,
+                    1.0,
+                    3000.0,
+                )),
+                Value::Map(test_param_map(
+                    &format!("{prefix} input"),
+                    base + 6,
+                    0.0,
+                    -24.0,
+                    24.0,
+                )),
+                Value::Map(test_param_map(
+                    &format!("{prefix} output"),
+                    base + 7,
+                    0.0,
+                    -24.0,
+                    24.0,
+                )),
+                Value::Map(test_param_map(&format!("{prefix} on"), base + 8, 1.0, 0.0, 1.0)),
+                Value::Map(test_param_map(
+                    &format!("{prefix} solo"),
+                    base + 9,
+                    0.0,
+                    0.0,
+                    1.0,
+                )),
+            ]);
+        }
+        params.extend([
+            Value::Map(test_param_map("low split", 6, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("high split", 7, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("xover low", 8, 120.0, 20.0, 2000.0)),
+            Value::Map(test_param_map("xover high", 9, 2500.0, 200.0, 18000.0)),
+            Value::Map(test_param_map("soft knee", 4, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("rms", 5, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("output", 3, 0.0, -24.0, 24.0)),
+            Value::Map(test_param_map("time", 2, 1.0, 0.1, 10.0)),
+            Value::Map(test_param_map("amount", 1, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+        ]);
+        // The display binds thresholds, band activators, and splits live.
+        for idx in [0, 10, 20, 2, 12, 22, 8, 18, 28, 30, 31] {
+            let Value::Map(param) = &mut params[idx] else {
+                unreachable!("ott test params are maps")
+            };
+            param.insert(
+                "value-field".to_string(),
+                Rc::new(RefCell::new(Value::String(format!("test-ott-param-{idx}")))),
+            );
+        }
+        params
+    }
+
     fn test_reverb_params() -> Vec<Value> {
         vec![
             Value::Map(test_param_map("mix", 0, 0.35, 0.0, 1.0)),
@@ -15115,6 +15274,10 @@ mod tests {
                 ("effects", test_list(vec![])),
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                (
+                    "instrument-active-notes",
+                    test_list(vec![Value::Number(69.0)]),
+                ),
                 ("bus-effects", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
@@ -15261,6 +15424,12 @@ mod tests {
             .unwrap_or_else(|| panic!("key with variant strip; layout={layout_summaries:#?}"));
         let variant_strip = find_layout_node_by_stable_key(&layout, "instrument-key-strip-69")
             .unwrap_or_else(|| panic!("key-lock variant strip; layout={layout_summaries:#?}"));
+        let active_indicator =
+            find_layout_node_by_stable_key(&layout, "instrument-key-activity-69")
+                .unwrap_or_else(|| panic!("active note indicator; layout={layout_summaries:#?}"));
+        let inactive_indicator =
+            find_layout_node_by_stable_key(&layout, "instrument-key-activity-60")
+                .unwrap_or_else(|| panic!("inactive note indicator; layout={layout_summaries:#?}"));
 
         assert!(
             key_row.rect.col >= key_panel.rect.col
@@ -15293,11 +15462,50 @@ mod tests {
         );
         assert_finite_nonzero_rect(variant_strip, "key-lock variant strip");
         assert_layout_inside(variant_strip, variant_key, "key-lock variant strip");
+        assert_finite_nonzero_rect(active_indicator, "active note indicator");
+        assert_layout_inside(active_indicator, variant_key, "active note indicator");
+        assert_finite_nonzero_rect(inactive_indicator, "inactive note indicator");
+        assert_layout_inside(inactive_indicator, white_key, "inactive note indicator");
+        assert!(
+            matches!(active_indicator.props.get("text"), Some(Value::String(text)) if text == "●"),
+            "active note indicator should be lit; props={:?}",
+            active_indicator.props
+        );
+        assert!(
+            inactive_indicator.props.get("text").is_none(),
+            "inactive note indicator should remain transparent; props={:?}",
+            inactive_indicator.props
+        );
         assert!(
             variant_strip.rect.height < variant_key.rect.height * 0.25,
             "variant color should be a strip, not the whole key; strip={:?} key={:?}",
             variant_strip.rect,
             variant_key.rect
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "instrument-active-notes",
+            test_list(vec![Value::Number(60.0)]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let updated_layout = editor.widget_layout().expect("updated keys tab layout");
+        let now_active =
+            find_layout_node_by_stable_key(&updated_layout, "instrument-key-activity-60")
+                .expect("reactively active note indicator");
+        let now_inactive =
+            find_layout_node_by_stable_key(&updated_layout, "instrument-key-activity-69")
+                .expect("reactively inactive note indicator");
+        assert!(
+            matches!(now_active.props.get("text"), Some(Value::String(text)) if text == "●"),
+            "reactive note-on should light the indicator; props={:?}",
+            now_active.props
+        );
+        assert!(
+            now_inactive.props.get("text").is_none(),
+            "reactive note-off should clear the indicator; props={:?}",
+            now_inactive.props
         );
 
         let variant_label = editor
@@ -22410,6 +22618,78 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_panel_toggle_hides_and_restores_fx_layout_spec() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str("(set! lower-panel-visible true)")
+            .expect("show FX panel");
+
+        let visible_spec = editor
+            .runtime_mut()
+            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .expect("build FX-visible layout spec")
+            .expect("layout spec");
+        assert!(
+            value_contains_string(&visible_spec, "*fx*"),
+            "visible FX layout spec should include the FX panel: {visible_spec:?}"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-fx-panel)")
+            .expect("hide FX panel");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("lower-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(false))
+        );
+        let hidden_spec = editor
+            .runtime_mut()
+            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .expect("build FX-hidden layout spec")
+            .expect("layout spec");
+        assert!(
+            !value_contains_string(&hidden_spec, "*fx*"),
+            "hidden FX layout spec should remove the FX panel: {hidden_spec:?}"
+        );
+        for expected in [
+            "*transport*",
+            "*samples*",
+            "*sequencer*",
+            "*track*",
+            "*mixer*",
+        ] {
+            assert!(
+                value_contains_string(&hidden_spec, expected),
+                "hiding FX should preserve {expected}: {hidden_spec:?}"
+            );
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-fx-panel)")
+            .expect("restore FX panel");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("lower-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
+        assert!(
+            collect_tile_buffer_names(&editor).contains(&"*fx*".to_string()),
+            "second toggle should restore the FX tile"
+        );
+    }
+
+    #[test]
     fn metal_seq_mixer_panel_toggle_preserves_clicked_step_tab() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -23606,10 +23886,13 @@ mod tests {
                 .expect("samples sidebar button");
         let mixer_button = find_layout_node_by_stable_key(&layout, "transport-mixer-panel-button")
             .expect("mixer panel button");
+        let fx_button = find_layout_node_by_stable_key(&layout, "transport-fx-panel-button")
+            .expect("FX panel button");
         let save_button =
             find_layout_node_by_stable_key(&layout, "transport-save-button").expect("save button");
         assert_finite_nonzero_rect(samples_button, "samples sidebar button");
         assert_finite_nonzero_rect(mixer_button, "mixer panel button");
+        assert_finite_nonzero_rect(fx_button, "FX panel button");
         assert_finite_nonzero_rect(save_button, "save button");
         assert!(
             samples_button.rect.col + samples_button.rect.width <= mixer_button.rect.col,
@@ -23618,9 +23901,15 @@ mod tests {
             mixer_button.rect
         );
         assert!(
-            mixer_button.rect.col + mixer_button.rect.width <= save_button.rect.col,
-            "mixer panel button should be to the left of save; mixer={:?} save={:?}",
+            mixer_button.rect.col + mixer_button.rect.width <= fx_button.rect.col,
+            "mixer panel button should be to the left of FX; mixer={:?} fx={:?}",
             mixer_button.rect,
+            fx_button.rect
+        );
+        assert!(
+            fx_button.rect.col + fx_button.rect.width <= save_button.rect.col,
+            "FX panel button should be to the left of save; fx={:?} save={:?}",
+            fx_button.rect,
             save_button.rect
         );
 
@@ -23650,6 +23939,34 @@ mod tests {
                 .unwrap(),
             Some(Value::Bool(false)),
             "mixer panel button should toggle mixer-panel-visible"
+        );
+
+        let fx_icon =
+            find_layout_node_by_widget_type(fx_button, "fx-panel-icon").expect("FX panel icon");
+        let callback = fx_icon
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("FX panel button on-click");
+        editor
+            .runtime_mut()
+            .eval_str("(set! lower-panel-visible true)")
+            .expect("reset FX panel visibility");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke FX panel button");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("lower-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(false)),
+            "FX panel button should toggle lower-panel-visible"
         );
     }
 
@@ -27752,6 +28069,190 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    fn metal_seq_sequencer_shift_drag_selection_and_render_perf() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        fn mouse_event(kind: MouseEventKind, col: f32, row: f32) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column: col as u16,
+                row: row as u16,
+                modifiers: KeyModifiers::SHIFT,
+            }
+        }
+
+        fn percentile(sorted: &[f64], pct: f64) -> f64 {
+            let index = ((sorted.len().saturating_sub(1) as f64) * pct).round() as usize;
+            sorted[index.min(sorted.len().saturating_sub(1))]
+        }
+
+        fn summarize(label: &str, values: &[f64]) {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            println!(
+                "{label:>12}: median={:7.3}ms p95={:7.3}ms min={:7.3}ms max={:7.3}ms",
+                percentile(&sorted, 0.50),
+                percentile(&sorted, 0.95),
+                sorted.first().copied().unwrap_or(0.0),
+                sorted.last().copied().unwrap_or(0.0),
+            );
+        }
+
+        let track_count = 20;
+        let step_count = 32;
+        let drag_end_step = 7;
+        let warmup_iterations = 5;
+        let measured_iterations = 20;
+        let selected_ranges = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        let mut editor = sequencer_perf_editor(track_count, step_count);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (defstate step-drag-anchor nil)
+                  (def selection-click? (evt) (get evt :shift))
+                  (def step-pointer-down-for-track (track step evt use-selection)
+                    (do (set! step-drag-anchor step) (seq-select-step-range step step)))
+                  (def step-select-drag-over-for-track (track step evt)
+                    (seq-select-step-range step-drag-anchor step))
+                  (def step-pointer-up (step evt) (set! step-drag-anchor nil))
+                "#,
+            )
+            .expect("install standalone selection gesture support");
+        editor
+            .runtime_mut()
+            .register_native("seq-pause-auto-follow", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-track-step-active?", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        {
+            let selected_ranges = Arc::clone(&selected_ranges);
+            editor
+                .runtime_mut()
+                .register_native("seq-select-step-range", move |args, _ctx| {
+                    let number = |value: Option<&Value>| match value {
+                        Some(Value::Number(value)) => *value as usize,
+                        _ => usize::MAX,
+                    };
+                    let start = number(args.first());
+                    let end = number(args.get(1));
+                    selected_ranges.lock().unwrap().push((start, end));
+                    Ok(Value::Nil)
+                });
+        }
+
+        let initial_frame =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 150, 44);
+        let tile = initial_frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*sequencer*")
+            .expect("sequencer selection perf tile should render");
+        let layout = tile
+            .frame
+            .widget_layout
+            .as_deref()
+            .expect("sequencer selection perf layout should build");
+        let start = find_layout_node_by_stable_key(layout, "seqv-step-cell-0-0")
+            .expect("selection start step");
+        let end =
+            find_layout_node_by_stable_key(layout, &format!("seqv-step-cell-0-{drag_end_step}"))
+                .expect("selection end step");
+        let down_callback = start
+            .props
+            .get("on-mouse-down")
+            .cloned()
+            .expect("selection start callback");
+        let up_callback = end
+            .props
+            .get("on-mouse-up")
+            .cloned()
+            .expect("selection end callback");
+        let selection_event = map_value([("shift", Value::Bool(true))]);
+        let start_point = (
+            tile.body_rect.col + start.rect.col + start.rect.width * 0.5,
+            tile.body_rect.row + start.rect.row + start.rect.height * 0.5,
+        );
+        let end_point = (
+            tile.body_rect.col + end.rect.col + end.rect.width * 0.5,
+            tile.body_rect.row + end.rect.row + end.rect.height * 0.5,
+        );
+
+        let mut input_samples = Vec::with_capacity(measured_iterations);
+        let mut frame_samples = Vec::with_capacity(measured_iterations);
+        let mut total_samples = Vec::with_capacity(measured_iterations);
+        for iteration in 0..(warmup_iterations + measured_iterations) {
+            selected_ranges.lock().unwrap().clear();
+            let total_start = std::time::Instant::now();
+            let input_start = std::time::Instant::now();
+            editor
+                .runtime_mut()
+                .invoke(down_callback.clone(), vec![selection_event.clone()])
+                .expect("start selection gesture");
+            editor.handle_tiled_mouse_precise(
+                mouse_event(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    start_point.0,
+                    start_point.1,
+                ),
+                start_point.0,
+                start_point.1,
+                0,
+            );
+            editor.handle_tiled_mouse_precise(
+                mouse_event(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    end_point.0,
+                    end_point.1,
+                ),
+                end_point.0,
+                end_point.1,
+                0,
+            );
+            editor
+                .runtime_mut()
+                .invoke(up_callback.clone(), vec![selection_event.clone()])
+                .expect("finish selection gesture");
+            let input_ms = input_start.elapsed().as_secs_f64() * 1000.0;
+
+            let frame_start = std::time::Instant::now();
+            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 150, 44);
+            let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(
+                frame.tiles.len(),
+                1,
+                "selection frame should render one tile"
+            );
+            let observed_ranges = selected_ranges.lock().unwrap().clone();
+            assert!(
+                observed_ranges
+                    .iter()
+                    .any(|range| *range == (0, drag_end_step)),
+                "shift drag should select through the target step; start={start_point:?} end={end_point:?} observed={observed_ranges:?}"
+            );
+
+            if iteration >= warmup_iterations {
+                input_samples.push(input_ms);
+                frame_samples.push(frame_ms);
+                total_samples.push(total_start.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+
+        println!(
+            "sequencer shift-drag selection perf: {track_count} tracks, {step_count} steps, selecting 0..={drag_end_step}, {measured_iterations} measured iterations after {warmup_iterations} warmups"
+        );
+        summarize("input", &input_samples);
+        summarize("frame", &frame_samples);
+        summarize("total", &total_samples);
+    }
+
+    #[test]
     fn metal_seq_mixer_v2_pattern_cell_state_updates_existing_bindings() {
         let track_count = 10;
         let cell_count = 8;
@@ -30108,6 +30609,312 @@ mod tests {
             layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Dimension"),
             "layout should contain the built-in Dimension panel"
         );
+    }
+
+    #[test]
+    fn metal_seq_fx_phaser_flanger_layout_contains_mode_buttons_and_knobs() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("bpm", Value::Number(120.0)),
+                ("test-phaser-flanger-param-1", Value::Number(0.0)),
+                ("test-phaser-flanger-param-2", Value::Number(4.0)),
+                ("test-phaser-flanger-param-3", Value::Number(400.0)),
+                ("test-phaser-flanger-param-4", Value::Number(0.35)),
+                ("test-phaser-flanger-param-5", Value::Number(0.0)),
+                ("test-phaser-flanger-param-6", Value::Number(2.5)),
+                ("test-phaser-flanger-param-7", Value::Number(80.0)),
+                ("test-phaser-flanger-param-8", Value::Number(0.0)),
+                ("test-phaser-flanger-param-9", Value::Number(0.15)),
+                ("test-phaser-flanger-param-10", Value::Number(6.0)),
+                ("test-phaser-flanger-param-11", Value::Number(0.0)),
+                ("test-phaser-flanger-param-12", Value::Number(0.25)),
+                ("test-phaser-flanger-param-15", Value::Number(20.0)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Phaser-Flanger".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Phaser-Flanger",
+                        0,
+                        test_phaser_flanger_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe phaser-flanger ui")
+            .expect("phaser-flanger ui probe value");
+        assert!(
+            value_contains_string(&ui_probe, "Phaser"),
+            "phaser-flanger custom UI probe should contain the mode buttons: {ui_probe:?}"
+        );
+        assert!(value_contains_string(&ui_probe, "Flanger"));
+        assert!(value_contains_string(&ui_probe, "Doubler"));
+        assert!(value_contains_string(&ui_probe, "LFO"));
+        assert!(value_contains_string(&ui_probe, "SWEEP"));
+        assert!(value_contains_string(&ui_probe, "amount"));
+        assert!(value_contains_string(&ui_probe, "dry/wet"));
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("phaser-flanger fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(128, 20);
+        let layout = editor.widget_layout().expect("phaser-flanger fx layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Phaser-Flanger"),
+            "layout should contain the built-in Phaser-Flanger panel"
+        );
+        for label in ["Phaser", "Flanger", "Doubler", "LFO", "SWEEP"] {
+            let node = find_layout_node_by_text(&layout, label)
+                .unwrap_or_else(|| panic!("phaser-flanger layout should contain {label:?}"));
+            assert_finite_nonzero_rect(node, &format!("phaser-flanger {label} label"));
+        }
+        let display = find_layout_node_by_widget_type(&layout, "phaser-notch")
+            .expect("phaser-flanger visualization widget");
+        assert_finite_nonzero_rect(display, "phaser-flanger visualization");
+        assert!(
+            eseqlisp::widget_render::layout_wants_animation_frames(display),
+            "phaser-flanger visualization should keep requesting frames while amount is nonzero"
+        );
+        for prop in [
+            "mode",
+            "notches",
+            "center",
+            "spread",
+            "blend",
+            "flanger-time",
+            "doubler-time",
+            "amount",
+            "stereo",
+            "sync",
+            "rate",
+            "sync-div",
+            "lfo-shape",
+            "bpm",
+        ] {
+            assert!(
+                matches!(display.props.get(prop), Some(Value::ReactiveRef { .. })),
+                "phaser-flanger visualization prop {prop:?} must retain its live parameter binding: {:?}",
+                display.props.get(prop)
+            );
+        }
+        let notches_control = find_layout_node_by_stable_key(
+            &layout,
+            "phaser-flanger-notches-control",
+        )
+        .expect("phaser-flanger integer notches control");
+        let notches_picker = find_layout_node_by_widget_type(notches_control, "number-picker")
+            .expect("phaser-flanger notches number picker");
+        assert_eq!(notches_picker.props.get("step"), Some(&Value::Number(1.0)));
+        assert_eq!(
+            notches_picker.props.get("decimals"),
+            Some(&Value::Number(0.0))
+        );
+        for (key, label) in [
+            ("phaser-flanger-param-12-base", "amount knob"),
+            ("phaser-flanger-param-17-base", "dry/wet knob"),
+        ] {
+            let wrapper = find_layout_node_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("phaser-flanger layout should contain {label}"));
+            let knob = find_layout_node_by_widget_type(wrapper, "knob-number")
+                .unwrap_or_else(|| panic!("phaser-flanger {label} should build a knob-number"));
+            assert_finite_nonzero_rect(knob, &format!("phaser-flanger {label}"));
+            assert_eq!(
+                knob.props.get("value-scale"),
+                Some(&Value::Number(100.0)),
+                "phaser-flanger {label} should parse display percentages such as 50 as model value 0.5"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_ott_layout_contains_band_fields_and_live_display() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let mut fields = vec![
+            ("num-tracks", Value::Number(1.0)),
+            ("compiling", Value::Bool(false)),
+            ("bpm", Value::Number(120.0)),
+            ("available-effects", test_list(vec![])),
+            (
+                "available-builtin-effects",
+                test_list(vec![Value::String("OTT".to_string())]),
+            ),
+            ("available-midi-effects", test_list(vec![])),
+            (
+                "bus-names",
+                test_list(vec![Value::String("Mix".to_string())]),
+            ),
+            (
+                "effects",
+                test_list(vec![Value::Map(test_fx_map("OTT", 0, test_ott_params()))]),
+            ),
+            ("midi-effects", test_list(vec![])),
+            (
+                "instrument-panel",
+                test_list(vec![Value::Map(test_instrument_map())]),
+            ),
+            ("bus-effects", test_list(vec![test_list(vec![])])),
+        ];
+        let reactive_values: Vec<(String, Value)> = [
+            (0, -60.0),
+            (10, -60.0),
+            (20, -60.0),
+            (2, -20.0),
+            (12, -20.0),
+            (22, -20.0),
+            (8, 1.0),
+            (18, 1.0),
+            (28, 1.0),
+            (30, 1.0),
+            (31, 1.0),
+        ]
+        .into_iter()
+        .map(|(idx, value)| (format!("test-ott-param-{idx}"), Value::Number(value)))
+        .collect();
+        for (name, value) in &reactive_values {
+            fields.push((name.as_str(), value.clone()));
+        }
+        editor.runtime_mut().register_reactive("SEQ", fields, true);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe ott ui")
+            .expect("ott ui probe value");
+        for label in [
+            "Split Freq",
+            "Input",
+            "Below",
+            "Above",
+            "Att/Rel",
+            "Output",
+            "Soft Knee",
+            "RMS",
+            "Time",
+            "Amount",
+        ] {
+            assert!(
+                value_contains_string(&ui_probe, label),
+                "ott custom UI probe should contain {label:?}: {ui_probe:?}"
+            );
+        }
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("ott fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(160, 24);
+        let layout = editor.widget_layout().expect("ott fx layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-OTT"),
+            "layout should contain the built-in OTT panel"
+        );
+        for label in ["Split Freq", "Below", "Above", "Att/Rel"] {
+            let node = find_layout_node_by_text(&layout, label)
+                .unwrap_or_else(|| panic!("ott layout should contain {label:?}"));
+            assert_finite_nonzero_rect(node, &format!("ott {label} label"));
+        }
+        let display = find_layout_node_by_widget_type(&layout, "multiband-meter")
+            .expect("ott band meter widget");
+        assert_finite_nonzero_rect(display, "ott band meter display");
+        for prop in [
+            "low-below-thr",
+            "mid-below-thr",
+            "high-below-thr",
+            "low-above-thr",
+            "mid-above-thr",
+            "high-above-thr",
+            "low-on",
+            "mid-on",
+            "high-on",
+            "low-split",
+            "high-split",
+        ] {
+            assert!(
+                matches!(display.props.get(prop), Some(Value::ReactiveRef { .. })),
+                "ott band meter prop {prop:?} must retain its live parameter binding: {:?}",
+                display.props.get(prop)
+            );
+        }
+        let requests =
+            eseqlisp::widget_render::multiband_meter::collect_band_meter_requests(&layout);
+        assert_eq!(
+            requests.len(),
+            1,
+            "visible OTT panel should request one band meter feed"
+        );
+        assert_eq!(requests[0].data_key, "band-meter:track-effect:0:0");
     }
 
     #[test]

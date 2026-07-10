@@ -4,7 +4,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+use eseqlisp::live_audio::BandMeterFrame;
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
+use eseqlisp::widget_render::multiband_meter::{BandMeterRequest, collect_band_meter_requests};
 use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, SpectrogramRequest};
 use sequencer::audio_tap::{self, SpectrogramProcessor};
 use sequencer::audiograph::{self, LiveGraphPtr};
@@ -43,10 +45,19 @@ struct TapNode {
     state: Vec<f32>,
 }
 
+/// One watched multiband-dynamics effect node whose state meters feed a
+/// `multiband-meter` widget.
+struct MeterNode {
+    node_id: i32,
+    revision: u64,
+    last_frame: Option<BandMeterFrame>,
+}
+
 pub(crate) struct LiveAudioAnalyzerManager {
     lg: LiveGraphPtr,
     taps: HashMap<TapKey, TapNode>,
     processors: HashMap<String, SpectrogramProcessor>,
+    meter_nodes: HashMap<String, MeterNode>,
     last_poll_at: Instant,
 }
 
@@ -56,6 +67,7 @@ impl LiveAudioAnalyzerManager {
             lg,
             taps: HashMap::new(),
             processors: HashMap::new(),
+            meter_nodes: HashMap::new(),
             last_poll_at: Instant::now() - LIVE_AUDIO_ANALYZER_POLL_INTERVAL,
         }
     }
@@ -66,6 +78,7 @@ impl LiveAudioAnalyzerManager {
         }
 
         let mut grouped: HashMap<TapKey, Vec<SpectrogramRequest>> = HashMap::new();
+        let mut meter_requests: HashMap<String, BandMeterRequest> = HashMap::new();
         for layout in editor.visible_widget_layouts() {
             for request in collect_spectrogram_requests(layout.as_ref()) {
                 grouped
@@ -73,7 +86,14 @@ impl LiveAudioAnalyzerManager {
                     .or_default()
                     .push(request);
             }
+            for request in collect_band_meter_requests(layout.as_ref()) {
+                meter_requests
+                    .entry(request.data_key.clone())
+                    .or_insert(request);
+            }
         }
+        let poll_due = self.last_poll_at.elapsed() >= LIVE_AUDIO_ANALYZER_POLL_INTERVAL;
+        let meters_changed = self.sync_band_meters(app, meter_requests, poll_due);
 
         let mut active_keys = HashSet::new();
         let mut topology_changed = false;
@@ -208,14 +228,119 @@ impl LiveAudioAnalyzerManager {
             self.last_poll_at = Instant::now();
         }
 
-        topology_changed || published_frame
+        topology_changed || published_frame || meters_changed
+    }
+
+    /// Watches the effect nodes behind visible `multiband-meter` widgets and
+    /// republishes their state meters when the values move.
+    fn sync_band_meters(
+        &mut self,
+        app: &ui::App,
+        requests: HashMap<String, BandMeterRequest>,
+        poll_due: bool,
+    ) -> bool {
+        let mut changed = false;
+        let stale_keys = self
+            .meter_nodes
+            .keys()
+            .filter(|key| !requests.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in stale_keys {
+            if let Some(node) = self.meter_nodes.remove(&key) {
+                let _ = unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
+            }
+        }
+        eseqlisp::live_audio::retain_band_meter_frames(&requests.keys().cloned().collect());
+
+        for (data_key, request) in requests {
+            let Some(node_id) = resolve_effect_node(app, &request.source) else {
+                if let Some(node) = self.meter_nodes.remove(&data_key) {
+                    let _ =
+                        unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
+                }
+                continue;
+            };
+            let needs_watch = self
+                .meter_nodes
+                .get(&data_key)
+                .map(|node| node.node_id != node_id)
+                .unwrap_or(true);
+            if needs_watch {
+                if let Some(node) = self.meter_nodes.remove(&data_key) {
+                    let _ =
+                        unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
+                }
+                if !unsafe { audiograph::add_node_to_watchlist(self.lg.0, node_id) } {
+                    continue;
+                }
+                self.meter_nodes.insert(
+                    data_key.clone(),
+                    MeterNode {
+                        node_id,
+                        revision: 0,
+                        last_frame: None,
+                    },
+                );
+            }
+            if !poll_due {
+                continue;
+            }
+            let Some(node) = self.meter_nodes.get_mut(&data_key) else {
+                continue;
+            };
+            let mut state = [0.0f32; sequencer::ott::OTT_STATE_SIZE];
+            let mut state_size = 0usize;
+            let copied = unsafe {
+                audiograph::get_node_state_into(
+                    self.lg.0,
+                    node.node_id,
+                    state.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&state),
+                    &mut state_size as *mut usize,
+                )
+            };
+            if !copied || state_size < std::mem::size_of_val(&state) {
+                continue;
+            }
+            let mut frame = BandMeterFrame {
+                revision: node.revision + 1,
+                level_db: [[0.0; 2]; 3],
+                gain_db: [0.0; 3],
+            };
+            for band in 0..3 {
+                for ch in 0..2 {
+                    frame.level_db[band][ch] =
+                        state[sequencer::ott::STATE_METER_LEVEL_DB + band * 2 + ch];
+                }
+                frame.gain_db[band] = state[sequencer::ott::STATE_METER_GAIN_DB + band];
+            }
+            let moved = node.last_frame.map_or(true, |last| {
+                (0..3).any(|band| {
+                    (frame.gain_db[band] - last.gain_db[band]).abs() > 0.05
+                        || (0..2).any(|ch| {
+                            (frame.level_db[band][ch] - last.level_db[band][ch]).abs() > 0.05
+                        })
+                })
+            });
+            if moved {
+                node.revision += 1;
+                node.last_frame = Some(frame);
+                eseqlisp::live_audio::publish_band_meter_frame(data_key, frame);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub(crate) fn suspend_for_project_load(&mut self) -> bool {
-        let had_live_data = !self.taps.is_empty() || !self.processors.is_empty();
+        let had_live_data =
+            !self.taps.is_empty() || !self.processors.is_empty() || !self.meter_nodes.is_empty();
         self.clear_taps();
         self.processors.clear();
+        self.clear_meter_nodes();
         eseqlisp::live_audio::retain_spectrogram_frames(&HashSet::<String>::new());
+        eseqlisp::live_audio::retain_band_meter_frames(&HashSet::<String>::new());
         had_live_data
     }
 
@@ -288,11 +413,18 @@ impl LiveAudioAnalyzerManager {
             self.destroy_tap(tap);
         }
     }
+
+    fn clear_meter_nodes(&mut self) {
+        for (_, node) in std::mem::take(&mut self.meter_nodes) {
+            let _ = unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
+        }
+    }
 }
 
 impl Drop for LiveAudioAnalyzerManager {
     fn drop(&mut self) {
         self.clear_taps();
+        self.clear_meter_nodes();
     }
 }
 
@@ -310,6 +442,43 @@ impl GraphEditBatchGuard {
 impl Drop for GraphEditBatchGuard {
     fn drop(&mut self) {
         unsafe { audiograph::end_graph_edit_batch(self.lg.0) };
+    }
+}
+
+/// Resolves an effect-slot source straight to its node id (for widgets that
+/// read the effect node's own state rather than tapping its audio).
+fn resolve_effect_node(app: &ui::App, source: &LiveAudioSourceSelector) -> Option<i32> {
+    match source {
+        LiveAudioSourceSelector::TrackEffect { index, slot } => app
+            .state
+            .pattern
+            .effect_chains
+            .get(*index)
+            .and_then(|chain| chain.get(*slot))
+            .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+            .filter(|node_id| *node_id > 0),
+        LiveAudioSourceSelector::BusEffect {
+            id: Some(bus_id),
+            slot,
+            ..
+        } => app
+            .buses
+            .iter()
+            .find(|bus| bus.id == BusId(*bus_id))
+            .and_then(|bus| bus.effect_slots.get(*slot))
+            .map(|slot| slot.node_id as i32)
+            .filter(|node_id| *node_id > 0),
+        LiveAudioSourceSelector::BusEffect {
+            id: None,
+            index: Some(index),
+            slot,
+        } => app
+            .buses
+            .get(*index)
+            .and_then(|bus| bus.effect_slots.get(*slot))
+            .map(|slot| slot.node_id as i32)
+            .filter(|node_id| *node_id > 0),
+        _ => None,
     }
 }
 

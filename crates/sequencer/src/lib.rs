@@ -77,8 +77,9 @@ pub mod lisp_host;
 pub mod mixer_volume;
 pub mod neural;
 #[allow(dead_code)]
-mod ott;
+pub mod ott;
 pub mod paths;
+mod phaser_flanger;
 pub mod plock_variants;
 pub mod process;
 pub mod project;
