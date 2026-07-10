@@ -730,21 +730,12 @@ fn process_name_initials(name: &str) -> String {
     }
 }
 
-fn process_abbrev(name: &str, max_chars: usize) -> String {
-    if name.chars().count() <= max_chars {
-        return name.to_string();
-    }
-    let keep = max_chars.saturating_sub(2);
-    format!("{}..", name.chars().take(keep).collect::<String>())
-}
-
 fn process_short_label(class_name: &str, inlet_name: &str) -> String {
     let class = process_name_initials(class_name);
-    let inlet = process_abbrev(inlet_name, 6);
-    match (class.is_empty(), inlet.is_empty()) {
+    match (class.is_empty(), inlet_name.is_empty()) {
         (_, true) => "lane".to_string(),
-        (true, false) => inlet,
-        (false, false) => format!("{class}/{inlet}"),
+        (true, false) => inlet_name.to_string(),
+        (false, false) => format!("{class}/{inlet_name}"),
     }
 }
 
@@ -10003,6 +9994,18 @@ mod tests {
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
     use sequencer::sequencer::default_empty_effect_chain;
     use std::collections::HashMap;
+
+    #[test]
+    fn process_lane_short_label_preserves_the_complete_inlet_name() {
+        assert_eq!(
+            process_short_label("project-ratchets", "repeats"),
+            "pr/repeats"
+        );
+        assert_eq!(
+            process_short_label("project-transpose-accumulator", "transpose"),
+            "pta/transpose"
+        );
+    }
 
     fn agent_test_string_list(values: &[&str]) -> Value {
         Value::List(
