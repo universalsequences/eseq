@@ -14,11 +14,11 @@ use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use super::MetalLiveSpectrogramPrimitive;
 use super::{
-    ndc_bounds, resolve_named_color, styled_cell, CellBuffer, MetalPrimitive, WidgetDefinition,
-    WidgetInstance, WidgetViewport,
+    CellBuffer, MetalPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
+    resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
-use crate::layout::{f64_to_f32, get_prop_num, Constraints, LayoutNode, MeasureCtx, Size};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 
@@ -512,8 +512,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
 
     #[test]
     fn freq_axis_maps_edges() {

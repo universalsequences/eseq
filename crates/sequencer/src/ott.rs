@@ -288,8 +288,14 @@ unsafe extern "C" fn ott_process(
         below_ratio[band] = (*s.add(base + BAND_BELOW_RATIO)).clamp(0.1, 100.0);
         above_thr[band] = (*s.add(base + BAND_ABOVE_THR_DB)).clamp(LEVEL_FLOOR_DB, 0.0);
         above_ratio[band] = (*s.add(base + BAND_ABOVE_RATIO)).clamp(0.1, 100.0);
-        attack[band] = time_coef((*s.add(base + BAND_ATTACK_MS)).clamp(0.1, 1000.0) * time, sr);
-        release[band] = time_coef((*s.add(base + BAND_RELEASE_MS)).clamp(1.0, 3000.0) * time, sr);
+        attack[band] = time_coef(
+            (*s.add(base + BAND_ATTACK_MS)).clamp(0.1, 1000.0) * time,
+            sr,
+        );
+        release[band] = time_coef(
+            (*s.add(base + BAND_RELEASE_MS)).clamp(1.0, 3000.0) * time,
+            sr,
+        );
         input_gain[band] = db_to_amp((*s.add(base + BAND_INPUT_DB)).clamp(-24.0, 24.0));
         band_out_gain[band] = db_to_amp((*s.add(base + BAND_OUTPUT_DB)).clamp(-24.0, 24.0));
         band_on[band] = *s.add(base + BAND_ON) > 0.5;
@@ -397,7 +403,11 @@ unsafe extern "C" fn ott_process(
             for (ch, sample) in [l, r].into_iter().enumerate() {
                 let m = &mut meter_env[b * 2 + ch];
                 let mag = sample.abs();
-                let mcoef = if mag > *m { meter_attack } else { meter_release };
+                let mcoef = if mag > *m {
+                    meter_attack
+                } else {
+                    meter_release
+                };
                 *m += mcoef * (mag - *m);
             }
         }

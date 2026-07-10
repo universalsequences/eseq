@@ -74,6 +74,12 @@ fn db_to_x(db: f32) -> f32 {
     ((db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB).clamp(0.0, 1.0)
 }
 
+fn tui_bar_filled_cells(level_x: f32, width: usize) -> usize {
+    (level_x.clamp(0.0, 1.0) * width as f32)
+        .round()
+        .clamp(0.0, width as f32) as usize
+}
+
 struct Display {
     // Per band (low, mid, high): L/R levels and gain as normalized axis x.
     level_x: [[f32; 2]; 3],
@@ -172,17 +178,25 @@ impl WidgetDefinition for MultibandMeterWidget {
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         let request = request_from_props(props);
-        let display = display_from_props(props, crate::live_audio::band_meter_frame(&request.data_key));
+        let display = display_from_props(
+            props,
+            crate::live_audio::band_meter_frame(&request.data_key),
+        );
         let width = rect.width.round().max(1.0) as usize;
         let col_start = rect.col.round() as u16;
         for (row_offset, band) in [2usize, 1, 0].into_iter().enumerate() {
             let row = (rect.row + rect.height * (0.5 + row_offset as f32) / 3.0).round() as u16;
-            let bar = (display.level_x[band][0].max(display.level_x[band][1])
-                * width.saturating_sub(1) as f32)
-                .round() as usize;
+            let filled = tui_bar_filled_cells(
+                display.level_x[band][0].max(display.level_x[band][1]),
+                width,
+            );
             for i in 0..width {
-                let ch = if i <= bar { '=' } else { '·' };
-                buf.set(row, col_start + i as u16, styled_cell(ch, theme::FG_MUTED(), None));
+                let ch = if i < filled { '=' } else { '·' };
+                buf.set(
+                    row,
+                    col_start + i as u16,
+                    styled_cell(ch, theme::FG_MUTED(), None),
+                );
             }
         }
     }
@@ -219,11 +233,8 @@ impl WidgetDefinition for MultibandMeterWidget {
             "level-color",
             Color::rgba(0.36, 0.72, 0.92, 1.0),
         );
-        let gain_color = resolve_named_color(
-            &node.props,
-            "gain-color",
-            Color::rgba(1.0, 0.62, 0.25, 1.0),
-        );
+        let gain_color =
+            resolve_named_color(&node.props, "gain-color", Color::rgba(1.0, 0.62, 0.25, 1.0));
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;
@@ -349,6 +360,12 @@ mod tests {
         assert!(db_to_x(-80.0) < 1.0e-6);
         assert!((db_to_x(0.0) - 1.0).abs() < 1.0e-6);
         assert!((db_to_x(-40.0) - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn tui_bar_is_empty_at_the_meter_floor() {
+        assert_eq!(tui_bar_filled_cells(0.0, 12), 0);
+        assert_eq!(tui_bar_filled_cells(1.0, 12), 12);
     }
 
     #[test]

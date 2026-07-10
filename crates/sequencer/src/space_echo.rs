@@ -19,7 +19,7 @@
 //! spring IR) hangs off the echo bus per the RE-201 mode selector.
 
 use crate::audiograph::NodeVTable;
-use crate::spring::{SPRING_TANK_STATE_LEN, SpringCoeffs, SpringParams, spring_tank_process};
+use crate::spring::{spring_tank_process, SpringCoeffs, SpringParams, SPRING_TANK_STATE_LEN};
 use std::os::raw::{c_int, c_void};
 
 const TAPE_BUF_LEN: usize = 131072;

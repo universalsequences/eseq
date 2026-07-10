@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use eseqlisp::live_audio::BandMeterFrame;
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
-use eseqlisp::widget_render::multiband_meter::{BandMeterRequest, collect_band_meter_requests};
+use eseqlisp::widget_render::multiband_meter::{collect_band_meter_requests, BandMeterRequest};
 use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, SpectrogramRequest};
 use sequencer::audio_tap::{self, SpectrogramProcessor};
 use sequencer::audiograph::{self, LiveGraphPtr};
