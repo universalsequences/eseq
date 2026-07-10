@@ -90,7 +90,7 @@ pub fn register_widget_natives(vm: &mut VM) {
 fn register_inline_value_widget_natives(vm: &mut VM) {
     for (form_name, widget_type, requires_range) in [
         ("~slider", "hslider", true),
-        ("~knob", "knob", true),
+        ("~knob", "inline-knob", true),
         ("~toggle", "toggle", false),
     ] {
         let widget_type = widget_type.to_string();

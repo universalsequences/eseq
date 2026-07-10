@@ -74,6 +74,12 @@ fn normalized_value(props: &HashMap<String, Value>) -> f32 {
     }
 }
 
+fn knob_t_from_local_row(node: &LayoutNode, local_row: f32) -> f32 {
+    let denom = (node.rect.height - 1.0).max(1.0);
+    let offset = (local_row - node.rect.row) / denom;
+    (1.0 - offset).clamp(0.0, 1.0)
+}
+
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let t = normalized_value(props);
     let size = rect.width.min(rect.height).max(1.0);
@@ -114,7 +120,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
 
 impl WidgetDefinition for KnobWidget {
     fn names(&self) -> &'static [&'static str] {
-        &["knob"]
+        &["knob", "inline-knob"]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -156,9 +162,9 @@ impl WidgetDefinition for KnobWidget {
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
-        match mouse_kind {
-            MouseEventKind::Down(MouseButton::Left) => MouseEventOutcome::Consume,
-            MouseEventKind::Drag(MouseButton::Left) => {
+        match (node.widget_type.as_str(), mouse_kind) {
+            ("inline-knob", MouseEventKind::Down(MouseButton::Left)) => MouseEventOutcome::Consume,
+            ("inline-knob", MouseEventKind::Drag(MouseButton::Left)) => {
                 let Some(Value::List(gesture)) = gesture else {
                     return MouseEventOutcome::Consume;
                 };
@@ -181,6 +187,12 @@ impl WidgetDefinition for KnobWidget {
                     (start_value + delta * range).clamp(min, max) as f64,
                 )))
             }
+            (
+                _,
+                MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left),
+            ) => MouseEventOutcome::Dispatch(WidgetEvent::SetNormalized(knob_t_from_local_row(
+                node, local_row,
+            ))),
             _ => MouseEventOutcome::Ignore,
         }
     }

@@ -763,7 +763,9 @@ fn static_inline_value(expr: &Expr) -> Option<Value> {
     }
 }
 
-fn inline_widget_source_identity(widget: &Value) -> Option<(String, usize, usize)> {
+type InlineWidgetSourceIdentity = (String, usize, usize);
+
+fn inline_widget_source_identity(widget: &Value) -> Option<InlineWidgetSourceIdentity> {
     let Value::Map(map) = widget else {
         return None;
     };
@@ -787,6 +789,22 @@ fn inline_widget_source_identity(widget: &Value) -> Option<(String, usize, usize
         revision,
         source_byte(SOURCE_START_BYTE_PROP)?,
         source_byte(SOURCE_END_BYTE_PROP)?,
+    ))
+}
+
+fn inline_widget_parent_identity(widget: &Value) -> Option<(String, String)> {
+    let Value::Map(map) = widget else {
+        return None;
+    };
+    let string_prop = |key: &str| {
+        map.get(key).and_then(|value| match &*value.borrow() {
+            Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+    };
+    Some((
+        string_prop(INLINE_PARENT_CALLEE_PROP)?,
+        string_prop(INLINE_PARENT_INLET_PROP)?,
     ))
 }
 
@@ -1568,6 +1586,8 @@ pub struct VM {
     pub global_names: Vec<String>,
     pub pending_widget_trees: Vec<PendingUiUpdate>,
     pending_inline_widgets: Vec<Value>,
+    registering_static_inline_widget: bool,
+    recent_runtime_inline_widgets: HashMap<(String, String), InlineWidgetSourceIdentity>,
     pub dag: ReactiveDag,
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
@@ -1601,6 +1621,8 @@ pub struct VmStateSnapshot {
     global_names: Vec<String>,
     pending_widget_trees: Vec<PendingUiUpdate>,
     pending_inline_widgets: Vec<Value>,
+    registering_static_inline_widget: bool,
+    recent_runtime_inline_widgets: HashMap<(String, String), InlineWidgetSourceIdentity>,
     dag: ReactiveDag,
     tracking_stack: Vec<NodeId>,
     reactive_namespaces: HashSet<String>,
@@ -2895,6 +2917,8 @@ impl VM {
             global_names: vec![],
             pending_widget_trees: Vec::new(),
             pending_inline_widgets: Vec::new(),
+            registering_static_inline_widget: false,
+            recent_runtime_inline_widgets: HashMap::new(),
             dag: ReactiveDag::new(),
             tracking_stack: Vec::new(),
             reactive_namespaces: HashSet::new(),
@@ -3074,6 +3098,8 @@ impl VM {
             global_names: self.global_names.clone(),
             pending_widget_trees: self.pending_widget_trees.clone(),
             pending_inline_widgets: self.pending_inline_widgets.clone(),
+            registering_static_inline_widget: self.registering_static_inline_widget,
+            recent_runtime_inline_widgets: self.recent_runtime_inline_widgets.clone(),
             dag: self.dag.clone(),
             tracking_stack: self.tracking_stack.clone(),
             reactive_namespaces: self.reactive_namespaces.clone(),
@@ -3106,6 +3132,8 @@ impl VM {
         self.global_names = snapshot.global_names;
         self.pending_widget_trees = snapshot.pending_widget_trees;
         self.pending_inline_widgets = snapshot.pending_inline_widgets;
+        self.registering_static_inline_widget = snapshot.registering_static_inline_widget;
+        self.recent_runtime_inline_widgets = snapshot.recent_runtime_inline_widgets;
         self.dag = snapshot.dag;
         self.tracking_stack = snapshot.tracking_stack;
         self.reactive_namespaces = snapshot.reactive_namespaces;
@@ -3448,21 +3476,29 @@ impl VM {
 
     pub fn begin_inline_widget_capture(&mut self) {
         self.pending_inline_widgets.clear();
+        self.recent_runtime_inline_widgets.clear();
     }
 
     pub fn register_inline_widget(&mut self, widget: Value) {
         if !self.inline_widget_registration_enabled() {
             return;
         }
-        if let Some(identity) = inline_widget_source_identity(&widget)
+        let identity = inline_widget_source_identity(&widget);
+        let runtime_parent = (!self.registering_static_inline_widget)
+            .then(|| inline_widget_parent_identity(&widget))
+            .flatten();
+        if let Some(identity) = identity.as_ref()
             && let Some(existing) = self
                 .pending_inline_widgets
                 .iter_mut()
-                .find(|existing| inline_widget_source_identity(existing) == Some(identity.clone()))
+                .find(|existing| inline_widget_source_identity(existing).as_ref() == Some(identity))
         {
             *existing = widget;
         } else {
             self.pending_inline_widgets.push(widget);
+        }
+        if let (Some(parent), Some(identity)) = (runtime_parent, identity) {
+            self.recent_runtime_inline_widgets.insert(parent, identity);
         }
     }
 
@@ -3527,7 +3563,10 @@ impl VM {
                 Value::String(source_revision.to_string()),
             ]);
             if let Some(Value::NativeFunction(function)) = self.global_value(form_name) {
+                let previous_static_registration = self.registering_static_inline_widget;
+                self.registering_static_inline_widget = true;
                 function(args, self);
+                self.registering_static_inline_widget = previous_static_registration;
             }
         }
 
@@ -3551,37 +3590,24 @@ impl VM {
         inlet: &str,
         target: Value,
     ) -> bool {
-        for widget in self.pending_inline_widgets.iter_mut().rev() {
-            let Value::Map(map) = widget else {
-                continue;
-            };
-            let parent_callee = map
-                .get(INLINE_PARENT_CALLEE_PROP)
-                .and_then(|value| match &*value.borrow() {
-                    Value::String(value) => Some(value.clone()),
-                    _ => None,
-                });
-            let parent_inlet =
-                map.get(INLINE_PARENT_INLET_PROP)
-                    .and_then(|value| match &*value.borrow() {
-                        Value::String(value) => Some(value.clone()),
-                        _ => None,
-                    });
-            if parent_callee.as_deref() == Some(callee)
-                && parent_inlet.as_deref() == Some(inlet)
-                && !map.contains_key("__inline-runtime-target")
-            {
-                map.insert(
-                    "__inline-runtime-target".to_string(),
-                    Rc::new(RefCell::new(target)),
-                );
-                return true;
-            }
-        }
-        false
+        let parent = (callee.to_string(), inlet.to_string());
+        let Some(source_identity) = self.recent_runtime_inline_widgets.remove(&parent) else {
+            return false;
+        };
+        let Some(Value::Map(map)) = self.pending_inline_widgets.iter_mut().find(|widget| {
+            inline_widget_source_identity(widget).as_ref() == Some(&source_identity)
+        }) else {
+            return false;
+        };
+        map.insert(
+            "__inline-runtime-target".to_string(),
+            Rc::new(RefCell::new(target)),
+        );
+        true
     }
 
     pub fn take_inline_widgets(&mut self) -> Vec<Value> {
+        self.recent_runtime_inline_widgets.clear();
         std::mem::take(&mut self.pending_inline_widgets)
     }
 
@@ -5431,6 +5457,82 @@ mod tests {
         assert_eq!(
             map_prop(&child, SOURCE_BUFFER_ID_PROP).as_deref(),
             Some(&Value::Number(42.0))
+        );
+    }
+
+    #[test]
+    fn runtime_targets_follow_executed_inline_call_sites_not_static_registration_order() {
+        fn inline_widget(start_byte: usize) -> Value {
+            let mut widget = crate::widgets::build_widget(
+                "hslider",
+                vec![
+                    Value::Keyword("value".to_string()),
+                    Value::Number(start_byte as f64),
+                ],
+            );
+            let Value::Map(map) = &mut widget else {
+                panic!("inline widget map");
+            };
+            for (key, value) in [
+                (
+                    SOURCE_REVISION_PROP,
+                    Value::String("runtime-target-order".to_string()),
+                ),
+                (SOURCE_START_BYTE_PROP, Value::Number(start_byte as f64)),
+                (SOURCE_END_BYTE_PROP, Value::Number((start_byte + 1) as f64)),
+                (
+                    super::INLINE_PARENT_CALLEE_PROP,
+                    Value::String("process-class".to_string()),
+                ),
+                (
+                    super::INLINE_PARENT_INLET_PROP,
+                    Value::String("amount".to_string()),
+                ),
+            ] {
+                map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+            }
+            widget
+        }
+
+        let mut vm = VM::new(Vec::new());
+        vm.set_current_effect_context(Some(42));
+        vm.begin_inline_widget_capture();
+
+        let first = inline_widget(10);
+        let second = inline_widget(20);
+        vm.registering_static_inline_widget = true;
+        vm.register_inline_widget(first.deep_clone());
+        vm.register_inline_widget(second.deep_clone());
+        vm.registering_static_inline_widget = false;
+
+        vm.register_inline_widget(first);
+        assert!(vm.attach_inline_widget_runtime_target(
+            "process-class",
+            "amount",
+            Value::String("first-handle".to_string()),
+        ));
+        vm.register_inline_widget(second);
+        assert!(vm.attach_inline_widget_runtime_target(
+            "process-class",
+            "amount",
+            Value::String("second-handle".to_string()),
+        ));
+
+        let widgets = vm.take_inline_widgets();
+        let target_at = |start_byte| {
+            widgets
+                .iter()
+                .find(|widget| source_byte_prop(widget, SOURCE_START_BYTE_PROP) == start_byte)
+                .and_then(|widget| map_prop(widget, "__inline-runtime-target"))
+                .map(|value| value.clone())
+        };
+        assert_eq!(
+            target_at(10),
+            Some(Value::String("first-handle".to_string()))
+        );
+        assert_eq!(
+            target_at(20),
+            Some(Value::String("second-handle".to_string()))
         );
     }
 

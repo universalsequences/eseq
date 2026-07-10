@@ -579,8 +579,11 @@ impl Buffer {
             TextEdit::new(value_anchor.start_byte, value_anchor.end_byte, replacement),
             Some(value_anchor_id),
         )?;
-        if let Some(anchor) = self.source_anchors.get_mut(&anchor_id) {
-            anchor.stale = false;
+        let container_anchor_id = self.inline_code_widgets[inline_index].container_anchor_id;
+        for authored_anchor_id in [anchor_id, container_anchor_id] {
+            if let Some(anchor) = self.source_anchors.get_mut(&authored_anchor_id) {
+                anchor.stale = false;
+            }
         }
         if let Value::Map(map) = &mut self.inline_code_widgets[inline_index].widget {
             let display_value = if matches!(map.get("__inline-toggle-numeric"), Some(marker) if matches!(&*marker.borrow(), Value::Bool(true)))
@@ -2329,6 +2332,20 @@ mod tests {
             .unwrap();
         assert!(buffer.text().contains("(~slider 100"));
         assert_eq!(buffer.inline_widget_display_col(anchor_id), Some((0, 9)));
+        let inline = &buffer.inline_code_widgets()[0];
+        for authored_anchor_id in [
+            inline.anchor_id,
+            inline.container_anchor_id,
+            inline.value_anchor_id.expect("value anchor"),
+        ] {
+            assert!(
+                !buffer
+                    .source_anchor(authored_anchor_id)
+                    .expect("authored anchor")
+                    .stale,
+                "inline writeback must keep every owned anchor fresh"
+            );
+        }
     }
 
     fn widget(

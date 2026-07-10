@@ -10179,7 +10179,7 @@ fn nested_inline_knob_inserts_columns_before_its_value_without_reserving_rows() 
     let knob = layout
         .children
         .iter()
-        .find(|node| node.widget_type == "knob")
+        .find(|node| node.widget_type == "inline-knob")
         .expect("inline knob");
     assert_eq!(knob.rect.row, 2.0 * text_height_scale);
     assert_eq!(knob.rect.height, text_height_scale);
@@ -10195,12 +10195,81 @@ fn nested_inline_knob_inserts_columns_before_its_value_without_reserving_rows() 
     let knob = zoomed_layout
         .children
         .iter()
-        .find(|node| node.widget_type == "knob")
+        .find(|node| node.widget_type == "inline-knob")
         .expect("zoomed inline knob");
     assert_eq!(knob.rect.row, 3.0);
     assert_eq!(knob.rect.col, value_col as f32 * 1.5);
     assert_eq!(knob.rect.width, 4.5);
     assert_eq!(knob.rect.height, 1.5);
+}
+
+#[test]
+fn inline_knob_uses_relative_drag_without_staling_its_owned_anchors() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().set_text(
+        "(def before-a 1)\n(def before-b 2)\n(def amount (~knob 0.5 :min 0 :max 1))",
+    );
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
+    let knob = frame
+        .widget_layout
+        .expect("inline knob layout")
+        .children
+        .iter()
+        .find(|node| node.widget_type == "inline-knob")
+        .expect("inline knob")
+        .clone();
+    let col = knob.rect.col + knob.rect.width * 0.5;
+    let start_row = knob.rect.row + knob.rect.height * 0.5;
+    let end_row = 0.1;
+
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col as u16,
+            start_row as u16,
+        ),
+        0,
+        0,
+        80,
+        8,
+        col,
+        start_row,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            col as u16,
+            end_row as u16,
+        ),
+        0,
+        0,
+        80,
+        8,
+        col,
+        end_row,
+    );
+
+    assert!(
+        !editor.active_buffer().text().contains("(~knob 0.5"),
+        "relative drag should rewrite the inline knob literal"
+    );
+    let dragged = crate::frame::build_render_frame(&mut editor, 80, 8);
+    let dragged_layout = dragged
+        .widget_layout
+        .expect("dragged inline knob layout");
+    let dragged_knob = dragged_layout
+        .children
+        .iter()
+        .find(|node| node.widget_type == "inline-knob")
+        .expect("dragged inline knob");
+    assert!(
+        !matches!(dragged_knob.props.get("muted"), Some(Value::Bool(true))),
+        "an inline widget must not become stale during its own writeback"
+    );
 }
 
 #[test]
