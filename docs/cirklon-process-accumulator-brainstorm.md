@@ -1,13 +1,11 @@
 # Cirklon-Style Step Processes: Design Spec
 
 Status: design spec (evolved from brainstorm). Phase 5 has landed through the
-fx-panel process-chain surface, and the Phase 5B project layer (items 1-3 + 6)
-has landed: `(processes :project ...)`, fire-time composition, per-track
-runtime state, and the badged fx-panel rows. Phase 5C (per-track
-copy-on-write lanes on project slots) is designed and ready to implement —
-it fixes the shipped-and-immediately-bitten singular-lane UI behavior.
-Latched brain wires and `target-mul!` (5B items 4-5) remain. Rack-slot write
-application remains a follow-up.
+fx-panel process-chain surface. The Phase 5B project layer (items 1-3 + 6) and
+Phase 5C per-track copy-on-write lanes have landed. Phase 7 resolved reads and
+bounded step/trigger history have also landed. Latched brain wires and
+`target-mul!` (5B items 4-5) remain. Rack-slot write application remains a
+follow-up.
 Covers accumulators, masks, ratchets, grabs, and the track-attached process
 chain, all built on the existing scheduler-owned `def-process` framework.
 
@@ -1048,7 +1046,7 @@ Same discipline as builtin effects. Library review should enforce this.
 (target-add! (read (track 1 :transpose)))                       ; current value
 (target-add! (read (track (in :source) :transpose :steps-ago 8))) ; history
 (target-set! (read (process transpose-wander :value)))
-(target-add! (if (> (read channel :density) 0.5) 12 0))
+(target-add! (if (> (read :channel :density) 0.5) 12 0))
 ```
 
 Sources: source step param; another track's current resolved value; another
@@ -1542,10 +1540,10 @@ full semantics.
    to fires at-or-after the brain tick, defaults-inert before the first tick,
    replay test across a scene switch mid-lookahead.
 
-### Phase 5C — Project-slot per-track lanes (next: designed, unimplemented)
+### Phase 5C — Project-slot per-track lanes (landed)
 
-Full design in "Project-slot lanes: per-track copy-on-write" above — written
-to be implementable as-is, with file/function anchors. Summary of the slice:
+Full design in "Project-slot lanes: per-track copy-on-write" above. The landed
+slice includes:
 
 1. `project_slot_identity_id` + `ProjectLaneOverrides` type +
    `apply_project_lane_overrides` overlay helper (`process.rs`).
@@ -1573,10 +1571,16 @@ to be implementable as-is, with file/function anchors. Summary of the slice:
 
 ### Phase 7 — Grabs and reads
 
-1. `read` expression family: track param (current + `:steps-ago` history buffers),
-   process outlet/state, channel.
-2. History buffer sizing/retention policy per track param.
-3. `echo-track` and `wrap-crash` as library examples.
+Landed:
+
+1. `read` expression family: resolved track params (current, `:steps-ago`, and
+   `:trigs-ago`), process outlet/state, and channel.
+2. Per-track sample-and-hold registers with the previous-tick determinism rule,
+   base-value fallback, pattern-change reset, and exact bounded retention of 256
+   step boundaries plus 256 fired triggers.
+3. `echo-track` and `wrap-crash` builtin library examples, plus the runnable
+   `crates/sequencer/scripts/process-phase7-reads-demo.lisp` source/history/
+   state/outlet/channel walkthrough.
 
 ### Phase 8 — Sugar tier
 
@@ -1767,7 +1771,6 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
 ## Open Questions
 
 - Exact preset file layout for tier 3 (lane content serialization).
-- History buffer depth and memory policy for `:steps-ago` reads.
 - Whether `def-mask`/`def-ratchet` sugar shapes are right, or one `def-step-fx`
   umbrella reads better — decide after the first few library entries.
 - Per-pattern process *bypass* toggle vs. relying on inert lane defaults.
@@ -1797,8 +1800,8 @@ assume one-instance-per-track so hard that an N-track instance can't exist.
   than single lanes — confirm this stays cheap enough for the lane UI.
 - Project layer: does a track slot ever need to run *ahead of* the project
   layer (splice point), or is project-first always right?
-- Project layer: per-track lane overrides bit on day one and are now
-  designed (Phase 5C, copy-on-write). Per-track *bypass* of a project slot
+- Project layer: per-track lane overrides landed in Phase 5C as copy-on-write.
+  Per-track *bypass* of a project slot
   (needs per-track storage for the flag) remains deferred; when it lands it
   should reuse the Phase 5C override store shape.
 - Whether the pack granularity (brain + project chain + wires) folds into the

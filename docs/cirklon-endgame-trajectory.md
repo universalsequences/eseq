@@ -8,18 +8,21 @@ end game**, deliberately deferring presets and UI polish.
 
 ## Where we are
 
-Landed and verified in code (through branch `codex/phase-5-process`):
+Landed and verified in code (through `main` at merge commit `f9f10cea`):
 
 | Phase | What it delivered |
 |---|---|
 | 0–2 | Accumulators end-to-end, `(processes :track ...)` chain attachment, lane-backed inlets, UI lanes + slot editor. `def-accumulator` sugar (an early Phase 8 slice). |
 | 3A/3B | Ports vs. bindings, hint resolution (`step-param` / `param-tag` / `midi-fx-target`), transient fire-time overlays, arm-to-map mapping UI, stale/unbound badges. |
 | 4 | `veto!`, `ratchet!` (both modes), process-inlet ports + `connect!` + `process-inlet`/`inlet`/`wire` constructor natives, `dice` / `prob-mask` / `repeater` library entries. |
-| 5 | Process chain in the fx panel (this branch — merge it first). |
+| 5 | Process chain in the fx panel. |
+| 5B | Project process layer: `(processes :project ...)`, project-before-track composition, per-track runtime state/RNG, persistence, and PROJECT-badged fx-panel rows (items 1–3 + 6). |
+| 5C | Per-track copy-on-write lane overrides for project slots, including persistence and reverting to the shared project lane. |
+| 7 | Previous-tick resolved track reads, 256-entry step/trigger histories, process state/outlet and channel reads, `echo-track` / `wrap-crash` library proofs, and a runnable Phase 7 reads demo. |
 
-Not landed: Phase 3C (rack write application), Phase 5B (project layer, shared
-brains, latched wires, `target-mul!`), Phase 6 (presets), Phase 7 (reads/grabs/
-history), Phase 8 (remaining sugar + curve preview), Phase 9 (timebase).
+Not landed: Phase 3C (rack write application), the remaining Phase 5B shared-
+brain work (latched inlet wires and `target-mul!`), Phase 6 (presets), Phase 8
+(remaining sugar + curve preview), Phase 9 (timebase).
 
 ## The end game, restated
 
@@ -40,7 +43,7 @@ rule**. Both cross-track grabs (Phase 7) and field `hear` reads use the same
 determinism contract — reads see resolved state as of the end of the previous
 step, never same-tick. Build the registers once; both features ride them.
 
-### Slice 1 — Phase 7 reads (the foundation)
+### Slice 1 — Phase 7 reads (landed foundation)
 
 - `read` expression family: another track's current resolved param value,
   `:steps-ago n` (time-locked history — canons), `:trigs-ago n` (event-locked
@@ -102,7 +105,7 @@ density goal, `suggest :harmony` for anyone else listening.
 
 | Item | Why it doesn't gate the end game |
 |---|---|
-| Phase 5B (project layer, brains, latched wires, `target-mul!`) | Spec says it gates nothing in Phases 6–9. Fields cover the energy-brain musical territory through channels. Pick it up later for the "DAW extension" surface. |
+| Remaining Phase 5B (shared/self-clocked brains, latched wires, `target-mul!`) | The project layer and per-track lane overrides have landed. These remaining items gate nothing in Phases 6–9; fields cover the energy-brain musical territory through channels. Pick them up later for the "DAW extension" surface. |
 | Phase 6 (presets, tiers 1–3) | Packaging polish. Packs ship as scripts until then. |
 | Phase 8 (rest of sugar + curve preview) | UI/ergonomics. Raw `def-process` reaches everything. |
 | Phase 3C (rack writes) | Independent follow-up; rack targets stay soft no-ops. |
@@ -119,12 +122,10 @@ From the spec's end-game section — cheap now, expensive to retrofit:
   conductor" seam).
 - Don't let chain-slot identity/storage hard-assume one-instance-per-track —
   a conductor is an N-track instance.
-- Registers/history (slice 1) should be sized/retained with the conductor's
-  read patterns in mind, not just single grabs (open question in the spec:
-  history depth policy — decide it during slice 1).
+- Registers/history retain exactly 256 step boundaries and 256 fired triggers
+  per track. Keep conductor read patterns within that explicit window.
 
 ## Sequence, in one line
 
-Merge `codex/phase-5-process` → **Phase 7 registers + reads** → **fields
-(`suggest`/`hear`)** → **conductor attachment** → author the first player
-pack. Presets, sugar, previews, and panels come after the band can play.
+**Fields (`suggest`/`hear`)** → **conductor attachment** → author the first
+player pack. Presets, sugar, previews, and panels come after the band can play.

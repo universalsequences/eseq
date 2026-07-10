@@ -40,3 +40,30 @@
                                   (min (in :lo) (in :hi))))))))
            nil)
          (target-set! :out held)))
+
+(def-process echo-track
+  :doc "Add a previous-tick resolved transpose from another track; lag is measured in source-track grid steps."
+  :target (step-param :transpose)
+  :in ((source :track :default 0)
+       (lag :int 0 255 :default 8)
+       (amount :float 0 1 :default 1 :lane true))
+  :run (target-add!
+         (* (in :amount)
+            (read (track (in :source)
+                         :transpose
+                         :steps-ago (in :lag))))))
+
+(def-process wrap-crash
+  :doc "Accumulate a lane delta, emit a crash to the selected track on each octave wrap, and add the held phase to transpose."
+  :target (step-param :transpose)
+  :in ((delta :float 0 4 :default 0 :lane true)
+       (track :track :default 7))
+  :state ((acc 0))
+  :run (do
+         (set! acc (+ acc (in :delta)))
+         (if (>= acc 12)
+           (do
+             (set! acc (- acc 12))
+             (emit :track (in :track) :note 0 :vel 0.9 :duration 0.5))
+           nil)
+         (target-add! acc)))

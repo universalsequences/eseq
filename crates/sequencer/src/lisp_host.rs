@@ -3523,6 +3523,7 @@ pub(crate) struct ProcessEvalContext {
     event: Option<EValue>,
     step_context: Option<crate::process::ProcessStepEventContext>,
     ports: Vec<crate::process::ProcessPortDef>,
+    reads: crate::process::ProcessReadSnapshot,
     outputs: Vec<crate::process::ProcessOutput>,
     emissions: Vec<EmittedAccumulatorEvent>,
     commands: Vec<crate::process::ProcessRunCommand>,
@@ -4202,6 +4203,7 @@ impl ScratchControlRuntime {
                 event: invocation.event,
                 step_context: invocation.step_context,
                 ports: invocation.ports,
+                reads: invocation.reads,
                 outputs: Vec::new(),
                 emissions: Vec::new(),
                 commands: Vec::new(),
@@ -4261,6 +4263,7 @@ impl ScratchControlRuntime {
                 event: shape_context.event.clone(),
                 step_context: Some(shape_context.step_context.clone()),
                 ports: shape_context.ports.clone(),
+                reads: crate::process::ProcessReadSnapshot::default(),
                 outputs: Vec::new(),
                 emissions: Vec::new(),
                 commands: Vec::new(),
@@ -4887,6 +4890,167 @@ fn register_process_natives(
                 return Err("step-length requires a scheduler step event context".to_string());
             };
             Ok(EValue::Number(step_context.step_beats as f64))
+        },
+    );
+
+    // The UI runtime already owns `track` as a widget/SDF combinator. Process
+    // bodies execute in the scheduler scratch VM, where the name is free; do
+    // not replace an established host meaning while registering authoring
+    // natives in the UI VM.
+    if runtime.global_value("track").is_none() {
+        runtime.register_native_with_docs(
+            "track",
+            "(track index :param [:steps-ago n | :trigs-ago n])",
+            "Construct a previous-tick resolved track-parameter read source.",
+            move |args, _ctx| {
+                if args.len() != 2 && args.len() != 4 {
+                    return Err(
+                        "track expects index, param, and optional :steps-ago/:trigs-ago count"
+                            .to_string(),
+                    );
+                }
+                let track = process_number_arg(args.first(), "track")?;
+                if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
+                    return Err("track index must be a non-negative integer".to_string());
+                }
+                let param = process_symbol_name(&args[1])?;
+                let mut fields = vec![
+                    ("kind", EValue::Keyword("track-read".to_string())),
+                    ("track", EValue::Number(track)),
+                    ("param", EValue::Keyword(param)),
+                ];
+                if args.len() == 4 {
+                    let mode = process_symbol_name(&args[2])?;
+                    if mode != "steps-ago" && mode != "trigs-ago" {
+                        return Err(
+                            "track read history mode must be :steps-ago or :trigs-ago".to_string()
+                        );
+                    }
+                    let ago = process_number_arg(args.get(3), "track")?;
+                    if !ago.is_finite() || ago < 0.0 || ago.fract() != 0.0 {
+                        return Err(
+                            "track read history count must be a non-negative integer".to_string()
+                        );
+                    }
+                    if ago as usize >= crate::process::PROCESS_READ_HISTORY_DEPTH {
+                        return Err(format!(
+                            "track read history count must be less than {}",
+                            crate::process::PROCESS_READ_HISTORY_DEPTH
+                        ));
+                    }
+                    fields.push(("mode", EValue::Keyword(mode)));
+                    fields.push(("ago", EValue::Number(ago)));
+                }
+                Ok(process_map(fields))
+            },
+        );
+    }
+
+    let process_authoring_for_read_source = Arc::clone(&process_authoring);
+    runtime.register_native_with_docs(
+        "process",
+        "(process name :state-or-outlet)",
+        "Construct a process state/outlet read source.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("process expects a name and state/outlet field".to_string());
+            }
+            let process = match &args[0] {
+                EValue::HostHandle { kind, id, .. } if kind == "process" => {
+                    let registry = process_authoring_for_read_source
+                        .lock()
+                        .map_err(|_| "failed to lock process authoring registry".to_string())?;
+                    let instance = registry
+                        .instances
+                        .iter()
+                        .find(|instance| instance.handle_id.0 == *id)
+                        .ok_or_else(|| "unknown process handle in read source".to_string())?;
+                    instance
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| instance.class_name.clone())
+                }
+                value => process_symbol_name(value)?,
+            };
+            Ok(process_map([
+                ("kind", EValue::Keyword("process-read".to_string())),
+                ("process", EValue::String(process)),
+                ("field", EValue::String(process_symbol_name(&args[1])?)),
+            ]))
+        },
+    );
+
+    let process_eval_for_read = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "read",
+        "(read (track ...)) | (read (process ...)) | (read :channel :name)",
+        "Read scheduler-owned resolved track history, process state/outlets, or a channel.",
+        move |args, _ctx| {
+            let guard = process_eval_for_read
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("read called outside process execution".to_string());
+            };
+            if args.len() == 2 && process_symbol_name(&args[0]).ok().as_deref() == Some("channel") {
+                let name = process_symbol_name(&args[1])?;
+                return Ok(ctx
+                    .reads
+                    .channels
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or(EValue::Nil));
+            }
+            let [EValue::Map(source)] = args.as_slice() else {
+                return Err("read expects a track/process source or channel name".to_string());
+            };
+            let string_field = |name: &str| -> Result<String, String> {
+                let value = source
+                    .get(name)
+                    .ok_or_else(|| format!("read source missing {name}"))?
+                    .borrow();
+                process_symbol_name(&value)
+            };
+            match string_field("kind")?.as_str() {
+                "track-read" => {
+                    let track = match source.get("track").map(|value| value.borrow()) {
+                        Some(value) => process_number_arg(Some(&value), "read")? as usize,
+                        None => return Err("track read source missing track".to_string()),
+                    };
+                    let param =
+                        parse_step_param_arg(&[EValue::Keyword(string_field("param")?)], 0)?;
+                    let Some(track) = ctx.reads.tracks.get(track) else {
+                        return Ok(EValue::Number(param.default_value() as f64));
+                    };
+                    let mode = source
+                        .get("mode")
+                        .map(|_| string_field("mode"))
+                        .transpose()?;
+                    let ago = match source.get("ago").map(|value| value.borrow()) {
+                        Some(value) => process_number_arg(Some(&value), "read")? as usize,
+                        None => 0,
+                    };
+                    let values = match mode.as_deref() {
+                        Some("steps-ago") => track.steps.get(ago).unwrap_or(&track.current),
+                        Some("trigs-ago") => track.trigs.get(ago).unwrap_or(&track.current),
+                        None => &track.current,
+                        Some(_) => return Err("unknown track read history mode".to_string()),
+                    };
+                    Ok(EValue::Number(values[param.index()] as f64))
+                }
+                "process-read" => {
+                    let process = string_field("process")?;
+                    let field = string_field("field")?;
+                    Ok(ctx
+                        .reads
+                        .process_values
+                        .get(&process)
+                        .and_then(|values| values.get(&field))
+                        .cloned()
+                        .unwrap_or(EValue::Nil))
+                }
+                _ => Err("unknown read source".to_string()),
+            }
         },
     );
 
@@ -22277,6 +22441,7 @@ mod tests {
                 event: None,
                 step_context: None,
                 ports: def.ports.clone(),
+                reads: crate::process::ProcessReadSnapshot::default(),
                 seed: 123,
             })
             .expect("invoke process");
@@ -22353,6 +22518,7 @@ mod tests {
                 event: None,
                 step_context: None,
                 ports: def.ports.clone(),
+                reads: crate::process::ProcessReadSnapshot::default(),
                 seed: 123,
             })
             .expect("invoke named-port process");
@@ -22447,6 +22613,7 @@ mod tests {
                 event: None,
                 step_context: None,
                 ports: def.ports.clone(),
+                reads: crate::process::ProcessReadSnapshot::default(),
                 seed: 123,
             })
             .expect("invoke mappable-port process");
@@ -22572,6 +22739,7 @@ mod tests {
                 },
             )],
             outputs: Vec::new(),
+            reads: crate::process::ProcessReadSnapshot::default(),
             emissions: Vec::new(),
             commands: Vec::new(),
             target_writes: Vec::new(),
@@ -22654,6 +22822,7 @@ mod tests {
                 event: None,
                 step_context: Some(test_process_step_context()),
                 ports: def.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
                 seed: 123,
             })
             .expect("invoke command-check process");
@@ -22724,6 +22893,7 @@ mod tests {
                 event: None,
                 step_context: Some(test_process_step_context()),
                 ports: def.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
                 seed: 123,
             })
             .expect("invoke shaped-ratchet process");
@@ -22786,6 +22956,7 @@ mod tests {
                 event: None,
                 step_context: None,
                 ports: def.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
                 seed: 123,
             })
             .expect_err("veto! outside step context should fail");
@@ -22796,7 +22967,7 @@ mod tests {
     }
 
     #[test]
-    fn process_builtin_library_loads_prob_mask_repeater_and_dice() {
+    fn process_builtin_library_loads_all_shipped_processes() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
             Arc::clone(&state),
@@ -22813,11 +22984,81 @@ mod tests {
         assert!(names.iter().any(|name| name == "prob-mask"), "{names:?}");
         assert!(names.iter().any(|name| name == "repeater"), "{names:?}");
         assert!(names.iter().any(|name| name == "dice"), "{names:?}");
+        assert!(names.iter().any(|name| name == "echo-track"), "{names:?}");
+        assert!(names.iter().any(|name| name == "wrap-crash"), "{names:?}");
         assert!(defs.iter().all(|def| {
             def.source_path
                 .as_deref()
                 .is_some_and(|path| path.ends_with("processes/builtin.lisp"))
         }));
+    }
+
+    #[test]
+    fn process_read_family_resolves_tracks_process_values_and_channels() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process read-family-probe
+                  :target (step-param :transpose)
+                  :run (target-add!
+                         (+ (read (track 0 :transpose))
+                            (read (track 0 :transpose :steps-ago 1))
+                            (read (track 0 :transpose :trigs-ago 0))
+                            (read (process :brain :value))
+                            (read :channel :density))))
+                "#,
+            )
+            .expect("define read-family probe");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "read-family-probe")
+            .expect("read-family definition");
+        let mut current = std::array::from_fn(|index| StepParam::ALL[index].default_value());
+        current[StepParam::Transpose.index()] = 2.0;
+        let mut step_zero = current;
+        step_zero[StepParam::Transpose.index()] = 3.0;
+        let mut step_one = current;
+        step_one[StepParam::Transpose.index()] = 4.0;
+        let mut trig = current;
+        trig[StepParam::Transpose.index()] = 5.0;
+        let reads = crate::process::ProcessReadSnapshot {
+            tracks: Arc::new(vec![crate::process::ProcessTrackReadSnapshot {
+                current,
+                steps: vec![step_zero, step_one],
+                trigs: vec![trig],
+            }]),
+            process_values: HashMap::from([(
+                "brain".to_string(),
+                HashMap::from([("value".to_string(), Value::Number(6.0))]),
+            )]),
+            channels: HashMap::from([("density".to_string(), Value::Number(7.0))]),
+        };
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 1,
+                source: def.run_source.expect("run source"),
+                beat: 1.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: def.ports,
+                reads,
+                seed: 1,
+            })
+            .expect("invoke read-family probe");
+        assert_eq!(result.target_writes[0].value, 24.0);
     }
 
     #[test]
@@ -23113,6 +23354,63 @@ mod tests {
         assert_eq!(def.ports.len(), 0);
         assert_eq!(def.inlets.len(), 11);
         assert!(def.inlets.iter().all(|inlet| inlet.lane));
+    }
+
+    #[test]
+    fn process_phase7_reads_demo_loads_all_sources_and_attaches_reader_chain() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            (0..2).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(2),
+            fallback_instrument_descriptors(2),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-phase7-reads-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read Phase 7 reads demo");
+
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate Phase 7 reads demo");
+
+        let chain = state.track_process_chain(1).expect("track 1 reader chain");
+        assert_eq!(chain.slots.len(), 7);
+        assert_eq!(
+            chain
+                .slots
+                .iter()
+                .map(|slot| slot.class_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "phase7-demo-current",
+                "phase7-demo-steps",
+                "phase7-demo-trigs",
+                "phase7-demo-state",
+                "phase7-demo-outlet",
+                "phase7-demo-channel",
+                "phase7-demo-steps",
+            ]
+        );
+        assert!(chain
+            .slots
+            .iter()
+            .all(|slot| slot.lanes.contains_key("amount")));
+
+        let authored = scratch.process_authoring_snapshot();
+        assert!(authored
+            .instances
+            .iter()
+            .any(|instance| instance.name.as_deref() == Some("phase7-demo-brain")));
+        assert!(authored
+            .channels
+            .iter()
+            .any(|channel| channel.name.as_deref() == Some("phase7-demo-density")));
     }
 
     #[test]
@@ -23581,6 +23879,7 @@ mod tests {
                     event: None,
                     step_context: None,
                     ports: def.ports.clone(),
+                    reads: crate::process::ProcessReadSnapshot::default(),
                     seed,
                 })
                 .expect("invoke helper process")
