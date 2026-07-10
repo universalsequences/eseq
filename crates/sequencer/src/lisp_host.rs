@@ -3548,6 +3548,9 @@ pub struct ScratchControlRuntime {
     process_eval: SharedProcessEvalContext,
     graph_node: SharedGraphNodeContext,
     graph_updates: HashMap<u64, CompiledGraphUpdate>,
+    process_run_callbacks: HashMap<String, EValue>,
+    #[cfg(test)]
+    process_run_cache_enabled: bool,
     runtime_globals: Vec<String>,
 }
 
@@ -3670,6 +3673,9 @@ impl ScratchControlRuntime {
             process_eval,
             graph_node,
             graph_updates: HashMap::new(),
+            process_run_callbacks: HashMap::new(),
+            #[cfg(test)]
+            process_run_cache_enabled: true,
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
@@ -3699,6 +3705,11 @@ impl ScratchControlRuntime {
     }
 
     pub fn eval(&mut self, code: &str) -> Result<Option<EValue>, String> {
+        // External evaluation can redefine macros used by a shipped process
+        // body without changing that body's source text. Recompile callbacks
+        // after every authoring evaluation so cached macro expansion can never
+        // outlive the environment that produced it.
+        self.process_run_callbacks.clear();
         self.runtime.eval_str(code).map_err(|e| format!("{e:?}"))
     }
 
@@ -3707,6 +3718,7 @@ impl ScratchControlRuntime {
         path: impl Into<PathBuf>,
         code: &str,
     ) -> Result<Option<EValue>, String> {
+        self.process_run_callbacks.clear();
         self.runtime
             .eval_source_at_path(path.into(), code)
             .map_err(|e| format!("{e:?}"))
@@ -4072,6 +4084,9 @@ impl ScratchControlRuntime {
             process_eval,
             graph_node,
             graph_updates: HashMap::new(),
+            process_run_callbacks: HashMap::new(),
+            #[cfg(test)]
+            process_run_cache_enabled: true,
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
@@ -4214,9 +4229,29 @@ impl ScratchControlRuntime {
             });
         }
         let _ = self.runtime.take_status_message();
-        self.runtime
-            .eval_str(&invocation.source)
-            .map_err(|error| format!("{error:?}"))?;
+        if self.process_run_cache_enabled() {
+            let callback =
+                if let Some(callback) = self.process_run_callbacks.get(&invocation.source) {
+                    callback.clone()
+                } else {
+                    let callback_source = format!("(lambda () {})", invocation.source);
+                    let callback = self
+                        .runtime
+                        .eval_str(&callback_source)
+                        .map_err(|error| format!("{error:?}"))?
+                        .ok_or_else(|| "process body did not compile to a callback".to_string())?;
+                    self.process_run_callbacks
+                        .insert(invocation.source.clone(), callback.clone());
+                    callback
+                };
+            self.runtime
+                .invoke(callback, Vec::new())
+                .map_err(|error| format!("{error:?}"))?;
+        } else {
+            self.runtime
+                .eval_str(&invocation.source)
+                .map_err(|error| format!("{error:?}"))?;
+        }
         let process_status = self.runtime.take_status_message();
         let ctx = self
             .process_eval
@@ -4240,6 +4275,23 @@ impl ScratchControlRuntime {
             target_writes: ctx.target_writes,
             transpose: ctx.transpose,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_process_run_cache_enabled(&mut self, enabled: bool) {
+        self.process_run_cache_enabled = enabled;
+    }
+
+    #[inline]
+    fn process_run_cache_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.process_run_cache_enabled
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
     }
 
     pub fn invoke_process_ratchet_shape(
@@ -22456,6 +22508,60 @@ mod tests {
                 value: 5.0,
             }]
         );
+    }
+
+    #[test]
+    fn process_run_callback_cache_invalidates_after_macro_redefinition() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (defmacro cached-process-write () `(target-set! 1))
+                (def-process cached-macro-process
+                  :target (step-param :transpose)
+                  :run (cached-process-write))
+                "#,
+            )
+            .expect("define cached macro process");
+
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "cached-macro-process")
+            .expect("cached macro process definition");
+        let invocation = crate::process::ProcessRunInvocation {
+            runtime_id: 91,
+            source: def.run_source.expect("run source"),
+            beat: 0.0,
+            sample_time: 0,
+            inlets: HashMap::new(),
+            state: HashMap::new(),
+            event: None,
+            step_context: None,
+            ports: def.ports,
+            reads: crate::process::ProcessReadSnapshot::default(),
+            seed: 1,
+        };
+        let first = scratch
+            .invoke_process_run(invocation.clone())
+            .expect("invoke initially compiled process");
+        assert_eq!(first.target_writes[0].value, 1.0);
+
+        scratch
+            .eval("(defmacro cached-process-write () `(target-set! 2))")
+            .expect("redefine process macro");
+        let recompiled = scratch
+            .invoke_process_run(invocation)
+            .expect("invoke process after macro redefinition");
+        assert_eq!(recompiled.target_writes[0].value, 2.0);
     }
 
     #[test]

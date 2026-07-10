@@ -7537,13 +7537,13 @@ pub fn spawn_scheduler_thread(
 mod tests {
     use super::{
         apply_fit_to_scale_to_trigger, apply_neuron_output_overrides, delayed_step_sample_time,
-        enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, midi_fx_window_events_from_step,
-        quantized_live_tick_sample, reconcile_graph_runtimes, resolve_effect_params,
-        resolve_instrument_plocks, resolve_sampler_params, run_midi_fx_chain_for_track,
-        schedule_playing_lookahead, should_reload_neural_runtime, swung_network_sample_time,
-        track_active_note_spans_at_beat, track_note_spans_for_trigger, EmittedNetworkEventSource,
-        LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState, SchedulerLookaheadState,
-        SnapshotSequencerClock,
+        enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, invoke_process_cascade,
+        midi_fx_window_events_from_step, quantized_live_tick_sample, reconcile_graph_runtimes,
+        resolve_effect_params, resolve_instrument_plocks, resolve_sampler_params,
+        run_midi_fx_chain_for_track, schedule_playing_lookahead, should_reload_neural_runtime,
+        swung_network_sample_time, track_active_note_spans_at_beat, track_note_spans_for_trigger,
+        EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState,
+        SchedulerLookaheadState, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{
@@ -7575,6 +7575,7 @@ mod tests {
     use eseqlisp::Runtime;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn test_resolved_step() -> ResolvedStep {
         ResolvedStep {
@@ -9373,6 +9374,122 @@ mod tests {
             .expect("spawn scheduler process accumulator harness")
             .join()
             .expect("scheduler process accumulator harness panicked")
+    }
+
+    fn project_performance_cascade_fixture(
+        cache_enabled: bool,
+    ) -> (
+        Arc<SequencerState>,
+        Option<lisp_host::ScratchControlRuntime>,
+        crate::process::ProcessRuntime,
+    ) {
+        const TRACKS: usize = 4;
+        let state = Arc::new(SequencerState::new(
+            TRACKS,
+            (0..TRACKS).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        for track in 0..TRACKS {
+            state.pattern.track_params[track].set_num_steps(16);
+            for step in 0..16 {
+                state.pattern.patterns[track].set_step_active(step, true);
+            }
+        }
+
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            (0..TRACKS).map(|_| Vec::new()).collect(),
+            (0..TRACKS)
+                .map(|_| EffectDescriptor::builtin_sampler())
+                .collect(),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-project-performance-lanes-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path)
+            .expect("read project process performance lanes demo");
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate project process performance lanes demo");
+        scratch.set_process_run_cache_enabled(cache_enabled);
+
+        let mut process_runtime = crate::process::ProcessRuntime::default();
+        process_runtime.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        (state, Some(scratch), process_runtime)
+    }
+
+    fn run_project_performance_cascade_pass(
+        state: &SequencerState,
+        scratch: &mut Option<lisp_host::ScratchControlRuntime>,
+        process_runtime: &mut crate::process::ProcessRuntime,
+        cycle: u64,
+    ) -> usize {
+        let mut invocation_count = 0;
+        for step in 0..16 {
+            for track in 0..4 {
+                let chain = state
+                    .composed_track_process_chain(track)
+                    .expect("composed project process chain");
+                for slot in &chain.slots {
+                    let Some(invocation) = process_runtime.step_process_invocation(
+                        slot,
+                        crate::process::ProcessStepRunContext {
+                            track,
+                            step,
+                            cycle,
+                            beat: cycle as f64 * 4.0 + step as f64 * 0.25,
+                            sample_time: cycle * 96_000 + step as u64 * 6_000,
+                            step_beats: 0.25,
+                            resolved: test_resolved_step(),
+                            event: Value::Nil,
+                        },
+                    ) else {
+                        continue;
+                    };
+                    invocation_count += 1;
+                    assert!(invoke_process_cascade(
+                        scratch,
+                        process_runtime,
+                        invocation,
+                        false,
+                        |_, _, _, _| {},
+                    ));
+                }
+            }
+        }
+        invocation_count
+    }
+
+    fn profile_project_performance_cascade(cache_enabled: bool) -> (Duration, usize) {
+        let (state, mut scratch, mut process_runtime) =
+            project_performance_cascade_fixture(cache_enabled);
+        let warmup_invocations =
+            run_project_performance_cascade_pass(&state, &mut scratch, &mut process_runtime, 0);
+        let started = Instant::now();
+        let measured_invocations =
+            run_project_performance_cascade_pass(&state, &mut scratch, &mut process_runtime, 1);
+        assert_eq!(warmup_invocations, measured_invocations);
+        (started.elapsed(), measured_invocations)
+    }
+
+    #[test]
+    #[ignore = "manual release-mode performance profile"]
+    fn profile_invoke_process_cascade_project_performance_lanes() {
+        let (uncached, uncached_invocations) = profile_project_performance_cascade(false);
+        let (cached, cached_invocations) = profile_project_performance_cascade(true);
+        assert_eq!(uncached_invocations, 128);
+        assert_eq!(cached_invocations, uncached_invocations);
+        let speedup = uncached.as_secs_f64() / cached.as_secs_f64();
+        eprintln!(
+            "invoke_process_cascade profile: invocations={} uncached={:?} cached={:?} speedup={:.2}x",
+            cached_invocations, uncached, cached, speedup
+        );
+        assert!(
+            speedup >= 10.0,
+            "expected at least 10x invoke_process_cascade speedup, measured {speedup:.2}x"
+        );
     }
 
     fn schedule_process_fixture(
