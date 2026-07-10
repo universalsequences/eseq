@@ -53,9 +53,62 @@ pub fn clear_spectrogram_frames() {
     spectrogram_frames().lock().unwrap().clear();
 }
 
+/// Live meter snapshot for one multiband dynamics effect instance: per-band
+/// (low, mid, high) L/R detector levels and the applied dynamics gain, in dB.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandMeterFrame {
+    pub revision: u64,
+    pub level_db: [[f32; 2]; 3],
+    pub gain_db: [f32; 3],
+}
+
+static BAND_METER_FRAMES: OnceLock<Mutex<HashMap<String, BandMeterFrame>>> = OnceLock::new();
+
+fn band_meter_frames() -> &'static Mutex<HashMap<String, BandMeterFrame>> {
+    BAND_METER_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn publish_band_meter_frame(key: impl Into<String>, frame: BandMeterFrame) {
+    {
+        let mut frames = band_meter_frames().lock().unwrap();
+        frames.insert(key.into(), frame);
+    }
+    // Meter widgets fold the frame into their primitives at build time, so a
+    // new frame must invalidate the compiled primitive cache to repaint.
+    crate::widget_render::bump_widget_state_generation();
+}
+
+pub fn band_meter_frame(key: &str) -> Option<BandMeterFrame> {
+    let frames = band_meter_frames().lock().unwrap();
+    frames.get(key).copied()
+}
+
+pub fn retain_band_meter_frames(active_keys: &HashSet<String>) {
+    let mut frames = band_meter_frames().lock().unwrap();
+    frames.retain(|key, _| active_keys.contains(key));
+}
+
+pub fn clear_band_meter_frames() {
+    band_meter_frames().lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_meter_frames_round_trip_and_retain() {
+        clear_band_meter_frames();
+        let frame = BandMeterFrame {
+            revision: 3,
+            level_db: [[-12.0, -13.0], [-24.0, -25.0], [-36.0, -37.0]],
+            gain_db: [-6.0, 0.0, 3.0],
+        };
+        publish_band_meter_frame("meter", frame);
+        assert_eq!(band_meter_frame("meter"), Some(frame));
+        retain_band_meter_frames(&HashSet::new());
+        assert!(band_meter_frame("meter").is_none());
+    }
 
     #[test]
     fn rejects_malformed_spectrogram_frame() {

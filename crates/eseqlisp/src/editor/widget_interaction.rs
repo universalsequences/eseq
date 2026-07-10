@@ -148,8 +148,12 @@ fn deepest_double_click_node(node: &LayoutNode, row: f32, col: f32) -> Option<La
         })
 }
 
-fn path_to_widget_id(node: &LayoutNode, target_id: u64, path: &mut Vec<LayoutNode>) -> bool {
-    path.push(node.clone());
+fn path_to_widget_id<'a>(
+    node: &'a LayoutNode,
+    target_id: u64,
+    path: &mut Vec<&'a LayoutNode>,
+) -> bool {
+    path.push(node);
     if node.widget_id == target_id {
         return true;
     }
@@ -179,7 +183,10 @@ fn nearest_pointer_capture_node(layout: &LayoutNode, hit_node: &LayoutNode) -> O
     if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
         return None;
     }
-    path.into_iter().rev().find(node_captures_pointer)
+    path.into_iter()
+        .rev()
+        .find(|node| node_captures_pointer(node))
+        .cloned()
 }
 
 fn pointer_dispatch_node(layout: &LayoutNode, hit_node: LayoutNode) -> LayoutNode {
@@ -196,8 +203,10 @@ fn nearest_widget_gesture_node(
     if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
         return None;
     }
-    let pointer_capture_id = nearest_pointer_capture_node(layout, hit_node)
-        .as_ref()
+    let pointer_capture_id = path
+        .iter()
+        .rev()
+        .find(|node| node_captures_pointer(node))
         .map(|node| node.widget_id);
     let hit_node_handles_pointer = widget_render::node_handles_pointer_events(hit_node);
     path.into_iter().rev().find_map(|node| {
@@ -210,9 +219,9 @@ fn nearest_widget_gesture_node(
         }
         let gesture_data = begin_widget_gesture_data(&node, local_col, local_row);
         if gesture_data.is_some() {
-            Some((node, gesture_data))
+            Some((node.clone(), gesture_data))
         } else if widget_render::widget_captures_drag(&node.widget_type) {
-            Some((node, None))
+            Some((node.clone(), None))
         } else {
             None
         }

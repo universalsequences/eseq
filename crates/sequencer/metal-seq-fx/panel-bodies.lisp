@@ -7,6 +7,7 @@
 (def instrument-key-white-height 3.25)
 (def instrument-key-black-height 2.45)
 (def instrument-key-strip-height 0.34)
+(def instrument-key-activity-height 0.42)
 (def instrument-key-button-gap 0.08)
 (def instrument-key-row-width
   (+ (* 7 instrument-key-white-width)
@@ -31,10 +32,13 @@
   (if (instrument-key-black? idx) instrument-key-black-height instrument-key-white-height))
 
 (def instrument-key-label-height (idx)
-  (- (instrument-key-height idx) instrument-key-strip-height))
+  (- (instrument-key-height idx) instrument-key-strip-height instrument-key-activity-height))
 
 (def instrument-key-note-selected? (note)
   (fx-list-contains? instrument-key-lock-selected-notes note))
+
+(def instrument-key-note-active? (note)
+  (fx-list-contains? SEQ.instrument-active-notes note))
 
 (def instrument-key-param-has-lock? (p note)
   (if (instrument-param-key-lock-row p note) true false))
@@ -178,6 +182,31 @@
           :h-align :center
           :color (instrument-key-text-color idx selected)
           :bg :transparent)
+        (box
+          :key (str "instrument-key-activity-row-" note)
+          :debug-name (str "instrument-key-activity-row-" note)
+          :width :fill
+          :height instrument-key-activity-height
+          :padding 0
+          :h-align :center
+          :v-align :center
+          :background-color :transparent
+          (if (instrument-key-note-active? note)
+            (label "●"
+              :key (str "instrument-key-activity-" note)
+              :debug-name (str "instrument-key-activity-" note)
+              :width 0.6
+              :height instrument-key-activity-height
+              :font-size 6.0
+              :h-align :center
+              :bg :transparent
+              :color (rgba 1.0 0.72 0.10 1.0))
+            (box
+              :key (str "instrument-key-activity-" note)
+              :debug-name (str "instrument-key-activity-" note)
+              :width 0.6
+              :height instrument-key-activity-height
+              :background-color :transparent)))
         (box
           :key (str "instrument-key-strip-" note)
           :width :fill

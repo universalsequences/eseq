@@ -215,20 +215,20 @@ fn synced_ms(div_idx: f32, offset: f32, bpm: f32) -> f32 {
 }
 
 // Target tape speed ratio. Free mode maps the knob exponentially across the
-// motor range (knob up = faster motor = shorter repeats). Sync mode picks the
-// speed that puts head 2 on the requested division, octave-folded into the
-// motor's reachable range.
-fn target_speed(sync: f32, knob: f32, div: f32, offset: f32, bpm: f32) -> f32 {
+// emulated motor range (knob up = faster motor = shorter repeats). In sync
+// mode the selected division belongs to the first active playback head; later
+// active heads retain the hardware's 1:2:3 spacing. Tempo sync is allowed to
+// extend beyond the hardware motor range so the displayed division remains
+// the actual delay time instead of being silently octave-folded.
+fn target_speed(sync: f32, head_mask: u8, knob: f32, div: f32, offset: f32, bpm: f32) -> f32 {
     if sync > 0.5 {
+        let Some(reference_head) = (0..HEAD_MS.len()).find(|head| head_mask & (1 << head) != 0)
+        else {
+            // Reverb-only mode has no echo timing to synchronize.
+            return MIN_SPEED * (MAX_SPEED / MIN_SPEED).powf(knob.clamp(0.0, 1.0));
+        };
         let ms = synced_ms(div, offset, bpm).max(1.0);
-        let mut ratio = HEAD_MS[1] / ms;
-        while ratio > MAX_SPEED {
-            ratio *= 0.5;
-        }
-        while ratio < MIN_SPEED {
-            ratio *= 2.0;
-        }
-        ratio.clamp(MIN_SPEED, MAX_SPEED)
+        HEAD_MS[reference_head] / ms
     } else {
         MIN_SPEED * (MAX_SPEED / MIN_SPEED).powf(knob.clamp(0.0, 1.0))
     }
@@ -388,7 +388,7 @@ unsafe extern "C" fn space_echo_init(
     *s.add(STATE_SPRING_TYPE) = 0.0;
     *s.add(STATE_STEREO_WIDTH) = 0.7;
     *s.add(STATE_SMOOTH_WIDTH) = 0.7;
-    let speed = target_speed(0.0, 0.5, 6.0, 0.0, 120.0);
+    let speed = target_speed(0.0, MODES[7].0, 0.5, 6.0, 0.0, 120.0);
     *s.add(STATE_SMOOTH_SPEED) = speed;
     *s.add(STATE_SMOOTH_INTENSITY) = intensity_gain(0.45);
     *s.add(STATE_SMOOTH_ECHO) = 0.8;
@@ -468,8 +468,11 @@ unsafe extern "C" fn space_echo_process(
 
     // Per-block coefficients. The loss cutoff tracks tape speed: slower tape
     // loses more highs, so cranking REPEAT RATE down also darkens the repeats.
-    let mut smooth_speed = (*s.add(STATE_SMOOTH_SPEED)).clamp(MIN_SPEED, MAX_SPEED);
-    let base_target_speed = target_speed(sync, rate_knob, sync_div, sync_offset, bpm);
+    let mut smooth_speed = (*s.add(STATE_SMOOTH_SPEED)).max(f32::MIN_POSITIVE);
+    if sync <= 0.5 {
+        smooth_speed = smooth_speed.clamp(MIN_SPEED, MAX_SPEED);
+    }
+    let base_target_speed = target_speed(sync, head_mask, rate_knob, sync_div, sync_offset, bpm);
     let loss_lp = lowpass_coeffs(6500.0 * smooth_speed.powf(0.7), sr);
     let fs_os = sr * 2.0;
     let os_lp = lowpass_coeffs(sr * 0.45, fs_os);
@@ -617,7 +620,14 @@ unsafe extern "C" fn space_echo_process(
                 .zip(mod_rate_depths)
                 .map(|(input, depth)| (*input.add(i)).clamp(0.0, 1.0) * depth)
                 .sum::<f32>();
-            target_speed(sync, rate_knob + rate_mod, sync_div, sync_offset, bpm)
+            target_speed(
+                sync,
+                head_mask,
+                rate_knob + rate_mod,
+                sync_div,
+                sync_offset,
+                bpm,
+            )
         } else {
             base_target_speed
         };
@@ -1087,7 +1097,7 @@ mod tests {
             state[STATE_DRY] = 0.0;
             state[STATE_SMOOTH_DRY] = 0.0;
             state[STATE_RATE] = knob;
-            state[STATE_SMOOTH_SPEED] = target_speed(0.0, knob, 6.0, 0.0, 120.0);
+            state[STATE_SMOOTH_SPEED] = target_speed(0.0, MODES[5].0, knob, 6.0, 0.0, 120.0);
             let frames = SR as usize + 8192;
             let (out_l, _) = render(&mut state, &impulse(frames), &impulse(frames));
             echo_peaks(&out_l, 0.02, 800)
@@ -1107,36 +1117,53 @@ mod tests {
     }
 
     #[test]
-    fn sync_puts_head_two_on_the_division() {
-        // 1/4 @ 120 BPM = 500 ms. Head 2 (138 ms) needs speed 0.276, folded
-        // up one octave to 0.552 → head-2 delay 250 ms (the folded division).
-        let mut state = clean_state();
-        state[STATE_MODE] = 1.0; // head 2 only
-        state[STATE_INTENSITY] = 0.0;
-        state[STATE_SMOOTH_INTENSITY] = 0.0;
-        state[STATE_DRY] = 0.0;
-        state[STATE_SMOOTH_DRY] = 0.0;
-        state[STATE_SYNC] = 1.0;
-        state[STATE_SYNC_DIV] = 6.0; // 1/4
-        let expected_speed = target_speed(1.0, 0.5, 6.0, 0.0, 120.0);
-        state[STATE_SMOOTH_SPEED] = expected_speed;
-        let expected_ms = HEAD_MS[1] / expected_speed;
+    fn sync_puts_each_single_selected_head_on_the_division() {
+        // 1/8 @ 60 BPM = 500 ms. This is deliberately slower than the
+        // hardware motor range for head 1: sync must still honor the division
+        // rather than folding it to a faster octave.
+        for mode_idx in 0..3 {
+            let mut state = clean_state();
+            let head_mask = MODES[mode_idx].0;
+            state[STATE_MODE] = mode_idx as f32;
+            state[STATE_INTENSITY] = 0.0;
+            state[STATE_SMOOTH_INTENSITY] = 0.0;
+            state[STATE_DRY] = 0.0;
+            state[STATE_SMOOTH_DRY] = 0.0;
+            state[STATE_SYNC] = 1.0;
+            state[STATE_SYNC_DIV] = 3.0; // 1/8
+            state[STATE_BPM] = 60.0;
+            state[STATE_SMOOTH_SPEED] = target_speed(1.0, head_mask, 0.5, 3.0, 0.0, 60.0);
 
-        let frames = SR as usize;
-        let (out_l, _) = render(&mut state, &impulse(frames), &impulse(frames));
-        let peaks = echo_peaks(&out_l, 0.02, 800);
-        assert!(!peaks.is_empty(), "no echo found");
-        let got_ms = peaks[0] as f32 * 1000.0 / SR as f32;
-        assert!(
-            (got_ms - expected_ms).abs() / expected_ms < 0.01,
-            "synced echo at {got_ms} ms, expected {expected_ms} ms"
-        );
-        // And the folded division must be beat-related: 500 / 2^k.
-        let division_ms = 500.0 / 2.0_f32.powf((500.0 / expected_ms).log2().round());
-        assert!(
-            (expected_ms - division_ms).abs() < 1.0,
-            "folded delay {expected_ms} not on a /2 grid of 500 ms"
-        );
+            let frames = SR as usize;
+            let (out_l, _) = render(&mut state, &impulse(frames), &impulse(frames));
+            let peaks = echo_peaks(&out_l, 0.02, 800);
+            assert!(!peaks.is_empty(), "mode {} produced no echo", mode_idx + 1);
+            let got_ms = peaks[0] as f32 * 1000.0 / SR as f32;
+            assert!(
+                (got_ms - 500.0).abs() < 5.0,
+                "mode {} synced at {got_ms} ms, expected 500 ms",
+                mode_idx + 1
+            );
+        }
+    }
+
+    #[test]
+    fn sync_anchors_multi_head_modes_to_the_first_active_head() {
+        let division_ms = synced_ms(3.0, 0.0, 60.0); // 1/8 = 500 ms
+
+        for mode_idx in 3..6 {
+            let head_mask = MODES[mode_idx].0;
+            let first_head = (0..HEAD_MS.len())
+                .find(|head| head_mask & (1 << head) != 0)
+                .unwrap();
+            let speed = target_speed(1.0, head_mask, 0.5, 3.0, 0.0, 60.0);
+            let first_head_ms = HEAD_MS[first_head] / speed;
+            assert!(
+                (first_head_ms - division_ms).abs() < 0.001,
+                "mode {} first head synced at {first_head_ms} ms, expected {division_ms} ms",
+                mode_idx + 1
+            );
+        }
     }
 
     #[test]
@@ -1241,7 +1268,7 @@ mod tests {
         state[STATE_DRY] = 0.0;
         state[STATE_SMOOTH_DRY] = 0.0;
         state[STATE_RATE] = 0.8;
-        state[STATE_SMOOTH_SPEED] = target_speed(0.0, 0.8, 6.0, 0.0, 120.0);
+        state[STATE_SMOOTH_SPEED] = target_speed(0.0, MODES[0].0, 0.8, 6.0, 0.0, 120.0);
 
         // Feed a steady tone so the tape is full of it.
         let tone = sine(1000.0, 0.5, SR as usize);
@@ -1435,12 +1462,12 @@ mod tests {
         state[STATE_DRY] = 0.0;
         state[STATE_SMOOTH_DRY] = 0.0;
         state[STATE_RATE] = 0.3;
-        state[STATE_SMOOTH_SPEED] = target_speed(0.0, 0.3, 6.0, 0.0, 120.0);
+        state[STATE_SMOOTH_SPEED] = target_speed(0.0, MODES[0].0, 0.3, 6.0, 0.0, 120.0);
         state[STATE_MOD_RATE_DEPTH_1] = 0.6;
         let (base, _) = render(&mut state.clone(), &impulse(frames), &impulse(frames));
         let mut state2 = state.clone();
         // With rate mod the smoothed speed glides up, so the echo lands sooner.
-        state2[STATE_SMOOTH_SPEED] = target_speed(0.0, 0.9, 6.0, 0.0, 120.0);
+        state2[STATE_SMOOTH_SPEED] = target_speed(0.0, MODES[0].0, 0.9, 6.0, 0.0, 120.0);
         let (modded, _) = render_with_mods(&mut state2, &impulse(frames), &impulse(frames), 1.0);
         let first_peak = |buf: &[f32]| echo_peaks(buf, 0.02, 800).first().copied().unwrap_or(0);
         assert!(

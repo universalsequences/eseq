@@ -2587,6 +2587,9 @@ pub struct SequencerState {
     graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     track_output_events: Mutex<Vec<TrackOutputEvent>>,
     track_output_current_beat_bits: AtomicU64,
+    active_note_until_samples: Vec<[AtomicU64; 128]>,
+    live_note_masks: Vec<[AtomicU64; 2]>,
+    audio_rendered_sample: AtomicU64,
     scratch_source: Mutex<String>,
     scratch_source_version: AtomicU64,
     published_sequencers: Mutex<Vec<PublishedSequencer>>,
@@ -2864,6 +2867,13 @@ impl SequencerState {
             graph_visualizations: Mutex::new(Vec::new()),
             track_output_events: Mutex::new(Vec::new()),
             track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
+            active_note_until_samples: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                .collect(),
+            live_note_masks: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                .collect(),
+            audio_rendered_sample: AtomicU64::new(0),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
@@ -3879,6 +3889,53 @@ impl SequencerState {
         f64::from_bits(self.track_output_current_beat_bits.load(Ordering::Relaxed))
     }
 
+    /// Publish the audio clock used to expire scheduled-note activity without
+    /// taking a lock on the realtime thread.
+    pub fn set_audio_rendered_sample(&self, sample: u64) {
+        self.audio_rendered_sample.store(sample, Ordering::Release);
+    }
+
+    /// Keep a scheduled MIDI note active through its gate end. `fetch_max`
+    /// preserves overlapping/retriggered instances of the same pitch.
+    pub fn mark_scheduled_note_active_until(&self, track: usize, note: u8, sample: u64) {
+        if let Some(notes) = self.active_note_until_samples.get(track) {
+            notes[note as usize].fetch_max(sample, Ordering::Relaxed);
+        }
+    }
+
+    /// Live notes have explicit note-off events, so replace their compact mask
+    /// independently from scheduled expirations. The two sources can overlap.
+    pub fn replace_live_notes(&self, track: usize, notes: impl IntoIterator<Item = u8>) {
+        let Some(words) = self.live_note_masks.get(track) else {
+            return;
+        };
+        let mut next = [0_u64; 2];
+        for note in notes {
+            next[note as usize / 64] |= 1_u64 << (note as usize % 64);
+        }
+        for (word, value) in words.iter().zip(next) {
+            word.store(value, Ordering::Release);
+        }
+    }
+
+    pub fn active_notes(&self, track: usize) -> Vec<u8> {
+        let (Some(until), Some(live)) = (
+            self.active_note_until_samples.get(track),
+            self.live_note_masks.get(track),
+        ) else {
+            return Vec::new();
+        };
+        let rendered = self.audio_rendered_sample.load(Ordering::Acquire);
+        (0_u8..=127)
+            .filter(|note| {
+                let idx = *note as usize;
+                let bit = 1_u64 << (idx % 64);
+                live[idx / 64].load(Ordering::Relaxed) & bit != 0
+                    || until[idx].load(Ordering::Relaxed) > rendered
+            })
+            .collect()
+    }
+
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         let snapshot = Arc::new(SequencerSnapshot::capture(self));
         self.publish_scheduler_snapshot_arc(snapshot)
@@ -4526,6 +4583,126 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
         true
     }
+    fn publish_process_chain_edit(&self) {
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+    }
+    /// Enable or bypass one pattern-scoped process-chain slot.
+    ///
+    /// Returns `false` only when the track or instance does not exist. A
+    /// repeated write of the current value is a successful no-op.
+    pub fn set_track_process_slot_enabled(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        enabled: bool,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+        let changed = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            let Some(slot) = chain
+                .slots
+                .iter_mut()
+                .find(|slot| slot.instance_id == instance_id)
+            else {
+                return false;
+            };
+            let changed = slot.enabled != enabled;
+            slot.enabled = enabled;
+            changed
+        };
+        if changed {
+            self.publish_process_chain_edit();
+        }
+        true
+    }
+    /// Move a slot before another instance, or to the end when `before` is
+    /// `None`. Instance ids make this stable across reactive UI refreshes and
+    /// avoid index-shift ambiguity while dragging downward.
+    pub fn move_track_process_slot_before(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        before: Option<crate::process::ProcessInstanceId>,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+        let changed = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            let Some(source_index) = chain
+                .slots
+                .iter()
+                .position(|slot| slot.instance_id == instance_id)
+            else {
+                return false;
+            };
+            if before == Some(instance_id) {
+                return true;
+            }
+            if before
+                .is_some_and(|target| !chain.slots.iter().any(|slot| slot.instance_id == target))
+            {
+                return false;
+            }
+            let previous_order = chain
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id)
+                .collect::<Vec<_>>();
+            let slot = chain.slots.remove(source_index);
+            let target_index = before
+                .and_then(|target| {
+                    chain
+                        .slots
+                        .iter()
+                        .position(|slot| slot.instance_id == target)
+                })
+                .unwrap_or(chain.slots.len());
+            chain.slots.insert(target_index, slot);
+            previous_order
+                != chain
+                    .slots
+                    .iter()
+                    .map(|slot| slot.instance_id)
+                    .collect::<Vec<_>>()
+        };
+        if changed {
+            self.publish_process_chain_edit();
+        }
+        true
+    }
+    /// Detach one slot from one track in the current pattern.
+    pub fn remove_track_process_slot(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+        let removed = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            let previous_len = chain.slots.len();
+            chain.slots.retain(|slot| slot.instance_id != instance_id);
+            chain.slots.len() != previous_len
+        };
+        if removed {
+            self.publish_process_chain_edit();
+        }
+        removed
+    }
     pub fn set_process_lane_value(
         &self,
         track: usize,
@@ -4588,6 +4765,40 @@ impl SequencerState {
             self.publish_scheduler_snapshot();
         }
         updated
+    }
+    /// Replace a scalar inlet on one track attachment. UI slot editors use
+    /// this track-local form; authored process handles intentionally retain
+    /// the all-attachments behavior of `set_process_inlet_value` above.
+    pub fn set_track_process_inlet_value(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        inlet_name: &str,
+        value: crate::process::ProcessLiteral,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+        let changed = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            let Some(slot) = chain
+                .slots
+                .iter_mut()
+                .find(|slot| slot.instance_id == instance_id)
+            else {
+                return false;
+            };
+            let changed = slot.inlets.get(inlet_name) != Some(&value);
+            slot.inlets.insert(inlet_name.to_string(), value);
+            changed
+        };
+        if changed {
+            self.publish_process_chain_edit();
+        }
+        true
     }
     pub fn set_process_port_binding(
         &self,
@@ -6301,6 +6512,25 @@ mod tests {
     };
     use crate::neural::ParamNodeId;
     use crate::sequencer::ModDestination;
+
+    #[test]
+    fn active_notes_merge_scheduled_expirations_with_live_note_state() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.set_audio_rendered_sample(100);
+        state.mark_scheduled_note_active_until(0, 60, 200);
+        state.replace_live_notes(0, [64]);
+        assert_eq!(state.active_notes(0), vec![60, 64]);
+
+        state.set_audio_rendered_sample(200);
+        assert_eq!(state.active_notes(0), vec![64]);
+
+        state.mark_scheduled_note_active_until(0, 64, 300);
+        state.replace_live_notes(0, []);
+        assert_eq!(state.active_notes(0), vec![64]);
+
+        state.set_audio_rendered_sample(300);
+        assert!(state.active_notes(0).is_empty());
+    }
 
     fn sample_track_params(id: usize) -> TrackParamsSnapshot {
         TrackParamsSnapshot {
@@ -8282,6 +8512,106 @@ mod tests {
         );
         assert!(snapshot.restore_track(&state, 0));
         assert_eq!(state.track_process_chain(0), Some(expected));
+    }
+
+    #[test]
+    fn process_chain_slot_edits_are_track_scoped_and_snapshot_visible() {
+        let state = make_state_with_tracks(2);
+        let mut first = sample_process_chain().slots.remove(0);
+        let mut second = first.clone();
+        second.instance_id = crate::process::ProcessInstanceId(8);
+        second.class_name = "second".to_string();
+        let mut third = first.clone();
+        third.instance_id = crate::process::ProcessInstanceId(9);
+        third.class_name = "third".to_string();
+        first.inlets.insert(
+            "depth".to_string(),
+            crate::process::ProcessLiteral::Number(1.0),
+        );
+        second.inlets = first.inlets.clone();
+        third.inlets = first.inlets.clone();
+        let chain = crate::process::TrackProcessChain {
+            slots: vec![first, second, third],
+        };
+        assert!(state.set_track_process_chain(0, chain));
+
+        assert!(state.set_track_process_slot_enabled(
+            0,
+            crate::process::ProcessInstanceId(8),
+            false,
+        ));
+        assert!(state.move_track_process_slot_before(
+            0,
+            crate::process::ProcessInstanceId(9),
+            Some(crate::process::ProcessInstanceId(7)),
+        ));
+        assert!(state.set_track_process_inlet_value(
+            0,
+            crate::process::ProcessInstanceId(8),
+            "depth",
+            crate::process::ProcessLiteral::Number(4.0),
+        ));
+
+        let edited = state.track_process_chain(0).expect("track 1 process chain");
+        assert_eq!(
+            edited
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id.0)
+                .collect::<Vec<_>>(),
+            vec![9, 7, 8]
+        );
+        assert!(!edited.slots[2].enabled);
+        assert_eq!(
+            edited.slots[2].inlets.get("depth"),
+            Some(&crate::process::ProcessLiteral::Number(4.0))
+        );
+        assert!(
+            state
+                .track_process_chain(1)
+                .expect("track 2 process chain")
+                .slots
+                .is_empty(),
+            "slot edits must not leak to another track"
+        );
+        assert_eq!(
+            state.latest_scheduler_snapshot().tracks[0].process_chain,
+            edited,
+            "every successful slot edit must publish to the scheduler snapshot"
+        );
+
+        assert!(state.move_track_process_slot_before(
+            0,
+            crate::process::ProcessInstanceId(7),
+            None,
+        ));
+        assert_eq!(
+            state
+                .track_process_chain(0)
+                .unwrap()
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id.0)
+                .collect::<Vec<_>>(),
+            vec![9, 8, 7]
+        );
+        assert!(state.remove_track_process_slot(0, crate::process::ProcessInstanceId(9)));
+        assert_eq!(
+            state
+                .track_process_chain(0)
+                .unwrap()
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id.0)
+                .collect::<Vec<_>>(),
+            vec![8, 7]
+        );
+        assert!(!state.remove_track_process_slot(0, crate::process::ProcessInstanceId(99)));
+        assert!(!state.move_track_process_slot_before(
+            0,
+            crate::process::ProcessInstanceId(99),
+            None,
+        ));
     }
 
     #[test]

@@ -44,6 +44,13 @@ cargo run --release
 
 On first launch, tinyseq creates `samples/` and `effects/` directories in the working directory. Drop `.wav` files into `samples/` (nested folders are fine) and they'll appear in the sidebar browser.
 
+## Headless UI capture
+
+The Metal sequencer can render a named UI buffer from a deterministic,
+Lisp-defined project fixture without opening the interactive app or an audio
+device. This is useful for visually iterating on instrument, process, effect,
+and sequencer panels. See [Metal sequencer UI capture](../../docs/metal-seq-ui-capture.md).
+
 ## Quick start
 
 1. Press **Ctrl+N** to open the sample browser

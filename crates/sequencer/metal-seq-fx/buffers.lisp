@@ -55,6 +55,24 @@
           (fx-panel (get fx :name) (get fx :params) fx)))
       (fx-drop-placeholder-panel))))
 
+;; Keep this as a macro rather than a normal function. Custom instrument/effect
+;; UI establishes render-local scope while this tree is evaluated, so the FX
+;; strip must remain inline at the effect-buffer callsite.
+(defmacro fx-track-selection-panel ()
+  `(v-stack :padding 0.05 :gap 1
+    (h-stack :gap 1
+      (if (> (len SEQ.process-slots) 0)
+        (process-chain-panel)
+        (box :width 0 :height 0))
+      (each SEQ.instrument-panel |inst inst-idx|
+        (instrument-panel inst))
+      (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
+        (midi-fx-panel (get fx :name) (get fx :params) fx))
+      (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
+        (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
+          (fx-panel (get fx :name) (get fx :params) fx)))
+      (fx-drop-placeholder-panel))))
+
 (effect-buffer "*track*"
   (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
@@ -68,20 +86,18 @@
     (fx-bus-selection-panel)
     (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
-    (v-stack :padding 0.05 :gap 1 
-      (h-stack :gap 1
-        (each SEQ.instrument-panel |inst inst-idx|
-          (instrument-panel inst))
-        (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
-          (midi-fx-panel (get fx :name) (get fx :params) fx))
-        (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
-          (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
-            (fx-panel (get fx :name) (get fx :params) fx)))
-        (fx-drop-placeholder-panel))))))
+    ;; Mapping changes the wrapper structure of every compatible parameter.
+    ;; A distinct root forces those cached parameter subtrees to be rebuilt
+    ;; immediately when mapping is armed from this same panel.
+    (if (process-map-active?)
+      (box :debug-name "fx-process-map-active-root" :padding 0
+        (fx-track-selection-panel))
+      (fx-track-selection-panel)))))
 
 (define-mode "seq-fx-mode" :read-only true)
 (mode-bind-key "seq-fx-mode" "BS" "fx-delete-selected-effect")
 (mode-bind-key "seq-fx-mode" "Delete" "fx-delete-selected-effect")
+(mode-bind-key "seq-fx-mode" "RET" "process-panel-open-selected-source")
 (set-buffer-mode-for "*fx*" "seq-fx-mode")
 
 (def fx-delete-selected-plock-row-key ()

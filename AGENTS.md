@@ -43,6 +43,52 @@ When changing Lisp UI structure or widget wrapper argument order, do not stop at
 
 When adding reactive props to a widget, update that widget's `bindable_props` contract. `build_widget` rejects unsupported reactive bindings by returning a string diagnostic instead of a widget map; if that rejected widget is passed through a wrapper, the wrapper may render as an empty measured container with no children. Add a regression test that passes the new prop as a `ReactiveRef`, not only as a literal number.
 
+### Sequencer panel visual capture
+
+When changing a `metal_seq` panel whose contents depend on project state (tracks, instruments, racks, processes, MIDI FX, or audio FX), use the headless sequencer capture command. Do not substitute a standalone `eseqlisp_capture` expression for this check: `metal_seq capture` creates a real headless sequencer project, evaluates the normal authoring Lisp, synchronizes the resulting state into `SEQ`, isolates the requested buffer, and renders it through the production Metal widget path without opening the interactive app or an audio device.
+
+Capture the process/instrument strip with the checked-in process fixture:
+
+```sh
+cargo run -p sequencer --bin metal_seq -- capture \
+  --script crates/sequencer/capture-fixtures/process-panel.lisp \
+  --buffer fx \
+  --track 0 \
+  --width 2000 \
+  --height 420 \
+  --out /tmp/metal-seq-process-panel.png
+```
+
+Capture a real saved custom instrument UI with:
+
+```sh
+cargo run -p sequencer --bin metal_seq -- capture \
+  --script crates/sequencer/capture-fixtures/instrument-panel.lisp \
+  --buffer fx \
+  --track 0 \
+  --width 1800 \
+  --height 600 \
+  --out /tmp/metal-seq-instrument-panel.png
+```
+
+Open and inspect the PNG before claiming visual correctness. Layout assertions remain required for finite/nonzero geometry; the PNG check covers typography, clipping, spacing, hierarchy, and overall composition that geometry tests cannot judge.
+
+Capture scripts contain exactly one declarative project form, followed by ordinary sequencer Lisp:
+
+```lisp
+(capture-project
+  (track :sampler :name "Sampler"))
+
+(load "../scripts/process-inlet-patch-demo.lisp")
+(process-inlet-demo-attach-track 0)
+
+;; Optional: runs after project/process state has populated SEQ.
+(def capture-after-sync ()
+  (process-panel-select-slot (nth SEQ.process-slots 0)))
+```
+
+Supported track kinds are `:sampler`, `:instrument`, `:modulator`, `:drum-rack`, and `:layer-rack`; tracks may also declare `:midi-fx` and built-in `:audio-fx`. Use `capture-after-sync` for UI state that depends on populated reactive data, such as selecting a process row or opening an instrument tab. Add durable fixtures under `crates/sequencer/capture-fixtures/`. Full usage is documented in `docs/metal-seq-ui-capture.md`. The capture path is macOS-only because it uses Metal.
+
 ### Patcher visual capture
 
 When changing the patcher renderer, cable geometry, node layout, ports, or other visual behavior, use the macOS Metal capture test to generate a PNG for inspection:

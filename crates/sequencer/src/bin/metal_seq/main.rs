@@ -10,6 +10,7 @@
 )]
 
 mod browser;
+mod capture;
 mod constants;
 mod custom_ui;
 mod editor_setup;
@@ -5167,8 +5168,14 @@ mod tests {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let capture_args = capture::CaptureArgs::parse_env()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     sequencer::paths::enter_sequencer_dir()?;
     sequencer::crash::install()?;
+
+    if let Some(args) = capture_args {
+        return capture::run(args);
+    }
 
     // 1. Init audio engine
     let eng = engine::init_engine()?;
@@ -5325,6 +5332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_current_track_playhead_visible = false;
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
+    let mut prev_instrument_active_notes: Vec<u8> = Vec::new();
     let mut preview_plock_variant: Option<(usize, String)> = None;
     let mut prev_active_buffer_name = editor.active_buffer().name.clone();
     let mut prev_selected_neural_neurons = selected_neural_neurons.lock().unwrap().clone();
@@ -7144,13 +7152,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap_or("Script")
                                     .to_string()
                             });
+                        let read_only = extract_bool_from_payload(&payload, "read-only");
                         match register_script_source_tab(
                             &mut editor,
                             Path::new(&path_str),
                             &label,
                             &path_str,
                         ) {
-                            Ok(_) => {
+                            Ok(buffer_name) => {
+                                if read_only {
+                                    if let Some(buffer) = editor
+                                        .buffers
+                                        .iter_mut()
+                                        .find(|buffer| buffer.name == buffer_name)
+                                    {
+                                        buffer.read_only = true;
+                                    }
+                                }
                                 editor.handle_host_event(HostEvent::Status(format!(
                                     "Opened script source: {label}"
                                 )));
@@ -16351,6 +16369,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut needs_reactive_cycle = false;
             let mut refresh_visible_step_after_cycle = false;
             let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
+            if fx_visible {
+                let active_notes = state.active_notes(ct);
+                if active_notes != prev_instrument_active_notes {
+                    needs_reactive_cycle |= editor
+                        .runtime_mut()
+                        .set_reactive(
+                            "SEQ",
+                            "instrument-active-notes",
+                            build_active_notes_value(&active_notes),
+                        )
+                        .effects_dirty;
+                    prev_instrument_active_notes = active_notes;
+                }
+            }
             if selected_neural_snapshot != prev_selected_neural_neurons {
                 needs_reactive_cycle |= sync_selected_neural_neuron_bindings(
                     editor.runtime_mut(),

@@ -985,6 +985,7 @@ pub(crate) fn init_runtime(
                         build_instrument_panel_value(&app, 0, &selected_steps)
                     },
                 ),
+                ("instrument-active-notes", Value::List(vec![])),
                 ("track-params", build_track_params(&state, 0)),
                 (
                     "tp-attack",
@@ -1957,16 +1958,93 @@ pub(crate) fn init_runtime(
                 .into())
             }
         };
-        let updated = st.set_process_inlet_value(
+        let updated = st.set_track_process_inlet_value(
+            track,
             sequencer::process::ProcessInstanceId(instance_id),
             &inlet,
             literal,
         );
-        if updated == 0 {
+        if !updated {
             return Err("seq-set-process-inlet: no matching attached process slot".into());
         }
         ui_inv.push(UiInvalidation::ProcessChain { track });
-        Ok(Value::Number(updated as f64))
+        Ok(Value::Bool(true))
+    });
+
+    let st = state.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-set-process-slot-enabled", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(instance_id)),
+            Some(Value::Bool(enabled)),
+        ) = (args.first(), args.get(1), args.get(2))
+        else {
+            return Err(
+                "seq-set-process-slot-enabled: expected (track instance-id enabled)".into(),
+            );
+        };
+        let track = *track as usize;
+        if !st.set_track_process_slot_enabled(
+            track,
+            sequencer::process::ProcessInstanceId(*instance_id as u64),
+            *enabled,
+        ) {
+            return Err("seq-set-process-slot-enabled: no matching attached process slot".into());
+        }
+        ui_inv.push(UiInvalidation::ProcessChain { track });
+        Ok(Value::Bool(*enabled))
+    });
+
+    let st = state.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-move-process-slot-before", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(instance_id)), Some(target)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err(
+                "seq-move-process-slot-before: expected (track instance-id before-instance-id-or-nil)"
+                    .into(),
+            );
+        };
+        let track = *track as usize;
+        let before = match target {
+            Value::Nil => None,
+            Value::Number(value) => Some(sequencer::process::ProcessInstanceId(*value as u64)),
+            _ => {
+                return Err(
+                    "seq-move-process-slot-before: target must be an instance id or nil".into(),
+                )
+            }
+        };
+        if !st.move_track_process_slot_before(
+            track,
+            sequencer::process::ProcessInstanceId(*instance_id as u64),
+            before,
+        ) {
+            return Err("seq-move-process-slot-before: no matching process slot".into());
+        }
+        ui_inv.push(UiInvalidation::ProcessChain { track });
+        Ok(Value::Bool(true))
+    });
+
+    let st = state.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-remove-process-slot", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(instance_id))) =
+            (args.first(), args.get(1))
+        else {
+            return Err("seq-remove-process-slot: expected (track instance-id)".into());
+        };
+        let track = *track as usize;
+        if !st.remove_track_process_slot(
+            track,
+            sequencer::process::ProcessInstanceId(*instance_id as u64),
+        ) {
+            return Err("seq-remove-process-slot: no matching attached process slot".into());
+        }
+        ui_inv.push(UiInvalidation::ProcessChain { track });
+        Ok(Value::Bool(true))
     });
 
     let st = state.clone();
@@ -4616,6 +4694,21 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-process-inlet",
             "(seq-set-process-inlet track instance-id inlet value)",
             "Set a scalar inlet on an attached process slot.",
+        ),
+        (
+            "seq-set-process-slot-enabled",
+            "(seq-set-process-slot-enabled track instance-id enabled)",
+            "Enable or bypass one attached process slot on a track.",
+        ),
+        (
+            "seq-move-process-slot-before",
+            "(seq-move-process-slot-before track instance-id before-instance-id-or-nil)",
+            "Move an attached process slot before another slot, or to the end with nil.",
+        ),
+        (
+            "seq-remove-process-slot",
+            "(seq-remove-process-slot track instance-id)",
+            "Detach one process slot from one track in the current pattern.",
         ),
         (
             "seq-bind-process-port",

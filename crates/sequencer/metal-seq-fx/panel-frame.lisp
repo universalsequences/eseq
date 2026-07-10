@@ -82,7 +82,12 @@
 	  )
         (box)))))
 
-(def fx-clear-selected-effect ()
+(def fx-clear-delete-selection ()
   (do
     (set! fx-selected-plock-row -1)
     (seq-clear-delete-target)))
+
+(def fx-clear-selected-effect ()
+  (do
+    (process-panel-clear-selection)
+    (fx-clear-delete-selection)))

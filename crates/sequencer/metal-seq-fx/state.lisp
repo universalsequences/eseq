@@ -14,6 +14,8 @@
 (defstate effect-mods-slot -1)
 (defstate effect-mods-bus -1)
 (defstate effect-selected-mod-slot 1)
+(defstate process-panel-selected-track -1)
+(defstate process-panel-selected-instance-id 0)
 ;; These are temporary render-context globals used by generated custom synth UI.
 ;; They must NOT be defstate: custom UI functions set them while rendering, and
 ;; writing reactive state during measurement/layout can perturb the layout.

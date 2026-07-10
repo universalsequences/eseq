@@ -103,10 +103,11 @@
       (box :width 2.72 :height 0.82))))
 
 (def builtin-fx-space-echo-rate-box (fx sync-p div-p offset-p rate-p)
-  (box :width 6.15 :height 7.45 :padding 0.18
-       :background-color :fx-inner-panel-bg :corner-radius 7
+  (box :width 8.25 :height 9.75 :padding 0.18
+    :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
       (label "REPEAT RATE" :font-size 8.0 :width 5.4 :color :dim :bg :transparent)
+      (box :height 0.5)
       (builtin-fx-space-echo-sync-button fx sync-p)
       (if (> (get sync-p :value) 0.5)
         (v-stack :gap 0.12 :align :center
@@ -153,10 +154,11 @@
       (builtin-fx-space-echo-mode-button fx p 11 "rev"))))
 
 (def builtin-fx-space-echo-mode-box (fx mode-p)
-  (box :width 9.2 :height 7.45 :padding 0.30
-       :background-color :fx-inner-panel-bg :corner-radius 7
+  (box :width 10.5 :height 8.85 :padding 0.30
+    :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.22 :align :center
       (label "MODE SELECTOR" :font-size 8.0 :width 8.2 :color :dim :bg :transparent)
+      (box :height 0.25)
       (builtin-fx-space-echo-mode-grid fx mode-p)
       (label (get mode-p :text-value)
         :font-size 8.5 :width 8.2 :color (space-echo-cream) :bg :transparent))))
@@ -164,13 +166,14 @@
 ;; ── Echo section ──
 
 (def builtin-fx-space-echo-echo-box (fx intensity-p echo-p bass-p treble-p width-p)
-  (box :width 10.4 :height 8.55 :padding 0.36
-       :background-color :fx-inner-panel-bg :corner-radius 7
+  (box :width 10.4 :height 9.75 :padding 0.36
+    :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "ECHO" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (builtin-fx-space-echo-percent-knob fx "intensity" intensity-p)
         (builtin-fx-space-echo-knob fx "echo vol" echo-p 2))
+      (box :height 0.85)
       (label "TONE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (v-stack :gap 0.30 :align :baseline
         (builtin-fx-filter-mini-number fx "bass" bass-p)
@@ -195,12 +198,14 @@
       :on-click |x y r| (fx-set-effect-value fx p index))))
 
 (def builtin-fx-space-echo-spring-row (fx p)
-  (h-stack :gap 0.14
-    (builtin-fx-space-echo-spring-button fx p 0 "RE-201")
-    (builtin-fx-space-echo-spring-button fx p 1 "Tubby")))
+  (v-stack
+    (h-stack :gap 0.14
+      (builtin-fx-space-echo-spring-button fx p 0 "RE-201")
+      (builtin-fx-space-echo-spring-button fx p 1 "Tubby")))
+  )
 
 (def builtin-fx-space-echo-tape-box (fx reverb-p tension-p spring-p wf-p age-p drive-p dry-p)
-  (box :width 10.4 :height 8.55 :padding 0.36
+  (box :width 10.4 :height 9.75 :padding 0.36
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.16 :align :center
       (label "REVERB" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)

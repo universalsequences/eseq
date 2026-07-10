@@ -200,10 +200,10 @@ pub fn collect_spectrogram_requests(layout: &LayoutNode) -> Vec<SpectrogramReque
 }
 
 fn collect_spectrogram_requests_into(layout: &LayoutNode, requests: &mut Vec<SpectrogramRequest>) {
-    if matches!(layout.widget_type.as_str(), "spectrogram" | "eq8-editor")
-        && layout.rect.width > 0.0
-        && layout.rect.height > 0.0
-    {
+    let needs_live_spectrum = matches!(layout.widget_type.as_str(), "spectrogram" | "eq8-editor")
+        || (layout.widget_type == "phaser-notch"
+            && get_f32_prop(&layout.props, "mode", 0.0).round() == 0.0);
+    if needs_live_spectrum && layout.rect.width > 0.0 && layout.rect.height > 0.0 {
         requests.push(request_from_props(&layout.props));
     }
     for child in &layout.children {
@@ -544,6 +544,16 @@ mod tests {
         let mut node = layout_node(HashMap::new());
         node.widget_type = "eq8-editor".to_string();
         assert_eq!(collect_spectrogram_requests(&node).len(), 1);
+    }
+
+    #[test]
+    fn collect_requests_includes_phaser_notch_widgets() {
+        let mut node = layout_node(HashMap::new());
+        node.widget_type = "phaser-notch".to_string();
+        assert_eq!(collect_spectrogram_requests(&node).len(), 1);
+
+        node.props.insert("mode".to_string(), Value::Number(1.0));
+        assert!(collect_spectrogram_requests(&node).is_empty());
     }
 
     #[cfg(target_os = "macos")]
