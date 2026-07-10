@@ -4998,6 +4998,211 @@ fn register_process_natives(
         );
     }
 
+    runtime.register_native_with_docs(
+        "pitch-field",
+        "(pitch-field pitches [:root pitch] [:weight 0..1])",
+        "Construct a typed pitch-set suggestion field.",
+        move |args, _ctx| {
+            let Some(EValue::List(pitches)) = args.first() else {
+                return Err("pitch-field expects a non-empty pitch list".to_string());
+            };
+            if pitches.is_empty() {
+                return Err("pitch-field expects a non-empty pitch list".to_string());
+            }
+            let mut pitch_values = Vec::with_capacity(pitches.len());
+            for pitch in pitches {
+                let pitch = pitch.borrow();
+                let pitch = process_number_arg(Some(&pitch), "pitch-field")?;
+                if !pitch.is_finite() {
+                    return Err("pitch-field pitches must be finite".to_string());
+                }
+                pitch_values.push(EValue::Number(pitch));
+            }
+            if (args.len() - 1) % 2 != 0 {
+                return Err("pitch-field options must be keyword/value pairs".to_string());
+            }
+            let mut root = EValue::Nil;
+            let mut weight = 1.0;
+            let mut index = 1;
+            while index < args.len() {
+                match process_symbol_name(&args[index])?.as_str() {
+                    "root" => {
+                        let value = process_number_arg(args.get(index + 1), "pitch-field :root")?;
+                        if !value.is_finite() {
+                            return Err("pitch-field root must be finite".to_string());
+                        }
+                        root = EValue::Number(value);
+                    }
+                    "weight" => {
+                        weight = process_number_arg(args.get(index + 1), "pitch-field :weight")?;
+                        if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+                            return Err("pitch-field weight must be between 0 and 1".to_string());
+                        }
+                    }
+                    option => return Err(format!("pitch-field unknown option :{option}")),
+                }
+                index += 2;
+            }
+            Ok(process_map([
+                ("field-domain", EValue::Keyword("pitch-field".to_string())),
+                ("pitches", process_list(pitch_values)),
+                ("root", root),
+                ("weight", EValue::Number(weight)),
+            ]))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "scalar-field",
+        "(scalar-field value)",
+        "Construct a typed scalar suggestion field.",
+        move |args, _ctx| {
+            if args.len() != 1 {
+                return Err("scalar-field expects one number".to_string());
+            }
+            process_scalar_field(process_number_arg(args.first(), "scalar-field")?)
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "gate-field",
+        "(gate-field value)",
+        "Construct a typed gate suggestion field.",
+        move |args, _ctx| match args.as_slice() {
+            [EValue::Bool(value)] => Ok(process_gate_field(*value)),
+            [EValue::Number(value)] => Ok(process_gate_field(*value > 0.5)),
+            _ => Err("gate-field expects one boolean or number".to_string()),
+        },
+    );
+
+    let process_eval_for_suggest = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "suggest",
+        "(suggest :field value)",
+        "Publish a typed field into the named channel at this process tick.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("suggest expects a field name and value".to_string());
+            }
+            let name = process_symbol_name(&args[0])?;
+            let value = normalize_process_field(&args[1])?;
+            let mut guard = process_eval_for_suggest
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("suggest called outside process execution".to_string());
+            };
+            ensure_process_run_scope(ctx, "suggest")?;
+            ctx.outputs.push(crate::process::ProcessOutput {
+                name: format!("__field:{name}"),
+                value: value.clone(),
+            });
+            Ok(value)
+        },
+    );
+
+    let process_eval_for_hear = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "hear",
+        "(hear :field)",
+        "Read the newest typed field published strictly before this process tick.",
+        move |args, _ctx| {
+            if args.len() != 1 {
+                return Err("hear expects one field name".to_string());
+            }
+            let name = process_symbol_name(&args[0])?;
+            let guard = process_eval_for_hear
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("hear called outside process execution".to_string());
+            };
+            Ok(ctx.reads.fields.get(&name).cloned().unwrap_or(EValue::Nil))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "field-domain",
+        "(field-domain field)",
+        "Return a typed field's domain keyword, or nil for no field.",
+        move |args, _ctx| match args.as_slice() {
+            [EValue::Nil] => Ok(EValue::Nil),
+            [field] => Ok(EValue::Keyword(process_field_domain(field)?)),
+            _ => Err("field-domain expects one field".to_string()),
+        },
+    );
+
+    for (native, key) in [
+        ("field-value", "value"),
+        ("field-pitches", "pitches"),
+        ("field-root", "root"),
+        ("field-weight", "weight"),
+    ] {
+        runtime.register_native_with_docs(
+            native,
+            format!("({native} field)"),
+            "Read a typed field component.",
+            move |args, _ctx| match args.as_slice() {
+                [EValue::Nil] => Ok(EValue::Nil),
+                [field] => process_field_cell(field, key),
+                _ => Err(format!("{native} expects one field")),
+            },
+        );
+    }
+
+    runtime.register_native_with_docs(
+        "field-nearest-delta",
+        "(field-nearest-delta pitch-field current-pitch grace)",
+        "Return the shortest signed pitch-class delta toward a pitch field.",
+        move |args, _ctx| {
+            if args.len() != 3 || process_field_domain(&args[0])? != "pitch-field" {
+                return Err(
+                    "field-nearest-delta expects a pitch field, current pitch, and grace"
+                        .to_string(),
+                );
+            }
+            let current = process_number_arg(args.get(1), "field-nearest-delta")?;
+            let grace = process_number_arg(args.get(2), "field-nearest-delta")?.max(0.0);
+            let EValue::List(pitches) = process_field_cell(&args[0], "pitches")? else {
+                return Err("pitch field pitches must be a list".to_string());
+            };
+            let mut best: Option<f64> = None;
+            for pitch in pitches {
+                let pitch = pitch.borrow();
+                let pitch = process_number_arg(Some(&pitch), "field-nearest-delta")?;
+                let delta = (pitch - current + 6.0).rem_euclid(12.0) - 6.0;
+                if best.is_none_or(|best| delta.abs() < best.abs()) {
+                    best = Some(delta);
+                }
+            }
+            let delta = best.ok_or_else(|| "pitch field cannot be empty".to_string())?;
+            Ok(EValue::Number(if delta.abs() <= grace {
+                0.0
+            } else {
+                delta
+            }))
+        },
+    );
+
+    let process_eval_for_current_note = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "current-note",
+        "(current-note)",
+        "Return the current step event's resolved transpose before this process runs.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("current-note expects no arguments".to_string());
+            }
+            let guard = process_eval_for_current_note
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(step) = guard.as_ref().and_then(|ctx| ctx.step_context.as_ref()) else {
+                return Err("current-note requires a scheduler step event context".to_string());
+            };
+            Ok(EValue::Number(step.resolved.transpose as f64))
+        },
+    );
+
     let process_authoring_for_read_source = Arc::clone(&process_authoring);
     runtime.register_native_with_docs(
         "process",
@@ -6220,6 +6425,87 @@ fn process_number_arg(value: Option<&EValue>, native: &str) -> Result<f64, Strin
     }
 }
 
+fn process_field_domain(value: &EValue) -> Result<String, String> {
+    let EValue::Map(map) = value else {
+        return Err("expected a typed field value".to_string());
+    };
+    let domain = map
+        .get("field-domain")
+        .ok_or_else(|| "field value is missing field-domain".to_string())?
+        .borrow();
+    process_symbol_name(&domain)
+}
+
+fn process_field_cell(value: &EValue, key: &str) -> Result<EValue, String> {
+    let EValue::Map(map) = value else {
+        return Err("expected a typed field value".to_string());
+    };
+    map.get(key)
+        .map(|value| value.borrow().clone())
+        .ok_or_else(|| format!("field value is missing {key}"))
+}
+
+fn process_scalar_field(value: f64) -> Result<EValue, String> {
+    if !value.is_finite() {
+        return Err("scalar field value must be finite".to_string());
+    }
+    Ok(process_map([
+        ("field-domain", EValue::Keyword("scalar".to_string())),
+        ("value", EValue::Number(value)),
+    ]))
+}
+
+fn process_gate_field(value: bool) -> EValue {
+    process_map([
+        ("field-domain", EValue::Keyword("gate".to_string())),
+        ("value", EValue::Bool(value)),
+    ])
+}
+
+fn normalize_process_field(value: &EValue) -> Result<EValue, String> {
+    match value {
+        EValue::Number(value) => process_scalar_field(*value),
+        EValue::Bool(value) => Ok(process_gate_field(*value)),
+        EValue::Map(_) => match process_field_domain(value)?.as_str() {
+            "scalar" => {
+                let scalar =
+                    process_number_arg(Some(&process_field_cell(value, "value")?), "scalar field")?;
+                process_scalar_field(scalar)
+            }
+            "gate" => match process_field_cell(value, "value")? {
+                EValue::Bool(value) => Ok(process_gate_field(value)),
+                _ => Err("gate field value must be boolean".to_string()),
+            },
+            "pitch-field" => {
+                let pitches = process_field_cell(value, "pitches")?;
+                let EValue::List(items) = &pitches else {
+                    return Err("pitch-field pitches must be a list".to_string());
+                };
+                if items.is_empty() {
+                    return Err("pitch-field requires at least one pitch".to_string());
+                }
+                for pitch in items {
+                    let pitch = pitch.borrow();
+                    let pitch = process_number_arg(Some(&pitch), "pitch-field")?;
+                    if !pitch.is_finite() {
+                        return Err("pitch-field pitches must be finite".to_string());
+                    }
+                }
+                let weight = process_number_arg(
+                    Some(&process_field_cell(value, "weight")?),
+                    "pitch-field weight",
+                )?;
+                if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+                    return Err("pitch-field weight must be between 0 and 1".to_string());
+                }
+                Ok(value.clone())
+            }
+            domain => Err(format!("unknown field domain :{domain}")),
+        },
+        _ => Err("suggest expects a number, boolean, or typed field value".to_string()),
+    }
+}
+
 fn process_target_write_args(
     args: &[EValue],
     native: &str,
@@ -6667,6 +6953,7 @@ fn parse_process_inlet_kind_and_range(
         "int" | "integer" => crate::process::ProcessInletKind::Int,
         "gate" | "bool" | "boolean" => crate::process::ProcessInletKind::Gate,
         "track" => crate::process::ProcessInletKind::Track,
+        "field" => crate::process::ProcessInletKind::Field,
         "any" => crate::process::ProcessInletKind::Any,
         other => return Err(format!("unknown process inlet kind :{other}")),
     };
@@ -23092,6 +23379,10 @@ mod tests {
         assert!(names.iter().any(|name| name == "dice"), "{names:?}");
         assert!(names.iter().any(|name| name == "echo-track"), "{names:?}");
         assert!(names.iter().any(|name| name == "wrap-crash"), "{names:?}");
+        assert!(
+            names.iter().any(|name| name == "follow-harmony"),
+            "{names:?}"
+        );
         assert!(defs.iter().all(|def| {
             def.source_path
                 .as_deref()
@@ -23148,6 +23439,7 @@ mod tests {
                 HashMap::from([("value".to_string(), Value::Number(6.0))]),
             )]),
             channels: HashMap::from([("density".to_string(), Value::Number(7.0))]),
+            fields: HashMap::new(),
         };
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
@@ -23165,6 +23457,74 @@ mod tests {
             })
             .expect("invoke read-family probe");
         assert_eq!(result.target_writes[0].value, 24.0);
+    }
+
+    #[test]
+    fn suggest_normalizes_scalar_gate_and_pitch_field_domains() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process typed-field-publisher
+                  :run (do
+                         (suggest :density 0.25)
+                         (suggest :accent true)
+                         (suggest :harmony
+                           (pitch-field (list 0 4 7) :root 0 :weight 0.8))))
+                "#,
+            )
+            .expect("define typed field publisher");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "typed-field-publisher")
+            .expect("typed field publisher definition");
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 1,
+                source: def.run_source.expect("run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: def.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
+                seed: 1,
+            })
+            .expect("invoke typed field publisher");
+
+        let domains = result
+            .outputs
+            .iter()
+            .map(|output| {
+                (
+                    output.name.as_str(),
+                    super::process_field_domain(&output.value).expect("typed field domain"),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            domains.get("__field:density").map(String::as_str),
+            Some("scalar")
+        );
+        assert_eq!(
+            domains.get("__field:accent").map(String::as_str),
+            Some("gate")
+        );
+        assert_eq!(
+            domains.get("__field:harmony").map(String::as_str),
+            Some("pitch-field")
+        );
     }
 
     #[test]
@@ -23517,6 +23877,43 @@ mod tests {
             .channels
             .iter()
             .any(|channel| channel.name.as_deref() == Some("phase7-demo-density")));
+    }
+
+    #[test]
+    fn process_fields_band_demo_loads_publisher_and_independent_followers() {
+        let state = Arc::new(SequencerState::new(
+            3,
+            (0..3).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(3),
+            fallback_instrument_descriptors(3),
+            0,
+            0,
+        );
+        scratch
+            .eval(&super::load_process_library_source())
+            .expect("load builtin process library");
+        let script_path = format!(
+            "{}/scripts/process-fields-band-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read fields band demo");
+
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate fields band demo");
+
+        assert_eq!(
+            state.track_process_chain(0).expect("publisher chain").slots[0].class_name,
+            "fields-band-publisher"
+        );
+        for track in [1, 2] {
+            let chain = state.track_process_chain(track).expect("follower chain");
+            assert_eq!(chain.slots.len(), 1);
+            assert_eq!(chain.slots[0].class_name, "follow-harmony");
+        }
     }
 
     #[test]

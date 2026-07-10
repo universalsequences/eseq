@@ -9820,6 +9820,80 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_fields_are_previous_tick_typed_and_independently_interpreted() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                4,
+                (0..4).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for track in 0..4 {
+                state.pattern.track_params[track].set_num_steps(2);
+                for step in 0..2 {
+                    state.pattern.patterns[track].set_step_active(step, true);
+                }
+            }
+            for track in 1..4 {
+                for step in 0..2 {
+                    state.set_step_param(track, step, StepParam::Transpose, 2.0);
+                }
+            }
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 4],
+                vec![EffectDescriptor::builtin_sampler(); 4],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("load builtin process library");
+            scratch
+                .eval(
+                    r#"
+                    (def-process harmony-publisher
+                      :run (suggest :harmony
+                             (pitch-field (list 0 4 7) :root 0 :weight 1)))
+                    (processes :track 0 (harmony-publisher))
+                    (processes :track 1
+                      (follow-harmony :listen :harmony :amount 1 :grace 0))
+                    (processes :track 2
+                      (follow-harmony :listen :harmony :amount 0.5 :grace 0))
+                    (processes :track 3
+                      (follow-harmony :listen :missing :amount 1 :grace 0))
+                    "#,
+                )
+                .expect("attach typed field publisher and listeners");
+
+            schedule_process_observed_fixture(&state, scratch, 18_000)
+        });
+
+        let track_transposes = |track: usize| {
+            events
+                .iter()
+                .filter(|event| event.track == track)
+                .take(2)
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            track_transposes(1),
+            vec![2.0, 0.0],
+            "same-tick publication is hidden; next tick follows the pitch field fully"
+        );
+        assert_eq!(
+            track_transposes(2),
+            vec![2.0, 1.0],
+            "each listener applies its own obedience amount"
+        );
+        assert_eq!(
+            track_transposes(3),
+            vec![2.0, 2.0],
+            "a missing publisher must remain inert"
+        );
+    }
+
+    #[test]
     fn scheduler_process_accumulator_lisp_attach_matches_manual_chain() {
         let (_state, events) =
             run_with_scheduler_stack(run_sparse_process_accumulator_fixture_via_lisp_attach);

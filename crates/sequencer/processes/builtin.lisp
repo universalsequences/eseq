@@ -67,3 +67,17 @@
              (emit :track (in :track) :note 0 :vel 0.9 :duration 0.5))
            nil)
          (target-add! acc)))
+
+(def-process follow-harmony
+  :doc "Move the current note toward the previous-tick pitch field. Missing publishers are inert; amount is sequenceable obedience."
+  :target (step-param :transpose)
+  :in ((listen :field :default :harmony)
+       (amount :float 0 1 :default 1 :lane true)
+       (grace :int 0 3 :default 0))
+  :run (let ((field (hear (in :listen))))
+         (if field
+           (target-add!
+             (* (in :amount)
+                (field-weight field)
+                (field-nearest-delta field (current-note) (in :grace))))
+           nil)))

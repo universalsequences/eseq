@@ -541,6 +541,7 @@ fn process_inlet_kind_name(kind: &sequencer::process::ProcessInletKind) -> &'sta
         sequencer::process::ProcessInletKind::Int => "int",
         sequencer::process::ProcessInletKind::Gate => "gate",
         sequencer::process::ProcessInletKind::Track => "track",
+        sequencer::process::ProcessInletKind::Field => "field",
         sequencer::process::ProcessInletKind::Any => "any",
     }
 }

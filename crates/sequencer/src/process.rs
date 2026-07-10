@@ -40,6 +40,7 @@ pub struct ProcessReadSnapshot {
     pub tracks: Arc<Vec<ProcessTrackReadSnapshot>>,
     pub process_values: HashMap<String, HashMap<String, Value>>,
     pub channels: HashMap<String, Value>,
+    pub fields: HashMap<String, Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +115,7 @@ pub enum ProcessInletKind {
     Int,
     Gate,
     Track,
+    Field,
     Any,
 }
 
@@ -1136,6 +1138,13 @@ struct ChannelState {
     name: String,
     value: Option<Value>,
     message_only: bool,
+    field_publications: VecDeque<TimedFieldValue>,
+}
+
+#[derive(Clone, Debug)]
+struct TimedFieldValue {
+    beat: f64,
+    value: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -1333,6 +1342,9 @@ impl ProcessRuntime {
             .map(ResolvedTrackHistory::new)
             .collect();
         self.resolved_track_snapshot_cache = None;
+        for channel in self.channels.values_mut() {
+            channel.field_publications.clear();
+        }
     }
 
     pub fn record_track_step_boundary(&mut self, track: usize, beat: f64) {
@@ -1426,6 +1438,18 @@ impl ProcessRuntime {
             .iter()
             .filter_map(|(name, channel)| channel.value.clone().map(|value| (name.clone(), value)))
             .collect();
+        let fields = self
+            .channels
+            .iter()
+            .filter_map(|(name, channel)| {
+                channel
+                    .field_publications
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.beat < before_beat - 1e-9)
+                    .map(|entry| (name.clone(), entry.value.clone()))
+            })
+            .collect();
         let mut process_values = HashMap::new();
         let mut standalone_class_counts = HashMap::<&str, usize>::new();
         for instance in &self.instances {
@@ -1462,6 +1486,7 @@ impl ProcessRuntime {
             tracks,
             process_values,
             channels,
+            fields,
         }
     }
 
@@ -1542,15 +1567,17 @@ impl ProcessRuntime {
                 continue;
             };
             let existing = self.channels.remove(&name);
-            let value = existing
-                .and_then(|existing| existing.value)
-                .or(channel.initial.clone());
+            let (value, field_publications) = existing
+                .map(|existing| (existing.value, existing.field_publications))
+                .unwrap_or_default();
+            let value = value.or(channel.initial.clone());
             next.insert(
                 name.clone(),
                 ChannelState {
                     name,
                     value,
                     message_only: channel.message_only,
+                    field_publications,
                 },
             );
         }
@@ -1763,8 +1790,36 @@ impl ProcessRuntime {
             .position(|instance| instance.runtime_id == result.runtime_id)
         else {
             if self.step_process_runtime_ids.contains(&result.runtime_id) {
+                let mut state = result.state;
+                let mut channel_sends = Vec::new();
+                let mut field_suggestions = Vec::new();
+                for output in result.outputs {
+                    if let Some(channel) = output.name.strip_prefix("__chan:") {
+                        channel_sends.push((channel.to_string(), output.value));
+                    } else if let Some(field) = output.name.strip_prefix("__field:") {
+                        field_suggestions.push((field.to_string(), output.value));
+                    } else {
+                        state.insert(output.name, output.value);
+                    }
+                }
                 self.step_process_states
-                    .insert(ProcessInstanceId(result.runtime_id), result.state);
+                    .insert(ProcessInstanceId(result.runtime_id), state);
+                for (channel, value) in channel_sends {
+                    invocations.extend(self.send_channel_at(
+                        &channel,
+                        value,
+                        result.beat,
+                        result.sample_time,
+                    ));
+                }
+                for (field, value) in field_suggestions {
+                    invocations.extend(self.suggest_field_at(
+                        &field,
+                        value,
+                        result.beat,
+                        result.sample_time,
+                    ));
+                }
                 for mut event in result.emissions {
                     let beat = result.beat + event.offset_beats.max(0.0) as f64;
                     event.offset_beats = 0.0;
@@ -1782,12 +1837,17 @@ impl ProcessRuntime {
         }
         let mut propagated_outputs = Vec::new();
         let mut channel_sends = Vec::new();
+        let mut field_suggestions = Vec::new();
         {
             let instance = &mut self.instances[pos];
             instance.state = result.state;
             for output in result.outputs {
                 if let Some(channel) = output.name.strip_prefix("__chan:") {
                     channel_sends.push((channel.to_string(), output.value));
+                    continue;
+                }
+                if let Some(field) = output.name.strip_prefix("__field:") {
+                    field_suggestions.push((field.to_string(), output.value));
                     continue;
                 }
                 instance
@@ -1822,6 +1882,14 @@ impl ProcessRuntime {
                 result.sample_time,
             ));
         }
+        for (field, value) in field_suggestions {
+            invocations.extend(self.suggest_field_at(
+                &field,
+                value,
+                result.beat,
+                result.sample_time,
+            ));
+        }
         for mut event in result.emissions {
             let beat = result.beat + event.offset_beats.max(0.0) as f64;
             event.offset_beats = 0.0;
@@ -1848,9 +1916,43 @@ impl ProcessRuntime {
                 name: name.to_string(),
                 value: None,
                 message_only: false,
+                field_publications: VecDeque::new(),
             });
         if !channel.message_only {
             channel.value = Some(value.clone());
+        }
+        self.propagate_source_at(
+            ProcessSourceRef::Channel(name.to_string()),
+            value,
+            beat,
+            sample_time,
+            None,
+        )
+    }
+
+    pub fn suggest_field_at(
+        &mut self,
+        name: &str,
+        value: Value,
+        beat: f64,
+        sample_time: u64,
+    ) -> Vec<ProcessRunInvocation> {
+        let channel = self
+            .channels
+            .entry(name.to_string())
+            .or_insert(ChannelState {
+                name: name.to_string(),
+                value: None,
+                message_only: false,
+                field_publications: VecDeque::new(),
+            });
+        channel.value = Some(value.clone());
+        channel.field_publications.push_back(TimedFieldValue {
+            beat,
+            value: value.clone(),
+        });
+        while channel.field_publications.len() > PROCESS_READ_HISTORY_DEPTH {
+            channel.field_publications.pop_front();
         }
         self.propagate_source_at(
             ProcessSourceRef::Channel(name.to_string()),
@@ -2827,6 +2929,19 @@ mod tests {
             runtime.read_snapshot(10_000.0).tracks[0].steps.len(),
             PROCESS_READ_HISTORY_DEPTH
         );
+    }
+
+    #[test]
+    fn pattern_reset_clears_previous_tick_field_registers() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.suggest_field_at("density", Value::Number(0.75), 0.0, 0);
+        assert_eq!(
+            runtime.read_snapshot(1.0).fields.get("density"),
+            Some(&Value::Number(0.75))
+        );
+
+        runtime.reset_resolved_track_history(&[]);
+        assert!(!runtime.read_snapshot(1.0).fields.contains_key("density"));
     }
 
     fn test_step_context(track: usize) -> ProcessStepEventContext {

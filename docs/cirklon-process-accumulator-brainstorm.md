@@ -3,9 +3,10 @@
 Status: design spec (evolved from brainstorm). Phase 5 has landed through the
 fx-panel process-chain surface. The Phase 5B project layer (items 1-3 + 6) and
 Phase 5C per-track copy-on-write lanes have landed. Phase 7 resolved reads and
-bounded step/trigger history have also landed. Latched brain wires and
-`target-mul!` (5B items 4-5) remain. Rack-slot write application remains a
-follow-up.
+bounded step/trigger history have also landed. The end-game Slice 2 field
+engine (`suggest` / previous-tick `hear`) and `follow-harmony` proof have
+landed. Latched brain wires and `target-mul!` (5B items 4-5) remain. Rack-slot
+write application remains a follow-up.
 Covers accumulators, masks, ratchets, grabs, and the track-attached process
 chain, all built on the existing scheduler-owned `def-process` framework.
 
@@ -1616,7 +1617,7 @@ Phase 7 grabs/history for harmonic context, and `ProcessInlet` targets so
 other processes/lanes sequence a conductor's inlets. Preset tier 3 becomes a
 *style* ("close voicings, low density, follows the bass").
 
-### Fields: suggestions instead of commands (the band model)
+### Fields: suggestions instead of commands (the band model — engine slice landed)
 
 The richer version of coordination is not top-down. Alongside `:play` (emit
 notes on bound tracks) and `:steer` (write followers' step params directly), a
@@ -1665,6 +1666,12 @@ Why this shape is right:
 
 The command spectrum, in one line:
 `:play` = the band's hands · `:steer` = lean on a player · `suggest` = the vibe.
+
+Landed engine surface: `pitch-field`, `scalar-field`, `gate-field`, `suggest`,
+previous-tick/nil-safe `hear`, field component readers, and
+`field-nearest-delta`. `follow-harmony` is a builtin member process with
+lane-sequenceable obedience and passing-tone grace. The runnable proof is
+`crates/sequencer/scripts/process-fields-band-demo.lisp`.
 
 The genuine engine deltas — the depth this spec doesn't yet cover:
 
