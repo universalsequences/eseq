@@ -22,6 +22,8 @@ pub mod number_picker;
 pub mod patcher;
 pub mod phaser_notch;
 pub mod response_curve_editor;
+pub mod roar_filter;
+pub mod roar_shaper;
 pub mod scroll;
 pub mod sdf_widget;
 pub mod spectrogram;
@@ -884,6 +886,8 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &eq8_editor::EQ8_EDITOR_WIDGET,
     &phaser_notch::PHASER_NOTCH_WIDGET,
     &multiband_meter::MULTIBAND_METER_WIDGET,
+    &roar_shaper::ROAR_SHAPER_WIDGET,
+    &roar_filter::ROAR_FILTER_WIDGET,
     &vstack::VSTACK_WIDGET,
     &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,

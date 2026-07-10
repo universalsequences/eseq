@@ -9,6 +9,7 @@
 (load "metal-seq-fx/builtin/space-echo.lisp")
 (load "metal-seq-fx/builtin/dimension.lisp")
 (load "metal-seq-fx/builtin/phaser-flanger.lisp")
+(load "metal-seq-fx/builtin/roar.lisp")
 (load "metal-seq-fx/builtin/filter-panel.lisp")
 (load "metal-seq-fx/builtin/dynamics.lisp")
 (load "metal-seq-fx/builtin/multiband.lisp")
