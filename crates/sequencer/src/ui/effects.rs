@@ -1372,6 +1372,10 @@ impl App {
                 crate::phaser_flanger::phaser_flanger_vtable(),
                 crate::phaser_flanger::PHASER_FLANGER_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Roar" => (
+                crate::roar::roar_vtable(),
+                crate::roar::ROAR_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             "DJ Mixer" => (
                 crate::dj_mixer::dj_mixer_vtable(),
                 crate::dj_mixer::DJ_MIXER_STATE_SIZE * std::mem::size_of::<f32>(),
@@ -1559,6 +1563,7 @@ impl App {
                         "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
                         "Space Echo" => crate::space_echo::SPACE_ECHO_PARAM_BPM,
                         "Phaser-Flanger" => crate::phaser_flanger::PHASER_FLANGER_PARAM_BPM,
+                        "Roar" => crate::roar::ROAR_PARAM_BPM,
                         "Filter" => crate::filter::FILTER_PARAM_BPM,
                         "DJ Mixer" => crate::dj_mixer::DJ_MIXER_PARAM_BPM,
                         _ => continue,
@@ -1599,6 +1604,7 @@ impl App {
                         "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
                         "Space Echo" => crate::space_echo::SPACE_ECHO_PARAM_BPM,
                         "Phaser-Flanger" => crate::phaser_flanger::PHASER_FLANGER_PARAM_BPM,
+                        "Roar" => crate::roar::ROAR_PARAM_BPM,
                         "Filter" => crate::filter::FILTER_PARAM_BPM,
                         "DJ Mixer" => crate::dj_mixer::DJ_MIXER_PARAM_BPM,
                         _ => continue,

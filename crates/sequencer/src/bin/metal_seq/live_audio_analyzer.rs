@@ -8,6 +8,7 @@ use eseqlisp::live_audio::BandMeterFrame;
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
 use eseqlisp::widget_render::multiband_meter::{collect_band_meter_requests, BandMeterRequest};
 use eseqlisp::widget_render::scope::{collect_scope_requests, ScopeRequest};
+use eseqlisp::widget_render::roar_shaper::collect_roar_meter_requests;
 use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, SpectrogramRequest};
 use sequencer::audio_tap::{self, SpectrogramProcessor};
 use sequencer::audiograph::{self, LiveGraphPtr};
@@ -105,6 +106,16 @@ impl LiveAudioAnalyzerManager {
                 meter_requests
                     .entry(request.data_key.clone())
                     .or_insert(request);
+            }
+            // Roar shaper views read their effect node's state meters over
+            // the same watchlist path, keyed `roar-meter:`.
+            for request in collect_roar_meter_requests(layout.as_ref()) {
+                meter_requests
+                    .entry(request.data_key.clone())
+                    .or_insert(BandMeterRequest {
+                        data_key: request.data_key,
+                        source: request.source,
+                    });
             }
         }
         let poll_due = self.last_poll_at.elapsed() >= LIVE_AUDIO_ANALYZER_POLL_INTERVAL;
@@ -351,18 +362,25 @@ impl LiveAudioAnalyzerManager {
             let Some(node) = self.meter_nodes.get_mut(&data_key) else {
                 continue;
             };
-            let mut state = [0.0f32; sequencer::ott::OTT_STATE_SIZE];
+            let is_roar = data_key.starts_with("roar-meter:");
+            let state_len = if is_roar {
+                sequencer::roar::ROAR_STATE_SIZE
+            } else {
+                sequencer::ott::OTT_STATE_SIZE
+            };
+            let mut state = vec![0.0f32; state_len];
+            let state_bytes = state_len * std::mem::size_of::<f32>();
             let mut state_size = 0usize;
             let copied = unsafe {
                 audiograph::get_node_state_into(
                     self.lg.0,
                     node.node_id,
                     state.as_mut_ptr().cast(),
-                    std::mem::size_of_val(&state),
+                    state_bytes,
                     &mut state_size as *mut usize,
                 )
             };
-            if !copied || state_size < std::mem::size_of_val(&state) {
+            if !copied || state_size < state_bytes {
                 continue;
             }
             let mut frame = BandMeterFrame {
@@ -370,12 +388,25 @@ impl LiveAudioAnalyzerManager {
                 level_db: [[0.0; 2]; 3],
                 gain_db: [0.0; 3],
             };
-            for band in 0..3 {
-                for ch in 0..2 {
-                    frame.level_db[band][ch] =
-                        state[sequencer::ott::STATE_METER_LEVEL_DB + band * 2 + ch];
+            if is_roar {
+                // Per stage: (pre-shaper min, max) as the level pair (linear
+                // curve-domain values) and the post-stage dB as the gain.
+                for stage in 0..3 {
+                    for slot in 0..2 {
+                        frame.level_db[stage][slot] =
+                            state[sequencer::roar::STATE_METER_PRE + stage * 2 + slot];
+                    }
+                    frame.gain_db[stage] =
+                        state[sequencer::roar::STATE_METER_POST_DB + stage];
                 }
-                frame.gain_db[band] = state[sequencer::ott::STATE_METER_GAIN_DB + band];
+            } else {
+                for band in 0..3 {
+                    for ch in 0..2 {
+                        frame.level_db[band][ch] =
+                            state[sequencer::ott::STATE_METER_LEVEL_DB + band * 2 + ch];
+                    }
+                    frame.gain_db[band] = state[sequencer::ott::STATE_METER_GAIN_DB + band];
+                }
             }
             let moved = node.last_frame.map_or(true, |last| {
                 (0..3).any(|band| {

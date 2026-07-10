@@ -1019,6 +1019,76 @@ mod tests {
     }
 
     #[test]
+    fn builtin_roar_exposes_stage_params_within_state_bounds() {
+        let descriptor = EffectDescriptor::builtin_roar();
+        // The roar panel (metal-seq-fx/builtin/roar.lisp) looks these up by
+        // name; renaming any of them breaks the custom UI.
+        for name in [
+            "enabled", "drive", "tone", "tone freq", "tone mode", "routing", "blend",
+            "xover low", "xover high", "fb mode", "fb time", "fb div", "fb amount",
+            "fb invert", "fb duck", "fb freq", "fb width", "compress", "sc hpf", "output",
+            "dry/wet",
+        ] {
+            assert!(
+                descriptor.params.iter().any(|param| param.name == name),
+                "Roar descriptor should expose {name:?}"
+            );
+        }
+        for prefix in ["s1", "s2", "s3"] {
+            for field in [
+                "shaper", "amount", "bias", "level", "filter", "freq", "res", "pre",
+            ] {
+                let name = format!("{prefix} {field}");
+                assert!(
+                    descriptor.params.iter().any(|param| param.name == name),
+                    "Roar descriptor should expose {name:?}"
+                );
+            }
+        }
+        // 21 globals + 24 stage params + the shared modulator block + 4
+        // targets × 4 mod-depth slots.
+        let modulator_params = crate::voice_modulator::effect_param_descriptors().len();
+        assert_eq!(descriptor.params.len(), 21 + 24 + modulator_params + 16);
+        assert_eq!(descriptor.instrument_modulation_targets.len(), 16);
+        for (idx, param) in descriptor.params.iter().enumerate() {
+            // The shared voice-modulator block (indices 45..45+block) writes
+            // into the modulator node's state, not Roar's.
+            if idx < 45 || param.name.ends_with(" amt") {
+                assert!(
+                    (param.node_param_idx as usize) < crate::roar::ROAR_STATE_SIZE,
+                    "param {:?} writes outside the Roar state array",
+                    param.name
+                );
+            }
+            assert!(
+                param.default >= param.min && param.default <= param.max,
+                "param {:?} default out of range",
+                param.name
+            );
+        }
+        let routing = descriptor
+            .params
+            .iter()
+            .find(|param| param.name == "routing")
+            .unwrap();
+        match &routing.kind {
+            ParamKind::Enum { labels } => assert_eq!(
+                labels,
+                &vec![
+                    "single".to_string(),
+                    "serial".to_string(),
+                    "parallel".to_string(),
+                    "multi band".to_string(),
+                    "mid side".to_string(),
+                    "feedback".to_string(),
+                    "delay".to_string(),
+                ]
+            ),
+            other => panic!("routing should be enum, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn builtin_ott_exposes_per_band_dynamics_params_within_state_bounds() {
         let descriptor = EffectDescriptor::builtin_ott();
         // The multiband panel (metal-seq-fx/builtin/multiband.lisp) looks
@@ -1087,6 +1157,7 @@ mod tests {
                 "Space Echo",
                 "Dimension",
                 "Phaser-Flanger",
+                "Roar",
                 "DJ Mixer",
                 "Reverb",
                 "444 Compressor",
@@ -1822,6 +1893,7 @@ impl EffectDescriptor {
             "Space Echo",
             "Dimension",
             "Phaser-Flanger",
+            "Roar",
             "DJ Mixer",
             "Reverb",
             "444 Compressor",
@@ -1872,6 +1944,7 @@ impl EffectDescriptor {
             "Space Echo" => Some(Self::builtin_space_echo()),
             "Dimension" => Some(Self::builtin_dimension()),
             "Phaser-Flanger" => Some(Self::builtin_phaser_flanger()),
+            "Roar" => Some(Self::builtin_roar()),
             "DJ Mixer" => Some(Self::builtin_dj_mixer()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
             "444 Compressor" => Some(Self::builtin_444_compressor()),
@@ -3752,6 +3825,410 @@ impl EffectDescriptor {
             mix_idx,
             "mix",
             crate::phaser_flanger::PHASER_FLANGER_PARAM_MOD_MIX_DEPTH_1,
+            -1.0,
+            1.0,
+            None,
+        );
+
+        desc
+    }
+
+    /// Built-in Roar multi-stage saturation descriptor (docs/roar-spec.md).
+    pub fn builtin_roar() -> Self {
+        fn continuous(
+            name: &str,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            scaling: ParamScaling,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+        fn options(
+            name: &str,
+            labels: &[&str],
+            default: f32,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: (labels.len() - 1) as f32,
+                default,
+                kind: ParamKind::Enum {
+                    labels: labels.iter().map(|label| label.to_string()).collect(),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+        fn boolean(name: &str, default: f32, node_param_idx: u64) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: 1.0,
+                default,
+                kind: ParamKind::Boolean,
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        const SHAPERS: [&str; 12] = [
+            "soft sine",
+            "digital clip",
+            "bit crusher",
+            "diode clipper",
+            "tube preamp",
+            "half wave",
+            "full wave",
+            "polynomial",
+            "fractal",
+            "tri fold",
+            "noise",
+            "shards",
+        ];
+        const FILTERS: [&str; 9] = [
+            "lp",
+            "bp",
+            "hp",
+            "notch",
+            "peak",
+            "morph",
+            "comb",
+            "resample",
+            "dispersion",
+        ];
+
+        let mut params = vec![
+            Self::enabled_param(crate::roar::ROAR_PARAM_ENABLED as u32, 1.0),
+            continuous(
+                "drive",
+                -12.0,
+                36.0,
+                0.0,
+                Some("dB"),
+                ParamScaling::Linear,
+                crate::roar::ROAR_PARAM_DRIVE,
+            ),
+            continuous(
+                "tone",
+                -1.0,
+                1.0,
+                0.0,
+                Some("%"),
+                ParamScaling::Linear,
+                crate::roar::ROAR_PARAM_TONE,
+            ),
+            continuous(
+                "tone freq",
+                50.0,
+                18_000.0,
+                180.0,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                crate::roar::ROAR_PARAM_TONE_FREQ,
+            ),
+            options("tone mode", &["tilt", "shelf"], 0.0, crate::roar::ROAR_PARAM_TONE_MODE),
+            options(
+                "routing",
+                &[
+                    "single",
+                    "serial",
+                    "parallel",
+                    "multi band",
+                    "mid side",
+                    "feedback",
+                    "delay",
+                ],
+                0.0,
+                crate::roar::ROAR_PARAM_ROUTING,
+            ),
+            continuous(
+                "blend",
+                0.0,
+                1.0,
+                0.5,
+                Some("%"),
+                ParamScaling::Linear,
+                crate::roar::ROAR_PARAM_BLEND,
+            ),
+            continuous(
+                "xover low",
+                40.0,
+                1_000.0,
+                200.0,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                crate::roar::ROAR_PARAM_XOVER_LOW,
+            ),
+            continuous(
+                "xover high",
+                500.0,
+                10_000.0,
+                2_000.0,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                crate::roar::ROAR_PARAM_XOVER_HIGH,
+            ),
+            options("fb mode", &["time", "note"], 0.0, crate::roar::ROAR_PARAM_FB_MODE),
+            continuous(
+                "fb time",
+                0.5,
+                1_000.0,
+                18.2,
+                Some("ms"),
+                ParamScaling::Exponential,
+                crate::roar::ROAR_PARAM_FB_TIME,
+            ),
+            options(
+                "fb div",
+                &[
+                    "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2",
+                    "1",
+                ],
+                3.0,
+                crate::roar::ROAR_PARAM_FB_DIV,
+            ),
+            continuous(
+                "fb amount",
+                0.0,
+                1.0,
+                0.0,
+                Some("%"),
+                ParamScaling::Linear,
+                crate::roar::ROAR_PARAM_FB_AMOUNT,
+            ),
+            boolean("fb invert", 0.0, crate::roar::ROAR_PARAM_FB_INVERT),
+            boolean("fb duck", 0.0, crate::roar::ROAR_PARAM_FB_DUCK),
+            continuous(
+                "fb freq",
+                30.0,
+                18_000.0,
+                1_000.0,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                crate::roar::ROAR_PARAM_FB_FREQ,
+            ),
+            continuous(
+                "fb width",
+                0.5,
+                9.0,
+                8.0,
+                Some("oct"),
+                ParamScaling::Linear,
+                crate::roar::ROAR_PARAM_FB_WIDTH,
+            ),
+            continuous(
+                "compress",
+                0.0,
+                1.0,
+                0.0,
+                Some("%"),
+                ParamScaling::Linear,
+                crate::roar::ROAR_PARAM_COMPRESS,
+            ),
+            boolean("sc hpf", 0.0, crate::roar::ROAR_PARAM_SC_HPF),
+            continuous(
+                "output",
+                -24.0,
+                24.0,
+                0.0,
+                Some("dB"),
+                ParamScaling::Linear,
+                crate::roar::ROAR_PARAM_OUTPUT,
+            ),
+            continuous(
+                "dry/wet",
+                0.0,
+                1.0,
+                1.0,
+                Some("%"),
+                ParamScaling::Linear,
+                crate::roar::ROAR_PARAM_MIX,
+            ),
+        ];
+        for stage in 0..crate::roar::NUM_STAGES {
+            let prefix = format!("s{}", stage + 1);
+            params.push(options(
+                &format!("{prefix} shaper"),
+                &SHAPERS,
+                0.0,
+                crate::roar::roar_stage_param(stage, crate::roar::RoarStageField::Shaper),
+            ));
+            params.push(continuous(
+                &format!("{prefix} amount"),
+                0.0,
+                1.0,
+                0.0,
+                Some("%"),
+                ParamScaling::Linear,
+                crate::roar::roar_stage_param(stage, crate::roar::RoarStageField::Amount),
+            ));
+            params.push(continuous(
+                &format!("{prefix} bias"),
+                -1.0,
+                1.0,
+                0.0,
+                None,
+                ParamScaling::Linear,
+                crate::roar::roar_stage_param(stage, crate::roar::RoarStageField::Bias),
+            ));
+            params.push(continuous(
+                &format!("{prefix} level"),
+                -24.0,
+                24.0,
+                0.0,
+                Some("dB"),
+                ParamScaling::Linear,
+                crate::roar::roar_stage_param(stage, crate::roar::RoarStageField::Level),
+            ));
+            params.push(options(
+                &format!("{prefix} filter"),
+                &FILTERS,
+                0.0,
+                crate::roar::roar_stage_param(stage, crate::roar::RoarStageField::Filter),
+            ));
+            params.push(continuous(
+                &format!("{prefix} freq"),
+                20.0,
+                16_000.0,
+                16_000.0,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                crate::roar::roar_stage_param(stage, crate::roar::RoarStageField::Freq),
+            ));
+            params.push(continuous(
+                &format!("{prefix} res"),
+                0.0,
+                1.0,
+                0.1,
+                None,
+                ParamScaling::Linear,
+                crate::roar::roar_stage_param(stage, crate::roar::RoarStageField::Res),
+            ));
+            params.push(boolean(
+                &format!("{prefix} pre"),
+                0.0,
+                crate::roar::roar_stage_param(stage, crate::roar::RoarStageField::Pre),
+            ));
+        }
+
+        let mut desc = Self {
+            name: "Roar".to_string(),
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params,
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let param_position = |desc: &Self, name: &str| {
+            desc.params
+                .iter()
+                .position(|param| param.name == name)
+                .unwrap_or_else(|| panic!("built-in Roar {name} param should exist"))
+        };
+        let drive_idx = param_position(&desc, "drive");
+        let tone_idx = param_position(&desc, "tone");
+        let fb_amount_idx = param_position(&desc, "fb amount");
+        let mix_idx = param_position(&desc, "dry/wet");
+
+        let mut append_depth_targets =
+            |base_param_idx: usize,
+             destination_name: &str,
+             first_depth_param: u64,
+             depth_min: f32,
+             depth_max: f32,
+             depth_unit: Option<&str>| {
+                for slot in 0..crate::voice_modulator::SLOT_COUNT {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: depth_min,
+                        max: depth_max,
+                        default: 0.0,
+                        kind: ParamKind::Continuous {
+                            unit: depth_unit.map(str::to_string),
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: first_depth_param as u32 + slot as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min,
+                            depth_max,
+                            depth_unit: depth_unit.map(str::to_string),
+                        });
+                }
+            };
+
+        // Drive modulation is applied additively in dB.
+        append_depth_targets(
+            drive_idx,
+            "drive",
+            crate::roar::ROAR_PARAM_MOD_DRIVE_DEPTH_1,
+            -24.0,
+            24.0,
+            Some("dB"),
+        );
+        append_depth_targets(
+            tone_idx,
+            "tone",
+            crate::roar::ROAR_PARAM_MOD_TONE_DEPTH_1,
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            fb_amount_idx,
+            "fb amount",
+            crate::roar::ROAR_PARAM_MOD_FB_AMOUNT_DEPTH_1,
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            mix_idx,
+            "mix",
+            crate::roar::ROAR_PARAM_MOD_MIX_DEPTH_1,
             -1.0,
             1.0,
             None,

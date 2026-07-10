@@ -50,6 +50,8 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "scope",
     "multiband-meter",
     "phaser-notch",
+    "roar-shaper",
+    "roar-filter",
     "scroll",
     "tree",
 ];
