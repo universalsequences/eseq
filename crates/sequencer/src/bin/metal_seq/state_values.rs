@@ -523,6 +523,8 @@ struct ProcessLaneUiEntry {
     target: String,
     map_ports: Vec<Value>,
     values: Vec<f32>,
+    project: bool,
+    forked: bool,
 }
 
 fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral) -> Option<f32> {
@@ -845,6 +847,13 @@ fn process_lane_entries_for_track(
                     .unwrap_or_default(),
                 map_ports,
                 values,
+                project: slot.project_layer,
+                forked: slot.project_layer
+                    && state.has_project_process_lane_override(
+                        track,
+                        slot.instance_id,
+                        &inlet_name,
+                    ),
             });
         }
     }
@@ -864,6 +873,8 @@ fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) -> Value {
         ("process", Value::String(entry.class_name.clone())),
         ("inlet", Value::String(entry.inlet_name.clone())),
         ("name", Value::String(entry.inlet_name.clone())),
+        ("project", Value::Bool(entry.project)),
+        ("forked", Value::Bool(entry.forked)),
         ("label", Value::String(entry.label.clone())),
         ("short-label", Value::String(entry.short_label.clone())),
         ("kind", Value::String(entry.kind.clone())),

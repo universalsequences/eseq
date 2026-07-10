@@ -319,6 +319,8 @@ pub struct ProjectPattern {
     #[serde(default)]
     pub process_chains: Vec<crate::process::TrackProcessChain>,
     #[serde(default)]
+    pub project_process_lane_overrides: Vec<crate::process::ProjectLaneOverrides>,
+    #[serde(default)]
     pub project_process_chain: crate::process::TrackProcessChain,
     #[serde(default)]
     pub plock_variant_registries: Vec<PlockVariantRegistry>,
@@ -621,6 +623,7 @@ impl ProjectPattern {
                 .map(|rack| rack.map(ProjectRackTrackPattern::from))
                 .collect(),
             process_chains: snapshot.process_chains.clone(),
+            project_process_lane_overrides: snapshot.project_process_lane_overrides.clone(),
             project_process_chain: snapshot.project_process_chain.clone(),
             plock_variant_registries: snapshot.plock_variant_registries.clone(),
             key_lock_variant_registries: snapshot.key_lock_variant_registries.clone(),
@@ -1935,6 +1938,7 @@ mod tests {
                     },
                     crate::process::TrackProcessChain::default(),
                 ],
+                project_process_lane_overrides: Vec::new(),
                 project_process_chain: crate::process::TrackProcessChain {
                     slots: vec![crate::process::TrackProcessSlot {
                         instance_id: crate::process::ProcessInstanceId(77),
@@ -1960,7 +1964,19 @@ mod tests {
 
     #[test]
     fn current_project_format_roundtrips() {
-        let project = sample_project();
+        let mut project = sample_project();
+        let identity = crate::process::project_slot_identity_id(
+            &project.patterns[0].project_process_chain.slots[0],
+        );
+        project.patterns[0].project_process_lane_overrides = vec![
+            std::collections::BTreeMap::from([(
+                identity,
+                std::collections::BTreeMap::from([(
+                    "prob".to_string(),
+                    crate::process::ProcessLane { values: vec![0.25, 0.75] },
+                )]),
+            )]),
+        ];
         let json = serde_json::to_string(&project).expect("serialize current project");
         let restored: ProjectFile =
             serde_json::from_str(&json).expect("deserialize current project");
@@ -1968,6 +1984,10 @@ mod tests {
         assert_eq!(restored.name, project.name);
         assert_eq!(restored.current_pattern, project.current_pattern);
         assert_eq!(restored.current_track, project.current_track);
+        assert_eq!(
+            restored.patterns[0].project_process_lane_overrides,
+            project.patterns[0].project_process_lane_overrides
+        );
         assert_eq!(restored.scratch.buffer, project.scratch.buffer);
         assert_eq!(restored.scratch.cursor_row, project.scratch.cursor_row);
         assert_eq!(restored.scratch.cursor_col, project.scratch.cursor_col);

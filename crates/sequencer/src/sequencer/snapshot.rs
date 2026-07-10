@@ -98,6 +98,11 @@ impl SequencerSnapshot {
         let project_process_chain = state.project_process_chain();
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let live_process_chains = state.pattern.process_chains.lock().unwrap();
+        let live_project_lane_overrides = state
+            .pattern
+            .project_process_lane_overrides
+            .lock()
+            .unwrap();
         let (effect_descriptors_by_track, instrument_descriptors) =
             state.scratch_runtime_descriptors();
 
@@ -205,6 +210,7 @@ impl SequencerSnapshot {
                 &instrument_slot,
                 &effect_descriptors,
                 &effect_slots,
+                live_project_lane_overrides.get(track_idx),
             );
             tracks.push(SequencerTrackSnapshot {
                 params,
@@ -305,6 +311,7 @@ fn track_snapshot_from_pattern_data(
         &data.instrument_slot,
         &effect_descriptors,
         &data.effect_slots,
+        Some(&data.project_process_lane_overrides),
     );
     let steps = (0..MAX_STEPS)
         .map(|step_idx| {
@@ -373,6 +380,7 @@ fn compose_track_process_chain(
     instrument_slot: &EffectSlotSnapshot,
     effect_descriptors: &[EffectDescriptor],
     effect_slots: &[EffectSlotSnapshot],
+    overrides: Option<&crate::process::ProjectLaneOverrides>,
 ) -> crate::process::TrackProcessChain {
     let track_chain = track_chain.cloned().unwrap_or_default();
     if project_process_chain.slots.is_empty() {
@@ -386,6 +394,9 @@ fn compose_track_process_chain(
         effect_descriptors,
         effect_slots,
     );
+    if let Some(overrides) = overrides {
+        crate::process::apply_project_lane_overrides(&mut project_chain, overrides);
+    }
     crate::process::compose_effective_process_chain(&project_chain, &track_chain)
 }
 
