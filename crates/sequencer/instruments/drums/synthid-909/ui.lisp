@@ -13,15 +13,15 @@
 (def synthid909-body-block ()
   (ui-control-panel-dense-s 0
     (h-stack :width :fill :height :fill :gap 0.30 :align :center
-      (v-stack :width 10.6 :gap 0.18 :align :start
-        (h-stack :gap 0.18 :align :start
+      (v-stack :width 12.5 :gap 0.18 :align :start
+        (h-stack :gap 0.24 :align :start
           (ui-lego-badge-s 0 "BODY" 4.4 (ui-accent-blue))
-          (ui-lego-micro-num-s 0 "release" "REL" 3.4 1 "ms" (ui-accent-orange))
+          (ui-lego-micro-num-s 0 "release" "REL ms" 4.2 1 false (ui-accent-orange))
           (ui-lego-micro-num-s 0 "amp_curve" "CURVE" 3.4 2 false (ui-accent-violet))))
       (h-stack :gap 0.10 :align :start
-        (ui-lego-knob-s 0 "body_amp" "AMP" 3.9 (ui-accent-orange) 3)
-        (ui-lego-knob-s 0 "body_asymmetry" "ASYM" 3.9 (ui-accent-violet) 3)
-        (ui-lego-micro-num-s 0 "body_harmonic" "HARM" 3.4 3 false (ui-accent-cyan))))))
+        (ui-lego-knob-s 0 "body_amp" "AMP" 3.6 (ui-accent-orange) 3)
+        (ui-lego-knob-s 0 "body_asymmetry" "ASYM" 3.6 (ui-accent-violet) 3)
+        (ui-lego-micro-num-s 0 "body_harmonic" "HARM" 3.3 3 false (ui-accent-cyan))))))
 
 (def synthid909-click-block ()
   (ui-control-panel-dense-s 0

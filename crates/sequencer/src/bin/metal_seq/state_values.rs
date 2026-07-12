@@ -39491,6 +39491,19 @@ mod tests {
                     instrument_panel.rect
                 );
             }
+
+            if instrument_name == "drums/synthid-909/" {
+                let release = find_stable_key_suffix(&layout, "release")
+                    .expect("SynthID 909 release control");
+                let curve = find_stable_key_suffix(&layout, "amp_curve")
+                    .expect("SynthID 909 amp curve control");
+                assert!(
+                    release.rect.col + release.rect.width + 0.2 <= curve.rect.col,
+                    "SynthID 909 BODY readouts must not overlap: release={:?}, curve={:?}",
+                    release.rect,
+                    curve.rect
+                );
+            }
         }
     }
 

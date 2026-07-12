@@ -5878,6 +5878,14 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
     let mut track_output_events = Vec::new();
 
+    process_runtime.sync_step_process_aliases(
+        snapshot
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(track, snapshot)| (track, &snapshot.process_chain)),
+    );
+
     let resolved_read_bases = vec![
         std::array::from_fn(|index| StepParam::ALL[index].default_value());
         snapshot.tracks.len()

@@ -1342,6 +1342,44 @@ impl ProcessRuntime {
         self.global_transpose
     }
 
+    /// Rebuild process-read aliases from the scheduler's current effective
+    /// chains. Alias uniqueness is a property of the whole snapshot, not of
+    /// whichever slot happened to fire most recently.
+    pub fn sync_step_process_aliases<'a>(
+        &mut self,
+        chains: impl IntoIterator<Item = (usize, &'a TrackProcessChain)>,
+    ) {
+        fn register_alias(
+            aliases: &mut HashMap<String, Option<u64>>,
+            alias: &str,
+            runtime_id: u64,
+        ) {
+            aliases
+                .entry(alias.to_string())
+                .and_modify(|existing| {
+                    if *existing != Some(runtime_id) {
+                        *existing = None;
+                    }
+                })
+                .or_insert(Some(runtime_id));
+        }
+
+        let mut aliases = HashMap::new();
+        let mut runtime_ids = HashSet::new();
+        for (track, chain) in chains {
+            for slot in chain.slots.iter().filter(|slot| slot.enabled) {
+                let runtime_id = track_process_slot_runtime_id(slot, track).0;
+                runtime_ids.insert(runtime_id);
+                if let Some(name) = slot.instance_name.as_deref() {
+                    register_alias(&mut aliases, name, runtime_id);
+                }
+                register_alias(&mut aliases, &slot.class_name, runtime_id);
+            }
+        }
+        self.step_process_aliases = aliases;
+        self.step_process_runtime_ids = runtime_ids;
+    }
+
     pub fn ensure_resolved_track_bases(&mut self, bases: &[ProcessResolvedValues]) {
         let old_len = self.resolved_track_history.len();
         if self.resolved_track_history.len() > bases.len() {
@@ -2430,18 +2468,6 @@ impl ProcessRuntime {
         let ports = def.ports.clone();
         let seed_policy = def.seed_policy;
         let instance_id = track_process_slot_runtime_id(slot, ctx.track);
-        if let Some(name) = slot.instance_name.as_ref() {
-            self.step_process_aliases
-                .insert(name.clone(), Some(instance_id.0));
-        }
-        self.step_process_aliases
-            .entry(slot.class_name.clone())
-            .and_modify(|existing| {
-                if *existing != Some(instance_id.0) {
-                    *existing = None;
-                }
-            })
-            .or_insert(Some(instance_id.0));
         self.step_process_runtime_ids.insert(instance_id.0);
         let existing_state = self
             .step_process_states
@@ -3129,6 +3155,89 @@ mod tests {
 
         runtime.reset_resolved_track_history(&[]);
         assert!(!runtime.read_snapshot(1.0).fields.contains_key("density"));
+    }
+
+    #[test]
+    fn step_process_class_alias_recovers_after_duplicate_is_removed() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.sync_authoring(
+            ProcessAuthoringSnapshot {
+                defs: vec![ProcessDef {
+                    id: 1,
+                    name: "reader-state".to_string(),
+                    source_path: None,
+                    doc: None,
+                    inlets: Vec::new(),
+                    outlets: Vec::new(),
+                    state: vec![ProcessStateDef {
+                        name: "phase".to_string(),
+                        initial: Value::Number(0.0),
+                    }],
+                    every: None,
+                    seed_policy: ProcessSeedPolicy::default(),
+                    ports: Vec::new(),
+                    accumulator: None,
+                    run_source: Some("nil".to_string()),
+                    listens: Vec::new(),
+                }],
+                ..ProcessAuthoringSnapshot::default()
+            },
+            0.0,
+        );
+        let slot = |instance_id| TrackProcessSlot {
+            instance_id: ProcessInstanceId(instance_id),
+            instance_name: None,
+            class_name: "reader-state".to_string(),
+            enabled: true,
+            project_layer: false,
+            inlets: BTreeMap::new(),
+            lanes: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+        };
+        let first = TrackProcessChain {
+            slots: vec![slot(11)],
+        };
+        let second = TrackProcessChain {
+            slots: vec![slot(12)],
+        };
+
+        runtime.sync_step_process_aliases([(0, &first), (1, &second)]);
+        for (track, chain, phase) in [(0, &first, 1.0), (1, &second, 2.0)] {
+            let invocation = runtime
+                .step_process_invocation(
+                    &chain.slots[0],
+                    ProcessStepRunContext {
+                        track,
+                        step: 0,
+                        cycle: 0,
+                        beat: 0.0,
+                        sample_time: 0,
+                        step_beats: 0.25,
+                        resolved: test_step_context(track).resolved,
+                        event: Value::Nil,
+                    },
+                )
+                .expect("build step process invocation");
+            runtime.apply_run_result(ProcessRunResult {
+                runtime_id: invocation.runtime_id,
+                state: HashMap::from([("phase".to_string(), Value::Number(phase))]),
+                ..ProcessRunResult::default()
+            });
+        }
+        assert!(
+            !runtime
+                .read_snapshot(1.0)
+                .process_values
+                .contains_key("reader-state"),
+            "class reads must be inert while more than one active runtime matches"
+        );
+
+        runtime.sync_step_process_aliases([(0, &first)]);
+        assert_eq!(
+            runtime.read_snapshot(1.0).process_values["reader-state"]["phase"],
+            Value::Number(1.0),
+            "removing the duplicate must restore the remaining class alias"
+        );
     }
 
     fn test_step_context(track: usize) -> ProcessStepEventContext {
