@@ -10595,6 +10595,7 @@ mod tests {
     fn metal_seq_core_lisp_files_parse() {
         for path in [
             "mac-osx-dark.lisp",
+            "mac-osx-light-theme.lisp",
             "ableton-mid.lisp",
             "mac-osx-graphite.lisp",
             "mac-osx-haze.lisp",
@@ -10658,6 +10659,59 @@ mod tests {
                 .parse()
                 .unwrap_or_else(|e| panic!("parse {path}: {e:?}"));
         }
+    }
+
+    #[test]
+    fn mac_osx_light_theme_defines_every_registered_theme_slot_once() {
+        let src = std::fs::read_to_string("mac-osx-light-theme.lisp")
+            .expect("read mac-osx-light-theme.lisp");
+        let keys = src
+            .lines()
+            .filter_map(|line| {
+                line.trim_start()
+                    .strip_prefix(':')
+                    .and_then(|rest| rest.split_ascii_whitespace().next())
+                    .map(|key| key.replace('-', "_"))
+            })
+            .collect::<Vec<_>>();
+        let unique_keys = keys.iter().cloned().collect::<HashSet<_>>();
+        let registered_keys = eseqlisp::theme::reactive_fields()
+            .into_iter()
+            .map(|(key, _)| key.to_string())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(
+            keys.len(),
+            unique_keys.len(),
+            "light theme must not define a theme slot more than once"
+        );
+        assert_eq!(
+            unique_keys, registered_keys,
+            "light theme must explicitly define the complete registered palette"
+        );
+    }
+
+    #[test]
+    fn mac_osx_light_theme_is_available_through_the_theme_registry() {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (load "metal-seq-themes.lisp")
+                  (seq-theme-mac-osx-light)
+                "#,
+            )
+            .expect("apply macOS light theme through its public command");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(= seq-current-theme \"mac-osx-light-theme\")")
+                .expect("read current theme state"),
+            Some(Value::Bool(true))
+        );
     }
 
     fn load_step_gesture_source(runtime: &mut Runtime) {
@@ -22990,6 +23044,67 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_samples_mixer_and_fx_tiles_expose_drag_collapse_actions() {
+        fn collapse_action(editor: &eseqlisp::Editor, buffer_name: &str) -> Value {
+            let buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == buffer_name)
+                .unwrap_or_else(|| panic!("missing buffer {buffer_name}"));
+            let leaf = editor
+                .tile_root
+                .find_leaf_by_buffer_idx(buffer_idx)
+                .unwrap_or_else(|| panic!("missing visible tile for {buffer_name}"));
+            assert_eq!(
+                leaf.collapse_threshold,
+                Some(0.25),
+                "{buffer_name} should collapse after dragging 25% through its minimum size"
+            );
+            leaf.on_collapse
+                .clone()
+                .unwrap_or_else(|| panic!("missing collapse action for {buffer_name}"))
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (set! samples-sidebar-visible true)
+                  (set! mixer-panel-visible true)
+                  (set! lower-panel-visible true)
+                  (seq-apply-fx-layout))
+                "#,
+            )
+            .expect("show all three collapsible panels");
+        editor.refresh_runtime_side_effects();
+
+        let samples_collapse = collapse_action(&editor, "*samples*");
+        let mixer_collapse = collapse_action(&editor, "*mixer*");
+        let fx_collapse = collapse_action(&editor, "*fx*");
+
+        for (callback, state_name) in [
+            (samples_collapse, "samples-sidebar-visible"),
+            (mixer_collapse, "mixer-panel-visible"),
+            (fx_collapse, "lower-panel-visible"),
+        ] {
+            editor
+                .runtime_mut()
+                .invoke(callback, Vec::new())
+                .unwrap_or_else(|error| {
+                    panic!("invoke collapse action for {state_name}: {error:?}")
+                });
+            editor.refresh_runtime_side_effects();
+            assert_eq!(
+                editor.runtime_mut().eval_str(state_name).unwrap(),
+                Some(Value::Bool(false)),
+                "collapse action should hide {state_name}"
+            );
+        }
+    }
+
+    #[test]
     fn metal_seq_mixer_panel_toggle_preserves_clicked_step_tab() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -24159,6 +24274,55 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_transport_scene_pills_are_drag_drop_reorder_targets() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-patterns", Value::Number(3.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        for scene in 0..3 {
+            let key = format!("transport-scene-pill-{scene}");
+            let pill = find_layout_node_by_stable_key(&layout, &key)
+                .unwrap_or_else(|| panic!("missing scene pill {scene}"));
+            assert_finite_nonzero_rect(pill, &key);
+            assert!(matches!(
+                pill.props.get("drag-type"),
+                Some(Value::String(value)) if value == "transport-scene"
+            ));
+            assert!(pill.props.contains_key("drag-payload"));
+            assert!(pill.props.contains_key("drop-types"));
+            assert!(pill.props.contains_key("drop-meta"));
+            assert!(pill.props.contains_key("on-drop"));
+        }
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(seq-reorder-scene-drop (dict :payload (dict :scene 0) :target (dict :scene 2)))",
+            )
+            .expect("dispatch scene reorder drop");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "reorder-scene");
+                assert_eq!(extract_usize_from_payload(payload, "source"), Some(0));
+                assert_eq!(extract_usize_from_payload(payload, "target"), Some(2));
+            }
+            other => panic!("expected reorder-scene host command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn metal_seq_transport_master_record_button_has_visible_rect() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -24312,6 +24476,11 @@ mod tests {
             "track-names",
             test_string_list(&["BOOOOOOOO.WAV"]),
         );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom"]),
+        );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let sequencer_id = editor
@@ -24366,6 +24535,13 @@ mod tests {
             Some(&Value::String("BOOOOOO..".to_string())),
             "compact sequencer track name should be truncated before the meter"
         );
+        assert_finite_nonzero_rect(track_name, "sequencer row track name badge");
+        assert_eq!(track_name.widget_type, "badge");
+        assert_eq!(
+            track_name.props.get("icon"),
+            Some(&Value::Keyword("piano".to_string())),
+            "instrument track names should reuse the sidebar piano icon"
+        );
 
         let volume_control = find_layout_node_by_stable_key(&layout, "seqv-track-volume-control-0")
             .unwrap_or_else(|| {
@@ -24412,6 +24588,54 @@ mod tests {
             Some(&Value::String("seqv-ellipsis-button".to_string())),
             "sequencer row expand control should use the SDF ellipsis widget instead of text"
         );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_hides_step_shells_beyond_pattern_length() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-num-steps", test_number_list(&[8.0]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 20);
+        let layout = editor
+            .widget_layout()
+            .expect("eight-step sequencer layout should build");
+
+        assert_eq!(
+            count_stable_key_prefix(&layout, "seqv-step-cell-"),
+            16,
+            "short patterns should preserve the fixed-width step grid"
+        );
+
+        for step in 0..16 {
+            let cell = find_layout_node_by_stable_key(&layout, &format!("seqv-step-cell-0-{step}"))
+                .unwrap_or_else(|| panic!("step cell {step} should exist"));
+            assert_finite_nonzero_rect(cell, &format!("step cell {step}"));
+            let expected_hide = Value::Number(if step < 8 { 0.0 } else { 1.0 });
+            assert_eq!(
+                cell.props.get("hide"),
+                Some(&expected_hide),
+                "step cell highlight {step} should reflect the pattern-length visibility boundary"
+            );
+
+            let shell = compact_step_shell(cell);
+            assert_finite_nonzero_rect(shell, &format!("step shell {step}"));
+            assert_eq!(
+                shell.props.get("hide"),
+                Some(&expected_hide),
+                "step shell {step} should reflect the pattern-length visibility boundary"
+            );
+        }
     }
 
     #[test]
@@ -24504,6 +24728,117 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_mixer_track_badge_double_click_toggles_lower_piano_roll() {
+        fn remembered_split_ratio(node: &eseqlisp::tile::TileNode, key: &str) -> Option<f32> {
+            match node {
+                eseqlisp::tile::TileNode::Leaf(_) => None,
+                eseqlisp::tile::TileNode::Split(split) => {
+                    if split.remember_key.as_deref() == Some(key) {
+                        Some(split.ratio)
+                    } else {
+                        remembered_split_ratio(&split.a, key)
+                            .or_else(|| remembered_split_ratio(&split.b, key))
+                    }
+                }
+            }
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer buffer should exist")
+            .id;
+        editor.set_active_buffer(mixer_id);
+        editor.set_layout_viewport(140, 20);
+        let layout = editor.widget_layout().expect("mixer layout should build");
+
+        let track_badge = find_layout_node_by_stable_key(&layout, "mixer-v2-strip-label-0")
+            .expect("mixer track badge hit target should exist");
+        let toggle_piano_roll = track_badge
+            .props
+            .get("on-double-click")
+            .cloned()
+            .expect("mixer track badge should expose a double-click callback");
+
+        editor
+            .runtime_mut()
+            .invoke(
+                toggle_piano_roll.clone(),
+                vec![map_value([(
+                    "phase",
+                    Value::String("double-click".to_string()),
+                )])],
+            )
+            .expect("invoke mixer track badge double-click");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string())),
+            "mixer badge double-click should preserve the main sequencer panel"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string())),
+            "mixer badge double-click should replace the FX lower pane with piano roll"
+        );
+
+        editor.update_tile_rects(140, 40);
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*piano-roll*"),
+            "piano roll should occupy a tile after opening"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(resize-window -0.1)")
+            .expect("increase piano-roll pane height");
+        editor.refresh_runtime_side_effects();
+        let resized_piano_roll_ratio =
+            remembered_split_ratio(&editor.tile_root, "sequencer-lower-panel:*piano-roll*")
+                .expect("piano-roll lower-panel split should have a remembered identity");
+
+        editor
+            .runtime_mut()
+            .invoke(
+                toggle_piano_roll.clone(),
+                vec![map_value([(
+                    "phase",
+                    Value::String("double-click".to_string()),
+                )])],
+            )
+            .expect("invoke mixer track badge double-click while piano roll is open");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string())),
+            "second mixer badge double-click should restore FX"
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(
+                toggle_piano_roll,
+                vec![map_value([(
+                    "phase",
+                    Value::String("double-click".to_string()),
+                )])],
+            )
+            .expect("reopen piano roll after showing FX");
+        editor.refresh_runtime_side_effects();
+
+        let restored_piano_roll_ratio =
+            remembered_split_ratio(&editor.tile_root, "sequencer-lower-panel:*piano-roll*")
+                .expect("reopened piano-roll split should retain its remembered identity");
+        assert!(
+            (restored_piano_roll_ratio - resized_piano_roll_ratio).abs() < f32::EPSILON,
+            "reopened piano roll should restore its resized ratio: resized={resized_piano_roll_ratio}, restored={restored_piano_roll_ratio}"
+        );
+    }
+
+    #[test]
     fn metal_seq_collapsed_tracks_render_compact_mixer_strip_and_hide_sequencer_row() {
         struct TestTextMeasurer;
         impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
@@ -24552,7 +24887,7 @@ mod tests {
                 ),
                 (
                     "track-instrument-types",
-                    test_string_list(&["sampler", "sampler", "sampler"]),
+                    test_string_list(&["sampler", "custom", "sampler"]),
                 ),
                 (
                     "track-mod-output-available",
@@ -24680,7 +25015,28 @@ mod tests {
         assert_finite_nonzero_rect(compact_badge, "collapsed mixer track badge");
         assert!(
             compact_badge.props.contains_key("on-double-click"),
-            "collapsed mixer badge should keep double-click collapse toggling"
+            "collapsed mixer badge should keep the piano-roll double-click gesture"
+        );
+        let compact_badge_content = find_layout_node_by_stable_key(
+            &mixer_layout,
+            "mixer-v2-track-collapsed-label-content-1",
+        )
+        .expect("collapsed track badge content should render");
+        assert_finite_nonzero_rect(compact_badge_content, "collapsed mixer badge content");
+        assert_eq!(compact_badge_content.widget_type, "badge");
+        assert_eq!(
+            compact_badge_content.props.get("icon"),
+            Some(&Value::Keyword("piano".to_string())),
+            "collapsed instrument badges should reuse the sidebar piano icon"
+        );
+        let sampler_badge_content =
+            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-label-content-0")
+                .expect("expanded sampler badge content should render");
+        assert_finite_nonzero_rect(sampler_badge_content, "expanded sampler badge content");
+        assert_eq!(
+            sampler_badge_content.props.get("icon"),
+            Some(&Value::Keyword("waveform".to_string())),
+            "sampler mixer badges should reuse the sidebar waveform icon"
         );
         let compact_mute =
             find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-collapsed-mute-1")
@@ -39026,6 +39382,12 @@ mod tests {
                 "instruments/drums/ultraperc/ui.lisp",
                 vec!["engine", "ratl", "dec"],
             ),
+            (
+                "drums/synthid-909/",
+                "instruments/drums/synthid-909/dsp.lisp",
+                "instruments/drums/synthid-909/ui.lisp",
+                vec!["start_ratio", "amp_curve", "fade_in"],
+            ),
         ];
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
@@ -39853,6 +40215,25 @@ mod tests {
                 .find_map(|child| find_bus_mod_input(child, bus_id, input))
         }
 
+        fn find_bus_effect_drop_target(node: &LayoutNode, bus: f64) -> Option<&LayoutNode> {
+            let is_target = node.props.get("drop-meta").is_some_and(|meta| {
+                let Value::Map(meta) = meta else {
+                    return false;
+                };
+                meta.get("kind")
+                    .is_some_and(|kind| *kind.borrow() == Value::String("bus".to_string()))
+                    && meta
+                        .get("bus")
+                        .is_some_and(|target_bus| *target_bus.borrow() == Value::Number(bus))
+            });
+            if is_target {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_bus_effect_drop_target(child, bus))
+        }
+
         fn find_descendant_button_by_text<'a>(
             node: &'a LayoutNode,
             text: &str,
@@ -40335,8 +40716,9 @@ mod tests {
             )
             .expect("drop built-in audio effect on track");
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
+        assert_eq!(commands.len(), 2);
+        assert_reveal_command(&commands[..1], 1.0);
+        match &commands[1] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
                 assert_eq!(name, "add-builtin-effect-to-track");
                 let Value::Map(payload) = payload else {
@@ -40353,6 +40735,16 @@ mod tests {
             }
             other => panic!("expected add-builtin-effect-to-track host command, got {other:?}"),
         }
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-set-track:[1]"),
+            "dropping an effect on a track should select that track"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(Value::Number(-1.0)),
+            "track effect drops should clear any bus selection"
+        );
 
         editor
             .runtime_mut()
@@ -40365,8 +40757,9 @@ mod tests {
             )
             .expect("drop custom audio effect on track");
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
+        assert_eq!(commands.len(), 2);
+        assert_reveal_command(&commands[..1], 1.0);
+        match &commands[1] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
                 assert_eq!(name, "add-effect-to-track");
                 let Value::Map(payload) = payload else {
@@ -40395,8 +40788,9 @@ mod tests {
             )
             .expect("drop MIDI effect on track");
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
+        assert_eq!(commands.len(), 2);
+        assert_reveal_command(&commands[..1], 1.0);
+        match &commands[1] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
                 assert_eq!(name, "add-midi-fx-to-track");
                 let Value::Map(payload) = payload else {
@@ -40412,6 +40806,130 @@ mod tests {
                 );
             }
             other => panic!("expected add-midi-fx-to-track host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-effect-on-bus
+                    (dict
+                      :drag-type "audio-effect"
+                      :payload (dict :kind "builtin-audio-effect" :name "Filter")
+                      :target (dict :kind "bus" :bus 1)))"#,
+            )
+            .expect("drop built-in audio effect on bus");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-builtin-bus-effect");
+                let Value::Map(payload) = payload else {
+                    panic!("add-builtin-bus-effect payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("bus").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Filter".to_string()))
+                );
+            }
+            other => panic!("expected add-builtin-bus-effect host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(Value::Number(1.0)),
+            "dropping an effect on a bus should select that bus"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-effect-on-bus
+                    (dict
+                      :drag-type "audio-effect"
+                      :payload (dict :kind "custom-audio-effect" :name "delayz")
+                      :target (dict :kind "bus" :bus 2)))"#,
+            )
+            .expect("drop custom audio effect on group bus");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-bus-effect");
+                let Value::Map(payload) = payload else {
+                    panic!("add-bus-effect payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("bus").map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("delayz".to_string()))
+                );
+            }
+            other => panic!("expected add-bus-effect host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(Value::Number(2.0)),
+            "dropping an effect on a group bus should select that group"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-on-group-header
+                    (dict
+                      :drag-type "sample"
+                      :payload (dict :path "samples/hat.wav")
+                      :target (dict :kind "bus" :bus 2))
+                    0)"#,
+            )
+            .expect("drop sample on group header");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-sample");
+                let Value::Map(payload) = payload else {
+                    panic!("add-track-sample payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(7.0))
+                );
+            }
+            other => panic!("expected grouped add-track-sample command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-on-group-header
+                    (dict
+                      :drag-type "instrument"
+                      :payload (dict :kind "instrument" :name "core/drift")
+                      :target (dict :kind "bus" :bus 2))
+                    0)"#,
+            )
+            .expect("drop instrument on group header");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("add-track-instrument payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(7.0))
+                );
+            }
+            other => panic!("expected grouped add-track-instrument command, got {other:?}"),
         }
 
         editor
@@ -40512,6 +41030,61 @@ mod tests {
             drop_zone.rect.width > 0.0 && drop_zone.rect.height > 0.0,
             "sample drop zone should have a finite visible rect: {:?}",
             drop_zone.rect
+        );
+        let bus_strip = find_bus_effect_drop_target(&layout, 1.0).expect("Bus A mixer strip");
+        assert_eq!(
+            bus_strip.props.get("drop-types"),
+            Some(&test_list(vec![Value::String("audio-effect".to_string())])),
+            "ordinary bus strips should accept audio-effect drops"
+        );
+        assert!(
+            bus_strip.props.contains_key("on-drop"),
+            "ordinary bus strips should expose an effect drop callback"
+        );
+        assert!(
+            bus_strip.rect.width > 0.0 && bus_strip.rect.height > 0.0,
+            "ordinary bus drop zone should have a finite visible rect: {:?}",
+            bus_strip.rect
+        );
+        let group_bus_strip =
+            find_bus_effect_drop_target(&layout, 2.0).expect("group backing bus mixer strip");
+        assert_eq!(
+            group_bus_strip.props.get("drop-types"),
+            Some(&test_list(vec![
+                Value::String("sample".to_string()),
+                Value::String("instrument".to_string()),
+                Value::String("audio-effect".to_string()),
+            ])),
+            "group bus strips should accept new tracks and audio-effect drops"
+        );
+        assert!(
+            group_bus_strip.props.contains_key("on-drop"),
+            "group bus strips should expose an effect drop callback"
+        );
+        assert!(
+            group_bus_strip.rect.width > 0.0 && group_bus_strip.rect.height > 0.0,
+            "group bus drop zone should have a finite visible rect: {:?}",
+            group_bus_strip.rect
+        );
+        let group_badge = find_node_by_stable_key(&layout, "mixer-v2-group-badge-7")
+            .expect("group badge click target");
+        let group_badge_click = group_badge
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("group badge should expose a selection callback");
+        editor
+            .runtime_mut()
+            .eval_str("(set! selected-bus -1)")
+            .unwrap();
+        editor
+            .runtime_mut()
+            .invoke(group_badge_click, vec![Value::Map(Default::default())])
+            .expect("click group badge");
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(Value::Number(2.0)),
+            "clicking the group badge should select its backing bus"
         );
         let mod_out =
             find_node_by_stable_key(&layout, "mixer-v2-mod-out-0").expect("track mod out port");
@@ -40779,7 +41352,13 @@ mod tests {
             "track controls should clear active delete target instead of claiming track deletion"
         );
         let track_label =
-            find_node_by_stable_key(&layout, "mixer-v2-track-label-0").expect("track label box");
+            find_node_by_stable_key(&layout_for_control_click, "mixer-v2-strip-label-0")
+                .expect("track label box");
+        let track_label_content =
+            find_node_by_stable_key(&layout_for_control_click, "mixer-v2-track-label-content-0")
+                .expect("track label badge content");
+        assert_finite_nonzero_rect(track_label_content, "mixer track label badge content");
+        assert_eq!(track_label_content.widget_type, "badge");
         let track_label_callback = track_label
             .props
             .get("on-click")
@@ -40815,7 +41394,7 @@ mod tests {
             .widget_layout()
             .expect("selected mixer layout should be available");
         let selected_track_label =
-            find_node_by_stable_key(&selected_layout, "mixer-v2-track-label-0")
+            find_node_by_stable_key(&selected_layout, "mixer-v2-strip-label-0")
                 .expect("selected track label box");
         assert!(
             selected_track_label.rect.width > 0.0 && selected_track_label.rect.height > 0.0,

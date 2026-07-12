@@ -711,13 +711,17 @@ pub enum LayoutSpec {
         min_height: Option<f32>,
         max_width: Option<f32>,
         max_height: Option<f32>,
+        collapse_threshold: Option<f32>,
+        on_collapse: Option<Value>,
     },
     Rows {
         gap: f32,
+        remember: Option<String>,
         panes: Vec<(f32, LayoutSpec)>,
     },
     Cols {
         gap: f32,
+        remember: Option<String>,
         panes: Vec<(f32, LayoutSpec)>,
     },
 }

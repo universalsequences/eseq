@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::os::raw::{c_char, c_float, c_int, c_void};
@@ -3443,6 +3443,7 @@ struct ProcessAuthoringRegistry {
     instances: Vec<crate::process::AuthoredProcessInstance>,
     channels: Vec<crate::process::AuthoredChannel>,
     patches: Vec<crate::process::AuthoredPatch>,
+    conductors: Vec<crate::process::AuthoredConductorAttachment>,
     outlet_handles: HashMap<u64, crate::process::ProcessOutletRef>,
     channel_handles: HashMap<u64, String>,
 }
@@ -3506,11 +3507,22 @@ impl ProcessAuthoringRegistry {
     }
 
     fn snapshot(&self) -> crate::process::ProcessAuthoringSnapshot {
+        let live_handles = self
+            .instances
+            .iter()
+            .map(|instance| instance.handle_id)
+            .collect::<HashSet<_>>();
         crate::process::ProcessAuthoringSnapshot {
             defs: self.defs.clone(),
             instances: self.instances.clone(),
             channels: self.channels.clone(),
             patches: self.patches.clone(),
+            conductors: self
+                .conductors
+                .iter()
+                .filter(|attachment| live_handles.contains(&attachment.process_handle_id))
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -3524,6 +3536,8 @@ pub(crate) struct ProcessEvalContext {
     step_context: Option<crate::process::ProcessStepEventContext>,
     ports: Vec<crate::process::ProcessPortDef>,
     reads: crate::process::ProcessReadSnapshot,
+    conductor_observe_tracks: Vec<usize>,
+    conductor_play_tracks: Vec<usize>,
     outputs: Vec<crate::process::ProcessOutput>,
     emissions: Vec<EmittedAccumulatorEvent>,
     commands: Vec<crate::process::ProcessRunCommand>,
@@ -4205,6 +4219,8 @@ impl ScratchControlRuntime {
         &mut self,
         invocation: crate::process::ProcessRunInvocation,
     ) -> Result<crate::process::ProcessRunResult, String> {
+        let conductor_observe_tracks = invocation.reads.conductor_observe_tracks.clone();
+        let conductor_play_tracks = invocation.reads.conductor_play_tracks.clone();
         {
             let mut ctx = self
                 .process_eval
@@ -4219,6 +4235,8 @@ impl ScratchControlRuntime {
                 step_context: invocation.step_context,
                 ports: invocation.ports,
                 reads: invocation.reads,
+                conductor_observe_tracks,
+                conductor_play_tracks,
                 outputs: Vec::new(),
                 emissions: Vec::new(),
                 commands: Vec::new(),
@@ -4316,6 +4334,8 @@ impl ScratchControlRuntime {
                 step_context: Some(shape_context.step_context.clone()),
                 ports: shape_context.ports.clone(),
                 reads: crate::process::ProcessReadSnapshot::default(),
+                conductor_observe_tracks: Vec::new(),
+                conductor_play_tracks: Vec::new(),
                 outputs: Vec::new(),
                 emissions: Vec::new(),
                 commands: Vec::new(),
@@ -4945,6 +4965,34 @@ fn register_process_natives(
         },
     );
 
+    runtime.register_native_with_docs(
+        "timebase-beats",
+        "(timebase-beats index-or-name)",
+        "Convert a sequencer timebase index/name to quarter-note beats.",
+        move |args, _ctx| {
+            if args.len() != 1 {
+                return Err("timebase-beats expects one timebase".to_string());
+            }
+            let timebase = match &args[0] {
+                EValue::Number(index) => {
+                    if !index.is_finite()
+                        || *index < 0.0
+                        || index.fract() != 0.0
+                        || (*index as usize) >= Timebase::COUNT
+                    {
+                        return Err(format!(
+                            "timebase-beats index must be an integer from 0 to {}",
+                            Timebase::COUNT - 1
+                        ));
+                    }
+                    Timebase::from_index(*index as u32)
+                }
+                value => parse_timebase_arg(std::slice::from_ref(value), 0)?,
+            };
+            Ok(EValue::Number(timebase.step_beats(16)))
+        },
+    );
+
     // The UI runtime already owns `track` as a widget/SDF combinator. Process
     // bodies execute in the scheduler scratch VM, where the name is free; do
     // not replace an established host meaning while registering authoring
@@ -5202,6 +5250,37 @@ fn register_process_natives(
             Ok(EValue::Number(step.resolved.transpose as f64))
         },
     );
+
+    for (native, observe) in [("observed-tracks", true), ("play-tracks", false)] {
+        let process_eval_for_tracks = Arc::clone(&process_eval);
+        runtime.register_native_with_docs(
+            native,
+            format!("({native})"),
+            "Return this conductor attachment's bound track indices.",
+            move |args, _ctx| {
+                if !args.is_empty() {
+                    return Err(format!("{native} expects no arguments"));
+                }
+                let guard = process_eval_for_tracks
+                    .lock()
+                    .map_err(|_| "failed to lock process eval context".to_string())?;
+                let Some(ctx) = guard.as_ref() else {
+                    return Err(format!("{native} called outside process execution"));
+                };
+                let tracks = if observe {
+                    &ctx.conductor_observe_tracks
+                } else {
+                    &ctx.conductor_play_tracks
+                };
+                if tracks.is_empty() {
+                    return Err(format!("{native} requires a conductor attachment"));
+                }
+                Ok(process_list(
+                    tracks.iter().map(|track| EValue::Number(*track as f64)),
+                ))
+            },
+        );
+    }
 
     let process_authoring_for_read_source = Arc::clone(&process_authoring);
     runtime.register_native_with_docs(
@@ -5591,6 +5670,17 @@ fn register_process_graph_emit_native(
             if let Some(ctx) = guard.as_mut() {
                 ensure_process_run_scope(ctx, "emit")?;
                 let event = build_process_emit_event(&args)?;
+                if !ctx.conductor_play_tracks.is_empty() {
+                    let Some(track) = event.track else {
+                        return Err("conductor emit requires an explicit bound :track".to_string());
+                    };
+                    if !ctx.conductor_play_tracks.contains(&track) {
+                        return Err(format!(
+                            "conductor cannot emit to unbound track {track}; bound play tracks are {:?}",
+                            ctx.conductor_play_tracks
+                        ));
+                    }
+                }
                 ctx.emissions.push(event);
                 return Ok(EValue::Bool(true));
             }
@@ -5943,15 +6033,76 @@ fn register_process_chain_natives(
     let publish_for_processes = publish.clone();
     runtime.register_native_with_docs(
         "processes",
-        "(processes :track <index | (list ...)> instance...) | (processes :project instance...)",
-        "Declare a step-process chain, in order. :track replaces the current pattern's chain on those tracks; :project replaces the project-level layer every track (present and future) runs ahead of its own chain. No instances clears it. Returns the instance handle (or a list of them) for lane!/knob tweaks.",
+        "(processes :track tracks instance...) | (processes :project instance...) | (processes :observe tracks :play tracks instance)",
+        "Declare a track/project step chain or one conductor instance observing and playing track sets.",
         move |args, _ctx| {
             let (EValue::Keyword(key) | EValue::Symbol(key)) = args
                 .first()
-                .ok_or_else(|| "processes expects :track or :project first".to_string())?
+                .ok_or_else(|| "processes expects :track, :project, or :observe first".to_string())?
             else {
-                return Err("processes expects :track or :project first".to_string());
+                return Err("processes expects :track, :project, or :observe first".to_string());
             };
+            if key.trim_start_matches(':') == "observe" {
+                let observe_tracks = parse_process_track_spec(
+                    args.get(1)
+                        .ok_or_else(|| "processes :observe expects a track list".to_string())?,
+                    state_for_processes.active_track_count(),
+                )?;
+                if observe_tracks.is_empty() {
+                    return Err("processes :observe requires at least one track".to_string());
+                }
+                if observe_tracks.iter().copied().collect::<HashSet<_>>().len()
+                    != observe_tracks.len()
+                {
+                    return Err("processes :observe track list contains duplicates".to_string());
+                }
+                if process_symbol_name(
+                    args.get(2)
+                        .ok_or_else(|| "processes :observe expects :play".to_string())?,
+                )? != "play"
+                {
+                    return Err("processes :observe expects :play after observed tracks".to_string());
+                }
+                let play_tracks = parse_process_track_spec(
+                    args.get(3)
+                        .ok_or_else(|| "processes :play expects a track list".to_string())?,
+                    state_for_processes.active_track_count(),
+                )?;
+                if play_tracks.is_empty() {
+                    return Err("processes :play requires at least one track".to_string());
+                }
+                if play_tracks.iter().copied().collect::<HashSet<_>>().len() != play_tracks.len() {
+                    return Err("processes :play track list contains duplicates".to_string());
+                }
+                let [EValue::HostHandle { kind, id, .. }] = args.get(4..).unwrap_or(&[]) else {
+                    return Err(
+                        "conductor attachment expects exactly one process instance".to_string()
+                    );
+                };
+                if kind != "process" {
+                    return Err("conductor attachment expects a process instance".to_string());
+                }
+                {
+                    let mut registry = authoring_for_processes
+                        .lock()
+                        .map_err(|_| "failed to lock process registry".to_string())?;
+                    if !registry.instances.iter().any(|instance| instance.handle_id.0 == *id) {
+                        return Err("unknown conductor process handle".to_string());
+                    }
+                    registry
+                        .conductors
+                        .retain(|entry| entry.process_handle_id.0 != *id);
+                    registry
+                        .conductors
+                        .push(crate::process::AuthoredConductorAttachment {
+                            process_handle_id: crate::process::AuthoredHandleId(*id),
+                            observe_tracks,
+                            play_tracks,
+                        });
+                }
+                publish_process_authoring(&authoring_for_processes, &publish_for_processes);
+                return Ok(args[4].clone());
+            }
             let (tracks, instance_args) = match key.trim_start_matches(':') {
                 "track" => {
                     let tracks = parse_process_track_spec(
@@ -5963,7 +6114,11 @@ fn register_process_chain_natives(
                     (Some(tracks), args.get(2..).unwrap_or(&[]))
                 }
                 "project" => (None, args.get(1..).unwrap_or(&[])),
-                _ => return Err("processes expects :track or :project first".to_string()),
+                _ => {
+                    return Err(
+                        "processes expects :track, :project, or :observe first".to_string()
+                    )
+                }
             };
             let project_layer = tracks.is_none();
             let mut slots = Vec::new();
@@ -6775,6 +6930,11 @@ fn push_process_target_write(
         return Err("target write called outside process execution".to_string());
     };
     ensure_process_run_scope(ctx, "target write")?;
+    if !ctx.conductor_play_tracks.is_empty() && ctx.step_context.is_none() {
+        return Err(
+            "conductors play through emit; direct target writes are not supported".to_string(),
+        );
+    }
     let port = match port {
         Some(port) => port,
         None => match ctx.ports.as_slice() {
@@ -7753,7 +7913,12 @@ fn process_instance_handle(
         kind: "process".to_string(),
         id: handle_id.0,
         callable: Rc::new(move |args, _vm| {
-            let publish_after_call = args.len() == 2;
+            let read_only_inline_poll = matches!(
+                args.as_slice(),
+                [EValue::Keyword(command) | EValue::Symbol(command), _]
+                    if command.trim_start_matches(':') == "__inline-read"
+            );
+            let publish_after_call = args.len() == 2 && !read_only_inline_poll;
             match process_handle_call(
                 &process_authoring,
                 process_chain_state.as_ref(),
@@ -22467,10 +22632,11 @@ mod tests {
         runtime
             .eval_str("(def seq-register-script-source-tab (label) nil)")
             .expect("install source-tab stub");
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
         register_published_process_authoring_natives(
             &mut runtime,
             Arc::clone(&state),
-            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&ui_epoch),
         );
         let source = include_str!("../scripts/inline-code-widgets-demo.lisp");
 
@@ -22488,6 +22654,27 @@ mod tests {
         assert_eq!(
             chain.slots[0].lanes.get("amount").map(|lane| &lane.values),
             Some(&vec![0.0, 2.0, 0.0, 0.0, -4.0, 0.0, 7.0, 0.0])
+        );
+
+        let published_version = state.published_process_authoring_version();
+        let published_ui_epoch = ui_epoch.load(Ordering::Acquire);
+        for _ in 0..8 {
+            assert_eq!(
+                runtime
+                    .eval_str("(inline-demo-process-h :__inline-read :limit)")
+                    .expect("poll inline process control"),
+                Some(Value::Number(7.0))
+            );
+        }
+        assert_eq!(
+            state.published_process_authoring_version(),
+            published_version,
+            "visible inline controls must not republish process authoring while polling values"
+        );
+        assert_eq!(
+            ui_epoch.load(Ordering::Acquire),
+            published_ui_epoch,
+            "read-only inline polling must not invalidate the UI or scheduler"
         );
     }
 
@@ -23133,6 +23320,8 @@ mod tests {
             )],
             outputs: Vec::new(),
             reads: crate::process::ProcessReadSnapshot::default(),
+            conductor_observe_tracks: Vec::new(),
+            conductor_play_tracks: Vec::new(),
             emissions: Vec::new(),
             commands: Vec::new(),
             target_writes: Vec::new(),
@@ -23440,6 +23629,8 @@ mod tests {
             )]),
             channels: HashMap::from([("density".to_string(), Value::Number(7.0))]),
             fields: HashMap::new(),
+            conductor_observe_tracks: Vec::new(),
+            conductor_play_tracks: Vec::new(),
         };
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
@@ -23914,6 +24105,50 @@ mod tests {
             assert_eq!(chain.slots.len(), 1);
             assert_eq!(chain.slots[0].class_name, "follow-harmony");
         }
+    }
+
+    #[test]
+    fn process_conductor_demo_loads_one_multi_track_attachment() {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-conductor-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
+
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate conductor demo");
+
+        let authored = scratch.process_authoring_snapshot();
+        assert_eq!(authored.conductors.len(), 1);
+        assert_eq!(authored.conductors[0].observe_tracks, vec![0, 1]);
+        assert_eq!(authored.conductors[0].play_tracks, vec![2, 3]);
+        let handle = authored.conductors[0].process_handle_id;
+        assert_eq!(
+            authored
+                .instances
+                .iter()
+                .find(|instance| instance.handle_id == handle)
+                .and_then(|instance| instance.name.as_deref()),
+            Some("call-response-conductor-h")
+        );
+        let players = state.track_process_chain(0).expect("response players");
+        assert_eq!(players.slots.len(), 2);
+        assert!(players
+            .slots
+            .iter()
+            .all(|slot| slot.class_name == "suggestion-response-player"));
     }
 
     #[test]
@@ -24592,6 +24827,346 @@ mod tests {
         assert_eq!(inlet_number(instance, "track"), 3.0);
         assert!(!inlet_bool(instance, "enabled"));
         assert!(!inlet_bool(instance, "markers"));
+    }
+
+    #[test]
+    fn band_coupling_matrix_demo_publishes_ui_and_attaches_voice_ear_chains() {
+        fn collect_widgets<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == widget_type {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_widgets(child, widget_type, out);
+            }
+        }
+
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+        }
+
+        fn inlet_number(instance: &crate::process::AuthoredProcessInstance, name: &str) -> f64 {
+            match instance.inlets.get(name) {
+                Some(crate::process::ProcessInletValue::Literal(Value::Number(value))) => *value,
+                other => panic!("expected numeric inlet {name}, got {other:?}"),
+            }
+        }
+
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut authoring = Runtime::new();
+        authoring.register_reactive(
+            "SEQ",
+            vec![
+                ("track-events", Value::List(Vec::new())),
+                ("track-event-current-beat", Value::Number(0.0)),
+                ("track-colors", Value::List(Vec::new())),
+                ("track-process-slots", Value::List(Vec::new())),
+            ],
+            true,
+        );
+        authoring
+            .eval_str(
+                r#"
+                (defstate seq-registered-step-tabs '())
+                (def seq-register-script-step-sequencer-tab (label buffer sequencer source-path)
+                  (set! seq-registered-step-tabs
+                    (append
+                      (filter (lambda (tab) (not (= (nth tab 1) buffer)))
+                        seq-registered-step-tabs)
+                      (list (list label buffer sequencer source-path)))))
+                "#,
+            )
+            .expect("install sequencer tab registration test stub");
+
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::clone(&ui_epoch),
+        );
+
+        let script_path = format!(
+            "{}/scripts/band-coupling-matrix-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source =
+            std::fs::read_to_string(&script_path).expect("read band coupling matrix demo script");
+        authoring
+            .eval_source_at_path(script_path.into(), &source)
+            .expect("evaluate band coupling matrix demo in regular runtime");
+        assert!(
+            ui_epoch.load(Ordering::Acquire) > 0,
+            "band coupling matrix demo should publish"
+        );
+
+        // Loading attaches one voice + one ear per track, all cells silent.
+        for track in 0..4 {
+            let chain = state.track_process_chain(track).expect("band chain");
+            assert_eq!(chain.slots.len(), 2, "track {track} chain length");
+            assert_eq!(chain.slots[0].class_name, "band-voice");
+            assert_eq!(chain.slots[1].class_name, "band-ear");
+        }
+
+        // The matrix cell setter writes the listener ear's per-source inlet.
+        authoring
+            .eval_str("(band-set-cell 0 2 0.9) (band-set-lag 1 4) (band-set-coupling 1.5)")
+            .expect("band setters should update process inlets");
+
+        let snapshot = state.published_process_authoring().to_runtime();
+        let ear_2 = snapshot
+            .instances
+            .iter()
+            .find(|instance| instance.name.as_deref() == Some("band-ear-2-h"))
+            .expect("named band-ear-2-h instance");
+        assert_eq!(ear_2.class_name, "band-ear");
+        assert_eq!(inlet_number(ear_2, "a0"), 0.9);
+        assert_eq!(inlet_number(ear_2, "coupling"), 1.5);
+        let voice_1 = snapshot
+            .instances
+            .iter()
+            .find(|instance| instance.name.as_deref() == Some("band-voice-1-h"))
+            .expect("named band-voice-1-h instance");
+        assert_eq!(inlet_number(voice_1, "lag"), 4.0);
+
+        // Presets rewrite all sixteen cells; ring couples each listener to the
+        // previous track at 0.8.
+        authoring
+            .eval_str("(band-apply-matrix (band-ring-matrix))")
+            .expect("apply ring preset");
+        let snapshot = state.published_process_authoring().to_runtime();
+        let ear_1 = snapshot
+            .instances
+            .iter()
+            .find(|instance| instance.name.as_deref() == Some("band-ear-1-h"))
+            .expect("named band-ear-1-h instance");
+        assert_eq!(inlet_number(ear_1, "a0"), 0.8);
+        assert_eq!(inlet_number(ear_1, "a1"), 0.0);
+
+        let tree = authoring
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("band coupling matrix demo should publish a widget tree");
+        let layout = authoring
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((90.0, 24.0)))
+            .expect("band coupling matrix demo widget tree should lay out");
+        for key in [
+            "band-coupling",
+            "band-grace",
+            "band-cell-matrix",
+            "band-preset-clear",
+            "band-preset-ring",
+            "band-preset-hub",
+            "band-preset-mesh",
+            "band-attach-button",
+            "band-detach-button",
+            "band-weight-0",
+            "band-lag-3",
+            "band-memory-2",
+            "band-track-event-view",
+        ] {
+            let widget =
+                find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
+            assert_measured(widget);
+        }
+        let mut matrices = Vec::new();
+        collect_widgets(&layout, "matrix", &mut matrices);
+        assert_eq!(matrices.len(), 1, "expected the 4x4 coupling matrix");
+        let mut number_pickers = Vec::new();
+        collect_widgets(&layout, "number-picker", &mut number_pickers);
+        assert_eq!(
+            number_pickers.len(),
+            14,
+            "expected coupling + grace + four rows of weight/lag/memory"
+        );
+    }
+
+    #[test]
+    fn band_coupling_demo_run_bodies_publish_field_and_stay_inert_by_default() {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/band-coupling-matrix-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source =
+            std::fs::read_to_string(&script_path).expect("read band coupling matrix demo script");
+        // The script defines the processes before any UI form; only the
+        // process layer is needed to probe the run bodies.
+        let process_section = source
+            .split(";; ── UI state mirrors")
+            .next()
+            .expect("process section");
+        scratch
+            .eval(process_section)
+            .expect("evaluate band coupling process layer");
+
+        let defs = scratch.process_authoring_snapshot().defs;
+
+        // band-voice with its default inlet values publishes a pitch-field on
+        // :band-0 even before any source trig has fired (reads are
+        // defaults-inert). The scheduler resolves inlet defaults before
+        // invoking, so the probe passes them explicitly.
+        let voice = defs
+            .iter()
+            .find(|def| def.name == "band-voice")
+            .expect("band-voice definition")
+            .clone();
+        let voice_inlets = HashMap::from([
+            ("chan".to_string(), Value::Keyword("band-0".to_string())),
+            ("self".to_string(), Value::Number(0.0)),
+            ("weight".to_string(), Value::Number(1.0)),
+            ("lag".to_string(), Value::Number(0.0)),
+            ("memory".to_string(), Value::Number(3.0)),
+        ]);
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 1,
+                source: voice.run_source.expect("voice run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: voice_inlets,
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: voice.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
+                seed: 1,
+            })
+            .expect("invoke band-voice run");
+        let field = result
+            .outputs
+            .iter()
+            .find(|output| output.name == "__field:band-0")
+            .expect("band-voice should suggest on :band-0");
+        assert_eq!(
+            super::process_field_domain(&field.value).expect("voice field domain"),
+            "pitch-field"
+        );
+
+        // Keep the voice's published policy field around: with all reads at
+        // their defaults the policy is the single pitch class 0.
+        let policy = field.value.clone();
+
+        // band-ear with no publishers and zero amounts writes nothing at all:
+        // coupling is fully inert until cells are raised.
+        let ear = defs
+            .iter()
+            .find(|def| def.name == "band-ear")
+            .expect("band-ear definition")
+            .clone();
+        let ear_inlets = HashMap::from([
+            ("a0".to_string(), Value::Number(0.0)),
+            ("a1".to_string(), Value::Number(0.0)),
+            ("a2".to_string(), Value::Number(0.0)),
+            ("a3".to_string(), Value::Number(0.0)),
+            ("coupling".to_string(), Value::Number(1.0)),
+            ("grace".to_string(), Value::Number(0.0)),
+        ]);
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 2,
+                source: ear.run_source.clone().expect("ear run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: ear_inlets,
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: ear.ports.clone(),
+                reads: crate::process::ProcessReadSnapshot::default(),
+                seed: 1,
+            })
+            .expect("invoke band-ear run");
+        assert!(
+            result.target_writes.is_empty(),
+            "silent matrix must not write transpose"
+        );
+
+        // With a full-amount cell from source 1 the ear conforms the current
+        // note to the heard policy: a whole-snap pitch-class delta, never a
+        // scaled interpolation. Policy {0} heard from transpose 1 => -1.
+        let mut reads = crate::process::ProcessReadSnapshot::default();
+        reads.fields.insert("band-1".to_string(), policy);
+        let ear_inlets = HashMap::from([
+            ("a0".to_string(), Value::Number(0.0)),
+            ("a1".to_string(), Value::Number(1.0)),
+            ("a2".to_string(), Value::Number(0.0)),
+            ("a3".to_string(), Value::Number(0.0)),
+            ("coupling".to_string(), Value::Number(1.0)),
+            ("grace".to_string(), Value::Number(0.0)),
+        ]);
+        let step_context = crate::process::ProcessStepEventContext {
+            track: 0,
+            step: 0,
+            cycle: 0,
+            beat: 0.0,
+            sample_time: 0,
+            step_beats: 0.25,
+            resolved: crate::accumulator::ResolvedStep {
+                duration: 1.0,
+                velocity: 1.0,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: 1.0,
+                pan: 0.0,
+                chop: 0.0,
+            },
+        };
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 3,
+                source: ear.run_source.expect("ear run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: ear_inlets,
+                state: HashMap::new(),
+                event: None,
+                step_context: Some(step_context),
+                ports: ear.ports,
+                reads,
+                seed: 1,
+            })
+            .expect("invoke band-ear conform run");
+        assert_eq!(result.target_writes.len(), 1, "one conform write");
+        assert_eq!(result.target_writes[0].value, -1.0);
     }
 
     #[test]

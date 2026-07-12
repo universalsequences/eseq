@@ -714,7 +714,7 @@
     :shadow-color '(rgba 0 0 0 0.0)
     :corner-radius 8
     :on-click |x y r| (sbrowser-select-tab name)
-    :color '(rgba 0.88 0.89 0.92 1.0)
+    :color :widget-label-fg
     :active-color :blue))
 
 (def sbrowser-tabs ()

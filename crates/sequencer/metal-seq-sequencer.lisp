@@ -557,64 +557,66 @@
 
 (defwidget seqv-step-shell
   :width 1.5 :height 1.5
-  :state (active odd plocked plock-kind selected duration track-r track-g track-b variant-r variant-g variant-b)
-  :bindable (active plocked plock-kind selected duration track-r track-g track-b variant-r variant-g variant-b)
+  :state (active odd plocked plock-kind selected duration hide track-r track-g track-b variant-r variant-g variant-b)
+  :bindable (active plocked plock-kind selected duration hide track-r track-g track-b variant-r variant-g variant-b)
   :shader
-  (let ((vcol (rgba variant-r variant-g variant-b 1.0))
-        (seqcol (rgba 0.545 0.545 0.588 0.95))
-        (border (if (= selected 1)
-          (if (= plock-kind 2)
-            (rgba variant-r variant-g variant-b 1.0)
-            (rgba 0.90 0.92 0.96 1.0))
-          (if (= plock-kind 2)
-            (rgba (* variant-r 0.34) (* variant-g 0.34) (* variant-b 0.34) 1.0)
-            (if (= odd 1) (rgba 0.28 0.28 0.28 1.0) (rgba 0.18 0.18 0.18 1.0))))))
-    (sdf/layer
-      (sdf/fill
-        (sdf/translate 0 0.0
-          (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0))
-        (material
-          :lighting (lighting :edge-min -0.5 :edge-max 0.3
-            :light (vec3 0.1 -1.8 2.5) :shininess 92.0)
-          :color (if (= duration 1)
-            (aqua-color
-              (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5)
-              (rgba track-r track-g track-b 1))
-            (rgba 0 0 0 0))))
-      (sdf/fill (sdf/circle 0.65)
-        (material
-          :lighting (lighting :edge-min -0.3 :edge-max 1.0
-            :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
-          :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
-      (sdf/fill (sdf/circle 0.53)
-        (material
-          :color (if (= odd 1) 
-            (rgba 0.15 0.155 0.155 1.0) 
-            (rgba 0.015 0.016 0.025 1.0))))
-      (sdf/fill
-        (sdf/translate 0 0.70
-          (sdf/rounded-rect 0.52 0.10 0.05))
-        (material
-          :color (if (= plock-kind 2)
-            vcol
-            (if (= plock-kind 1)
-              seqcol
-              (rgba 0 0 0 0)))
-          :shadow (shadow
+  (if (= hide 1)
+    (rgba 0 0 0 0)
+    (let ((vcol (rgba variant-r variant-g variant-b 1.0))
+          (seqcol (rgba 0.545 0.545 0.588 0.95))
+          (border (if (= selected 1)
+            (if (= plock-kind 2)
+              (rgba variant-r variant-g variant-b 1.0)
+              (rgba 0.90 0.92 0.96 1.0))
+            (if (= plock-kind 2)
+              (rgba (* variant-r 0.34) (* variant-g 0.34) (* variant-b 0.34) 1.0)
+              (if (= odd 1) (rgba 0.28 0.28 0.28 1.0) (rgba 0.18 0.18 0.18 1.0))))))
+      (sdf/layer
+        (sdf/fill
+          (sdf/translate 0 0.0
+            (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0))
+          (material
+            :lighting (lighting :edge-min -0.5 :edge-max 0.3
+              :light (vec3 0.1 -1.8 2.5) :shininess 92.0)
+            :color (if (= duration 1)
+              (aqua-color
+                (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5)
+                (rgba track-r track-g track-b 1))
+              (rgba 0 0 0 0))))
+        (sdf/fill (sdf/circle 0.65)
+          (material
+            :lighting (lighting :edge-min -0.3 :edge-max 1.0
+              :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
+            :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
+        (sdf/fill (sdf/circle 0.53)
+          (material
+            :color (if (= odd 1)
+              (rgba 0.15 0.155 0.155 1.0)
+              (rgba 0.015 0.016 0.025 1.0))))
+        (sdf/fill
+          (sdf/translate 0 0.70
+            (sdf/rounded-rect 0.52 0.10 0.05))
+          (material
             :color (if (= plock-kind 2)
-              (rgba variant-r variant-g variant-b 0.70)
-              (rgba 0 0 0 0))
-            :blur (if (= plock-kind 2) 0.12 0.0)
-            :offset (vec2 0 0))))
-      (sdf/fill (sdf/circle 0.36)
-        (material
-          :lighting (lighting :edge-min -0.35 :edge-max 0.5
-            :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
-          :color (if (= active 1)
-            (aqua-color
-              (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
-              (rgba track-r track-g track-b 1.0))
-            (rgba 0 0 0 0)))))))
+              vcol
+              (if (= plock-kind 1)
+                seqcol
+                (rgba 0 0 0 0)))
+            :shadow (shadow
+              :color (if (= plock-kind 2)
+                (rgba variant-r variant-g variant-b 0.70)
+                (rgba 0 0 0 0))
+              :blur (if (= plock-kind 2) 0.12 0.0)
+              :offset (vec2 0 0))))
+        (sdf/fill (sdf/circle 0.36)
+          (material
+            :lighting (lighting :edge-min -0.35 :edge-max 0.5
+              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
+            :color (if (= active 1)
+              (aqua-color
+                (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
+                (rgba track-r track-g track-b 1.0))
+              (rgba 0 0 0 0))))))))
 
 (def seqv-mute-bg (active)
   (if active
@@ -682,9 +684,15 @@
           :background-color :transparent
           :on-click |x y r| (seqv-select-track-for-edit i)
           :on-double-click (lambda (evt) (seqv-open-piano-roll-for-track i))
-          (label (seqv-track-name-display name)
+          (badge (seqv-track-name-display name)
             :key (str "seqv-track-name-label-" i)
-            :font-size 11 :width 8.6
+            :icon (seq-track-type-icon i)
+            :font-size 11 :width 8.6 :height 1 :padding 0
+            :h-align :left
+            :background-color :transparent
+            :border-color :transparent
+            :highlight-color :transparent
+            :shadow-color :transparent
             :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
                      :dark-gray
                      :dim)
@@ -814,6 +822,7 @@
           nil))
       :active (seqv-cursor-highlight-binding track step)
       :selected (seqv-track-selected-binding track)
+      :hide (if visible 0 1)
       :background "cursor-highlight"
       (box
         :width 3.05 :height 1.45
@@ -823,6 +832,7 @@
         :plock-kind plock-kind
         :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
         :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
+        :hide (if visible 0 1)
         :track-r track-r :track-g track-g :track-b track-b
         :variant-r variant-r :variant-g variant-g :variant-b variant-b
         :background "seqv-step-shell"))))

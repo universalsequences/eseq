@@ -1087,6 +1087,31 @@ impl ProjectScenes {
         Some(new_idx)
     }
 
+    /// Move one scene to another position without modifying any track pattern
+    /// pool. Scene cells contain stable pattern ids, so moving the scene itself
+    /// preserves every track's pattern identity and data.
+    pub fn reorder_scene(&mut self, source: usize, target: usize) -> Option<usize> {
+        if source >= self.scenes.len() || target >= self.scenes.len() {
+            return None;
+        }
+        if source == target {
+            return Some(self.current_scene);
+        }
+
+        let scene = self.scenes.remove(source);
+        self.scenes.insert(target, scene);
+        self.current_scene = if self.current_scene == source {
+            target
+        } else if source < self.current_scene && self.current_scene <= target {
+            self.current_scene - 1
+        } else if target <= self.current_scene && self.current_scene < source {
+            self.current_scene + 1
+        } else {
+            self.current_scene
+        };
+        Some(self.current_scene)
+    }
+
     pub fn current_scene_metadata(
         &self,
     ) -> (
@@ -4918,7 +4943,13 @@ impl SequencerState {
         };
         if removed {
             if let Some(identity) = removed_identity {
-                for overrides in self.pattern.project_process_lane_overrides.lock().unwrap().iter_mut() {
+                for overrides in self
+                    .pattern
+                    .project_process_lane_overrides
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                {
                     overrides.remove(&identity);
                 }
             }
@@ -4968,15 +4999,25 @@ impl SequencerState {
                 .slots
                 .into_iter()
                 .find(|slot| slot.instance_id == instance_id);
-            let Some(project_slot) = project_slot else { return false };
+            let Some(project_slot) = project_slot else {
+                return false;
+            };
             let identity = crate::process::project_slot_identity_id(&project_slot);
             let mut overrides = self.pattern.project_process_lane_overrides.lock().unwrap();
-            let Some(track_overrides) = overrides.get_mut(track) else { return false };
+            let Some(track_overrides) = overrides.get_mut(track) else {
+                return false;
+            };
             let lane = track_overrides
                 .entry(identity)
                 .or_default()
                 .entry(inlet_name.clone())
-                .or_insert_with(|| project_slot.lanes.get(&inlet_name).cloned().unwrap_or_default());
+                .or_insert_with(|| {
+                    project_slot
+                        .lanes
+                        .get(&inlet_name)
+                        .cloned()
+                        .unwrap_or_default()
+                });
             if lane.values.len() <= step {
                 lane.values.resize(step + 1, 0.0);
             }
@@ -4992,14 +5033,26 @@ impl SequencerState {
         instance_id: crate::process::ProcessInstanceId,
         inlet_name: &str,
     ) -> bool {
-        let Some(slot) = self.project_process_chain().slots.into_iter().find(|slot| slot.instance_id == instance_id) else {
+        let Some(slot) = self
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_id == instance_id)
+        else {
             return false;
         };
         let identity = crate::process::project_slot_identity_id(&slot);
         let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
-        let Some(track_overrides) = all.get_mut(track) else { return false };
-        let removed = track_overrides.get_mut(&identity).is_some_and(|lanes| lanes.remove(inlet_name).is_some());
-        if track_overrides.get(&identity).is_some_and(|lanes| lanes.is_empty()) {
+        let Some(track_overrides) = all.get_mut(track) else {
+            return false;
+        };
+        let removed = track_overrides
+            .get_mut(&identity)
+            .is_some_and(|lanes| lanes.remove(inlet_name).is_some());
+        if track_overrides
+            .get(&identity)
+            .is_some_and(|lanes| lanes.is_empty())
+        {
             track_overrides.remove(&identity);
         }
         drop(all);
@@ -5014,7 +5067,12 @@ impl SequencerState {
         instance_id: crate::process::ProcessInstanceId,
         inlet_name: &str,
     ) -> bool {
-        let Some(slot) = self.project_process_chain().slots.into_iter().find(|slot| slot.instance_id == instance_id) else {
+        let Some(slot) = self
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_id == instance_id)
+        else {
             return false;
         };
         self.pattern
@@ -5947,6 +6005,19 @@ impl SequencerState {
         };
         self.publish_scheduler_snapshot();
         new_idx
+    }
+
+    /// Reorder scenes while keeping the currently playing scene active and
+    /// leaving all per-track pattern pools untouched.
+    pub fn reorder_scene(&self, source: usize, target: usize) -> Option<usize> {
+        let current_scene = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            scenes.reorder_scene(source, target)?
+        };
+        self.pattern
+            .current_pattern
+            .store(current_scene as u32, Ordering::Relaxed);
+        Some(current_scene)
     }
 
     pub fn delete_pattern(
@@ -9119,15 +9190,30 @@ mod tests {
             state.composed_track_process_chain(1).unwrap().slots[0].lanes["amount"].values,
             vec![0.1, 0.2, 0.3]
         );
-        assert_eq!(state.project_process_chain().slots[0].lanes["amount"].values, vec![0.1, 0.2, 0.3]);
+        assert_eq!(
+            state.project_process_chain().slots[0].lanes["amount"].values,
+            vec![0.1, 0.2, 0.3]
+        );
         assert!(state.has_project_process_lane_override(0, instance_id, "amount"));
 
-        assert_eq!(state.set_process_lane_values(instance_id, "amount", vec![4.0, 5.0]), 1);
-        assert_eq!(state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values, vec![0.1, 9.0, 0.3]);
-        assert_eq!(state.composed_track_process_chain(1).unwrap().slots[0].lanes["amount"].values, vec![4.0, 5.0]);
+        assert_eq!(
+            state.set_process_lane_values(instance_id, "amount", vec![4.0, 5.0]),
+            1
+        );
+        assert_eq!(
+            state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values,
+            vec![0.1, 9.0, 0.3]
+        );
+        assert_eq!(
+            state.composed_track_process_chain(1).unwrap().slots[0].lanes["amount"].values,
+            vec![4.0, 5.0]
+        );
 
         assert!(state.clear_project_process_lane_override(0, instance_id, "amount"));
-        assert_eq!(state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values, vec![4.0, 5.0]);
+        assert_eq!(
+            state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values,
+            vec![4.0, 5.0]
+        );
     }
 
     #[test]
@@ -9658,6 +9744,91 @@ mod tests {
             scenes.track_pools[0].get(orphan).unwrap().track_bits[0],
             1,
             "capturing while an empty cell is active must not overwrite orphan data"
+        );
+    }
+
+    #[test]
+    fn reorder_scene_moves_only_scene_references_and_follows_the_current_scene() {
+        let first = snapshot_with_active_step(1, 0, 2);
+        let second = snapshot_with_active_step(1, 0, 7);
+        let third = snapshot_with_active_step(1, 0, 11);
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(vec![first, second, third], 1);
+
+        let original_scene_ids = (0..3)
+            .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
+            .collect::<Vec<_>>();
+        let pool_before = {
+            let scenes = state.pattern.scenes.lock().unwrap();
+            let mut entries = scenes.track_pools[0]
+                .patterns
+                .iter()
+                .map(|(id, data)| (id.0, data.track_bits))
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|(id, _)| *id);
+            (entries, scenes.track_pools[0].next_id)
+        };
+
+        assert_eq!(state.reorder_scene(0, 2), Some(0));
+        assert_eq!(state.current_scene_index(), 0);
+        assert_eq!(
+            (0..3)
+                .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                original_scene_ids[1],
+                original_scene_ids[2],
+                original_scene_ids[0]
+            ]
+        );
+
+        let pool_after = {
+            let scenes = state.pattern.scenes.lock().unwrap();
+            let mut entries = scenes.track_pools[0]
+                .patterns
+                .iter()
+                .map(|(id, data)| (id.0, data.track_bits))
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|(id, _)| *id);
+            (entries, scenes.track_pools[0].next_id)
+        };
+        assert_eq!(
+            pool_after, pool_before,
+            "track pattern pools must be untouched"
+        );
+
+        assert_eq!(state.reorder_scene(2, 0), Some(1));
+        assert_eq!(state.current_scene_index(), 1);
+        assert_eq!(
+            (0..3)
+                .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
+                .collect::<Vec<_>>(),
+            original_scene_ids
+        );
+    }
+
+    #[test]
+    fn reorder_scene_rejects_out_of_range_indices_without_changes() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                snapshot_with_active_step(1, 0, 3),
+                snapshot_with_active_step(1, 0, 9),
+            ],
+            0,
+        );
+        let ids_before = (0..2)
+            .map(|scene| state.scene_track_pattern_id(scene, 0))
+            .collect::<Vec<_>>();
+
+        assert_eq!(state.reorder_scene(0, 2), None);
+        assert_eq!(state.reorder_scene(2, 0), None);
+        assert_eq!(state.current_scene_index(), 0);
+        assert_eq!(
+            (0..2)
+                .map(|scene| state.scene_track_pattern_id(scene, 0))
+                .collect::<Vec<_>>(),
+            ids_before
         );
     }
 

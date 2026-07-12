@@ -20,6 +20,8 @@ Landed and verified in code (through `main` at merge commit `f9f10cea`):
 | 5C | Per-track copy-on-write lane overrides for project slots, including persistence and reverting to the shared project lane. |
 | 7 | Previous-tick resolved track reads, 256-entry step/trigger histories, process state/outlet and channel reads, `echo-track` / `wrap-crash` library proofs, and a runnable Phase 7 reads demo. |
 | Band slice 2 | Typed `pitch-field` / scalar / gate suggestions, previous-tick nil-safe `hear`, `follow-harmony`, and a three-track band demo. |
+| Band slice 3 | One-instance `:observe` / `:play` conductor attachment, post-resolution coalesced invocation, bound-track emissions, and a four-track conductor demo. |
+| Player slice 1 | Self-contained conductor demo with phrase note count, integer delay, sequencer timebase spacing, and density-driven distribution across played tracks. |
 
 Not landed: Phase 3C (rack write application), the remaining Phase 5B shared-
 brain work (latched inlet wires and `target-mul!`), Phase 6 (presets), Phase 8
@@ -79,7 +81,7 @@ This slice alone delivers most of the band model: any process can suggest,
 joining the band is "drop `follow-harmony` on the track", listening is a mesh.
 No conductor needed yet.
 
-### Slice 3 — Conductor attachment mode
+### Slice 3 — Conductor attachment mode (landed)
 
 The one genuinely new invocation shape:
 
@@ -128,5 +130,5 @@ From the spec's end-game section — cheap now, expensive to retrofit:
 
 ## Sequence, in one line
 
-**Conductor attachment** → author the first player pack. Presets, sugar,
-previews, and panels come after the band can play.
+Expand the first player pack beyond the landed call/response voice. Presets,
+sugar, previews, and panels come after the band can play.

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::buffer::BufferTextStyle;
 use crate::runtime::{LayoutTabSpec, Runtime};
 use crate::theme;
-use crate::vm::{Value, format_lisp_value};
+use crate::vm::{format_lisp_value, Value};
 
 use super::{MAX_TEXT_ZOOM, MIN_TEXT_ZOOM};
 
@@ -851,7 +851,9 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "Set the window layout declaratively. Spec is a nested list:\n\
          (:rows ratio (:cols ratio \"buf-a\" ratio \"buf-b\" ...) ratio \"buf-c\" ...)\n\
          :rows splits horizontally (top/bottom), :cols splits vertically (left/right).\n\
-        Each pane is preceded by its ratio (fraction of parent space).",
+         Each pane is preceded by its ratio (fraction of parent space). Add\n\
+         :remember \"stable-key\" to a split to restore its last user-resized ratio\n\
+         when a later set-layout rebuilds that split.",
         |args, ctx| {
             use crate::runtime::LayoutSpec;
 
@@ -870,6 +872,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         min_height: None,
                         max_width: None,
                         max_height: None,
+                        collapse_threshold: None,
+                        on_collapse: None,
                     }),
                     Value::List(items)
                         if !items.is_empty()
@@ -893,6 +897,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         let mut min_height: Option<f32> = None;
                         let mut max_width: Option<f32> = None;
                         let mut max_height: Option<f32> = None;
+                        let mut collapse_threshold: Option<f32> = None;
+                        let mut on_collapse = None;
                         let mut tabs: Vec<LayoutTabSpec> = Vec::new();
                         let mut i = 2;
                         while i < items.len() {
@@ -954,6 +960,22 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                                                 max_height = Some(*n as f32)
                                             }
                                         }
+                                        "collapse-threshold" => {
+                                            if let Value::Number(n) = &*v {
+                                                if !(0.0..=1.0).contains(n) {
+                                                    return Err(
+                                                        ":collapse-threshold must be between 0 and 1"
+                                                            .into(),
+                                                    );
+                                                }
+                                                collapse_threshold = Some(*n as f32);
+                                            } else {
+                                                return Err(
+                                                    ":collapse-threshold expects a number".into(),
+                                                );
+                                            }
+                                        }
+                                        "on-collapse" => on_collapse = Some((*v).clone()),
                                         "tabs" => {
                                             tabs = parse_layout_tabs(&v, &name)?;
                                         }
@@ -962,6 +984,12 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                                 }
                             }
                             i += 1;
+                        }
+                        if collapse_threshold.is_some() != on_collapse.is_some() {
+                            return Err(
+                                ":collapse-threshold and :on-collapse must be provided together"
+                                    .into(),
+                            );
                         }
                         Ok(LayoutSpec::Buffer {
                             name,
@@ -976,6 +1004,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                             min_height,
                             max_width,
                             max_height,
+                            collapse_threshold,
+                            on_collapse,
                         })
                     }
                     Value::List(items) => {
@@ -993,6 +1023,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         let mut panes = Vec::new();
                         let mut i = 1;
                         let mut gap = 0.0f32;
+                        let mut remember = None;
                         while i < items.len() {
                             if let Value::Keyword(k) = &*items[i].borrow() {
                                 let key = k.clone();
@@ -1006,6 +1037,21 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                                         match &*gap_val {
                                             Value::Number(n) => gap = (*n as f32).max(0.0),
                                             _ => return Err(":gap expects a number".into()),
+                                        }
+                                        i += 1;
+                                        continue;
+                                    }
+                                    "remember" => {
+                                        let remember_val = items[i].borrow();
+                                        match &*remember_val {
+                                            Value::String(key) if !key.is_empty() => {
+                                                remember = Some(key.clone())
+                                            }
+                                            _ => {
+                                                return Err(
+                                                    ":remember expects a non-empty string".into()
+                                                );
+                                            }
                                         }
                                         i += 1;
                                         continue;
@@ -1031,8 +1077,16 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                             return Err("no panes in layout spec".into());
                         }
                         Ok(match dir {
-                            "rows" => LayoutSpec::Rows { gap, panes },
-                            _ => LayoutSpec::Cols { gap, panes },
+                            "rows" => LayoutSpec::Rows {
+                                gap,
+                                remember,
+                                panes,
+                            },
+                            _ => LayoutSpec::Cols {
+                                gap,
+                                remember,
+                                panes,
+                            },
                         })
                     }
                     _ => Err("layout spec must be a string or list".into()),
@@ -1444,7 +1498,11 @@ fn describe_directory_entry_unix(
 
 #[cfg(unix)]
 fn bit(mode: u32, flag: u32, ch: char) -> char {
-    if mode & flag != 0 { ch } else { '-' }
+    if mode & flag != 0 {
+        ch
+    } else {
+        '-'
+    }
 }
 
 fn format_size(size: u64) -> String {

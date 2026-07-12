@@ -637,6 +637,7 @@ pub struct Editor {
     cached_tile_rects: Vec<(TileId, Rect)>,
     /// Outer margin around the tiled layout, in cell units.
     tile_outer_gap: f32,
+    remembered_split_ratios: HashMap<String, f32>,
     retained_tile_layouts: HashMap<BufferId, Vec<RetainedTileLayout>>,
     visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
     widget_cursor: WidgetCursor,
@@ -777,6 +778,7 @@ impl Editor {
             typing_undo_buffer_id: None,
             cached_tile_rects: vec![],
             tile_outer_gap: 0.0,
+            remembered_split_ratios: HashMap::new(),
             retained_tile_layouts: HashMap::new(),
             visible_binding_layout_signature: None,
             widget_cursor: WidgetCursor::Default,
@@ -1326,6 +1328,7 @@ impl Editor {
             dir: SplitDir::Vertical,
             ratio: 0.72,
             gap: 0.0,
+            remember_key: None,
             a: Box::new(existing_root),
             b: Box::new(TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx))),
         });
@@ -1473,6 +1476,7 @@ impl Editor {
             path: &mut Vec<usize>,
             previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
             retained_tile_layouts: &HashMap<BufferId, Vec<RetainedTileLayout>>,
+            remembered_split_ratios: &HashMap<String, f32>,
         ) -> Result<TileNode, String> {
             match spec {
                 LayoutSpec::Buffer {
@@ -1488,6 +1492,8 @@ impl Editor {
                     min_height,
                     max_width,
                     max_height,
+                    collapse_threshold,
+                    on_collapse,
                 } => {
                     let buf_idx = buffer_idx_by_name(bufs, &name)
                         .ok_or_else(|| format!("layout references missing buffer '{name}'"))?;
@@ -1552,6 +1558,8 @@ impl Editor {
                     leaf.min_height = min_height;
                     leaf.max_width = max_width;
                     leaf.max_height = max_height;
+                    leaf.collapse_threshold = collapse_threshold;
+                    leaf.on_collapse = on_collapse;
                     if let Some(buffer) = bufs.get(leaf.buffer_idx)
                         && let Some(retained) =
                             retained_tile_layouts.get(&buffer.id).and_then(|retained| {
@@ -1564,25 +1572,37 @@ impl Editor {
                     }
                     Ok(TileNode::Leaf(leaf))
                 }
-                LayoutSpec::Rows { gap, panes } => build_split(
+                LayoutSpec::Rows {
+                    gap,
+                    remember,
+                    panes,
+                } => build_split(
                     panes,
                     SplitDir::Horizontal,
                     gap,
+                    remember,
                     bufs,
                     next_id,
                     path,
                     previous_tabbed_leaves,
                     retained_tile_layouts,
+                    remembered_split_ratios,
                 ),
-                LayoutSpec::Cols { gap, panes } => build_split(
+                LayoutSpec::Cols {
+                    gap,
+                    remember,
+                    panes,
+                } => build_split(
                     panes,
                     SplitDir::Vertical,
                     gap,
+                    remember,
                     bufs,
                     next_id,
                     path,
                     previous_tabbed_leaves,
                     retained_tile_layouts,
+                    remembered_split_ratios,
                 ),
             }
         }
@@ -1591,11 +1611,13 @@ impl Editor {
             panes: Vec<(f32, LayoutSpec)>,
             dir: SplitDir,
             gap: f32,
+            remember: Option<String>,
             bufs: &[Buf],
             next_id: &mut TileId,
             path: &mut Vec<usize>,
             previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
             retained_tile_layouts: &HashMap<BufferId, Vec<RetainedTileLayout>>,
+            remembered_split_ratios: &HashMap<String, f32>,
         ) -> Result<TileNode, String> {
             assert!(!panes.is_empty());
             if panes.len() == 1 {
@@ -1606,6 +1628,7 @@ impl Editor {
                     path,
                     previous_tabbed_leaves,
                     retained_tile_layouts,
+                    remembered_split_ratios,
                 );
             }
             let mut iter = panes.into_iter();
@@ -1620,6 +1643,7 @@ impl Editor {
                 path,
                 previous_tabbed_leaves,
                 retained_tile_layouts,
+                remembered_split_ratios,
             )?;
             path.pop();
             let child_b = if rest.len() == 1 {
@@ -1631,6 +1655,7 @@ impl Editor {
                     path,
                     previous_tabbed_leaves,
                     retained_tile_layouts,
+                    remembered_split_ratios,
                 )?;
                 path.pop();
                 child
@@ -1646,11 +1671,13 @@ impl Editor {
                     rescaled,
                     dir,
                     gap,
+                    None,
                     bufs,
                     next_id,
                     path,
                     previous_tabbed_leaves,
                     retained_tile_layouts,
+                    remembered_split_ratios,
                 )?;
                 path.pop();
                 child
@@ -1658,11 +1685,17 @@ impl Editor {
 
             let split_id = *next_id;
             *next_id += 1;
+            let ratio = remember
+                .as_ref()
+                .and_then(|key| remembered_split_ratios.get(key))
+                .copied()
+                .unwrap_or(ratio);
             Ok(TileNode::Split(TileSplit {
                 id: split_id,
                 dir,
                 ratio,
                 gap,
+                remember_key: remember,
                 a: Box::new(child_a),
                 b: Box::new(child_b),
             }))
@@ -1676,6 +1709,7 @@ impl Editor {
             &mut path,
             &previous_tabbed_leaves,
             &self.retained_tile_layouts,
+            &self.remembered_split_ratios,
         ) {
             Ok(root) => root,
             Err(error) => {
@@ -2686,7 +2720,8 @@ impl Editor {
             area: hit.area,
         });
         self.widget_cursor = tile_resize_cursor(hit.dir);
-        self.update_tile_split_ratio(hit.split_id, hit.dir, hit.area, precise_col, precise_row);
+        let _ =
+            self.update_tile_split_ratio(hit.split_id, hit.dir, hit.area, precise_col, precise_row);
         true
     }
 
@@ -2703,17 +2738,27 @@ impl Editor {
         match mouse.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.widget_cursor = tile_resize_cursor(drag.dir);
-                self.update_tile_split_ratio(
+                let collapse_callback = self.update_tile_split_ratio(
                     drag.split_id,
                     drag.dir,
                     drag.area,
                     precise_col,
                     precise_row,
                 );
+                if let Some(callback) = collapse_callback {
+                    self.active_tile_resize_drag = None;
+                    self.last_mouse_precise = None;
+                    self.widget_cursor = WidgetCursor::Default;
+                    self.suppress_mouse_until_left_up = true;
+                    self.apply_widget_output(Some(crate::widget_render::EventOutput {
+                        callback,
+                        args: Vec::new(),
+                    }));
+                }
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.update_tile_split_ratio(
+                let collapse_callback = self.update_tile_split_ratio(
                     drag.split_id,
                     drag.dir,
                     drag.area,
@@ -2723,6 +2768,12 @@ impl Editor {
                 self.active_tile_resize_drag = None;
                 self.last_mouse_precise = None;
                 self.widget_cursor = WidgetCursor::Default;
+                if let Some(callback) = collapse_callback {
+                    self.apply_widget_output(Some(crate::widget_render::EventOutput {
+                        callback,
+                        args: Vec::new(),
+                    }));
+                }
                 true
             }
             _ => true,
@@ -2770,13 +2821,32 @@ impl Editor {
         area: Rect,
         precise_col: f32,
         precise_row: f32,
-    ) {
+    ) -> Option<Value> {
         if let Some(split) = self.tile_root.find_split_mut(split_id) {
             let mut ratio = split_ratio_for_point(area, dir, precise_col, precise_row);
             // Enforce minimum sizes from layout spec
             let total = match dir {
                 SplitDir::Vertical => area.width,
                 SplitDir::Horizontal => area.height,
+            };
+            let collapse_callback = if total > 0.0 {
+                let collapse_for = |node: &TileNode, attempted_size: f32| {
+                    let TileNode::Leaf(leaf) = node else {
+                        return None;
+                    };
+                    let threshold = leaf.collapse_threshold?;
+                    let minimum = match dir {
+                        SplitDir::Vertical => leaf.min_width?,
+                        SplitDir::Horizontal => leaf.min_height?,
+                    };
+                    (attempted_size <= minimum * (1.0 - threshold))
+                        .then(|| leaf.on_collapse.clone())
+                        .flatten()
+                };
+                collapse_for(&split.a, total * ratio)
+                    .or_else(|| collapse_for(&split.b, total * (1.0 - ratio)))
+            } else {
+                None
             };
             if total > 0.0 {
                 let a_min = match dir {
@@ -2809,6 +2879,13 @@ impl Editor {
                 }
             }
             split.ratio = ratio;
+            let remembered = split
+                .remember_key
+                .clone()
+                .map(|remember_key| (remember_key, ratio));
+            if let Some((remember_key, ratio)) = remembered {
+                self.remembered_split_ratios.insert(remember_key, ratio);
+            }
             // Recompute layouts for all inactive tiles with their new dimensions
             let mut buf_indices: Vec<usize> = Vec::new();
             for id in self.tile_root.leaf_ids() {
@@ -2826,6 +2903,9 @@ impl Editor {
                 self.refresh_inactive_tile_layouts_for_buffer(buf_idx);
             }
             self.mark_needs_redraw();
+            collapse_callback
+        } else {
+            None
         }
     }
 
@@ -7840,6 +7920,10 @@ impl Editor {
         if let Some(delta) = self.runtime.take_pending_resize_window() {
             if let Some(split) = self.tile_root.find_parent_split(self.active_tile) {
                 split.ratio = (split.ratio + delta as f32).clamp(0.1, 0.9);
+                if let Some(remember_key) = split.remember_key.clone() {
+                    self.remembered_split_ratios
+                        .insert(remember_key, split.ratio);
+                }
                 self.mark_needs_redraw();
             }
         }

@@ -133,6 +133,7 @@ enum CaptureTrackKind {
 struct CaptureTrackSpec {
     kind: CaptureTrackKind,
     display_name: Option<String>,
+    num_steps: Option<usize>,
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
 }
@@ -247,6 +248,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     };
 
     let mut display_name = None;
+    let mut num_steps = None;
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
     while cursor < items.len() {
@@ -263,6 +265,16 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
                         .to_string(),
                 );
             }
+            "num-steps" => {
+                let steps = expression_usize(value)
+                    .ok_or_else(|| ":num-steps expects a positive integer".to_string())?;
+                if !(1..=MAX_STEPS).contains(&steps) {
+                    return Err(format!(
+                        ":num-steps must be between 1 and {MAX_STEPS}, got {steps}"
+                    ));
+                }
+                num_steps = Some(steps);
+            }
             "midi-fx" => midi_fx = expression_string_list(value, ":midi-fx")?,
             "audio-fx" => audio_fx = expression_string_list(value, ":audio-fx")?,
             other => return Err(format!("unsupported track option :{other}")),
@@ -273,6 +285,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     Ok(CaptureTrackSpec {
         kind,
         display_name,
+        num_steps,
         midi_fx,
         audio_fx,
     })
@@ -290,6 +303,15 @@ fn expression_name(expression: Option<&Expression>) -> Option<&str> {
 fn expression_string(expression: Option<&Expression>) -> Option<&str> {
     match expression? {
         Expression::String(value) | Expression::Symbol(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn expression_usize(expression: &Expression) -> Option<usize> {
+    match expression {
+        Expression::Number(value) if value.is_finite() && *value >= 1.0 && value.fract() == 0.0 => {
+            usize::try_from(*value as u64).ok()
+        }
         _ => None,
     }
 }
@@ -322,6 +344,9 @@ fn apply_capture_project(app: &mut ui::App, project: &CaptureProjectSpec) -> Res
 
         if let Some(name) = &spec.display_name {
             app.tracks[track] = name.clone();
+        }
+        if let Some(num_steps) = spec.num_steps {
+            app.state.pattern.track_params[track].set_num_steps(num_steps);
         }
         for effect in &spec.midi_fx {
             app.add_midi_fx_to_track_sync(track, effect)
@@ -534,7 +559,7 @@ mod tests {
     fn parses_project_tracks_and_preserves_non_project_source() {
         let source = r#"
             (capture-project
-              (track :sampler :name "Drums" :midi-fx ("arp") :audio-fx '("filter"))
+              (track :sampler :name "Drums" :num-steps 8 :midi-fx ("arp") :audio-fx '("filter"))
               (track :instrument "core/drift"))
 
             (def-process passthrough :run nil)
@@ -547,6 +572,7 @@ mod tests {
             CaptureTrackSpec {
                 kind: CaptureTrackKind::Sampler,
                 display_name: Some("Drums".to_string()),
+                num_steps: Some(8),
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],
             }
@@ -555,6 +581,7 @@ mod tests {
             parsed.project.tracks[1].kind,
             CaptureTrackKind::Instrument("core/drift".to_string())
         );
+        assert_eq!(parsed.project.tracks[1].num_steps, None);
         assert!(!parsed.executable_source.contains("capture-project"));
         assert!(parsed.executable_source.contains("def-process passthrough"));
         assert!(parsed.executable_source.contains("processes :track 0"));
@@ -569,6 +596,20 @@ mod tests {
     fn capture_project_is_required_and_unique() {
         assert!(parse_capture_source("(def x 1)").is_err());
         assert!(parse_capture_source("(capture-project) (capture-project)").is_err());
+    }
+
+    #[test]
+    fn capture_track_num_steps_rejects_out_of_range_values() {
+        for source in [
+            "(capture-project (track :sampler :num-steps 0))",
+            "(capture-project (track :sampler :num-steps 8.5))",
+            "(capture-project (track :sampler :num-steps 999))",
+        ] {
+            assert!(
+                parse_capture_source(source).is_err(),
+                "source should fail: {source}"
+            );
+        }
     }
 
     #[test]

@@ -3701,7 +3701,9 @@ where
         }
         let invocation_beat = invocation.beat;
         let process_runtime_id = invocation.runtime_id;
-        invocation.reads = process_runtime.read_snapshot(invocation_beat);
+        if invocation.reads.conductor_observe_tracks.is_empty() {
+            invocation.reads = process_runtime.read_snapshot(invocation_beat);
+        }
         let Some(scratch) = scratch_runtime.as_mut() else {
             return true;
         };
@@ -3721,6 +3723,33 @@ where
                     );
                 }
             }
+        }
+    }
+    true
+}
+
+fn invoke_conductor_invocations(
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    invocations: Vec<crate::process::ProcessRunInvocation>,
+    debug_accum: bool,
+) -> bool {
+    for invocation in invocations {
+        if !invoke_process_cascade(
+            scratch_runtime,
+            process_runtime,
+            invocation,
+            debug_accum,
+            |_scratch, _runtime, runtime_id, commands| {
+                if !commands.is_empty() && (debug_accum || debug_routing_enabled()) {
+                    eprintln!(
+                        "[process] conductor {} produced unsupported step commands",
+                        runtime_id
+                    );
+                }
+            },
+        ) {
+            return false;
         }
     }
     true
@@ -5890,6 +5919,30 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let mut neural_reset_group_idx = 0;
         for trigger in triggers {
             let trigger_sample_time = scheduled_until_sample + trigger.offset as u64;
+            let conductor_invocations =
+                process_runtime.take_conductor_invocations_before(trigger.absolute_beats);
+            if !invoke_conductor_invocations(
+                scratch_runtime,
+                process_runtime,
+                conductor_invocations,
+                debug_accum,
+            ) || !enqueue_due_process_emissions(
+                queue,
+                snapshot,
+                &mut track_output_events,
+                scratch_runtime,
+                midi_fx_quantizer_state,
+                process_runtime,
+                pattern_epoch,
+                chunk_start_beats,
+                scheduled_until_sample,
+                trigger.absolute_beats,
+                samples_per_quarter,
+                debug_accum,
+            ) {
+                chunk_enqueued = false;
+                break;
+            }
             process_neural_boundaries_until(
                 neural_runtime,
                 &mut neural_cursor_beats,
@@ -6283,6 +6336,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 process_runtime.record_track_fire(
                                     trigger.track,
                                     trigger.absolute_beats,
+                                    sample_time,
                                     crate::process::resolved_values_from_step(
                                         output.resolved,
                                         &step_snapshot.params,
@@ -6482,6 +6536,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     process_runtime.record_track_fire(
                         trigger.track,
                         trigger.absolute_beats,
+                        sample_time,
                         crate::process::resolved_values_from_step(resolved, &step_snapshot.params),
                     );
                     recorded_track_fire = true;
@@ -6675,6 +6730,29 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if !chunk_enqueued {
                 break;
             }
+        }
+        if chunk_enqueued {
+            let conductor_invocations =
+                process_runtime.take_conductor_invocations_through(chunk_end_beats);
+            chunk_enqueued = invoke_conductor_invocations(
+                scratch_runtime,
+                process_runtime,
+                conductor_invocations,
+                debug_accum,
+            ) && enqueue_due_process_emissions(
+                queue,
+                snapshot,
+                &mut track_output_events,
+                scratch_runtime,
+                midi_fx_quantizer_state,
+                process_runtime,
+                pattern_epoch,
+                chunk_start_beats,
+                scheduled_until_sample,
+                chunk_end_beats,
+                samples_per_quarter,
+                debug_accum,
+            );
         }
         if !chunk_enqueued {
             break;
@@ -9890,6 +9968,210 @@ mod tests {
             track_transposes(3),
             vec![2.0, 2.0],
             "a missing publisher must remain inert"
+        );
+    }
+
+    #[test]
+    fn scheduler_response_phrase_uses_note_count_delay_and_timebase_lanes() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for track in 0..3 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[0].set_step_active(1, true);
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 3],
+                vec![EffectDescriptor::builtin_sampler(); 3],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("load builtin process library");
+            scratch
+                .eval(
+                    r#"
+                    (def-process response-test-publisher
+                      :run (suggest :harmony
+                             (pitch-field (list 0 4 7) :root 0 :weight 1)))
+                    (def-process response-test-player
+                      :in ((listen :field :default :harmony)
+                           (target :track :default 2)
+                           (num-notes :int 0 8 :default 0 :lane true)
+                           (play-delay :int 0 16 :default 1 :lane true)
+                           (timebase :int 0 12 :default 4 :lane true))
+                      :run (let ((field (hear (in :listen))))
+                             (if field
+                               (let ((pitches (field-pitches field))
+                                     (spacing (* (in :play-delay)
+                                                 (timebase-beats (in :timebase)))))
+                                 (map (lambda (i)
+                                        (emit :track (in :target)
+                                              :after (* (+ i 1) spacing)
+                                              :note (nth pitches (mod i (len pitches)))
+                                              :vel 0.75
+                                              :duration 0.5))
+                                      (range 0 (in :num-notes))))
+                               nil)))
+                    (processes :track 0
+                      (response-test-publisher)
+                      (response-test-player
+                        :listen :harmony
+                        :target 2
+                        :num-notes (lane 2 2)
+                        :play-delay (lane 2 2)
+                        :timebase (lane 4 4)))
+                    "#,
+                )
+                .expect("attach lane-driven response phrase");
+
+            schedule_process_observed_fixture(&state, scratch, 42_000)
+        });
+
+        let responses = events
+            .iter()
+            .filter(|event| event.track == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses
+                .iter()
+                .map(|event| event.sample_time)
+                .collect::<Vec<_>>(),
+            // The harness's process-emission chunk begins at sample 1. At
+            // 120 BPM / 48 kHz, the second call is beat 0.25, then +0.5 and
+            // +1.0 beats land at samples 18_001 and 30_001 respectively.
+            vec![18_001, 30_001],
+            "delay=2 at a sixteenth-note timebase must place replies at +1/8 and +1/4"
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>(),
+            vec![0.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn scheduler_conductor_runs_once_after_coincident_observed_tracks_resolve() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for track in 0..3 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[1].set_step_active(0, true);
+            state.set_step_param(0, 0, StepParam::Transpose, 3.0);
+            state.set_step_param(1, 0, StepParam::Transpose, 7.0);
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 3],
+                vec![EffectDescriptor::builtin_sampler(); 3],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process sum-conductor
+                      :run (emit
+                             :track (nth (play-tracks) 0)
+                             :note (+ (read (track 0 :transpose))
+                                      (read (track 1 :transpose)))
+                             :vel 0.8
+                             :duration 0.5))
+                    (def sum-conductor-h
+                      (processes :observe (list 0 1) :play (list 2)
+                        (sum-conductor)))
+                    "#,
+                )
+                .expect("attach multi-track conductor");
+
+            let authored = scratch.process_authoring_snapshot();
+            assert_eq!(authored.conductors.len(), 1);
+            assert_eq!(authored.conductors[0].observe_tracks, vec![0, 1]);
+            assert_eq!(authored.conductors[0].play_tracks, vec![2]);
+
+            schedule_process_observed_fixture(&state, scratch, 30_000)
+        });
+
+        let conductor_events = events
+            .iter()
+            .filter(|event| event.track == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            conductor_events.len(),
+            1,
+            "coincident observed tracks must wake one conductor instance once"
+        );
+        assert_eq!(conductor_events[0].transpose, 10.0);
+    }
+
+    #[test]
+    fn scheduler_conductor_demo_spreads_delayed_harmony_by_density() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                4,
+                (0..4).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for track in 0..4 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[1].set_step_active(0, true);
+            state.pattern.patterns[0].set_step_active(1, true);
+            state.pattern.patterns[1].set_step_active(1, true);
+            for step in 0..2 {
+                state.set_step_param(0, step, StepParam::Transpose, 3.0);
+                state.set_step_param(1, step, StepParam::Transpose, 7.0);
+            }
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 4],
+                vec![EffectDescriptor::builtin_sampler(); 4],
+                0,
+                0,
+            );
+            let script_path = format!(
+                "{}/scripts/process-conductor-demo.lisp",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
+            scratch
+                .eval_source_at_path(script_path, &source)
+                .expect("evaluate conductor demo");
+
+            schedule_process_observed_fixture(&state, scratch, 42_000)
+        });
+
+        let responses = events
+            .iter()
+            .filter(|event| (2..=3).contains(&event.track))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            responses
+                .iter()
+                .map(|event| (event.track, event.sample_time, event.transpose))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, 18_001, 3.0),
+                (3, 18_001, 7.0),
+                (2, 30_001, 7.0),
+                (3, 30_001, 10.0),
+            ],
+            "the second sparse call should turn the prior suggestion into two delayed phrases"
         );
     }
 

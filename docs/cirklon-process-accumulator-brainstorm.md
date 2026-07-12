@@ -5,8 +5,9 @@ fx-panel process-chain surface. The Phase 5B project layer (items 1-3 + 6) and
 Phase 5C per-track copy-on-write lanes have landed. Phase 7 resolved reads and
 bounded step/trigger history have also landed. The end-game Slice 2 field
 engine (`suggest` / previous-tick `hear`) and `follow-harmony` proof have
-landed. Latched brain wires and `target-mul!` (5B items 4-5) remain. Rack-slot
-write application remains a follow-up.
+landed. Conductor `:observe` / `:play` attachment has landed as well. Latched
+brain wires and `target-mul!` (5B items 4-5) remain. Rack-slot write application
+remains a follow-up.
 Covers accumulators, masks, ratchets, grabs, and the track-attached process
 chain, all built on the existing scheduler-owned `def-process` framework.
 
@@ -1675,7 +1676,7 @@ lane-sequenceable obedience and passing-tone grace. The runnable proof is
 
 The genuine engine deltas — the depth this spec doesn't yet cover:
 
-1. **Conductor attachment mode.** One instance observing N tracks and playing
+1. **Conductor attachment mode (landed).** One instance observing N tracks and playing
    M others — `(processes :observe (list 1 2) :play (list 3 4 5 6) ...)`-ish —
    invoked once per tick *after* all observed tracks resolve. This is where the
    currently-undefined same-tick cross-track ordering gets its answer: the
@@ -1685,6 +1686,14 @@ The genuine engine deltas — the depth this spec doesn't yet cover:
    answer without a general dependency graph. (Fields reduce how load-bearing
    this is — much of the band model works through opt-in listening with the
    one-tick rule, no track binding at all.)
+
+   Landed surface: `(processes :observe (list ...) :play (list ...) instance)`.
+   Observed fires at one timestamp are coalesced into one invocation after all
+   of them resolve; observed-track reads include that resolved tick. Emissions
+   are restricted to the bound play set and use the existing process emission
+   path. `observed-tracks` and `play-tracks` expose bindings to raw
+   `def-process` bodies. Runnable proof:
+   `crates/sequencer/scripts/process-conductor-demo.lisp`.
 2. **A determinism contract for stateful conductors.** A density-goal
    harmonizer with memory can't be a lane fold; it's the raw tier's "missing
    sugar shape" made concrete. Likely a third tier (`def-conductor`?):

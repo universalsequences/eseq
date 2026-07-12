@@ -3686,7 +3686,11 @@ fn tree_header_rows_are_not_selectable_or_keyboard_targets() {
     let row_y = |row: f32| layout.rect.row + row + 0.5;
 
     editor.handle_mouse_precise(
-        mouse_event(MouseEventKind::Down(MouseButton::Left), col as u16, row_y(1.0) as u16),
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col as u16,
+            row_y(1.0) as u16,
+        ),
         0,
         0,
         40,
@@ -3704,7 +3708,11 @@ fn tree_header_rows_are_not_selectable_or_keyboard_targets() {
         .eval_str(r#"(set! selected "")"#)
         .expect("reset selected");
     editor.handle_mouse_precise(
-        mouse_event(MouseEventKind::Down(MouseButton::Left), col as u16, row_y(0.0) as u16),
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col as u16,
+            row_y(0.0) as u16,
+        ),
         0,
         0,
         40,
@@ -6353,7 +6361,10 @@ fn inspect_source_span_opens_exact_widget_form_without_legacy_identity() {
         .eval_source_at_path(path.clone(), source)
         .unwrap();
     let start = source.find("(knob-number").unwrap();
-    let end = source[start..].find(')').map(|offset| start + offset + 1).unwrap();
+    let end = source[start..]
+        .find(')')
+        .map(|offset| start + offset + 1)
+        .unwrap();
     let revision = crate::hot_reload::hash_source(source);
 
     let mut props = HashMap::new();
@@ -6394,7 +6405,10 @@ fn inspect_source_span_opens_exact_widget_form_without_legacy_identity() {
     assert!(super::inspect_node_has_source_identity(&node));
     assert!(editor.open_source_for_inspected_node(&node).unwrap());
     assert_eq!(editor.active_buffer().path.as_ref(), Some(&path));
-    assert_eq!(editor.active_buffer().cursor, super::offset_to_position(source, start));
+    assert_eq!(
+        editor.active_buffer().cursor,
+        super::offset_to_position(source, start)
+    );
 
     let _ = std::fs::remove_file(path);
 }
@@ -6588,7 +6602,10 @@ fn inspect_hit_test_prefers_source_identified_ancestor() {
     use std::collections::HashMap;
 
     let mut parent_props = HashMap::new();
-    parent_props.insert("key".to_string(), Value::String("seqv-select-1".to_string()));
+    parent_props.insert(
+        "key".to_string(),
+        Value::String("seqv-select-1".to_string()),
+    );
     let child = crate::layout::LayoutNode {
         widget_id: 2,
         stable_widget_id: None,
@@ -6727,6 +6744,202 @@ fn eval_tabbed_test_layout(editor: &mut Editor) {
         )
         .unwrap();
     editor.refresh_runtime_side_effects();
+}
+
+#[test]
+fn remembered_layout_split_restores_its_user_resized_ratio() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*fx*", "");
+    editor.open_scratch_buffer("*piano-roll*", "");
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(set-layout
+                (list :rows :remember "lower:piano-roll"
+                  0.6 "*main*"
+                  0.4 "*piano-roll*"))"#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let (split_id, split_dir) = match &editor.tile_root {
+        crate::tile::TileNode::Split(split) => {
+            assert_eq!(split.remember_key.as_deref(), Some("lower:piano-roll"));
+            (split.id, split.dir)
+        }
+        crate::tile::TileNode::Leaf(_) => panic!("remembered layout should build a split"),
+    };
+    editor.update_tile_split_ratio(
+        split_id,
+        split_dir,
+        crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
+        0.0,
+        42.0,
+    );
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(set-layout
+                (list :rows :remember "lower:fx"
+                  0.7 "*main*"
+                  0.3 "*fx*"))"#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let fx_ratio = match &editor.tile_root {
+        crate::tile::TileNode::Split(split) => split.ratio,
+        crate::tile::TileNode::Leaf(_) => panic!("FX layout should build a split"),
+    };
+    assert!((fx_ratio - 0.7).abs() < f32::EPSILON);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(set-layout
+                (list :rows :remember "lower:piano-roll"
+                  0.6 "*main*"
+                  0.4 "*piano-roll*"))"#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let restored_ratio = match &editor.tile_root {
+        crate::tile::TileNode::Split(split) => split.ratio,
+        crate::tile::TileNode::Leaf(_) => panic!("piano-roll layout should build a split"),
+    };
+    assert!(
+        (restored_ratio - 0.42).abs() < f32::EPSILON,
+        "piano-roll split should restore its remembered drag ratio: {restored_ratio}"
+    );
+}
+
+#[test]
+fn fixed_pane_collapses_only_after_dragging_through_its_threshold() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*panel*", "");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def panel-collapsed (state false))
+            (def sidebar-collapsed (state false))
+            (set-layout
+              (list :rows
+                0.8 "*main*"
+                0.2 (list :buf "*panel*"
+                      :min-height 20
+                      :max-height 20
+                      :collapse-threshold 0.25
+                      :on-collapse (lambda () (set! panel-collapsed true)))))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let (split_id, split_dir) = match &editor.tile_root {
+        crate::tile::TileNode::Split(split) => (split.id, split.dir),
+        crate::tile::TileNode::Leaf(_) => panic!("collapsible layout should build a split"),
+    };
+    let area = crate::layout::Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
+
+    editor.active_tile_resize_drag = Some(super::TileResizeDrag {
+        split_id,
+        dir: split_dir,
+        area,
+    });
+    editor.handle_tile_resize_drag(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 0, 84),
+        0.0,
+        84.0,
+    );
+    assert_eq!(
+        editor.runtime_mut().eval_str("panel-collapsed").unwrap(),
+        Some(Value::Bool(false)),
+        "dragging less than 25% through the fixed height must keep the pane visible"
+    );
+
+    editor.active_tile_resize_drag = Some(super::TileResizeDrag {
+        split_id,
+        dir: split_dir,
+        area,
+    });
+    editor.handle_tile_resize_drag(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 0, 86),
+        0.0,
+        86.0,
+    );
+    assert_eq!(
+        editor.runtime_mut().eval_str("panel-collapsed").unwrap(),
+        Some(Value::Bool(true)),
+        "crossing 25% through the fixed height should collapse during the drag"
+    );
+    assert!(
+        editor.active_tile_resize_drag.is_none(),
+        "collapsing should cancel the stale divider drag before rebuilding the layout"
+    );
+    assert!(
+        editor.suppress_mouse_until_left_up,
+        "the remainder of a collapsed pane's pointer gesture should be suppressed"
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 0, 86),
+        0.0,
+        86.0,
+        0,
+    );
+    assert!(
+        !editor.suppress_mouse_until_left_up,
+        "mouse-up should finish suppression after the pane has collapsed"
+    );
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (set-layout
+              (list :cols
+                0.2 (list :buf "*panel*"
+                      :min-width 20
+                      :max-width 20
+                      :collapse-threshold 0.25
+                      :on-collapse (lambda () (set! sidebar-collapsed true)))
+                0.8 "*main*"))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let (split_id, split_dir) = match &editor.tile_root {
+        crate::tile::TileNode::Split(split) => (split.id, split.dir),
+        crate::tile::TileNode::Leaf(_) => panic!("collapsible sidebar should build a split"),
+    };
+    editor.active_tile_resize_drag = Some(super::TileResizeDrag {
+        split_id,
+        dir: split_dir,
+        area,
+    });
+    editor.handle_tile_resize_drag(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 14, 0),
+        14.0,
+        0.0,
+    );
+    assert_eq!(
+        editor.runtime_mut().eval_str("sidebar-collapsed").unwrap(),
+        Some(Value::Bool(true)),
+        "a fixed left sidebar should collapse as soon as its drag crosses the threshold"
+    );
 }
 
 fn editor_with_tabbed_buffers() -> Editor {
@@ -10091,24 +10304,25 @@ fn inline_widget_snapshot_sync_preserves_code_and_inline_layout() {
 
     assert_eq!(editor.active_buffer().view_mode, super::ViewMode::Both);
     let frame = crate::frame::build_render_frame(&mut editor, 80, 8);
-    let rendered_source = frame.lines[0].iter().map(|cell| cell.ch).collect::<String>();
+    let rendered_source = frame.lines[0]
+        .iter()
+        .map(|cell| cell.ch)
+        .collect::<String>();
     let mut expected = source.to_string();
     expected.insert_str(source.find("12").unwrap(), "        ");
     assert_eq!(rendered_source.trim_end(), expected);
-    assert!(
-        frame
-            .widget_layout
-            .as_ref()
-            .is_some_and(|layout| layout.children.iter().any(|node| node.widget_type == "hslider"))
-    );
+    assert!(frame.widget_layout.as_ref().is_some_and(|layout| layout
+        .children
+        .iter()
+        .any(|node| node.widget_type == "hslider")));
 }
 
 #[test]
 fn inline_slider_in_dormant_function_body_registers_during_compilation() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-    editor.active_buffer_mut().set_text(
-        "(def tune ()\n  (~slider 24 :min 0 :max 48))\n(def untouched 1)",
-    );
+    editor
+        .active_buffer_mut()
+        .set_text("(def tune ()\n  (~slider 24 :min 0 :max 48))\n(def untouched 1)");
     editor.sync_runtime_context();
     let buffer_id = editor.active_buffer().id;
     editor.evaluate_buffer_transactional(buffer_id);
@@ -10128,9 +10342,9 @@ fn inline_slider_in_dormant_function_body_registers_during_compilation() {
 #[test]
 fn inline_slider_layout_stays_on_value_line_and_survives_edit_above() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-    editor.active_buffer_mut().set_text(
-        "(def header 1)\n(def amount (~slider 12 :min 0 :max 24))\n(def footer 2)",
-    );
+    editor
+        .active_buffer_mut()
+        .set_text("(def header 1)\n(def amount (~slider 12 :min 0 :max 24))\n(def footer 2)");
     editor.sync_runtime_context();
     let buffer_id = editor.active_buffer().id;
     editor.evaluate_buffer_transactional(buffer_id);
@@ -10148,22 +10362,27 @@ fn inline_slider_layout_stays_on_value_line_and_survives_edit_above() {
     editor.active_buffer_mut().cursor = (0, 0);
     editor.active_buffer_mut().insert_str(";; moved\n");
     let frame = crate::frame::build_render_frame(&mut editor, 80, 10);
-    let layout = frame.widget_layout.expect("inline widget layout after edit");
+    let layout = frame
+        .widget_layout
+        .expect("inline widget layout after edit");
     let slider = layout
         .children
         .iter()
         .find(|node| node.widget_type == "hslider")
         .expect("inline hslider after edit");
     assert_eq!(slider.rect.row, 2.0 * text_height_scale);
-    assert!(!matches!(slider.props.get("muted"), Some(Value::Bool(true))));
+    assert!(!matches!(
+        slider.props.get("muted"),
+        Some(Value::Bool(true))
+    ));
 }
 
 #[test]
 fn nested_inline_knob_inserts_columns_before_its_value_without_reserving_rows() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-    editor.active_buffer_mut().set_text(
-        "(def nested\n  (list\n    (~knob 0.5 :min 0 :max 1)))\n(def after 2)",
-    );
+    editor
+        .active_buffer_mut()
+        .set_text("(def nested\n  (list\n    (~knob 0.5 :min 0 :max 1)))\n(def after 2)");
     editor.sync_runtime_context();
     let buffer_id = editor.active_buffer().id;
     editor.evaluate_buffer_transactional(buffer_id);
@@ -10189,9 +10408,7 @@ fn nested_inline_knob_inserts_columns_before_its_value_without_reserving_rows() 
 
     editor.set_text_zoom(1.5).unwrap();
     let zoomed = crate::frame::build_render_frame(&mut editor, 80, 10);
-    let zoomed_layout = zoomed
-        .widget_layout
-        .expect("zoomed inline knob layout");
+    let zoomed_layout = zoomed.widget_layout.expect("zoomed inline knob layout");
     let knob = zoomed_layout
         .children
         .iter()
@@ -10206,9 +10423,9 @@ fn nested_inline_knob_inserts_columns_before_its_value_without_reserving_rows() 
 #[test]
 fn inline_knob_uses_relative_drag_without_staling_its_owned_anchors() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-    editor.active_buffer_mut().set_text(
-        "(def before-a 1)\n(def before-b 2)\n(def amount (~knob 0.5 :min 0 :max 1))",
-    );
+    editor
+        .active_buffer_mut()
+        .set_text("(def before-a 1)\n(def before-b 2)\n(def amount (~knob 0.5 :min 0 :max 1))");
     editor.sync_runtime_context();
     let buffer_id = editor.active_buffer().id;
     editor.evaluate_buffer_transactional(buffer_id);
@@ -10258,9 +10475,7 @@ fn inline_knob_uses_relative_drag_without_staling_its_owned_anchors() {
         "relative drag should rewrite the inline knob literal"
     );
     let dragged = crate::frame::build_render_frame(&mut editor, 80, 8);
-    let dragged_layout = dragged
-        .widget_layout
-        .expect("dragged inline knob layout");
+    let dragged_layout = dragged.widget_layout.expect("dragged inline knob layout");
     let dragged_knob = dragged_layout
         .children
         .iter()
@@ -10417,7 +10632,11 @@ fn inline_slider_drag_writes_literal_and_re_evaluates_once_on_release() {
     let end_col = slider.rect.col + slider.rect.width - 0.1;
     let row = slider.rect.row + 0.5;
     editor.handle_mouse_precise(
-        mouse_event(MouseEventKind::Down(MouseButton::Left), start_col as u16, row as u16),
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            start_col as u16,
+            row as u16,
+        ),
         0,
         0,
         80,
@@ -10426,7 +10645,11 @@ fn inline_slider_drag_writes_literal_and_re_evaluates_once_on_release() {
         row,
     );
     editor.handle_mouse_precise(
-        mouse_event(MouseEventKind::Drag(MouseButton::Left), end_col as u16, row as u16),
+        mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            end_col as u16,
+            row as u16,
+        ),
         0,
         0,
         80,
@@ -10440,7 +10663,11 @@ fn inline_slider_drag_writes_literal_and_re_evaluates_once_on_release() {
         editor.active_buffer().text()
     );
     editor.handle_mouse_precise(
-        mouse_event(MouseEventKind::Up(MouseButton::Left), end_col as u16, row as u16),
+        mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            end_col as u16,
+            row as u16,
+        ),
         0,
         0,
         80,

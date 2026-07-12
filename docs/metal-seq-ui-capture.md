@@ -37,8 +37,10 @@ Supported track forms are:
 ```
 
 Every track accepts an optional display `:name`, `:midi-fx` list, and built-in
-`:audio-fx` list. A saved instrument goes through the same compile/load/init path
-as an instrument added in the app, so its real custom UI can be captured.
+`:audio-fx` list. `:num-steps` sets the initial pattern length from 1 through the
+sequencer's maximum pattern length. A saved instrument goes through the same
+compile/load/init path as an instrument added in the app, so its real custom UI
+can be captured.
 
 From the repository root:
 

@@ -5,12 +5,15 @@
 
 (defwidget cursor-highlight
   :width 1 :height 1
-  :state (active selected)
-  :bindable (active selected)
-  :shader (sdf/layer
-    (sdf/stroke (sdf/rounded-rect (* width 0.94) (* height 0.99) 0.30)
-      0.055
-      (rgba 0.72 0.76 0.84 (* 0.95 active selected)))))
+  :state (active selected hide)
+  :bindable (active selected hide)
+  :shader
+  (if (= hide 1)
+    (rgba 0 0 0 0)
+    (sdf/layer
+      (sdf/stroke (sdf/rounded-rect (* width 0.94) (* height 0.99) 0.30)
+        0.055
+        (rgba 0.72 0.76 0.84 (* 0.95 active selected))))))
 
 ;; ── Aqua material for sliders ──
 
