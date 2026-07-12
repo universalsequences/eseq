@@ -204,6 +204,7 @@ struct PendingSavedInstrumentLoad {
     name: String,
     source: String,
     run_mode: CustomInstrumentRunMode,
+    group_id: Option<u64>,
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
@@ -6525,6 +6526,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "add-track-sample" => {
                         let path_str = extract_path_from_payload(&payload);
+                        let group_id = extract_usize_from_payload(&payload, "group-id")
+                            .map(|group_id| group_id as u64);
                         let preserve_browser_context =
                             extract_bool_from_payload(&payload, "preserve-browser-context");
                         eprintln!(
@@ -6540,6 +6543,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let path = Path::new(&path_str);
                             match app.graph_controller().add_track(path) {
                                 Ok(idx) => {
+                                    host_commands::add_new_track_to_group(&mut app, idx, group_id);
+                                    *track_groups.lock().unwrap() = app.groups.clone();
                                     register_waveform_sample(path);
                                     current_track.store(idx, Ordering::Relaxed);
                                     let new_name = app.tracks[idx].clone();
@@ -6576,6 +6581,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
                                     sync_step_param_lists(rt, &state, idx);
                                     sync_track_mixer_state(rt, &app, &state);
+                                    sync_groups_bindings(rt, &app.groups);
                                     sync_bus_mixer_state(rt, &app);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
@@ -6667,6 +6673,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ));
                             continue;
                         };
+                        let group_id = extract_usize_from_payload(&payload, "group-id")
+                            .map(|group_id| group_id as u64);
                         let source = match sequencer::lisp_host::load_instrument_source(&name) {
                             Ok(source) => source,
                             Err(error) => {
@@ -6711,6 +6719,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         selected_steps: &selected_steps,
                                         accumulator_names: &accumulator_names,
                                         cached_track_peak_levels: &cached_track_peak_levels,
+                                        group_id,
+                                        track_groups: &track_groups,
                                         ui_epoch: &ui_epoch,
                                         lg_raw,
                                     },
@@ -6740,6 +6750,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             name: name.clone(),
                             source,
                             run_mode,
+                            group_id,
                             receiver: rx,
                         });
                         editor.handle_host_event(HostEvent::Status(format!(
@@ -9130,6 +9141,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 members: members.clone(),
                                 bus_id: bus.0,
                             });
+                            let selected_bus_index = app
+                                .buses
+                                .iter()
+                                .position(|candidate| candidate.id == bus)
+                                .expect("new group backing bus must be present in app buses");
                             selected_tracks.lock().unwrap().clear();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
@@ -9145,6 +9161,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ct,
                                 &HashSet::new(),
                             );
+                            let _ =
+                                rt.eval_str(&format!("(set! selected-bus {selected_bus_index})"));
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -12759,6 +12777,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "reorder-scene" => {
+                        let source = extract_usize_from_payload(&payload, "source");
+                        let target = extract_usize_from_payload(&payload, "target");
+                        match (source, target) {
+                            (Some(source), Some(target)) => {
+                                if app.state.reorder_scene(source, target).is_some() {
+                                    let rt = editor.runtime_mut();
+                                    sync_pattern_state(rt, &state);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Moved scene {} to {}",
+                                        source + 1,
+                                        target + 1
+                                    )));
+                                } else {
+                                    editor.handle_host_event(HostEvent::Status(
+                                        "Could not reorder scenes: scene index out of range"
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Could not reorder scenes: invalid drag payload".to_string(),
+                            )),
+                        }
+                    }
                     "propagate-current-track-to-all-patterns" => {
                         let track = match payload {
                             Value::Number(n) => n as usize,
@@ -15750,6 +15796,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 selected_steps: &selected_steps,
                                 accumulator_names: &accumulator_names,
                                 cached_track_peak_levels: &cached_track_peak_levels,
+                                group_id: pending.group_id,
+                                track_groups: &track_groups,
                                 ui_epoch: &ui_epoch,
                                 lg_raw,
                             },

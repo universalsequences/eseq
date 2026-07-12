@@ -388,6 +388,13 @@
 (def seq-delete-pattern ()
   (host-command "delete-pattern" (dict)))
 
+(def seq-reorder-scene-drop (event)
+  (let ((source (get (get event :payload) :scene))
+        (target (get (get event :target) :scene)))
+    (if (= source target)
+      nil
+      (host-command "reorder-scene" (dict :source source :target target)))))
+
 (def transport-icon-style
   (ui/style
     :pressed (dict
@@ -523,10 +530,17 @@
       (box :background "transport-btn-bg" :padding 0.2 :height 1.4
       (h-stack :gap 0.1 :align :center
         (each (range 0 SEQ.num-patterns) |i|
-          (box :width 2.5 :height 1.1 
+          (box :key (str "transport-scene-pill-" i)
+            :width 2.5 :height 1.1
             :background "pattern-pill-bg"
             :active (if (= i SEQ.current-pattern) 1 0)
             :style pattern-control-style
+            :drag-type "transport-scene"
+            :drag-payload (dict :scene i)
+            :drop-types (list "transport-scene")
+            :drop-meta (dict :scene i)
+            :drop-hover-border-color :mixer-strip-selected-border
+            :on-drop seq-reorder-scene-drop
             :on-click |x y r| (seq-switch-pattern i)
             (v-stack :align :center
               (label (fmt " {} " (+ i 1))

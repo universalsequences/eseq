@@ -71,6 +71,10 @@ pub struct TileLeaf {
     pub max_width: Option<f32>,
     /// Maximum tile height in cells.
     pub max_height: Option<f32>,
+    /// Fraction of the enforced minimum size that must be dragged through
+    /// before this pane collapses on pointer release.
+    pub collapse_threshold: Option<f32>,
+    pub on_collapse: Option<Value>,
     // Per-tile interaction state (moved from Editor)
     pub focused_widget_id: Option<u64>,
     pub focused_widget_node: Option<LayoutNode>,
@@ -115,6 +119,9 @@ pub struct TileSplit {
     pub dir: SplitDir,
     pub ratio: f32, // 0.0..1.0, portion for child `a`
     pub gap: f32,
+    /// Stable opt-in identity used to restore a user-resized ratio when a
+    /// declarative layout is rebuilt.
+    pub remember_key: Option<String>,
     pub a: Box<TileNode>,
     pub b: Box<TileNode>,
 }
@@ -180,6 +187,8 @@ impl TileLeaf {
             min_height: None,
             max_width: None,
             max_height: None,
+            collapse_threshold: None,
+            on_collapse: None,
             focused_widget_id: None,
             focused_widget_node: None,
             widget_scroll_top: 0.0,
@@ -650,6 +659,7 @@ impl TileNode {
                     dir,
                     ratio: 0.5,
                     gap: 0.0,
+                    remember_key: None,
                     a: Box::new(TileNode::Leaf(existing_leaf)),
                     b: Box::new(TileNode::Leaf(new_leaf)),
                 });

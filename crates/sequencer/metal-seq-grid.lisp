@@ -457,14 +457,42 @@
       0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)
       0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))))
 
+(def seq-collapsible-panel-layout-spec (buffer on-collapse min-width max-width min-height max-height)
+  (list :buf buffer
+    :hide-status true
+    :border-radius 12
+    :border-width 4
+    :background-color :buffer-bg
+    :min-width min-width
+    :max-width max-width
+    :min-height min-height
+    :max-height max-height
+    :collapse-threshold 0.25
+    :on-collapse on-collapse))
+
+(def seq-samples-panel-layout-spec (min-width max-width min-height max-height)
+  (seq-collapsible-panel-layout-spec "*samples*"
+    (lambda () (seq-hide-samples-sidebar))
+    min-width max-width min-height max-height))
+
+(def seq-mixer-panel-layout-spec (min-width max-width min-height max-height)
+  (seq-collapsible-panel-layout-spec "*mixer*"
+    (lambda () (seq-hide-mixer-panel))
+    min-width max-width min-height max-height))
+
+(def seq-fx-panel-layout-spec (min-width max-width min-height max-height)
+  (seq-collapsible-panel-layout-spec "*fx*"
+    (lambda () (seq-hide-fx-panel))
+    min-width max-width min-height max-height))
+
 (def seq-samples-sidebar-layout-spec ()
-  (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42))
+  (seq-samples-panel-layout-spec 34 42 nil nil))
 
 (def seq-main-and-mixer-layout-spec ()
   (if mixer-panel-visible
     (list :rows :gap 1
       0.55 (seq-step-and-track-panel-layout-spec)
-      0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 14 :max-height 14))
+      0.45 (seq-mixer-panel-layout-spec nil nil 14 14))
     (seq-step-and-track-panel-layout-spec)))
 
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
@@ -477,8 +505,11 @@
     (if lower-panel-visible
       (list :rows :gap 1
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-        0.95 main-layout
-        lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height))
+        0.95 (list :rows :gap 1 :remember (str "sequencer-lower-panel:" lower-buffer)
+          0.95 main-layout
+          lower-ratio (if (= lower-buffer "*fx*")
+            (seq-fx-panel-layout-spec nil nil lower-min-height lower-max-height)
+            (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height))))
       (list :rows :gap 1
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
         0.95 main-layout))))
@@ -486,26 +517,26 @@
 (def seq-patcher-bottom-bar-layout-spec ()
   (if (and samples-sidebar-visible mixer-panel-visible lower-panel-visible)
     (list :cols :gap 1
-      0.333 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
-      0.334 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
-      0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13))
+      0.333 (seq-samples-panel-layout-spec 28 28 13 13)
+      0.334 (seq-mixer-panel-layout-spec 25 30 13 13)
+      0.333 (seq-fx-panel-layout-spec nil nil 13 13))
     (if (and samples-sidebar-visible mixer-panel-visible)
       (list :cols :gap 1
-        0.5 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
-        0.5 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13))
+        0.5 (seq-samples-panel-layout-spec 28 28 13 13)
+        0.5 (seq-mixer-panel-layout-spec 25 30 13 13))
     (if samples-sidebar-visible
       (if lower-panel-visible
         (list :cols :gap 1
-          0.5 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
-          0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13))
-        (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13))
+          0.5 (seq-samples-panel-layout-spec 28 28 13 13)
+          0.5 (seq-fx-panel-layout-spec nil nil 13 13))
+        (seq-samples-panel-layout-spec 28 28 13 13))
       (if mixer-panel-visible
         (if lower-panel-visible
           (list :cols :gap 1
-            0.5 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
-            0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13))
-          (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13))
-        (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13))))))
+            0.5 (seq-mixer-panel-layout-spec 25 30 13 13)
+            0.5 (seq-fx-panel-layout-spec nil nil 13 13))
+          (seq-mixer-panel-layout-spec 25 30 13 13))
+        (seq-fx-panel-layout-spec nil nil 13 13))))))
 
 (def seq-patcher-bottom-bar-visible? ()
   (or samples-sidebar-visible mixer-panel-visible lower-panel-visible))
@@ -576,6 +607,28 @@
       (if (= lower-panel-buffer "*piano-roll*")
         (seq-apply-piano-roll-layout)
         (seq-apply-fx-layout)))))
+
+(def seq-hide-samples-sidebar ()
+  (if samples-sidebar-visible
+    (do
+      (set! samples-sidebar-visible false)
+      (seq-refresh-current-layout))
+    nil))
+
+(def seq-hide-mixer-panel ()
+  (if mixer-panel-visible
+    (do
+      (seq-sync-step-panel-buffer-from-current-window)
+      (set! mixer-panel-visible false)
+      (seq-refresh-current-layout))
+    nil))
+
+(def seq-hide-fx-panel ()
+  (if lower-panel-visible
+    (do
+      (set! lower-panel-visible false)
+      (seq-refresh-current-layout))
+    nil))
 
 (def seq-toggle-samples-sidebar ()
   (do

@@ -184,7 +184,7 @@
         (name (get payload :name))
         (track (get target :track)))
       (do
-        (mixer-v2-clear-delete-target)
+        (mixer-v2-select-track track)
         (if (= kind "builtin-audio-effect")
           (host-command "add-builtin-effect-to-track" (dict :track track :name name))
           (if (= kind "custom-audio-effect")
@@ -200,6 +200,20 @@
       (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
         (mixer-v2-drop-effect-on-track event)
         (status "Unsupported drop")))))
+
+(def mixer-v2-drop-effect-on-bus (event)
+  (let ((payload (get event :payload))
+      (target (get event :target)))
+    (let ((kind (get payload :kind))
+        (name (get payload :name))
+        (bus (get target :bus)))
+      (do
+        (mixer-v2-select-bus bus)
+        (if (= kind "builtin-audio-effect")
+          (host-command "add-builtin-bus-effect" (dict :bus bus :name name))
+          (if (= kind "custom-audio-effect")
+            (host-command "add-bus-effect" (dict :bus bus :name name))
+            (status "Drop an audio effect on a bus")))))))
 
 (defstate mixer-v2-pending-mod-source -1)
 (def mixer-v2-track-modulator? (i)
@@ -733,11 +747,19 @@
         1.0)
       :selected-background-color :fx-panel-header-selected-bg
       :on-click (lambda (event) (mixer-v2-track-label-click event i))
-      :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
-      (label (substring (nth SEQ.track-names i) 0 10)
+      :on-double-click (lambda (event) (seqv-open-piano-roll-for-track i))
+      (badge (substring (nth SEQ.track-names i) 0 10)
+        :key (str "mixer-v2-track-label-content-" i)
+        :icon (seq-track-type-icon i)
         :width 9.8
+        :height 1.0
+        :padding 0
         :font-size 10
         :h-align :center
+        :background-color :transparent
+        :border-color :transparent
+        :highlight-color :transparent
+        :shadow-color :transparent
         :color (if muted :dim :black)
         :active (mixer-v2-track-delete-target-binding i)
         :active-color :white
@@ -786,11 +808,19 @@
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (mixer-v2-track-label-click event i))
-          :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
-          (label (mixer-v2-track-collapsed-label i)
+          :on-double-click (lambda (event) (seqv-open-piano-roll-for-track i))
+          (badge (mixer-v2-track-collapsed-label i)
+            :key (str "mixer-v2-track-collapsed-label-content-" i)
+            :icon (seq-track-type-icon i)
             :width 3.65
+            :height 1.0
+            :padding 0
             :font-size 9
             :h-align :center
+            :background-color :transparent
+            :border-color :transparent
+            :highlight-color :transparent
+            :shadow-color :transparent
             :color (if muted :dim :black)
             :active (mixer-v2-track-delete-target-binding i)
             :active-color :white
@@ -870,12 +900,17 @@
 
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
-    (box :width 10.3 :height 13.0
+    (box :key (str "mixer-v2-bus-strip-" i)
+      :width 10.3 :height 13.0
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
       :corner-radius 10
       :border-color (mixer-v2-strip-border selected)
+      :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
+      :drop-types (list "audio-effect")
+      :drop-meta (dict :kind "bus" :bus i)
+      :on-drop (lambda (event) (mixer-v2-drop-effect-on-bus event))
       :on-click (lambda (event) (mixer-v2-select-bus i))
       (v-stack :gap 0.25
         (box :height 2.6)
@@ -981,10 +1016,17 @@
   (let ((group (nth SEQ.groups gidx))
       (c (mixer-v2-group-color gidx))
       (bus-idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
-    (box :width 9.0 :height 13.05
+    (box :key (str "mixer-v2-group-bus-strip-" bus-idx)
+      :width 9.0 :height 13.05
       :corner-radius 12
       :padding 0.0
       :background-color :mixer-strip-bg
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types (if (>= bus-idx 0)
+        (list "sample" "instrument" "audio-effect")
+        (list))
+      :drop-meta (dict :kind "bus" :bus bus-idx)
+      :on-drop (lambda (event) (mixer-v2-drop-on-group-header event gidx))
       (v-stack :gap 0.4 :align :center
         
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
@@ -997,18 +1039,47 @@
         (box :height 0.25)
         (mixer-v2-bus-mod-port-row (get group :bus-id))
         (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
+          :key (str "mixer-v2-group-badge-" (get group :id))
+          :on-click (lambda (event) (mixer-v2-select-group gidx))
           (h-stack :gap 0.2
             (button (if (get group :collapsed) "▸" "▾")
               :width 2.0 :height 0.9 :padding 0 :font-size 14
               :background-color '(rgba 0.1 0.1 0.1 0.5)
               :border-color '(rgba 0.8 0.8 0.8 0.9)
               :color :white
-              :on-click (lambda (event) (mixer-v2-toggle-group-collapsed (get group :id))))
+              :on-click (lambda (event)
+                (do
+                  (mixer-v2-select-group gidx)
+                  (mixer-v2-toggle-group-collapsed (get group :id)))))
             (label (substring (get group :name) 0 10)
               :font-size 11
               :h-align :center
               :color :black
               :bg :transparent))        )))))
+
+(def mixer-v2-drop-new-track-into-group (event gidx)
+  (let ((payload (get event :payload))
+      (group (nth SEQ.groups gidx)))
+    (let ((path (get payload :path))
+        (name (get payload :name))
+        (group-id (get group :id)))
+      (do
+        (mixer-v2-select-group gidx)
+        (if (= (get event :drag-type) "instrument")
+          (if name
+            (do
+              (set! sbrowser-loading-instrument-name name)
+              (host-command "add-track-instrument" (dict :name name :group-id group-id)))
+            (status "Drop an instrument, not a folder"))
+          (if path
+            (host-command "add-track-sample"
+              (dict :path path :group-id group-id :preserve-browser-context true))
+            (status "Drop a sample file, not a folder")))))))
+
+(def mixer-v2-drop-on-group-header (event gidx)
+  (if (= (get event :drag-type) "audio-effect")
+    (mixer-v2-drop-effect-on-bus event)
+    (mixer-v2-drop-new-track-into-group event gidx)))
 
 (def mixer-v2-group-member-strip (i)
   (if (seq-track-collapsed? i)

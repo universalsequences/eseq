@@ -3688,7 +3688,7 @@ where
 {
     let mut pending_invocations = vec![initial];
     let mut processed_invocations = 0usize;
-    while let Some(invocation) = pending_invocations.pop() {
+    while let Some(mut invocation) = pending_invocations.pop() {
         processed_invocations += 1;
         if processed_invocations > PROCESS_EVENT_CASCADE_LIMIT {
             if debug_accum || debug_routing_enabled() {
@@ -3701,6 +3701,9 @@ where
         }
         let invocation_beat = invocation.beat;
         let process_runtime_id = invocation.runtime_id;
+        if invocation.reads.conductor_observe_tracks.is_empty() {
+            invocation.reads = process_runtime.read_snapshot(invocation_beat);
+        }
         let Some(scratch) = scratch_runtime.as_mut() else {
             return true;
         };
@@ -3720,6 +3723,33 @@ where
                     );
                 }
             }
+        }
+    }
+    true
+}
+
+fn invoke_conductor_invocations(
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    invocations: Vec<crate::process::ProcessRunInvocation>,
+    debug_accum: bool,
+) -> bool {
+    for invocation in invocations {
+        if !invoke_process_cascade(
+            scratch_runtime,
+            process_runtime,
+            invocation,
+            debug_accum,
+            |_scratch, _runtime, runtime_id, commands| {
+                if !commands.is_empty() && (debug_accum || debug_routing_enabled()) {
+                    eprintln!(
+                        "[process] conductor {} produced unsupported step commands",
+                        runtime_id
+                    );
+                }
+            },
+        ) {
+            return false;
         }
     }
     true
@@ -5690,6 +5720,7 @@ struct SchedulerLookaheadState {
     neural_runtime: NeuralRuntime,
     generator_runtime: crate::generator::GeneratorRuntime,
     process_runtime: crate::process::ProcessRuntime,
+    resolved_read_pattern_epoch: Option<u64>,
     graph_manifests: Vec<crate::graph::GraphManifest>,
     graph_runtimes: Vec<crate::graph::GraphRuntime>,
     debug_graph_drive_chunks: u32,
@@ -5706,6 +5737,7 @@ impl SchedulerLookaheadState {
             neural_runtime: NeuralRuntime::default(),
             generator_runtime: crate::generator::GeneratorRuntime::default(),
             process_runtime: crate::process::ProcessRuntime::default(),
+            resolved_read_pattern_epoch: None,
             graph_manifests: Vec::new(),
             graph_runtimes: Vec::new(),
             debug_graph_drive_chunks: 0,
@@ -5846,6 +5878,25 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
     let mut track_output_events = Vec::new();
 
+    process_runtime.sync_step_process_aliases(
+        snapshot
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(track, snapshot)| (track, &snapshot.process_chain)),
+    );
+
+    let resolved_read_bases = vec![
+        std::array::from_fn(|index| StepParam::ALL[index].default_value());
+        snapshot.tracks.len()
+    ];
+    if scheduler.resolved_read_pattern_epoch != Some(pattern_epoch) {
+        process_runtime.reset_resolved_track_history(&resolved_read_bases);
+        scheduler.resolved_read_pattern_epoch = Some(pattern_epoch);
+    } else {
+        process_runtime.ensure_resolved_track_bases(&resolved_read_bases);
+    }
+
     let midi_fx_descriptors_for_scheduling = scratch_runtime
         .as_ref()
         .map(|runtime| runtime.midi_fx_descriptors())
@@ -5861,6 +5912,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let mut chunk_enqueued = true;
         let mut neural_reset_groups: Vec<(usize, f64)> = Vec::new();
         for trigger in &triggers {
+            process_runtime.record_track_step_boundary(trigger.track, trigger.absolute_beats);
             let step = &snapshot.tracks[trigger.track].steps[trigger.step];
             if !step.active || !step.neural_reset {
                 continue;
@@ -5875,6 +5927,30 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let mut neural_reset_group_idx = 0;
         for trigger in triggers {
             let trigger_sample_time = scheduled_until_sample + trigger.offset as u64;
+            let conductor_invocations =
+                process_runtime.take_conductor_invocations_before(trigger.absolute_beats);
+            if !invoke_conductor_invocations(
+                scratch_runtime,
+                process_runtime,
+                conductor_invocations,
+                debug_accum,
+            ) || !enqueue_due_process_emissions(
+                queue,
+                snapshot,
+                &mut track_output_events,
+                scratch_runtime,
+                midi_fx_quantizer_state,
+                process_runtime,
+                pattern_epoch,
+                chunk_start_beats,
+                scheduled_until_sample,
+                trigger.absolute_beats,
+                samples_per_quarter,
+                debug_accum,
+            ) {
+                chunk_enqueued = false;
+                break;
+            }
             process_neural_boundaries_until(
                 neural_runtime,
                 &mut neural_cursor_beats,
@@ -6265,6 +6341,15 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             let step_beats = trigger.samples_per_step / samples_per_quarter;
                             let mut accumulator_events = Vec::new();
                             if !output.suppressed && process_base_alive {
+                                process_runtime.record_track_fire(
+                                    trigger.track,
+                                    trigger.absolute_beats,
+                                    sample_time,
+                                    crate::process::resolved_values_from_step(
+                                        output.resolved,
+                                        &step_snapshot.params,
+                                    ),
+                                );
                                 let mut event_effect_params = output.effect_params.clone();
                                 let mut event_instrument_params =
                                     scheduled_instrument_params_from_vec(
@@ -6445,6 +6530,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 crate::accumulator::ActionBuffer::just(StepAction::Play(resolved))
             };
 
+            let mut recorded_track_fire = false;
             for action in actions.iter() {
                 if !process_base_alive {
                     continue;
@@ -6454,6 +6540,15 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     StepAction::SendToTrack { track, resolved } => (track, resolved),
                     StepAction::Silence => continue,
                 };
+                if !recorded_track_fire {
+                    process_runtime.record_track_fire(
+                        trigger.track,
+                        trigger.absolute_beats,
+                        sample_time,
+                        crate::process::resolved_values_from_step(resolved, &step_snapshot.params),
+                    );
+                    recorded_track_fire = true;
+                }
                 if target_track >= snapshot.tracks.len() {
                     continue;
                 }
@@ -6643,6 +6738,29 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if !chunk_enqueued {
                 break;
             }
+        }
+        if chunk_enqueued {
+            let conductor_invocations =
+                process_runtime.take_conductor_invocations_through(chunk_end_beats);
+            chunk_enqueued = invoke_conductor_invocations(
+                scratch_runtime,
+                process_runtime,
+                conductor_invocations,
+                debug_accum,
+            ) && enqueue_due_process_emissions(
+                queue,
+                snapshot,
+                &mut track_output_events,
+                scratch_runtime,
+                midi_fx_quantizer_state,
+                process_runtime,
+                pattern_epoch,
+                chunk_start_beats,
+                scheduled_until_sample,
+                chunk_end_beats,
+                samples_per_quarter,
+                debug_accum,
+            );
         }
         if !chunk_enqueued {
             break;
@@ -7505,13 +7623,13 @@ pub fn spawn_scheduler_thread(
 mod tests {
     use super::{
         apply_fit_to_scale_to_trigger, apply_neuron_output_overrides, delayed_step_sample_time,
-        enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, midi_fx_window_events_from_step,
-        quantized_live_tick_sample, reconcile_graph_runtimes, resolve_effect_params,
-        resolve_instrument_plocks, resolve_sampler_params, run_midi_fx_chain_for_track,
-        schedule_playing_lookahead, should_reload_neural_runtime, swung_network_sample_time,
-        track_active_note_spans_at_beat, track_note_spans_for_trigger, EmittedNetworkEventSource,
-        LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState, SchedulerLookaheadState,
-        SnapshotSequencerClock,
+        enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, invoke_process_cascade,
+        midi_fx_window_events_from_step, quantized_live_tick_sample, reconcile_graph_runtimes,
+        resolve_effect_params, resolve_instrument_plocks, resolve_sampler_params,
+        run_midi_fx_chain_for_track, schedule_playing_lookahead, should_reload_neural_runtime,
+        swung_network_sample_time, track_active_note_spans_at_beat, track_note_spans_for_trigger,
+        EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState,
+        SchedulerLookaheadState, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{
@@ -7543,6 +7661,7 @@ mod tests {
     use eseqlisp::Runtime;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn test_resolved_step() -> ResolvedStep {
         ResolvedStep {
@@ -9343,6 +9462,122 @@ mod tests {
             .expect("scheduler process accumulator harness panicked")
     }
 
+    fn project_performance_cascade_fixture(
+        cache_enabled: bool,
+    ) -> (
+        Arc<SequencerState>,
+        Option<lisp_host::ScratchControlRuntime>,
+        crate::process::ProcessRuntime,
+    ) {
+        const TRACKS: usize = 4;
+        let state = Arc::new(SequencerState::new(
+            TRACKS,
+            (0..TRACKS).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        for track in 0..TRACKS {
+            state.pattern.track_params[track].set_num_steps(16);
+            for step in 0..16 {
+                state.pattern.patterns[track].set_step_active(step, true);
+            }
+        }
+
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            (0..TRACKS).map(|_| Vec::new()).collect(),
+            (0..TRACKS)
+                .map(|_| EffectDescriptor::builtin_sampler())
+                .collect(),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-project-performance-lanes-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&script_path)
+            .expect("read project process performance lanes demo");
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate project process performance lanes demo");
+        scratch.set_process_run_cache_enabled(cache_enabled);
+
+        let mut process_runtime = crate::process::ProcessRuntime::default();
+        process_runtime.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        (state, Some(scratch), process_runtime)
+    }
+
+    fn run_project_performance_cascade_pass(
+        state: &SequencerState,
+        scratch: &mut Option<lisp_host::ScratchControlRuntime>,
+        process_runtime: &mut crate::process::ProcessRuntime,
+        cycle: u64,
+    ) -> usize {
+        let mut invocation_count = 0;
+        for step in 0..16 {
+            for track in 0..4 {
+                let chain = state
+                    .composed_track_process_chain(track)
+                    .expect("composed project process chain");
+                for slot in &chain.slots {
+                    let Some(invocation) = process_runtime.step_process_invocation(
+                        slot,
+                        crate::process::ProcessStepRunContext {
+                            track,
+                            step,
+                            cycle,
+                            beat: cycle as f64 * 4.0 + step as f64 * 0.25,
+                            sample_time: cycle * 96_000 + step as u64 * 6_000,
+                            step_beats: 0.25,
+                            resolved: test_resolved_step(),
+                            event: Value::Nil,
+                        },
+                    ) else {
+                        continue;
+                    };
+                    invocation_count += 1;
+                    assert!(invoke_process_cascade(
+                        scratch,
+                        process_runtime,
+                        invocation,
+                        false,
+                        |_, _, _, _| {},
+                    ));
+                }
+            }
+        }
+        invocation_count
+    }
+
+    fn profile_project_performance_cascade(cache_enabled: bool) -> (Duration, usize) {
+        let (state, mut scratch, mut process_runtime) =
+            project_performance_cascade_fixture(cache_enabled);
+        let warmup_invocations =
+            run_project_performance_cascade_pass(&state, &mut scratch, &mut process_runtime, 0);
+        let started = Instant::now();
+        let measured_invocations =
+            run_project_performance_cascade_pass(&state, &mut scratch, &mut process_runtime, 1);
+        assert_eq!(warmup_invocations, measured_invocations);
+        (started.elapsed(), measured_invocations)
+    }
+
+    #[test]
+    #[ignore = "manual release-mode performance profile"]
+    fn profile_invoke_process_cascade_project_performance_lanes() {
+        let (uncached, uncached_invocations) = profile_project_performance_cascade(false);
+        let (cached, cached_invocations) = profile_project_performance_cascade(true);
+        assert_eq!(uncached_invocations, 128);
+        assert_eq!(cached_invocations, uncached_invocations);
+        let speedup = uncached.as_secs_f64() / cached.as_secs_f64();
+        eprintln!(
+            "invoke_process_cascade profile: invocations={} uncached={:?} cached={:?} speedup={:.2}x",
+            cached_invocations, uncached, cached, speedup
+        );
+        assert!(
+            speedup >= 10.0,
+            "expected at least 10x invoke_process_cascade speedup, measured {speedup:.2}x"
+        );
+    }
+
     fn schedule_process_fixture(
         state: &Arc<SequencerState>,
         scratch: lisp_host::ScratchControlRuntime,
@@ -9514,6 +9749,437 @@ mod tests {
             track_transposes(1),
             vec![11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0],
             "track 1 = project counter + its own accumulator"
+        );
+    }
+
+    #[test]
+    fn scheduler_resolved_track_read_uses_previous_tick_not_trigger_visit_order() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            for track in 0..2 {
+                state.pattern.track_params[track].set_num_steps(4);
+                for step in 0..4 {
+                    state.pattern.patterns[track].set_step_active(step, true);
+                }
+            }
+            for (step, transpose) in [2.0, 4.0, 6.0, 8.0].into_iter().enumerate() {
+                state.set_step_param(0, step, StepParam::Transpose, transpose);
+            }
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![
+                    EffectDescriptor::builtin_sampler(),
+                    EffectDescriptor::builtin_sampler(),
+                ],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process follow-previous-source
+                      :target (step-param :transpose)
+                      :run (target-add! (read (track 0 :transpose))))
+                    (processes :track 1 (follow-previous-source))
+                    "#,
+                )
+                .expect("define previous-tick track reader");
+
+            schedule_process_observed_fixture(&state, scratch, 54_000)
+        });
+
+        let track_transposes = |track: usize| {
+            events
+                .iter()
+                .filter(|event| event.track == track)
+                .take(4)
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(track_transposes(0), vec![2.0, 4.0, 6.0, 8.0]);
+        assert_eq!(
+            track_transposes(1),
+            vec![0.0, 2.0, 4.0, 6.0],
+            "track 1 must not observe track 0's same-boundary value even though track 0 sorts first"
+        );
+    }
+
+    #[test]
+    fn scheduler_resolved_track_read_repeats_across_pattern_cycles() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            for track in 0..2 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.set_step_param(0, 0, StepParam::Transpose, 7.0);
+            state.pattern.patterns[1].set_step_active(4, true);
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![
+                    EffectDescriptor::builtin_sampler(),
+                    EffectDescriptor::builtin_sampler(),
+                ],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process repeat-current-source
+                      :target (step-param :transpose)
+                      :run (target-add! (read (track 0 :transpose))))
+                    (processes :track 1 (repeat-current-source))
+                    "#,
+                )
+                .expect("define repeating current-value reader");
+
+            schedule_process_observed_fixture(&state, scratch, 108_000)
+        });
+
+        let reader = events
+            .iter()
+            .filter(|event| event.track == 1)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(reader, vec![7.0, 7.0], "reader must repeat every cycle");
+    }
+
+    #[test]
+    fn phase7_demo_trigger_history_reader_repeats_across_pattern_cycles() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            for track in 0..2 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.set_step_param(0, 0, StepParam::Transpose, 7.0);
+            // UI step #3 is zero-based scheduler step 2, where the demo's
+            // `:trigs-ago 1` amount lane is active.
+            state.pattern.patterns[1].set_step_active(2, true);
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![
+                    EffectDescriptor::builtin_sampler(),
+                    EffectDescriptor::builtin_sampler(),
+                ],
+                0,
+                0,
+            );
+            let script_path = format!(
+                "{}/scripts/process-phase7-reads-demo.lisp",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let source = std::fs::read_to_string(&script_path).expect("read Phase 7 reads demo");
+            scratch
+                .eval_source_at_path(script_path, &source)
+                .expect("evaluate Phase 7 reads demo");
+
+            schedule_process_observed_fixture(&state, scratch, 108_000)
+        });
+
+        let reader = events
+            .iter()
+            .filter(|event| event.track == 1)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reader,
+            vec![7.0, 7.0],
+            "the demo's UI step #3 trigger-history reader must repeat every cycle"
+        );
+    }
+
+    #[test]
+    fn scheduler_fields_are_previous_tick_typed_and_independently_interpreted() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                4,
+                (0..4).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for track in 0..4 {
+                state.pattern.track_params[track].set_num_steps(2);
+                for step in 0..2 {
+                    state.pattern.patterns[track].set_step_active(step, true);
+                }
+            }
+            for track in 1..4 {
+                for step in 0..2 {
+                    state.set_step_param(track, step, StepParam::Transpose, 2.0);
+                }
+            }
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 4],
+                vec![EffectDescriptor::builtin_sampler(); 4],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("load builtin process library");
+            scratch
+                .eval(
+                    r#"
+                    (def-process harmony-publisher
+                      :run (suggest :harmony
+                             (pitch-field (list 0 4 7) :root 0 :weight 1)))
+                    (processes :track 0 (harmony-publisher))
+                    (processes :track 1
+                      (follow-harmony :listen :harmony :amount 1 :grace 0))
+                    (processes :track 2
+                      (follow-harmony :listen :harmony :amount 0.5 :grace 0))
+                    (processes :track 3
+                      (follow-harmony :listen :missing :amount 1 :grace 0))
+                    "#,
+                )
+                .expect("attach typed field publisher and listeners");
+
+            schedule_process_observed_fixture(&state, scratch, 18_000)
+        });
+
+        let track_transposes = |track: usize| {
+            events
+                .iter()
+                .filter(|event| event.track == track)
+                .take(2)
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            track_transposes(1),
+            vec![2.0, 0.0],
+            "same-tick publication is hidden; next tick follows the pitch field fully"
+        );
+        assert_eq!(
+            track_transposes(2),
+            vec![2.0, 1.0],
+            "each listener applies its own obedience amount"
+        );
+        assert_eq!(
+            track_transposes(3),
+            vec![2.0, 2.0],
+            "a missing publisher must remain inert"
+        );
+    }
+
+    #[test]
+    fn scheduler_response_phrase_uses_note_count_delay_and_timebase_lanes() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for track in 0..3 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[0].set_step_active(1, true);
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 3],
+                vec![EffectDescriptor::builtin_sampler(); 3],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("load builtin process library");
+            scratch
+                .eval(
+                    r#"
+                    (def-process response-test-publisher
+                      :run (suggest :harmony
+                             (pitch-field (list 0 4 7) :root 0 :weight 1)))
+                    (def-process response-test-player
+                      :in ((listen :field :default :harmony)
+                           (target :track :default 2)
+                           (num-notes :int 0 8 :default 0 :lane true)
+                           (play-delay :int 0 16 :default 1 :lane true)
+                           (timebase :int 0 12 :default 4 :lane true))
+                      :run (let ((field (hear (in :listen))))
+                             (if field
+                               (let ((pitches (field-pitches field))
+                                     (spacing (* (in :play-delay)
+                                                 (timebase-beats (in :timebase)))))
+                                 (map (lambda (i)
+                                        (emit :track (in :target)
+                                              :after (* (+ i 1) spacing)
+                                              :note (nth pitches (mod i (len pitches)))
+                                              :vel 0.75
+                                              :duration 0.5))
+                                      (range 0 (in :num-notes))))
+                               nil)))
+                    (processes :track 0
+                      (response-test-publisher)
+                      (response-test-player
+                        :listen :harmony
+                        :target 2
+                        :num-notes (lane 2 2)
+                        :play-delay (lane 2 2)
+                        :timebase (lane 4 4)))
+                    "#,
+                )
+                .expect("attach lane-driven response phrase");
+
+            schedule_process_observed_fixture(&state, scratch, 42_000)
+        });
+
+        let responses = events
+            .iter()
+            .filter(|event| event.track == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses
+                .iter()
+                .map(|event| event.sample_time)
+                .collect::<Vec<_>>(),
+            // The harness's process-emission chunk begins at sample 1. At
+            // 120 BPM / 48 kHz, the second call is beat 0.25, then +0.5 and
+            // +1.0 beats land at samples 18_001 and 30_001 respectively.
+            vec![18_001, 30_001],
+            "delay=2 at a sixteenth-note timebase must place replies at +1/8 and +1/4"
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>(),
+            vec![0.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn scheduler_conductor_runs_once_after_coincident_observed_tracks_resolve() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for track in 0..3 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[1].set_step_active(0, true);
+            state.set_step_param(0, 0, StepParam::Transpose, 3.0);
+            state.set_step_param(1, 0, StepParam::Transpose, 7.0);
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 3],
+                vec![EffectDescriptor::builtin_sampler(); 3],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"
+                    (def-process sum-conductor
+                      :run (emit
+                             :track (nth (play-tracks) 0)
+                             :note (+ (read (track 0 :transpose))
+                                      (read (track 1 :transpose)))
+                             :vel 0.8
+                             :duration 0.5))
+                    (def sum-conductor-h
+                      (processes :observe (list 0 1) :play (list 2)
+                        (sum-conductor)))
+                    "#,
+                )
+                .expect("attach multi-track conductor");
+
+            let authored = scratch.process_authoring_snapshot();
+            assert_eq!(authored.conductors.len(), 1);
+            assert_eq!(authored.conductors[0].observe_tracks, vec![0, 1]);
+            assert_eq!(authored.conductors[0].play_tracks, vec![2]);
+
+            schedule_process_observed_fixture(&state, scratch, 30_000)
+        });
+
+        let conductor_events = events
+            .iter()
+            .filter(|event| event.track == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            conductor_events.len(),
+            1,
+            "coincident observed tracks must wake one conductor instance once"
+        );
+        assert_eq!(conductor_events[0].transpose, 10.0);
+    }
+
+    #[test]
+    fn scheduler_conductor_demo_spreads_delayed_harmony_by_density() {
+        let events = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                4,
+                (0..4).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for track in 0..4 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            state.pattern.patterns[0].set_step_active(0, true);
+            state.pattern.patterns[1].set_step_active(0, true);
+            state.pattern.patterns[0].set_step_active(1, true);
+            state.pattern.patterns[1].set_step_active(1, true);
+            for step in 0..2 {
+                state.set_step_param(0, step, StepParam::Transpose, 3.0);
+                state.set_step_param(1, step, StepParam::Transpose, 7.0);
+            }
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 4],
+                vec![EffectDescriptor::builtin_sampler(); 4],
+                0,
+                0,
+            );
+            let script_path = format!(
+                "{}/scripts/process-conductor-demo.lisp",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
+            scratch
+                .eval_source_at_path(script_path, &source)
+                .expect("evaluate conductor demo");
+
+            schedule_process_observed_fixture(&state, scratch, 42_000)
+        });
+
+        let responses = events
+            .iter()
+            .filter(|event| (2..=3).contains(&event.track))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            responses
+                .iter()
+                .map(|event| (event.track, event.sample_time, event.transpose))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, 18_001, 3.0),
+                (3, 18_001, 7.0),
+                (2, 30_001, 7.0),
+                (3, 30_001, 10.0),
+            ],
+            "the second sparse call should turn the prior suggestion into two delayed phrases"
         );
     }
 

@@ -4,7 +4,8 @@
 //! state: process instances, clocks, channels, patches, and pending process
 //! emissions. It deliberately does not evaluate Lisp.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use eseqlisp::vm::Value;
 use serde::{Deserialize, Serialize};
@@ -15,8 +16,75 @@ use crate::lisp_host::EmittedAccumulatorEvent;
 use crate::neural::ParamNodeId;
 use crate::neural::{process_grid_boundaries, GridBoundaryClock};
 use crate::scheduled_event::StepEvent;
+use crate::sequencer::{StepParam, NUM_PARAMS};
 
 pub const DEFAULT_PROCESS_PORT: &str = "__default";
+/// Exact retained depth for both grid-step and fired-trigger reads. Keeping a
+/// fixed, documented window makes scheduler memory independent of authored
+/// process input while covering sixteen bars at sixteenth-note resolution.
+pub const PROCESS_READ_HISTORY_DEPTH: usize = 256;
+
+pub type ProcessResolvedValues = [f32; NUM_PARAMS];
+
+#[derive(Clone, Debug, Default)]
+pub struct ProcessTrackReadSnapshot {
+    pub current: ProcessResolvedValues,
+    /// Newest boundary first; index `n` implements `:steps-ago n`.
+    pub steps: Vec<ProcessResolvedValues>,
+    /// Newest fired trigger first; index `n` implements `:trigs-ago n`.
+    pub trigs: Vec<ProcessResolvedValues>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProcessReadSnapshot {
+    pub tracks: Arc<Vec<ProcessTrackReadSnapshot>>,
+    pub process_values: HashMap<String, HashMap<String, Value>>,
+    pub channels: HashMap<String, Value>,
+    pub fields: HashMap<String, Value>,
+    pub conductor_observe_tracks: Vec<usize>,
+    pub conductor_play_tracks: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct TimedResolvedValues {
+    beat: f64,
+    values: ProcessResolvedValues,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedTrackHistory {
+    base: ProcessResolvedValues,
+    current: ProcessResolvedValues,
+    steps: VecDeque<TimedResolvedValues>,
+    trigs: VecDeque<TimedResolvedValues>,
+}
+
+impl ResolvedTrackHistory {
+    fn new(base: ProcessResolvedValues) -> Self {
+        Self {
+            base,
+            current: base,
+            steps: VecDeque::new(),
+            trigs: VecDeque::new(),
+        }
+    }
+}
+
+pub fn resolved_values_from_step(
+    resolved: ResolvedStep,
+    step_params: &[f32; NUM_PARAMS],
+) -> ProcessResolvedValues {
+    let mut values = *step_params;
+    values[StepParam::Duration.index()] = resolved.duration;
+    values[StepParam::Velocity.index()] = resolved.velocity;
+    values[StepParam::Speed.index()] = resolved.speed;
+    values[StepParam::AuxA.index()] = resolved.aux_a;
+    values[StepParam::AuxB.index()] = resolved.aux_b;
+    values[StepParam::Transpose.index()] = resolved.transpose;
+    values[StepParam::Pan.index()] = resolved.pan;
+    values[StepParam::Chop.index()] = resolved.chop;
+    values
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProcessTimeExpr {
@@ -37,7 +105,9 @@ impl ProcessTimeExpr {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct ProcessInstanceId(pub u64);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +117,7 @@ pub enum ProcessInletKind {
     Int,
     Gate,
     Track,
+    Field,
     Any,
 }
 
@@ -367,8 +438,7 @@ pub struct TrackProcessChain {
 }
 
 /// Forked lanes for one track, keyed by durable project-slot identity and inlet.
-pub type ProjectLaneOverrides =
-    BTreeMap<ProcessInstanceId, BTreeMap<String, ProcessLane>>;
+pub type ProjectLaneOverrides = BTreeMap<ProcessInstanceId, BTreeMap<String, ProcessLane>>;
 
 pub fn project_slot_identity_id(slot: &TrackProcessSlot) -> ProcessInstanceId {
     ProcessInstanceId(if let Some(name) = slot.instance_name.as_deref() {
@@ -659,12 +729,20 @@ pub struct AuthoredPatch {
     pub target: ProcessTargetRef,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthoredConductorAttachment {
+    pub process_handle_id: AuthoredHandleId,
+    pub observe_tracks: Vec<usize>,
+    pub play_tracks: Vec<usize>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ProcessAuthoringSnapshot {
     pub defs: Vec<ProcessDef>,
     pub instances: Vec<AuthoredProcessInstance>,
     pub channels: Vec<AuthoredChannel>,
     pub patches: Vec<AuthoredPatch>,
+    pub conductors: Vec<AuthoredConductorAttachment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -744,6 +822,7 @@ pub struct PublishedProcessAuthoringSnapshot {
     pub instances: Vec<PublishedAuthoredProcessInstance>,
     pub channels: Vec<PublishedAuthoredChannel>,
     pub patches: Vec<AuthoredPatch>,
+    pub conductors: Vec<AuthoredConductorAttachment>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -900,6 +979,7 @@ impl ProcessAuthoringSnapshot {
                 })
                 .collect::<Result<Vec<_>, String>>()?,
             patches: self.patches.clone(),
+            conductors: self.conductors.clone(),
         })
     }
 }
@@ -930,6 +1010,7 @@ impl PublishedProcessAuthoringSnapshot {
             && self.instances.is_empty()
             && self.channels.is_empty()
             && self.patches.is_empty()
+            && self.conductors.is_empty()
     }
 
     pub fn to_runtime(&self) -> ProcessAuthoringSnapshot {
@@ -1003,6 +1084,7 @@ impl PublishedProcessAuthoringSnapshot {
                 })
                 .collect(),
             patches: self.patches.clone(),
+            conductors: self.conductors.clone(),
         }
     }
 }
@@ -1043,6 +1125,11 @@ pub fn merge_authoring_snapshots(
         base.channels.push(channel);
     }
     base.patches.extend(overlay.patches);
+    for conductor in overlay.conductors {
+        base.conductors
+            .retain(|entry| entry.process_handle_id != conductor.process_handle_id);
+        base.conductors.push(conductor);
+    }
     base
 }
 
@@ -1070,6 +1157,13 @@ struct ChannelState {
     name: String,
     value: Option<Value>,
     message_only: bool,
+    field_publications: VecDeque<TimedFieldValue>,
+}
+
+#[derive(Clone, Debug)]
+struct TimedFieldValue {
+    beat: f64,
+    value: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -1083,6 +1177,7 @@ pub struct ProcessRunInvocation {
     pub event: Option<Value>,
     pub step_context: Option<ProcessStepEventContext>,
     pub ports: Vec<ProcessPortDef>,
+    pub reads: ProcessReadSnapshot,
     pub seed: u64,
 }
 
@@ -1214,7 +1309,21 @@ pub struct ProcessRuntime {
     step_process_states: HashMap<ProcessInstanceId, HashMap<String, Value>>,
     step_process_runtime_ids: HashSet<u64>,
     pending_step_inlet_writes: HashMap<(usize, ProcessInstanceId, String), Vec<ProcessInletWrite>>,
+    resolved_track_history: Vec<ResolvedTrackHistory>,
+    resolved_track_snapshot_cache: Option<(u64, Arc<Vec<ProcessTrackReadSnapshot>>)>,
+    /// Named aliases are exact. Class aliases are retained only while unique;
+    /// ambiguous class reads resolve inertly instead of selecting by visit order.
+    step_process_aliases: HashMap<String, Option<u64>>,
+    conductors: Vec<AuthoredConductorAttachment>,
+    pending_conductor_ticks: VecDeque<PendingConductorTick>,
     global_transpose: f32,
+}
+
+#[derive(Clone, Debug)]
+struct PendingConductorTick {
+    beat: f64,
+    sample_time: u64,
+    fired_tracks: HashSet<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -1233,9 +1342,283 @@ impl ProcessRuntime {
         self.global_transpose
     }
 
+    /// Rebuild process-read aliases from the scheduler's current effective
+    /// chains. Alias uniqueness is a property of the whole snapshot, not of
+    /// whichever slot happened to fire most recently.
+    pub fn sync_step_process_aliases<'a>(
+        &mut self,
+        chains: impl IntoIterator<Item = (usize, &'a TrackProcessChain)>,
+    ) {
+        fn register_alias(
+            aliases: &mut HashMap<String, Option<u64>>,
+            alias: &str,
+            runtime_id: u64,
+        ) {
+            aliases
+                .entry(alias.to_string())
+                .and_modify(|existing| {
+                    if *existing != Some(runtime_id) {
+                        *existing = None;
+                    }
+                })
+                .or_insert(Some(runtime_id));
+        }
+
+        let mut aliases = HashMap::new();
+        let mut runtime_ids = HashSet::new();
+        for (track, chain) in chains {
+            for slot in chain.slots.iter().filter(|slot| slot.enabled) {
+                let runtime_id = track_process_slot_runtime_id(slot, track).0;
+                runtime_ids.insert(runtime_id);
+                if let Some(name) = slot.instance_name.as_deref() {
+                    register_alias(&mut aliases, name, runtime_id);
+                }
+                register_alias(&mut aliases, &slot.class_name, runtime_id);
+            }
+        }
+        self.step_process_aliases = aliases;
+        self.step_process_runtime_ids = runtime_ids;
+    }
+
+    pub fn ensure_resolved_track_bases(&mut self, bases: &[ProcessResolvedValues]) {
+        let old_len = self.resolved_track_history.len();
+        if self.resolved_track_history.len() > bases.len() {
+            self.resolved_track_history.truncate(bases.len());
+        }
+        for (track, base) in bases.iter().copied().enumerate() {
+            if let Some(history) = self.resolved_track_history.get_mut(track) {
+                history.base = base;
+                continue;
+            }
+            self.resolved_track_history
+                .push(ResolvedTrackHistory::new(base));
+        }
+        if old_len != self.resolved_track_history.len() {
+            self.resolved_track_snapshot_cache = None;
+        }
+    }
+
+    /// Reset all resolved reads to pattern base values. This is intentionally
+    /// separate from transport realignment: stop/start preserves musical state,
+    /// while a pattern change follows the default accumulator reset policy.
+    pub fn reset_resolved_track_history(&mut self, bases: &[ProcessResolvedValues]) {
+        self.resolved_track_history = bases
+            .iter()
+            .copied()
+            .map(ResolvedTrackHistory::new)
+            .collect();
+        self.resolved_track_snapshot_cache = None;
+        for channel in self.channels.values_mut() {
+            channel.field_publications.clear();
+        }
+    }
+
+    pub fn record_track_step_boundary(&mut self, track: usize, beat: f64) {
+        let Some(history) = self.resolved_track_history.get_mut(track) else {
+            return;
+        };
+        history.steps.push_back(TimedResolvedValues {
+            beat,
+            values: history.current,
+        });
+        while history.steps.len() > PROCESS_READ_HISTORY_DEPTH {
+            history.steps.pop_front();
+        }
+        if self
+            .resolved_track_snapshot_cache
+            .as_ref()
+            .is_some_and(|(cached_beat, _)| beat <= f64::from_bits(*cached_beat) + 1e-9)
+        {
+            self.resolved_track_snapshot_cache = None;
+        }
+    }
+
+    pub fn record_track_fire(
+        &mut self,
+        track: usize,
+        beat: f64,
+        sample_time: u64,
+        values: ProcessResolvedValues,
+    ) {
+        let Some(history) = self.resolved_track_history.get_mut(track) else {
+            return;
+        };
+        history.current = values;
+        history
+            .trigs
+            .push_back(TimedResolvedValues { beat, values });
+        while history.trigs.len() > PROCESS_READ_HISTORY_DEPTH {
+            history.trigs.pop_front();
+        }
+        if self
+            .resolved_track_snapshot_cache
+            .as_ref()
+            .is_some_and(|(cached_beat, _)| beat < f64::from_bits(*cached_beat) - 1e-9)
+        {
+            self.resolved_track_snapshot_cache = None;
+        }
+        if self
+            .conductors
+            .iter()
+            .any(|conductor| conductor.observe_tracks.contains(&track))
+        {
+            if let Some(tick) = self
+                .pending_conductor_ticks
+                .iter_mut()
+                .find(|tick| (tick.beat - beat).abs() <= 1e-9)
+            {
+                tick.sample_time = tick.sample_time.max(sample_time);
+                tick.fired_tracks.insert(track);
+            } else {
+                self.pending_conductor_ticks
+                    .push_back(PendingConductorTick {
+                        beat,
+                        sample_time,
+                        fired_tracks: HashSet::from([track]),
+                    });
+            }
+        }
+    }
+
+    pub fn read_snapshot(&mut self, before_beat: f64) -> ProcessReadSnapshot {
+        // Strictly earlier beats enforce the previous-tick rule even when the
+        // scheduler happens to visit the publishing track first at a shared
+        // sample boundary.
+        let trig_is_visible = |beat: f64| beat < before_beat - 1e-9;
+        // A boundary at the invocation beat contains the value held through
+        // the step that just ended, so it is part of previous-step state.
+        let step_is_visible = |beat: f64| beat <= before_beat + 1e-9;
+        let cache_key = before_beat.to_bits();
+        let tracks = if let Some((_, tracks)) = self
+            .resolved_track_snapshot_cache
+            .as_ref()
+            .filter(|(beat, _)| *beat == cache_key)
+        {
+            Arc::clone(tracks)
+        } else {
+            let tracks = Arc::new(
+                self.resolved_track_history
+                    .iter()
+                    .map(|history| {
+                        let trigs = history
+                            .trigs
+                            .iter()
+                            .rev()
+                            .filter(|entry| trig_is_visible(entry.beat))
+                            .map(|entry| entry.values)
+                            .collect::<Vec<_>>();
+                        let current = trigs.first().copied().unwrap_or(history.base);
+                        let steps = history
+                            .steps
+                            .iter()
+                            .rev()
+                            .filter(|entry| step_is_visible(entry.beat))
+                            .map(|entry| entry.values)
+                            .collect::<Vec<_>>();
+                        ProcessTrackReadSnapshot {
+                            current,
+                            steps,
+                            trigs,
+                        }
+                    })
+                    .collect(),
+            );
+            self.resolved_track_snapshot_cache = Some((cache_key, Arc::clone(&tracks)));
+            tracks
+        };
+        let channels = self
+            .channels
+            .iter()
+            .filter_map(|(name, channel)| channel.value.clone().map(|value| (name.clone(), value)))
+            .collect();
+        let fields = self
+            .channels
+            .iter()
+            .filter_map(|(name, channel)| {
+                channel
+                    .field_publications
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.beat < before_beat - 1e-9)
+                    .map(|entry| (name.clone(), entry.value.clone()))
+            })
+            .collect();
+        let mut process_values = HashMap::new();
+        let mut standalone_class_counts = HashMap::<&str, usize>::new();
+        for instance in &self.instances {
+            *standalone_class_counts
+                .entry(instance.class_name.as_str())
+                .or_default() += 1;
+        }
+        for instance in &self.instances {
+            let mut values = instance.state.clone();
+            values.extend(instance.outlets.clone());
+            if let Some(name) = instance.name.as_ref() {
+                process_values.insert(name.clone(), values.clone());
+            }
+            if standalone_class_counts
+                .get(instance.class_name.as_str())
+                .copied()
+                == Some(1)
+            {
+                process_values.insert(instance.class_name.clone(), values);
+            }
+        }
+        for (alias, runtime_id) in &self.step_process_aliases {
+            let Some(runtime_id) = runtime_id else {
+                continue;
+            };
+            if let Some(state) = self
+                .step_process_states
+                .get(&ProcessInstanceId(*runtime_id))
+            {
+                process_values.insert(alias.clone(), state.clone());
+            }
+        }
+        ProcessReadSnapshot {
+            tracks,
+            process_values,
+            channels,
+            fields,
+            conductor_observe_tracks: Vec::new(),
+            conductor_play_tracks: Vec::new(),
+        }
+    }
+
+    pub fn conductor_read_snapshot(
+        &mut self,
+        beat: f64,
+        observe_tracks: &[usize],
+        play_tracks: &[usize],
+    ) -> ProcessReadSnapshot {
+        let mut snapshot = self.read_snapshot(beat);
+        let tracks = Arc::make_mut(&mut snapshot.tracks);
+        for track in observe_tracks {
+            let (Some(history), Some(track_snapshot)) = (
+                self.resolved_track_history.get(*track),
+                tracks.get_mut(*track),
+            ) else {
+                continue;
+            };
+            let trigs = history
+                .trigs
+                .iter()
+                .rev()
+                .filter(|entry| entry.beat <= beat + 1e-9)
+                .map(|entry| entry.values)
+                .collect::<Vec<_>>();
+            track_snapshot.current = trigs.first().copied().unwrap_or(history.base);
+            track_snapshot.trigs = trigs;
+        }
+        snapshot.conductor_observe_tracks = observe_tracks.to_vec();
+        snapshot.conductor_play_tracks = play_tracks.to_vec();
+        snapshot
+    }
+
     pub fn reset_transport(&mut self, total_beats: f64) {
         self.pending_events.clear();
         self.pending_step_inlet_writes.clear();
+        self.pending_conductor_ticks.clear();
         for instance in &mut self.instances {
             if let Some(clock) = &mut instance.clock {
                 clock.realign(total_beats);
@@ -1246,6 +1629,7 @@ impl ProcessRuntime {
     pub fn clear_scene_pending(&mut self) {
         self.pending_events.clear();
         self.pending_step_inlet_writes.clear();
+        self.pending_conductor_ticks.clear();
     }
 
     pub fn defer_step_process_inlet_write(
@@ -1301,6 +1685,7 @@ impl ProcessRuntime {
         self.sync_channels(authoring.channels);
         self.sync_instances(authoring.instances, total_beats);
         self.patches = authoring.patches;
+        self.conductors = authoring.conductors;
     }
 
     fn sync_channels(&mut self, channels: Vec<AuthoredChannel>) {
@@ -1310,15 +1695,17 @@ impl ProcessRuntime {
                 continue;
             };
             let existing = self.channels.remove(&name);
-            let value = existing
-                .and_then(|existing| existing.value)
-                .or(channel.initial.clone());
+            let (value, field_publications) = existing
+                .map(|existing| (existing.value, existing.field_publications))
+                .unwrap_or_default();
+            let value = value.or(channel.initial.clone());
             next.insert(
                 name.clone(),
                 ChannelState {
                     name,
                     value,
                     message_only: channel.message_only,
+                    field_publications,
                 },
             );
         }
@@ -1471,6 +1858,7 @@ impl ProcessRuntime {
                     event: None,
                     step_context: None,
                     ports: ports.clone(),
+                    reads: ProcessReadSnapshot::default(),
                     seed: process_rng_seed(
                         instance.runtime_id,
                         seed_policy,
@@ -1508,6 +1896,7 @@ impl ProcessRuntime {
                         event: None,
                         step_context: None,
                         ports: ports.clone(),
+                        reads: ProcessReadSnapshot::default(),
                         seed: process_rng_seed(
                             runtime_id,
                             class_seed_policy,
@@ -1521,6 +1910,103 @@ impl ProcessRuntime {
         invocations
     }
 
+    pub fn take_conductor_invocations_before(&mut self, beat: f64) -> Vec<ProcessRunInvocation> {
+        self.take_conductor_invocations(beat, false)
+    }
+
+    pub fn take_conductor_invocations_through(&mut self, beat: f64) -> Vec<ProcessRunInvocation> {
+        self.take_conductor_invocations(beat, true)
+    }
+
+    fn take_conductor_invocations(
+        &mut self,
+        beat: f64,
+        inclusive: bool,
+    ) -> Vec<ProcessRunInvocation> {
+        let mut due = Vec::new();
+        while self.pending_conductor_ticks.front().is_some_and(|tick| {
+            if inclusive {
+                tick.beat <= beat + 1e-9
+            } else {
+                tick.beat < beat - 1e-9
+            }
+        }) {
+            if let Some(tick) = self.pending_conductor_ticks.pop_front() {
+                due.push(tick);
+            }
+        }
+        let channel_snapshot = self.channels.clone();
+        let handle_snapshot = self.handle_to_runtime.clone();
+        let instance_snapshot = self.instances.clone();
+        let mut invocations = Vec::new();
+        for tick in due {
+            for conductor in self.conductors.clone() {
+                if !conductor
+                    .observe_tracks
+                    .iter()
+                    .any(|track| tick.fired_tracks.contains(track))
+                {
+                    continue;
+                }
+                let Some(runtime_id) = self
+                    .handle_to_runtime
+                    .get(&conductor.process_handle_id)
+                    .copied()
+                else {
+                    continue;
+                };
+                let Some(instance) = self
+                    .instances
+                    .iter()
+                    .find(|instance| instance.runtime_id == runtime_id)
+                else {
+                    continue;
+                };
+                let Some(source) = instance.run_source.clone() else {
+                    continue;
+                };
+                let ports = self
+                    .defs
+                    .get(&instance.class_name)
+                    .map(|def| def.ports.clone())
+                    .unwrap_or_default();
+                let seed_policy = self
+                    .defs
+                    .get(&instance.class_name)
+                    .map(|def| def.seed_policy)
+                    .unwrap_or_default();
+                invocations.push(ProcessRunInvocation {
+                    runtime_id,
+                    source,
+                    beat: tick.beat,
+                    sample_time: tick.sample_time,
+                    inlets: resolve_inlets(
+                        &instance.inlets,
+                        &channel_snapshot,
+                        &handle_snapshot,
+                        &instance_snapshot,
+                    ),
+                    state: instance.state.clone(),
+                    event: None,
+                    step_context: None,
+                    ports,
+                    reads: self.conductor_read_snapshot(
+                        tick.beat,
+                        &conductor.observe_tracks,
+                        &conductor.play_tracks,
+                    ),
+                    seed: process_rng_seed(
+                        runtime_id,
+                        seed_policy,
+                        ProcessRngPosition::Temporal { beat: tick.beat },
+                    ),
+                });
+            }
+        }
+        invocations.sort_by_key(|invocation| (invocation.sample_time, invocation.runtime_id));
+        invocations
+    }
+
     pub fn apply_run_result(&mut self, result: ProcessRunResult) -> Vec<ProcessRunInvocation> {
         let mut invocations = Vec::new();
         let Some(pos) = self
@@ -1529,8 +2015,36 @@ impl ProcessRuntime {
             .position(|instance| instance.runtime_id == result.runtime_id)
         else {
             if self.step_process_runtime_ids.contains(&result.runtime_id) {
+                let mut state = result.state;
+                let mut channel_sends = Vec::new();
+                let mut field_suggestions = Vec::new();
+                for output in result.outputs {
+                    if let Some(channel) = output.name.strip_prefix("__chan:") {
+                        channel_sends.push((channel.to_string(), output.value));
+                    } else if let Some(field) = output.name.strip_prefix("__field:") {
+                        field_suggestions.push((field.to_string(), output.value));
+                    } else {
+                        state.insert(output.name, output.value);
+                    }
+                }
                 self.step_process_states
-                    .insert(ProcessInstanceId(result.runtime_id), result.state);
+                    .insert(ProcessInstanceId(result.runtime_id), state);
+                for (channel, value) in channel_sends {
+                    invocations.extend(self.send_channel_at(
+                        &channel,
+                        value,
+                        result.beat,
+                        result.sample_time,
+                    ));
+                }
+                for (field, value) in field_suggestions {
+                    invocations.extend(self.suggest_field_at(
+                        &field,
+                        value,
+                        result.beat,
+                        result.sample_time,
+                    ));
+                }
                 for mut event in result.emissions {
                     let beat = result.beat + event.offset_beats.max(0.0) as f64;
                     event.offset_beats = 0.0;
@@ -1548,12 +2062,17 @@ impl ProcessRuntime {
         }
         let mut propagated_outputs = Vec::new();
         let mut channel_sends = Vec::new();
+        let mut field_suggestions = Vec::new();
         {
             let instance = &mut self.instances[pos];
             instance.state = result.state;
             for output in result.outputs {
                 if let Some(channel) = output.name.strip_prefix("__chan:") {
                     channel_sends.push((channel.to_string(), output.value));
+                    continue;
+                }
+                if let Some(field) = output.name.strip_prefix("__field:") {
+                    field_suggestions.push((field.to_string(), output.value));
                     continue;
                 }
                 instance
@@ -1588,6 +2107,14 @@ impl ProcessRuntime {
                 result.sample_time,
             ));
         }
+        for (field, value) in field_suggestions {
+            invocations.extend(self.suggest_field_at(
+                &field,
+                value,
+                result.beat,
+                result.sample_time,
+            ));
+        }
         for mut event in result.emissions {
             let beat = result.beat + event.offset_beats.max(0.0) as f64;
             event.offset_beats = 0.0;
@@ -1614,9 +2141,43 @@ impl ProcessRuntime {
                 name: name.to_string(),
                 value: None,
                 message_only: false,
+                field_publications: VecDeque::new(),
             });
         if !channel.message_only {
             channel.value = Some(value.clone());
+        }
+        self.propagate_source_at(
+            ProcessSourceRef::Channel(name.to_string()),
+            value,
+            beat,
+            sample_time,
+            None,
+        )
+    }
+
+    pub fn suggest_field_at(
+        &mut self,
+        name: &str,
+        value: Value,
+        beat: f64,
+        sample_time: u64,
+    ) -> Vec<ProcessRunInvocation> {
+        let channel = self
+            .channels
+            .entry(name.to_string())
+            .or_insert(ChannelState {
+                name: name.to_string(),
+                value: None,
+                message_only: false,
+                field_publications: VecDeque::new(),
+            });
+        channel.value = Some(value.clone());
+        channel.field_publications.push_back(TimedFieldValue {
+            beat,
+            value: value.clone(),
+        });
+        while channel.field_publications.len() > PROCESS_READ_HISTORY_DEPTH {
+            channel.field_publications.pop_front();
         }
         self.propagate_source_at(
             ProcessSourceRef::Channel(name.to_string()),
@@ -1779,6 +2340,7 @@ impl ProcessRuntime {
                         .get(&instance.class_name)
                         .map(|def| def.ports.clone())
                         .unwrap_or_default(),
+                    reads: ProcessReadSnapshot::default(),
                     seed: process_rng_seed(
                         instance.runtime_id,
                         self.defs
@@ -1931,6 +2493,7 @@ impl ProcessRuntime {
                 resolved: ctx.resolved,
             }),
             ports,
+            reads: ProcessReadSnapshot::default(),
             seed: process_rng_seed(
                 instance_id.0,
                 seed_policy,
@@ -2509,6 +3072,174 @@ pub fn stable_process_id(name: &str) -> u64 {
 mod tests {
     use super::*;
 
+    fn read_values(transpose: f32) -> ProcessResolvedValues {
+        let mut values = std::array::from_fn(|index| StepParam::ALL[index].default_value());
+        values[StepParam::Transpose.index()] = transpose;
+        values
+    }
+
+    #[test]
+    fn resolved_track_reads_are_previous_tick_sample_and_hold() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.reset_resolved_track_history(&[read_values(0.0)]);
+        runtime.record_track_step_boundary(0, 0.0);
+        runtime.record_track_fire(0, 0.0, 0, read_values(3.0));
+
+        let same_tick = runtime.read_snapshot(0.0);
+        assert_eq!(
+            same_tick.tracks[0].current[StepParam::Transpose.index()],
+            0.0
+        );
+        assert_eq!(
+            same_tick.tracks[0].steps[0][StepParam::Transpose.index()],
+            0.0
+        );
+
+        runtime.record_track_step_boundary(0, 1.0);
+        let next_tick = runtime.read_snapshot(1.0);
+        assert_eq!(
+            next_tick.tracks[0].current[StepParam::Transpose.index()],
+            3.0
+        );
+        assert_eq!(
+            next_tick.tracks[0].steps[0][StepParam::Transpose.index()],
+            3.0
+        );
+        assert_eq!(
+            next_tick.tracks[0].steps[1][StepParam::Transpose.index()],
+            0.0
+        );
+    }
+
+    #[test]
+    fn resolved_track_trigger_history_ignores_grid_gaps_and_is_bounded() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.reset_resolved_track_history(&[read_values(0.0)]);
+        runtime.record_track_fire(0, 0.0, 0, read_values(2.0));
+        for beat in 1..4 {
+            runtime.record_track_step_boundary(0, beat as f64);
+        }
+        runtime.record_track_fire(0, 4.0, 4, read_values(7.0));
+
+        let snapshot = runtime.read_snapshot(5.0);
+        assert_eq!(
+            snapshot.tracks[0].trigs[0][StepParam::Transpose.index()],
+            7.0
+        );
+        assert_eq!(
+            snapshot.tracks[0].trigs[1][StepParam::Transpose.index()],
+            2.0
+        );
+        assert_eq!(
+            snapshot.tracks[0].steps[0][StepParam::Transpose.index()],
+            2.0
+        );
+
+        for beat in 5..(PROCESS_READ_HISTORY_DEPTH + 20) {
+            runtime.record_track_step_boundary(0, beat as f64);
+        }
+        assert_eq!(
+            runtime.read_snapshot(10_000.0).tracks[0].steps.len(),
+            PROCESS_READ_HISTORY_DEPTH
+        );
+    }
+
+    #[test]
+    fn pattern_reset_clears_previous_tick_field_registers() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.suggest_field_at("density", Value::Number(0.75), 0.0, 0);
+        assert_eq!(
+            runtime.read_snapshot(1.0).fields.get("density"),
+            Some(&Value::Number(0.75))
+        );
+
+        runtime.reset_resolved_track_history(&[]);
+        assert!(!runtime.read_snapshot(1.0).fields.contains_key("density"));
+    }
+
+    #[test]
+    fn step_process_class_alias_recovers_after_duplicate_is_removed() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.sync_authoring(
+            ProcessAuthoringSnapshot {
+                defs: vec![ProcessDef {
+                    id: 1,
+                    name: "reader-state".to_string(),
+                    source_path: None,
+                    doc: None,
+                    inlets: Vec::new(),
+                    outlets: Vec::new(),
+                    state: vec![ProcessStateDef {
+                        name: "phase".to_string(),
+                        initial: Value::Number(0.0),
+                    }],
+                    every: None,
+                    seed_policy: ProcessSeedPolicy::default(),
+                    ports: Vec::new(),
+                    accumulator: None,
+                    run_source: Some("nil".to_string()),
+                    listens: Vec::new(),
+                }],
+                ..ProcessAuthoringSnapshot::default()
+            },
+            0.0,
+        );
+        let slot = |instance_id| TrackProcessSlot {
+            instance_id: ProcessInstanceId(instance_id),
+            instance_name: None,
+            class_name: "reader-state".to_string(),
+            enabled: true,
+            project_layer: false,
+            inlets: BTreeMap::new(),
+            lanes: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+        };
+        let first = TrackProcessChain {
+            slots: vec![slot(11)],
+        };
+        let second = TrackProcessChain {
+            slots: vec![slot(12)],
+        };
+
+        runtime.sync_step_process_aliases([(0, &first), (1, &second)]);
+        for (track, chain, phase) in [(0, &first, 1.0), (1, &second, 2.0)] {
+            let invocation = runtime
+                .step_process_invocation(
+                    &chain.slots[0],
+                    ProcessStepRunContext {
+                        track,
+                        step: 0,
+                        cycle: 0,
+                        beat: 0.0,
+                        sample_time: 0,
+                        step_beats: 0.25,
+                        resolved: test_step_context(track).resolved,
+                        event: Value::Nil,
+                    },
+                )
+                .expect("build step process invocation");
+            runtime.apply_run_result(ProcessRunResult {
+                runtime_id: invocation.runtime_id,
+                state: HashMap::from([("phase".to_string(), Value::Number(phase))]),
+                ..ProcessRunResult::default()
+            });
+        }
+        assert!(
+            !runtime
+                .read_snapshot(1.0)
+                .process_values
+                .contains_key("reader-state"),
+            "class reads must be inert while more than one active runtime matches"
+        );
+
+        runtime.sync_step_process_aliases([(0, &first)]);
+        assert_eq!(
+            runtime.read_snapshot(1.0).process_values["reader-state"]["phase"],
+            Value::Number(1.0),
+            "removing the duplicate must restore the remaining class alias"
+        );
+    }
+
     fn test_step_context(track: usize) -> ProcessStepEventContext {
         ProcessStepEventContext {
             track,
@@ -2794,6 +3525,7 @@ mod tests {
                     }),
                     target: ProcessTargetRef::Channel("drift".to_string()),
                 }],
+                conductors: Vec::new(),
             },
             0.0,
         );
