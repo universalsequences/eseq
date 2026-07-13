@@ -10,7 +10,7 @@ use crate::effects::{
     BUILTIN_SLOT_COUNT,
 };
 use crate::lisp_host::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
-use crate::sequencer::{CustomInstrumentRunMode, InstrumentType};
+use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType};
 use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
 
@@ -1032,27 +1032,25 @@ impl App {
             .move_midi_fx_slot_in_other_track_patterns(track, source_slot, target_slot);
     }
 
-    fn sync_other_bus_pattern_effect_insert(&mut self, bus_idx: usize, slot_idx: usize) {
-        let default_snapshot = self.capture_bus_pattern_snapshot();
-        self.state.insert_bus_effect_slot_in_other_scene_patterns(
+    fn remap_other_bus_pattern_effect_slots(
+        &self,
+        bus_idx: usize,
+        new_to_old: &[Option<usize>],
+        snapshot_before_remap: &[BusPatternSnapshot],
+    ) {
+        self.state.remap_bus_effect_slots_in_other_scene_patterns(
             bus_idx,
-            slot_idx,
-            &default_snapshot,
+            new_to_old,
+            snapshot_before_remap,
         );
     }
 
-    fn sync_other_bus_pattern_effect_move(
-        &mut self,
-        bus_idx: usize,
-        source_slot: usize,
-        target_slot: usize,
-    ) {
-        let default_snapshot = self.capture_bus_pattern_snapshot();
-        self.state.move_bus_effect_slot_in_other_scene_patterns(
+    fn initialize_other_bus_pattern_effect_slot(&self, bus_idx: usize, slot_idx: usize) {
+        let live_snapshot = self.capture_bus_pattern_snapshot();
+        self.state.replace_bus_effect_slot_in_other_scene_patterns(
             bus_idx,
-            source_slot,
-            target_slot,
-            &default_snapshot,
+            slot_idx,
+            &live_snapshot,
         );
     }
 
@@ -2545,6 +2543,7 @@ impl App {
             .next_free_bus_effect_slot(bus_idx)
             .ok_or_else(|| "No free bus effect slots available".to_string())?;
         self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, name)?;
+        self.initialize_other_bus_pattern_effect_slot(bus_idx, slot_idx);
         Ok(slot_idx)
     }
 
@@ -2557,6 +2556,7 @@ impl App {
             .next_free_bus_effect_slot(bus_idx)
             .ok_or_else(|| "No free bus effect slots available".to_string())?;
         self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, name)?;
+        self.initialize_other_bus_pattern_effect_slot(bus_idx, slot_idx);
         Ok(slot_idx)
     }
 
@@ -2577,6 +2577,20 @@ impl App {
                     custom_name: bus.custom_effect_names.get(slot_idx).cloned().flatten(),
                 })
             })
+            .collect())
+    }
+
+    fn active_bus_effect_slots(&self, bus_idx: usize) -> Result<Vec<usize>, String> {
+        let bus = self
+            .buses
+            .get(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        Ok(bus
+            .effect_slots
+            .iter()
+            .enumerate()
+            .take(MAX_CUSTOM_FX)
+            .filter_map(|(slot_idx, slot)| (slot.node_id != 0).then_some(slot_idx))
             .collect())
     }
 
@@ -2671,7 +2685,13 @@ impl App {
         bus_idx: usize,
         target_slot: usize,
     ) -> Result<usize, String> {
+        let snapshot_before_remap = self.capture_bus_pattern_snapshot();
         let mut entries = self.bus_effect_entries(bus_idx)?;
+        let mut new_to_old = self
+            .active_bus_effect_slots(bus_idx)?
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
         if entries.len() >= MAX_CUSTOM_FX {
             return Err("No free bus effect slots available".to_string());
         }
@@ -2695,11 +2715,14 @@ impl App {
                 custom_name: None,
             },
         );
+        new_to_old.insert(insert_offset, None);
+        new_to_old.resize(MAX_CUSTOM_FX, None);
+        new_to_old.truncate(MAX_CUSTOM_FX);
         let old_edges = self.bus_effect_edges(bus_idx)?;
         self.write_bus_effect_entries(bus_idx, &entries)?;
         self.reconnect_bus_effect_chain(old_edges, bus_idx)?;
         self.insert_empty_bus_effect_lease_slot(bus_idx, insert_offset);
-        self.sync_other_bus_pattern_effect_insert(bus_idx, insert_offset);
+        self.remap_other_bus_pattern_effect_slots(bus_idx, &new_to_old, &snapshot_before_remap);
         Ok(insert_offset)
     }
 
@@ -2713,6 +2736,7 @@ impl App {
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
         let slot_idx = self.prepare_bus_effect_insert_slot(bus_idx, target_slot)?;
         self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, name)?;
+        self.initialize_other_bus_pattern_effect_slot(bus_idx, slot_idx);
         Ok(slot_idx)
     }
 
@@ -2725,6 +2749,7 @@ impl App {
         let result = self.compile_saved_effect(name)?;
         let slot_idx = self.prepare_bus_effect_insert_slot(bus_idx, target_slot)?;
         self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)?;
+        self.initialize_other_bus_pattern_effect_slot(bus_idx, slot_idx);
         Ok(slot_idx)
     }
 
@@ -2734,7 +2759,9 @@ impl App {
         source_slot: usize,
         target_slot: Option<usize>,
     ) -> Result<usize, String> {
+        let snapshot_before_remap = self.capture_bus_pattern_snapshot();
         let mut entries = self.bus_effect_entries(bus_idx)?;
+        let active_slots = self.active_bus_effect_slots(bus_idx)?;
         let source_offset = self
             .buses
             .get(bus_idx)
@@ -2770,12 +2797,17 @@ impl App {
             entries.insert(source_offset, entry);
             return Ok(source_slot);
         }
+        let mut new_to_old = active_slots.into_iter().map(Some).collect::<Vec<_>>();
+        let source_physical_slot = new_to_old.remove(source_offset);
+        new_to_old.insert(target_offset, source_physical_slot);
+        new_to_old.resize(MAX_CUSTOM_FX, None);
+        new_to_old.truncate(MAX_CUSTOM_FX);
         let old_edges = self.bus_effect_edges(bus_idx)?;
         entries.insert(target_offset, entry);
         self.write_bus_effect_entries(bus_idx, &entries)?;
         self.reconnect_bus_effect_chain(old_edges, bus_idx)?;
         self.move_bus_effect_lease_slot(bus_idx, source_offset, target_offset);
-        self.sync_other_bus_pattern_effect_move(bus_idx, source_offset, target_offset);
+        self.remap_other_bus_pattern_effect_slots(bus_idx, &new_to_old, &snapshot_before_remap);
         self.push_all_delay_bpm();
         Ok(target_offset)
     }
@@ -3036,6 +3068,9 @@ impl App {
             bus.custom_effect_names[slot_idx] = None;
         }
         self.set_bus_effect_lease(bus_idx, slot_idx, None);
+        let live_snapshot = self.capture_bus_pattern_snapshot();
+        self.state
+            .clear_bus_effect_slot_in_other_scene_patterns(bus_idx, slot_idx, &live_snapshot);
         Ok(())
     }
 

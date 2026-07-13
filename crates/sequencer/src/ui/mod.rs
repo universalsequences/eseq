@@ -702,6 +702,48 @@ impl BusChannelState {
     }
 }
 
+fn restored_bus_effect_default(
+    descriptor: Option<&EffectDescriptor>,
+    param_idx: usize,
+    value: f32,
+) -> f32 {
+    descriptor
+        .and_then(|descriptor| descriptor.params.get(param_idx))
+        .map(|param| {
+            if value.is_finite() {
+                param.clamp(value)
+            } else {
+                param.default
+            }
+        })
+        .unwrap_or(value)
+}
+
+#[cfg(test)]
+mod bus_effect_default_tests {
+    use super::restored_bus_effect_default;
+    use crate::effects::EffectDescriptor;
+
+    #[test]
+    fn restored_bus_effect_defaults_enforce_descriptor_ranges() {
+        let ott = EffectDescriptor::builtin_ott();
+        let low_above_threshold = ott
+            .params
+            .iter()
+            .position(|param| param.name == "low above thr")
+            .unwrap();
+
+        assert_eq!(
+            restored_bus_effect_default(Some(&ott), low_above_threshold, 100.0),
+            0.0
+        );
+        assert_eq!(
+            restored_bus_effect_default(Some(&ott), low_above_threshold, f32::NAN),
+            ott.params[low_above_threshold].default
+        );
+    }
+}
+
 pub struct UiState {
     pub cursor_step: usize,
     pub cursor_track: usize,
@@ -1024,6 +1066,7 @@ impl App {
                 continue;
             };
             bus.gate_sequence = saved.gate_sequence.clone();
+            let descriptors = &bus.effect_descriptors;
             for (slot_idx, slot) in bus.effect_slots.iter_mut().enumerate() {
                 // Recall per-scene base parameter values. Legacy snapshots (and
                 // slots missing from the saved set) carry no defaults, so the
@@ -1031,7 +1074,12 @@ impl App {
                 if let Some(saved_defaults) = saved.effect_defaults.get(slot_idx) {
                     for (param_idx, value) in saved_defaults.iter().copied().enumerate() {
                         if param_idx < slot.defaults.len() {
-                            slot.defaults[param_idx] = value;
+                            let restored = restored_bus_effect_default(
+                                descriptors.get(slot_idx),
+                                param_idx,
+                                value,
+                            );
+                            slot.defaults[param_idx] = restored;
                         }
                     }
                 }
@@ -1048,7 +1096,13 @@ impl App {
                         if let Some(saved_step) = saved_plocks.get(step) {
                             for (param_idx, value) in saved_step.iter().copied().enumerate() {
                                 if param_idx < values.len() {
-                                    values[param_idx] = value;
+                                    values[param_idx] = value.map(|value| {
+                                        restored_bus_effect_default(
+                                            descriptors.get(slot_idx),
+                                            param_idx,
+                                            value,
+                                        )
+                                    });
                                 }
                             }
                         }

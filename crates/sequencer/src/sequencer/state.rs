@@ -211,6 +211,53 @@ pub struct BusPatternSnapshot {
     pub effect_defaults: Vec<Vec<f32>>,
 }
 
+impl BusPatternSnapshot {
+    fn remap_effect_slots(&mut self, new_to_old: &[Option<usize>]) {
+        let old_plocks = std::mem::take(&mut self.effect_plocks);
+        let old_defaults = std::mem::take(&mut self.effect_defaults);
+        let slot_count = crate::lisp_host::MAX_CUSTOM_FX;
+
+        self.effect_plocks = new_to_old
+            .iter()
+            .copied()
+            .take(slot_count)
+            .map(|source| {
+                source
+                    .and_then(|slot| old_plocks.get(slot).cloned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        self.effect_defaults = new_to_old
+            .iter()
+            .copied()
+            .take(slot_count)
+            .map(|source| {
+                source
+                    .and_then(|slot| old_defaults.get(slot).cloned())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        self.effect_plocks.resize_with(slot_count, Vec::new);
+        self.effect_defaults.resize_with(slot_count, Vec::new);
+    }
+
+    fn replace_effect_slot(
+        &mut self,
+        slot_idx: usize,
+        defaults: Vec<f32>,
+        plocks: Vec<Vec<Option<f32>>>,
+    ) {
+        if slot_idx >= crate::lisp_host::MAX_CUSTOM_FX {
+            return;
+        }
+        self.effect_plocks.resize_with(slot_idx + 1, Vec::new);
+        self.effect_defaults.resize_with(slot_idx + 1, Vec::new);
+        self.effect_plocks[slot_idx] = plocks;
+        self.effect_defaults[slot_idx] = defaults;
+    }
+}
+
 #[derive(Clone)]
 pub struct BusGateSequence {
     pub steps: [bool; MAX_STEPS],
@@ -3811,23 +3858,14 @@ impl SequencerState {
         slot_idx: usize,
         default_snapshot: &[BusPatternSnapshot],
     ) {
-        let current_scene = self.current_scene_index();
-        let mut scenes = self.pattern.scenes.lock().unwrap();
-        let target_len = scenes.scene_count().max(current_scene + 1);
-        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, default_snapshot);
-        for (scene_idx, scene) in scenes.scenes.iter_mut().enumerate() {
-            if scene_idx == current_scene {
-                continue;
-            }
-            let Some(bus) = scene.bus_patterns.get_mut(bus_idx) else {
-                continue;
-            };
-            if slot_idx > bus.effect_plocks.len() {
-                continue;
-            }
-            bus.effect_plocks.insert(slot_idx, Vec::new());
-            bus.effect_plocks.truncate(crate::lisp_host::MAX_CUSTOM_FX);
+        let slot_count = crate::lisp_host::MAX_CUSTOM_FX;
+        if slot_idx >= slot_count {
+            return;
         }
+        let mut new_to_old = (0..slot_count).map(Some).collect::<Vec<_>>();
+        new_to_old.insert(slot_idx, None);
+        new_to_old.truncate(slot_count);
+        self.remap_bus_effect_slots_in_other_scene_patterns(bus_idx, &new_to_old, default_snapshot);
     }
 
     pub fn move_bus_effect_slot_in_other_scene_patterns(
@@ -3835,6 +3873,22 @@ impl SequencerState {
         bus_idx: usize,
         source_slot: usize,
         target_slot: usize,
+        default_snapshot: &[BusPatternSnapshot],
+    ) {
+        let slot_count = crate::lisp_host::MAX_CUSTOM_FX;
+        if source_slot >= slot_count || target_slot >= slot_count || source_slot == target_slot {
+            return;
+        }
+        let mut new_to_old = (0..slot_count).map(Some).collect::<Vec<_>>();
+        let source = new_to_old.remove(source_slot);
+        new_to_old.insert(target_slot, source);
+        self.remap_bus_effect_slots_in_other_scene_patterns(bus_idx, &new_to_old, default_snapshot);
+    }
+
+    pub fn remap_bus_effect_slots_in_other_scene_patterns(
+        &self,
+        bus_idx: usize,
+        new_to_old: &[Option<usize>],
         default_snapshot: &[BusPatternSnapshot],
     ) {
         let current_scene = self.current_scene_index();
@@ -3845,19 +3899,62 @@ impl SequencerState {
             if scene_idx == current_scene {
                 continue;
             }
-            let Some(bus) = scene.bus_patterns.get_mut(bus_idx) else {
-                continue;
-            };
-            if source_slot >= bus.effect_plocks.len() {
+            if let Some(bus) = scene.bus_patterns.get_mut(bus_idx) {
+                bus.remap_effect_slots(new_to_old);
+            }
+        }
+    }
+
+    pub fn replace_bus_effect_slot_in_other_scene_patterns(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+        source_snapshot: &[BusPatternSnapshot],
+    ) {
+        let Some(source_bus) = source_snapshot.get(bus_idx) else {
+            return;
+        };
+        let defaults = source_bus
+            .effect_defaults
+            .get(slot_idx)
+            .cloned()
+            .unwrap_or_default();
+        let plocks = source_bus
+            .effect_plocks
+            .get(slot_idx)
+            .cloned()
+            .unwrap_or_default();
+        let current_scene = self.current_scene_index();
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let target_len = scenes.scene_count().max(current_scene + 1);
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, source_snapshot);
+        for (scene_idx, scene) in scenes.scenes.iter_mut().enumerate() {
+            if scene_idx == current_scene {
                 continue;
             }
-            let plocks = bus.effect_plocks.remove(source_slot);
-            let mut target = target_slot.min(bus.effect_plocks.len());
-            if source_slot < target {
-                target = target.saturating_sub(1);
+            if let Some(bus) = scene.bus_patterns.get_mut(bus_idx) {
+                bus.replace_effect_slot(slot_idx, defaults.clone(), plocks.clone());
             }
-            bus.effect_plocks.insert(target, plocks);
-            bus.effect_plocks.truncate(crate::lisp_host::MAX_CUSTOM_FX);
+        }
+    }
+
+    pub fn clear_bus_effect_slot_in_other_scene_patterns(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+        default_snapshot: &[BusPatternSnapshot],
+    ) {
+        let current_scene = self.current_scene_index();
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let target_len = scenes.scene_count().max(current_scene + 1);
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, default_snapshot);
+        for (scene_idx, scene) in scenes.scenes.iter_mut().enumerate() {
+            if scene_idx == current_scene {
+                continue;
+            }
+            if let Some(bus) = scene.bus_patterns.get_mut(bus_idx) {
+                bus.replace_effect_slot(slot_idx, Vec::new(), Vec::new());
+            }
         }
     }
 
@@ -7430,7 +7527,7 @@ mod tests {
                 vec![vec![Some(marker + 1.0)]],
                 vec![vec![Some(marker + 2.0)]],
             ],
-            effect_defaults: vec![vec![marker]],
+            effect_defaults: vec![vec![marker], vec![marker + 1.0], vec![marker + 2.0]],
         }]
     }
 
@@ -7515,6 +7612,94 @@ mod tests {
             "other scene should receive an empty inserted bus effect slot"
         );
         assert_eq!(other_after[0].effect_plocks[2][0][0], Some(1.75));
+        assert!(
+            other_after[0].effect_defaults[1].is_empty(),
+            "the inserted slot must also be empty in the parallel defaults lane"
+        );
+        assert_eq!(
+            other_after[0].effect_defaults[2],
+            vec![1.75],
+            "existing base values must follow their effect when its slot shifts"
+        );
+
+        state.move_bus_effect_slot_in_other_scene_patterns(0, 2, 0, &current);
+
+        let current_after_move = state.bus_pattern_snapshot_or_default(0, &current);
+        let other_after_move = state.bus_pattern_snapshot_or_default(1, &current);
+        assert_eq!(
+            current_after_move[0].effect_defaults[0],
+            vec![0.25],
+            "current scene bus defaults should not be touched"
+        );
+        assert_eq!(other_after_move[0].effect_plocks[0][0][0], Some(1.75));
+        assert_eq!(other_after_move[0].effect_defaults[0], vec![1.75]);
+        assert_eq!(other_after_move[0].effect_plocks[1][0][0], Some(0.75));
+        assert_eq!(other_after_move[0].effect_defaults[1], vec![0.75]);
+    }
+
+    #[test]
+    fn bus_effect_slot_topology_uses_final_forward_destination_and_handles_sparse_chains() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let current = sample_bus_pattern_snapshot(0.25);
+        let other = sample_bus_pattern_snapshot(0.75);
+        state.replace_bus_pattern_repository(vec![current.clone(), other], &current);
+
+        state.move_bus_effect_slot_in_other_scene_patterns(0, 0, 2, &current);
+
+        let moved = state.bus_pattern_snapshot_or_default(1, &current);
+        assert_eq!(moved[0].effect_defaults[0], vec![1.75]);
+        assert_eq!(moved[0].effect_defaults[1], vec![2.75]);
+        assert_eq!(moved[0].effect_defaults[2], vec![0.75]);
+        assert_eq!(moved[0].effect_plocks[2][0][0], Some(0.75));
+
+        state.remap_bus_effect_slots_in_other_scene_patterns(
+            0,
+            &[Some(0), Some(2), None],
+            &current,
+        );
+
+        let compacted = state.bus_pattern_snapshot_or_default(1, &current);
+        assert_eq!(compacted[0].effect_defaults[0], vec![1.75]);
+        assert_eq!(compacted[0].effect_defaults[1], vec![0.75]);
+        assert!(compacted[0].effect_defaults[2].is_empty());
+        assert_eq!(compacted[0].effect_plocks[1][0][0], Some(0.75));
+    }
+
+    #[test]
+    fn bus_effect_slot_initialization_and_clear_update_both_scene_value_lanes() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let current = sample_bus_pattern_snapshot(0.25);
+        let other = sample_bus_pattern_snapshot(0.75);
+        state.replace_bus_pattern_repository(vec![current.clone(), other], &current);
+        let initialized = sample_bus_pattern_snapshot(10.0);
+
+        state.replace_bus_effect_slot_in_other_scene_patterns(0, 1, &initialized);
+
+        let current_after = state.bus_pattern_snapshot_or_default(0, &current);
+        let other_after = state.bus_pattern_snapshot_or_default(1, &current);
+        assert_eq!(current_after[0].effect_defaults[1], vec![1.25]);
+        assert_eq!(other_after[0].effect_defaults[1], vec![11.0]);
+        assert_eq!(other_after[0].effect_plocks[1][0][0], Some(11.0));
+
+        state.clear_bus_effect_slot_in_other_scene_patterns(0, 1, &current);
+
+        let cleared = state.bus_pattern_snapshot_or_default(1, &current);
+        assert!(cleared[0].effect_defaults[1].is_empty());
+        assert!(cleared[0].effect_plocks[1].is_empty());
     }
 
     #[test]
