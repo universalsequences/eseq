@@ -17585,6 +17585,181 @@ mod tests {
         ));
     }
 
+    fn test_macro_value(id: u32, key: &str, name: &str, value: f64) -> Value {
+        map_value([
+            ("id", Value::Number(id as f64)),
+            ("key", Value::String(key.to_string())),
+            ("name", Value::String(name.to_string())),
+            ("kind", Value::String("mapped".to_string())),
+            ("value", Value::Number(value)),
+            ("mappings", test_list(vec![])),
+        ])
+    }
+
+    fn macro_controls_editor(value: f64) -> eseqlisp::Editor {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(40, 16);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![(
+                "macros",
+                test_list(vec![test_macro_value(
+                    7,
+                    "player/delay-push",
+                    "Delay Push",
+                    value,
+                )]),
+            )],
+            false,
+        );
+        let src =
+            std::fs::read_to_string("metal-seq-macros.lisp").expect("read reusable macro controls");
+        editor
+            .runtime_mut()
+            .eval_str(&src)
+            .expect("load reusable macro controls");
+        editor
+    }
+
+    #[test]
+    fn macro_script_helper_normalizes_keyword_keys_and_queues_ensure() {
+        let mut editor = macro_controls_editor(0.25);
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(macro-id-for-key :player/delay-push)"),
+            Ok(Some(Value::Number(7.0)))
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(macro-ensure :player/delay-push \"Ignored Rename\")")
+            .expect("ensure keyed macro");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected macro-ensure host command: {:?}", commands[0]);
+        };
+        assert_eq!(name, "macro-ensure");
+        let Value::Map(payload) = payload else {
+            panic!("macro-ensure payload should be a dict: {payload:?}");
+        };
+        assert!(matches!(
+            payload.get("key").map(|value| value.borrow().clone()),
+            Some(Value::String(key)) if key == "player/delay-push"
+        ));
+        assert!(matches!(
+            payload.get("name").map(|value| value.borrow().clone()),
+            Some(Value::String(name)) if name == "Ignored Rename"
+        ));
+    }
+
+    #[test]
+    fn macro_knob_and_map_button_render_and_emit_by_resolved_id() {
+        let mut editor = macro_controls_editor(0.25);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*macro-controls-test*"
+                  (h-stack :gap 1
+                    (macro-knob :macro :player/delay-push)
+                    (macro-map-button :macro :player/delay-push)))
+                "#,
+            )
+            .expect("create macro controls test buffer");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*macro-controls-test*")
+            .expect("macro controls buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+
+        let layout = editor.widget_layout().expect("macro controls layout");
+        assert_finite_layout_tree(&layout);
+        let knob = find_layout_node_by_widget_type(&layout, "knob-number")
+            .expect("macro knob layout node");
+        let map_button = find_layout_node_by_widget_type(&layout, "button")
+            .expect("macro map button layout node");
+        assert_finite_nonzero_rect(knob, "macro knob");
+        assert_finite_nonzero_rect(map_button, "macro map button");
+        assert_eq!(layout_prop_number(knob, "value"), Some(0.25));
+
+        editor
+            .runtime_mut()
+            .invoke(
+                knob.props
+                    .get("on-change")
+                    .cloned()
+                    .expect("macro knob on-change"),
+                vec![Value::Number(0.75)],
+            )
+            .expect("change macro knob");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected macro-set-value host command: {:?}", commands[0]);
+        };
+        assert_eq!(name, "macro-set-value");
+        let Value::Map(payload) = payload else {
+            panic!("macro-set-value payload should be a dict: {payload:?}");
+        };
+        assert!(matches!(
+            payload.get("id").map(|value| value.borrow().clone()),
+            Some(Value::Number(id)) if id == 7.0
+        ));
+        assert!(matches!(
+            payload.get("value").map(|value| value.borrow().clone()),
+            Some(Value::Number(value)) if value == 0.75
+        ));
+
+        editor
+            .runtime_mut()
+            .invoke(
+                map_button
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("macro map button on-click"),
+                vec![Value::Nil],
+            )
+            .expect("arm macro mapping");
+        assert_eq!(
+            editor.runtime_mut().eval_str("macro-mapping-open"),
+            Ok(Some(Value::Bool(true)))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("macro-mapping-selected"),
+            Ok(Some(Value::Number(7.0)))
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "macros",
+            test_list(vec![test_macro_value(
+                7,
+                "player/delay-push",
+                "Delay Push",
+                0.6,
+            )]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let updated_layout = editor
+            .widget_layout()
+            .expect("updated macro controls layout");
+        let updated_knob = find_layout_node_by_widget_type(&updated_layout, "knob-number")
+            .expect("updated macro knob layout node");
+        assert_eq!(layout_prop_number(updated_knob, "value"), Some(0.6));
+        assert!(
+            layout_node_contains_text_fragment(&updated_layout, "mapping..."),
+            "armed map button should expose its active state"
+        );
+    }
+
     fn test_app_with_sampler_descriptor(desc: sequencer::effects::EffectDescriptor) -> ui::App {
         let mut app = test_app_with_instrument_descriptor(desc);
         app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Sampler];
@@ -22322,6 +22497,100 @@ mod tests {
             effect_buffer_targets,
             vec![script_buffer_name],
             "16-cycle script tab registration and effect-buffer must target the same buffer"
+        );
+    }
+
+    #[test]
+    fn metal_seq_macro_player_script_renders_visible_controls_in_its_own_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.drain_host_commands();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "macros",
+            test_list(vec![
+                test_macro_value(7, "delay-push", "Delay Push", 0.2),
+                test_macro_value(8, "space", "Space", 0.5),
+                test_macro_value(9, "texture", "Texture", 0.8),
+            ]),
+        );
+        let src = std::fs::read_to_string("scripts/macro-player-demo.lisp")
+            .expect("read macro player demo");
+        editor
+            .runtime_mut()
+            .eval_source_at_path(PathBuf::from("scripts/macro-player-demo.lisp"), &src)
+            .expect("evaluate macro player demo");
+        editor.refresh_runtime_side_effects();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(set-layout (list :buf "*macro-player*" :hide-status true :min-width 25))"#,
+            )
+            .expect("isolate macro player buffer");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("macro player demo status after refresh: {status}");
+        }
+
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*macro-player*")
+            .expect("macro player effect buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(80, 24);
+        let layout = editor.widget_layout().unwrap_or_else(|| {
+            let tree = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.id == buffer_id)
+                .and_then(|buffer| buffer.widget_tree.as_ref());
+            panic!("macro player layout; widget tree={tree:#?}")
+        });
+        assert_finite_layout_tree(&layout);
+        let title = find_layout_node_by_stable_key(&layout, "macro-player-title")
+            .expect("macro player title");
+        assert_finite_nonzero_rect(&layout, "macro player surface");
+        assert_finite_nonzero_rect(title, "macro player title");
+
+        let mut knob_count = 0;
+        let mut button_count = 0;
+        fn count_controls(
+            node: &eseqlisp::layout::LayoutNode,
+            knob_count: &mut usize,
+            button_count: &mut usize,
+        ) {
+            if node.widget_type == "knob-number" {
+                *knob_count += 1;
+                assert_finite_nonzero_rect(node, "macro player knob");
+            } else if node.widget_type == "button" {
+                *button_count += 1;
+                assert_finite_nonzero_rect(node, "macro player map button");
+            }
+            for child in &node.children {
+                count_controls(child, knob_count, button_count);
+            }
+        }
+        count_controls(&layout, &mut knob_count, &mut button_count);
+        assert_eq!(knob_count, 3);
+        assert_eq!(button_count, 3);
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(
+            commands.len(),
+            3,
+            "each declaration should ensure one macro"
+        );
+        assert!(commands.iter().all(|command| matches!(
+            command,
+            eseqlisp::host::HostCommand::Custom { name, .. } if name == "macro-ensure"
+        )));
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                r#"(len (filter |tab| (and (= (nth tab 0) "Player") (= (nth tab 1) "*macro-player*")) seq-registered-step-tabs))"#,
+            ),
+            Ok(Some(Value::Number(1.0))),
+            "player surface should register as a script-owned tab",
         );
     }
 

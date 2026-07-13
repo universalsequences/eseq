@@ -696,6 +696,7 @@ pub(crate) fn init_runtime(
         "SEQ",
         {
             let mut fields = vec![
+                ("macros", build_macros_value(app)),
                 ("playing", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),

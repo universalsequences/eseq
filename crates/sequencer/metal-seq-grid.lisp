@@ -4,6 +4,7 @@
 (load "metal-seq-themes.lisp")
 (seq-theme-mac-osx-dark)
 (load "metal-seq-materials.lisp")
+(load "metal-seq-macros.lisp")
 
 (defstate selected-bus -1)
 
