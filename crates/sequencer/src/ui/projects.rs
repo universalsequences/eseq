@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -6,7 +7,9 @@ use crossterm::event::KeyCode;
 
 use crate::effects::{EffectDescriptor, BUILTIN_SLOT_COUNT};
 use crate::lisp_host;
+use crate::macro_engine::{MacroParamKey, ResolvedMacroTarget};
 use crate::neural::ParamNodeId;
+use crate::process::ParamTarget;
 use crate::project::{
     self, chord_snapshot_from_steps_durations_and_delays, project_file_version, ProjectBusChannel,
     ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
@@ -21,6 +24,89 @@ use super::graph::{
     RackCustomBuildSpec, RackSamplerBuildSpec, RackSlotBuildSpec, RackSlotInstrumentBuildSpec,
 };
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
+
+fn resolve_live_macro_target(
+    state: &crate::sequencer::SequencerState,
+    effect_descriptors: &[Vec<EffectDescriptor>],
+    instrument_descriptors: &[EffectDescriptor],
+    track: usize,
+    target: &ParamTarget,
+) -> Option<ResolvedMacroTarget> {
+    match target {
+        ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            param_id: previous_param_id,
+        } => {
+            let descriptor = effect_descriptors.get(track)?.get(*slot)?;
+            if !descriptor.name.eq_ignore_ascii_case(effect) {
+                return None;
+            }
+            let param_idx = descriptor
+                .params
+                .iter()
+                .position(|descriptor| descriptor.has_tag_or_name(param))?;
+            let live_slot = state.pattern.effect_chains.get(track)?.get(*slot)?;
+            if param_idx >= live_slot.num_params.load(Ordering::Relaxed) as usize {
+                return None;
+            }
+            let raw_idx = live_slot.resolve_node_idx(param_idx) as u32;
+            let param_id = ParamNodeId::from_slot_param(
+                live_slot.node_id.load(Ordering::Relaxed),
+                live_slot.modulator_node_id.load(Ordering::Relaxed),
+                raw_idx,
+            );
+            if previous_param_id.is_some() && param_id.is_none() {
+                return None;
+            }
+            Some(ResolvedMacroTarget {
+                target: ParamTarget::EffectParam {
+                    slot: *slot,
+                    effect: effect.clone(),
+                    param: param.clone(),
+                    param_id,
+                },
+                key: MacroParamKey::for_effect(track, *slot, param_idx, param_id),
+            })
+        }
+        ParamTarget::InstrumentParam {
+            param,
+            param_id: previous_param_id,
+        } => {
+            let descriptor = instrument_descriptors.get(track)?;
+            let param_idx = descriptor
+                .params
+                .iter()
+                .position(|descriptor| descriptor.has_tag_or_name(param))?;
+            let live_slot = state.pattern.instrument_slots.get(track)?;
+            if param_idx >= live_slot.num_params.load(Ordering::Relaxed) as usize {
+                return None;
+            }
+            let raw_idx = live_slot.resolve_node_idx(param_idx) as u32;
+            let param_id = ParamNodeId::from_slot_param(
+                live_slot.node_id.load(Ordering::Relaxed),
+                live_slot.modulator_node_id.load(Ordering::Relaxed),
+                raw_idx,
+            );
+            if previous_param_id.is_some() && param_id.is_none() {
+                return None;
+            }
+            Some(ResolvedMacroTarget {
+                target: ParamTarget::InstrumentParam {
+                    param: param.clone(),
+                    param_id,
+                },
+                key: MacroParamKey::for_instrument(track, param_idx, param_id),
+            })
+        }
+        ParamTarget::StepParam { .. } | ParamTarget::ProcessInlet { .. } => None,
+        _ => Some(ResolvedMacroTarget {
+            target: target.clone(),
+            key: MacroParamKey::from_target(track, target, None)?,
+        }),
+    }
+}
 
 fn project_slot_into_synced_snapshot(
     slot: project::ProjectEffectSlot,
@@ -2584,7 +2670,20 @@ impl App {
         walk(Path::new("samples"))
     }
 
-    pub fn push_all_restored_defaults(&self) {
+    pub fn push_all_restored_defaults(&mut self) {
+        let state = Arc::clone(&self.state);
+        let effect_descriptors = &self.graph.effect_descriptors;
+        let instrument_descriptors = &self.graph.instrument_descriptors;
+        self.macro_engine.revalidate_mappings(|track, target| {
+            resolve_live_macro_target(
+                &state,
+                effect_descriptors,
+                instrument_descriptors,
+                track,
+                target,
+            )
+        });
+
         self.push_master_volume();
         for track_idx in 0..self.tracks.len() {
             self.push_track_volume(track_idx);
@@ -2614,7 +2713,7 @@ impl App {
                             value.round().max(0.0) as usize,
                         );
                     } else {
-                        self.send_slot_param(track_idx, slot_idx, param_idx, value);
+                        self.send_effective_slot_param(track_idx, slot_idx, param_idx);
                     }
                 }
             }

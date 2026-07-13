@@ -766,6 +766,7 @@ pub struct UiState {
 
 pub struct App {
     pub state: Arc<SequencerState>,
+    pub macro_engine: crate::macro_engine::MacroEngine,
     pub tracks: Vec<String>,
     pub track_colors: Vec<TrackColor>,
     pub track_collapsed: Vec<bool>,
@@ -1173,6 +1174,7 @@ impl App {
 
         let mut app = Self {
             state,
+            macro_engine: crate::macro_engine::MacroEngine::default(),
             tracks: Vec::new(),
             track_colors: Vec::new(),
             track_collapsed: Vec::new(),

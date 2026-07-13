@@ -1050,6 +1050,36 @@ impl App {
         }
     }
 
+    pub(super) fn effective_instrument_param_value(
+        &self,
+        track: usize,
+        param_idx: usize,
+    ) -> Option<f32> {
+        let slot = self.state.pattern.instrument_slots.get(track)?;
+        if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
+            return None;
+        }
+        let raw_idx = slot.resolve_node_idx(param_idx) as u32;
+        let param_id = crate::neural::ParamNodeId::from_slot_param(
+            slot.node_id.load(Ordering::Relaxed),
+            slot.modulator_node_id.load(Ordering::Relaxed),
+            raw_idx,
+        );
+        let key = crate::macro_engine::MacroParamKey::for_instrument(track, param_idx, param_id);
+        Some(
+            self.macro_engine
+                .effective_value(&key, slot.defaults.get(param_idx)),
+        )
+    }
+
+    /// Sends the current base value unless an engaged macro owns this param.
+    pub(super) fn send_effective_instrument_param(&self, track: usize, param_idx: usize) {
+        let Some(value) = self.effective_instrument_param_value(track, param_idx) else {
+            return;
+        };
+        self.send_instrument_param(track, param_idx, value);
+    }
+
     pub fn send_instrument_tensor_param(&self, track: usize, tensor_idx: usize, values: &[f32]) {
         if self.is_sampler_track(track) {
             return;
@@ -1574,7 +1604,7 @@ impl App {
         let slot = &self.state.pattern.instrument_slots[track];
         let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
         for param_idx in 0..num_params {
-            self.send_instrument_param(track, param_idx, slot.defaults.get(param_idx));
+            self.send_effective_instrument_param(track, param_idx);
         }
     }
 

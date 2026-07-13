@@ -538,6 +538,103 @@ impl App {
         }
     }
 
+    pub(super) fn effective_slot_param_value(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+    ) -> Option<f32> {
+        let slot = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)?
+            .get(slot_idx)?;
+        if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
+            return None;
+        }
+        let raw_idx = slot.resolve_node_idx(param_idx) as u32;
+        let param_id = crate::neural::ParamNodeId::from_slot_param(
+            slot.node_id.load(Ordering::Relaxed),
+            slot.modulator_node_id.load(Ordering::Relaxed),
+            raw_idx,
+        );
+        let key = crate::macro_engine::MacroParamKey::for_effect(
+            track,
+            slot_idx,
+            param_idx,
+            param_id,
+        );
+        Some(
+            self.macro_engine
+                .effective_value(&key, slot.defaults.get(param_idx)),
+        )
+    }
+
+    /// Sends the current base value unless an engaged macro owns this param.
+    pub(super) fn send_effective_slot_param(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+    ) {
+        let Some(value) = self.effective_slot_param_value(track, slot_idx, param_idx) else {
+            return;
+        };
+        self.send_slot_param(track, slot_idx, param_idx, value);
+    }
+
+    /// Applies a live macro position and re-sends every affected target.
+    /// Phase 2 commands call this entry point rather than mutating the engine
+    /// directly so both engagement and release reach the DSP immediately.
+    pub fn set_macro_value(&mut self, id: crate::macro_engine::MacroId, value: f32) {
+        let touched = self.macro_engine.set_value(id, value);
+        for (track, target) in touched {
+            match target {
+                crate::process::ParamTarget::EffectParam {
+                    slot,
+                    effect,
+                    param,
+                    ..
+                } => {
+                    let Some(param_idx) = self
+                        .graph
+                        .effect_descriptors
+                        .get(track)
+                        .and_then(|descriptors| descriptors.get(slot))
+                        .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(&effect))
+                        .and_then(|descriptor| {
+                            descriptor
+                                .params
+                                .iter()
+                                .position(|descriptor| descriptor.has_tag_or_name(&param))
+                        })
+                    else {
+                        continue;
+                    };
+                    self.send_effective_slot_param(track, slot, param_idx);
+                }
+                crate::process::ParamTarget::InstrumentParam { param, .. } => {
+                    let Some(param_idx) = self
+                        .graph
+                        .instrument_descriptors
+                        .get(track)
+                        .and_then(|descriptor| {
+                            descriptor
+                                .params
+                                .iter()
+                                .position(|descriptor| descriptor.has_tag_or_name(&param))
+                        })
+                    else {
+                        continue;
+                    };
+                    self.send_effective_instrument_param(track, param_idx);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn toggle_slot_boolean(&mut self) {
         let param_idx = self.ui.effect_param_cursor;
         let track = self.ui.cursor_track;

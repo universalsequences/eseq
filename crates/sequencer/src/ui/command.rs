@@ -747,7 +747,10 @@ mod tests {
         EffectDescriptor, EffectSlotSnapshot, InstrumentModulationTarget, ParamDescriptor,
         ParamKind, ParamScaling, TensorParamDescriptor,
     };
+    use crate::macro_engine::{MacroCurve, MacroKind, MacroMapping};
+    use crate::neural::ParamNodeId;
     use crate::plock_variants::PlockVariantKey;
+    use crate::process::ParamTarget;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType, RackRouting,
@@ -1350,6 +1353,137 @@ mod tests {
     }
 
     #[test]
+    fn effect_base_edit_is_masked_while_macro_is_engaged_and_restored_on_release() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc.clone());
+        let id = app
+            .macro_engine
+            .create_macro("push", MacroKind::Mapped)
+            .expect("macro id");
+        app.macro_engine
+            .add_mapping(
+                id,
+                MacroMapping::new_resolved(
+                    0,
+                    ParamTarget::EffectParam {
+                        slot: 0,
+                        effect: desc.name.clone(),
+                        param: desc.params[0].name.clone(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    0.2,
+                    0.8,
+                    MacroCurve::Linear,
+                )
+                .expect("effect mapping"),
+            )
+            .expect("known macro");
+        app.set_macro_value(id, 1.0);
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 0,
+                value: 0.35,
+            },
+        );
+
+        assert_eq!(app.state.pattern.effect_chains[0][0].defaults.get(0), 0.35);
+        assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.8));
+
+        app.set_macro_value(id, 0.0);
+        assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.35));
+    }
+
+    #[test]
+    fn instrument_base_edit_is_masked_while_macro_is_engaged_and_restored_on_release() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        let id = app
+            .macro_engine
+            .create_macro("instrument push", MacroKind::Mapped)
+            .expect("macro id");
+        app.macro_engine
+            .add_mapping(
+                id,
+                MacroMapping::new(
+                    0,
+                    ParamTarget::InstrumentParam {
+                        param: desc.params[0].name.clone(),
+                        param_id: Some(ParamNodeId {
+                            logical_id: 42,
+                            node_param_idx: desc.params[0].node_param_idx,
+                        }),
+                    },
+                    0.1,
+                    0.9,
+                    MacroCurve::Linear,
+                )
+                .expect("instrument mapping"),
+            )
+            .expect("known macro");
+        app.set_macro_value(id, 1.0);
+
+        apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: 0.4,
+            },
+        );
+
+        assert_eq!(app.state.pattern.instrument_slots[0].defaults.get(0), 0.4);
+        assert_eq!(app.effective_instrument_param_value(0, 0), Some(0.9));
+
+        app.set_macro_value(id, 0.0);
+        assert_eq!(app.effective_instrument_param_value(0, 0), Some(0.4));
+    }
+
+    #[test]
+    fn restored_defaults_keep_engaged_override_and_suspend_incompatible_scene_target() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc.clone());
+        let id = app
+            .macro_engine
+            .create_macro("scene-safe push", MacroKind::Mapped)
+            .expect("macro id");
+        app.macro_engine
+            .add_mapping(
+                id,
+                MacroMapping::new_resolved(
+                    0,
+                    ParamTarget::EffectParam {
+                        slot: 0,
+                        effect: desc.name.clone(),
+                        param: desc.params[0].name.clone(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    0.2,
+                    0.8,
+                    MacroCurve::Linear,
+                )
+                .expect("resolved fallback mapping"),
+            )
+            .expect("known macro");
+        app.set_macro_value(id, 1.0);
+        app.state.pattern.effect_chains[0][0].defaults.set(0, 0.3);
+
+        app.push_all_restored_defaults();
+        assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.8));
+        assert!(!app.macro_engine.macro_definition(id).unwrap().mappings[0].suspended);
+
+        app.graph.effect_descriptors[0][0].name = "different effect".to_string();
+        app.push_all_restored_defaults();
+        assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.3));
+        assert!(app.macro_engine.macro_definition(id).unwrap().mappings[0].suspended);
+    }
+
+    #[test]
     fn effect_depth_plock_command_updates_dgen_mod_active_plock() {
         let desc = effect_mod_test_descriptor();
         let mut app = test_app_with_effect_descriptor(desc);
@@ -1851,7 +1985,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
                 slot.defaults.set(param_idx, value);
-                app.send_slot_param(track, slot_idx, param_idx, value);
+                app.send_effective_slot_param(track, slot_idx, param_idx);
                 sync_effect_mod_active_default(app, track, slot_idx, param_idx);
             }
         }
@@ -1904,7 +2038,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         } => {
             let slot = &app.state.pattern.instrument_slots[track];
             slot.defaults.set(param_idx, value);
-            app.send_instrument_param(track, param_idx, value);
+            app.send_effective_instrument_param(track, param_idx);
             sync_instrument_mod_active_default(app, track, param_idx);
             app.mark_track_sound_dirty(track);
         }

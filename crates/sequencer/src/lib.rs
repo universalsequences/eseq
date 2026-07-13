@@ -74,6 +74,7 @@ pub mod graph;
 mod limiter;
 #[allow(dead_code)]
 pub mod lisp_host;
+pub mod macro_engine;
 pub mod mixer_volume;
 pub mod neural;
 #[allow(dead_code)]
