@@ -11870,6 +11870,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "copy-effect-values-to-all-scenes" => {
+                        let chain = extract_string_from_payload(&payload, "chain");
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let bus_idx = extract_usize_from_payload(&payload, "bus");
+                        let slot_idx = extract_usize_from_payload(&payload, "slot");
+                        let updated = match (chain.as_deref(), track, bus_idx, slot_idx) {
+                            (Some("audio"), Some(track), _, Some(slot_idx)) => state
+                                .copy_current_effect_values_to_all_track_patterns(track, slot_idx),
+                            (Some("midi"), Some(track), _, Some(slot_idx)) => state
+                                .copy_current_midi_fx_values_to_all_track_patterns(track, slot_idx),
+                            (Some("bus"), _, Some(bus_idx), Some(slot_idx)) => {
+                                app.copy_bus_effect_values_to_all_scenes(bus_idx, slot_idx)
+                            }
+                            _ => 0,
+                        };
+                        if updated > 0 {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Copied effect values to {updated} patterns/scenes"
+                            )));
+                        } else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Could not copy effect values: invalid effect target".to_string(),
+                            ));
+                        }
+                    }
+                    "copy-instrument-values-to-all-scenes" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let updated = match (track, rack_slot) {
+                            (Some(track), Some(rack_slot)) => state
+                                .copy_current_rack_slot_instrument_values_to_all_track_patterns(
+                                    track, rack_slot,
+                                ),
+                            (Some(track), None) => {
+                                state.copy_current_instrument_values_to_all_track_patterns(track)
+                            }
+                            _ => 0,
+                        };
+                        if updated > 0 {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Copied instrument values to {updated} patterns/scenes"
+                            )));
+                        } else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Could not copy instrument values: invalid instrument target"
+                                    .to_string(),
+                            ));
+                        }
+                    }
                     "move-midi-fx-slot" => {
                         let source_track = extract_usize_from_payload(&payload, "source-track");
                         let source_slot = extract_usize_from_payload(&payload, "source-slot");

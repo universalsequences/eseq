@@ -1643,6 +1643,7 @@ impl Runtime {
             "text-input",
             "number-picker",
             "dropdown",
+            "menu-button",
             "select",
             "v-stack",
             "h-stack",

@@ -476,6 +476,20 @@ mod tests {
             Some(vec![0.1, 0.2, 0.95, 0.4])
         );
 
+        let mut destination = snapshot.clone();
+        destination.tensor_params[0].default = vec![0.0; 4];
+        destination.tensor_params[0].plocks[7] = Some(vec![0.8, 0.7, 0.6, 0.5]);
+        destination.copy_base_values_from(&snapshot);
+        assert_eq!(
+            destination.tensor_params[0].default,
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(
+            destination.tensor_params[0].plocks[7],
+            Some(vec![0.8, 0.7, 0.6, 0.5]),
+            "copying scene defaults must preserve the destination scene's tensor p-locks"
+        );
+
         let restored = EffectSlotState::empty();
         snapshot.restore(&restored);
         assert_eq!(
@@ -7097,6 +7111,27 @@ pub struct EffectSlotSnapshot {
 }
 
 impl EffectSlotSnapshot {
+    /// Copy scene-level parameter values while preserving all step/note locks,
+    /// runtime node bindings, and descriptor metadata owned by this snapshot.
+    pub fn copy_base_values_from(&mut self, source: &Self) {
+        let scalar_count = (self.num_params as usize)
+            .min(self.defaults.len())
+            .min(source.num_params as usize)
+            .min(source.defaults.len());
+        self.defaults[..scalar_count].copy_from_slice(&source.defaults[..scalar_count]);
+
+        for tensor in &mut self.tensor_params {
+            let Some(source_tensor) = source.tensor_params.iter().find(|candidate| {
+                candidate.name == tensor.name
+                    && candidate.shape == tensor.shape
+                    && candidate.default.len() == tensor.default.len()
+            }) else {
+                continue;
+            };
+            tensor.default.clone_from(&source_tensor.default);
+        }
+    }
+
     pub fn capture(slot: &EffectSlotState) -> Self {
         let node_id = slot.node_id.load(Ordering::Relaxed);
         let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed);

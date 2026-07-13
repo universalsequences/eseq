@@ -21,11 +21,13 @@
       :height fx-fixed-panel-height
       :debug-name "modulator-panel"
       (v-stack :gap 0 :height :fill
-        (box :debug-name "modulator-header-box" :height fx-panel-header-height :padding 0 :v-align :center :h-align :start
+        (box :debug-name "modulator-header-box" :width :fill :height fx-panel-header-height :padding 0 :v-align :center :h-align :start
           (h-stack :gap 0.5 :align :center :width :fill
             (fx-panel-header-leading-spacer)
             (fx-enabled-toggle (enabled-param (get inst :synth)) false "modulator-enabled")
-            (label "Modulator" :font-size 11 :color :white :bg :transparent)))
+            (label "Modulator" :font-size 11 :color :white :bg :transparent)
+            (box :flex 1 :height 0.15)
+            (instrument-header-actions-menu inst)))
         (box :height 0.2)
         (fx-panel-body "modulator-panel-content"
           (box 

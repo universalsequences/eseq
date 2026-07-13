@@ -404,6 +404,7 @@
                   (instrument-mods-toggle-button)
                   (instrument-keys-button))
                 (box :flex 1 :height 0.15)
+                (instrument-header-actions-menu inst)
                 (v-stack
                   (button "edit"
                     :background-color '(rgba 0.0 0.0 0.0 0.3)

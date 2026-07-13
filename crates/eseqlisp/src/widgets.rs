@@ -32,6 +32,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "response-curve-editor",
     "eq8-editor",
     "dropdown",
+    "menu-button",
     "select",
     "v-stack",
     "h-stack",
@@ -375,11 +376,19 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
         || widget_type == "textbox"
         || widget_type == "number-picker"
         || widget_type == "dropdown"
+        || widget_type == "menu-button"
         || widget_type == "knob-number"
         || widget_type == "patcher"
     {
         map.entry("focusable".to_string())
             .or_insert_with(|| Rc::new(RefCell::new(Value::Bool(true))));
+    }
+
+    if widget_type == "menu-button" {
+        map.insert(
+            "action-menu".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
     }
 
     if !children.is_empty() {

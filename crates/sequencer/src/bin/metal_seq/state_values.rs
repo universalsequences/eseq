@@ -7287,6 +7287,10 @@ pub(crate) fn build_instrument_panel_value(
         ))),
     );
     panel_map.insert(
+        "track".to_string(),
+        Rc::new(RefCell::new(Value::Number(track as f64))),
+    );
+    panel_map.insert(
         "phase-field".to_string(),
         Rc::new(RefCell::new(Value::String(modulator_phase_field(track)))),
     );
@@ -15998,6 +16002,10 @@ mod tests {
             Rc::new(RefCell::new(Value::String("modulator".to_string()))),
         );
         inst.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        inst.insert(
             "phase-field".to_string(),
             Rc::new(RefCell::new(Value::String(
                 modulator_phase_field(0).to_string(),
@@ -18217,6 +18225,12 @@ mod tests {
             find_layout_node_by_debug_name(&layout, "rack-panel").expect("rack panel layout node");
         let selected_sampler_panel = find_layout_node_by_debug_name(&layout, "sampler-panel")
             .expect("selected rack sampler panel layout node");
+        let selected_sampler_header =
+            find_layout_node_by_debug_name(selected_sampler_panel, "sampler-header-box")
+                .expect("selected rack sampler header layout node");
+        let selected_sampler_actions =
+            find_layout_node_by_debug_name(selected_sampler_panel, "instrument-header-actions-0-0")
+                .expect("selected rack sampler action menu layout node");
         let chain_list = find_layout_node_by_debug_name(&layout, "rack-chain-list")
             .unwrap_or_else(|| panic!("rack chain list; layout={layout_summaries:#?}"));
         let layer_label = find_layout_node_by_text(&layout, "Layer Alpha")
@@ -18286,6 +18300,16 @@ mod tests {
             selected_sampler_panel.rect.width > 60.0 && selected_sampler_panel.rect.height > 8.0,
             "selected rack sampler panel should render as its own full panel, got {:?}",
             selected_sampler_panel.rect
+        );
+        assert_eq!(selected_sampler_actions.widget_type, "menu-button");
+        assert_finite_nonzero_rect(
+            selected_sampler_actions,
+            "selected rack sampler action menu",
+        );
+        assert_layout_inside(
+            selected_sampler_actions,
+            selected_sampler_header,
+            "selected rack sampler action menu",
         );
         assert!(
             selected_sampler_panel.rect.col
@@ -30240,6 +30264,97 @@ mod tests {
         editor
             .runtime_mut()
             .eval_str(
+                r#"(fx-copy-values-to-all-scenes
+                    (dict :slot-idx 2 :track-idx 0 :bus-fx false :midi-fx false))"#,
+            )
+            .expect("copy track effect values to every scene");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "copy-effect-values-to-all-scenes");
+                assert_eq!(
+                    extract_string_from_payload(payload, "chain").as_deref(),
+                    Some("audio")
+                );
+                assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+                assert_eq!(extract_usize_from_payload(payload, "slot"), Some(2));
+            }
+            other => panic!("expected copy-effect-values-to-all-scenes, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-copy-values-to-all-scenes
+                    (dict :slot-idx 3 :track-idx 0 :bus-fx false :midi-fx true))"#,
+            )
+            .expect("copy MIDI effect values to every scene");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "copy-effect-values-to-all-scenes");
+                assert_eq!(
+                    extract_string_from_payload(payload, "chain").as_deref(),
+                    Some("midi")
+                );
+                assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+                assert_eq!(extract_usize_from_payload(payload, "slot"), Some(3));
+            }
+            other => panic!("expected copy-effect-values-to-all-scenes, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-copy-values-to-all-scenes
+                    (dict :slot-idx 1 :bus-fx true :bus-idx 2 :midi-fx false))"#,
+            )
+            .expect("copy bus effect values to every scene");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "copy-effect-values-to-all-scenes");
+                assert_eq!(
+                    extract_string_from_payload(payload, "chain").as_deref(),
+                    Some("bus")
+                );
+                assert_eq!(extract_usize_from_payload(payload, "bus"), Some(2));
+                assert_eq!(extract_usize_from_payload(payload, "slot"), Some(1));
+            }
+            other => panic!("expected copy-effect-values-to-all-scenes, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(instrument-copy-values-to-all-scenes (dict :track 0))")
+            .expect("copy instrument values to every scene");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "copy-instrument-values-to-all-scenes");
+                assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+                assert_eq!(extract_usize_from_payload(payload, "rack-slot"), None);
+            }
+            other => panic!("expected copy-instrument-values-to-all-scenes, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(instrument-copy-values-to-all-scenes (dict :track 0 :rack-slot 0))")
+            .expect("copy rack-slot instrument values to every scene");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "copy-instrument-values-to-all-scenes");
+                assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+                assert_eq!(extract_usize_from_payload(payload, "rack-slot"), Some(0));
+            }
+            other => panic!("expected copy-instrument-values-to-all-scenes, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
                 r#"(fx-drop-on-effect
                     (dict
                       :payload (dict :kind "builtin-audio-effect" :name "Filter")
@@ -30614,6 +30729,14 @@ mod tests {
             layout_contains_widget_type(&layout, "response-curve-editor"),
             "filter layout should contain the response curve editor"
         );
+        let filter_header = find_layout_node_by_debug_name(&layout, "audio-fx-panel-header")
+            .expect("filter header should render");
+        let filter_actions =
+            find_layout_node_by_debug_name(&layout, "effect-header-actions-audio-0-0")
+                .expect("filter action menu should render");
+        assert_eq!(filter_actions.widget_type, "menu-button");
+        assert_finite_nonzero_rect(filter_actions, "filter action menu");
+        assert_layout_inside(filter_actions, filter_header, "filter action menu");
     }
 
     #[test]
@@ -30902,6 +31025,28 @@ mod tests {
         let layout = editor.widget_layout().expect("sampler panel layout");
         let panel = find_layout_node_by_debug_name(&layout, "sampler-panel")
             .expect("sampler panel should render");
+        let header = find_layout_node_by_debug_name(panel, "sampler-header-box")
+            .expect("sampler header should render");
+        let actions = find_layout_node_by_debug_name(panel, "instrument-header-actions-2-main")
+            .expect("sampler action menu should render");
+        assert_eq!(actions.widget_type, "menu-button");
+        assert_finite_nonzero_rect(actions, "sampler action menu");
+        assert_layout_inside(actions, header, "sampler action menu");
+        assert!(
+            ((actions.rect.row + actions.rect.height * 0.5)
+                - (header.rect.row + header.rect.height * 0.5))
+                .abs()
+                < 0.01,
+            "sampler action menu should be vertically centered in its header; action={:?}, header={:?}",
+            actions.rect,
+            header.rect
+        );
+        assert!(
+            actions.rect.col + actions.rect.width < header.rect.col + header.rect.width - 0.5,
+            "sampler action menu should retain a visible trailing inset; action={:?}, header={:?}",
+            actions.rect,
+            header.rect
+        );
         assert!(
             panel.props.contains_key("on-drop"),
             "sampler panel should expose an on-drop callback"
@@ -38743,8 +38888,15 @@ mod tests {
             find_layout_node_by_debug_name(&layout, "modulator-panel").expect("modulator panel");
         let body = find_layout_node_by_debug_name(&layout, "modulator-panel-body")
             .expect("modulator panel body");
+        let header = find_layout_node_by_debug_name(panel, "modulator-header-box")
+            .expect("modulator panel header");
+        let actions = find_layout_node_by_debug_name(panel, "instrument-header-actions-0-main")
+            .expect("modulator action menu");
         let curve = find_layout_node_by_widget_type(&layout, "modulator-curve")
             .expect("modulator curve widget");
+        assert_eq!(actions.widget_type, "menu-button");
+        assert_finite_nonzero_rect(actions, "modulator action menu");
+        assert_layout_inside(actions, header, "modulator action menu");
         assert!(matches!(
             curve.props.get("phase"),
             Some(Value::ReactiveRef {

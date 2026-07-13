@@ -3217,6 +3217,124 @@ impl SequencerState {
         scenes.save_scene_snapshot(current_pattern, snapshot)
     }
 
+    pub fn copy_current_effect_values_to_all_track_patterns(
+        &self,
+        track: usize,
+        slot_idx: usize,
+    ) -> usize {
+        let Some(source_slot) = self
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|slots| slots.get(slot_idx))
+            .map(EffectSlotSnapshot::capture)
+        else {
+            return 0;
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        let mut updated = 0;
+        for pattern in pool.patterns.values_mut() {
+            if let Some(slot) = pattern.effect_slots.get_mut(slot_idx) {
+                slot.copy_base_values_from(&source_slot);
+                updated += 1;
+            }
+        }
+        updated
+    }
+
+    pub fn copy_current_midi_fx_values_to_all_track_patterns(
+        &self,
+        track: usize,
+        slot_idx: usize,
+    ) -> usize {
+        let Some(source_slot) = self
+            .pattern
+            .midi_fx_slots
+            .get(track)
+            .and_then(|slots| slots.get(slot_idx))
+            .map(EffectSlotSnapshot::capture)
+        else {
+            return 0;
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        let mut updated = 0;
+        for pattern in pool.patterns.values_mut() {
+            if let Some(slot) = pattern.midi_fx_slots.get_mut(slot_idx) {
+                slot.copy_base_values_from(&source_slot);
+                updated += 1;
+            }
+        }
+        updated
+    }
+
+    pub fn copy_current_instrument_values_to_all_track_patterns(&self, track: usize) -> usize {
+        let Some(source_slot) = self
+            .pattern
+            .instrument_slots
+            .get(track)
+            .map(EffectSlotSnapshot::capture)
+        else {
+            return 0;
+        };
+        let Some(source_base_note) = self.pattern.instrument_base_note_offsets.get(track) else {
+            return 0;
+        };
+        let source_base_note = f32::from_bits(source_base_note.load(Ordering::Relaxed));
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        for pattern in pool.patterns.values_mut() {
+            pattern.instrument_slot.copy_base_values_from(&source_slot);
+            pattern.instrument_base_note_offset = source_base_note;
+        }
+        pool.patterns.len()
+    }
+
+    pub fn copy_current_rack_slot_instrument_values_to_all_track_patterns(
+        &self,
+        track: usize,
+        rack_slot_idx: usize,
+    ) -> usize {
+        let source = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(rack_slot_idx))
+            .cloned();
+        let Some(source) = source else {
+            return 0;
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        let mut updated = 0;
+        for pattern in pool.patterns.values_mut() {
+            let Some(slot) = pattern
+                .rack_track
+                .as_mut()
+                .and_then(|rack| rack.slots.get_mut(rack_slot_idx))
+            else {
+                continue;
+            };
+            slot.instrument_slot
+                .copy_base_values_from(&source.instrument_slot);
+            slot.instrument_base_note_offset = source.instrument_base_note_offset;
+            updated += 1;
+        }
+        updated
+    }
+
     pub fn sync_effect_slot_with_modulator_in_track_patterns(
         &self,
         track: usize,
@@ -3936,6 +4054,34 @@ impl SequencerState {
                 bus.replace_effect_slot(slot_idx, defaults.clone(), plocks.clone());
             }
         }
+    }
+
+    pub fn copy_bus_effect_values_to_all_scene_patterns(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+        source_snapshot: &[BusPatternSnapshot],
+    ) -> usize {
+        let Some(source_defaults) = source_snapshot
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_defaults.get(slot_idx))
+            .cloned()
+        else {
+            return 0;
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let target_len = scenes.scene_count().max(self.current_scene_index() + 1);
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, source_snapshot);
+        let mut updated = 0;
+        for scene in &mut scenes.scenes {
+            let Some(bus) = scene.bus_patterns.get_mut(bus_idx) else {
+                continue;
+            };
+            bus.effect_defaults.resize_with(slot_idx + 1, Vec::new);
+            bus.effect_defaults[slot_idx] = source_defaults.clone();
+            updated += 1;
+        }
+        updated
     }
 
     pub fn clear_bus_effect_slot_in_other_scene_patterns(
@@ -7700,6 +7846,112 @@ mod tests {
         let cleared = state.bus_pattern_snapshot_or_default(1, &current);
         assert!(cleared[0].effect_defaults[1].is_empty());
         assert!(cleared[0].effect_plocks[1].is_empty());
+    }
+
+    #[test]
+    fn copy_current_device_values_updates_every_pattern_without_copying_locks() {
+        let descriptor = EffectDescriptor::builtin_filter();
+        let state = SequencerState::new(1, vec![vec![EffectSlotState::new(&descriptor, 101)]]);
+        state.pattern.midi_fx_slots[0][0].apply_descriptor(&descriptor, 201);
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 301);
+
+        let mut first = sample_pattern_snapshot(1);
+        let mut second = sample_pattern_snapshot(1);
+        first.midi_fx_slots[0][0] = sample_effect_slot_snapshot(20);
+        second.midi_fx_slots[0][0] = sample_effect_slot_snapshot(21);
+        first.rack_tracks[0] = Some(sample_rack_track_snapshot());
+        second.rack_tracks[0] = Some(sample_rack_track_snapshot());
+        second.effect_slots[0][0].plocks[5][1] = Some(555.0);
+        second.midi_fx_slots[0][0].plocks[6][1] = Some(666.0);
+        second.instrument_slots[0]
+            .key_locks
+            .insert(60, vec![Some(777.0), None]);
+        second.rack_tracks[0].as_mut().unwrap().slots[0]
+            .instrument_slot
+            .plocks[7][1] = Some(888.0);
+        state.replace_pattern_repository(vec![first, second], 0);
+
+        state.pattern.effect_chains[0][0].defaults.set(0, 91.0);
+        state.pattern.effect_chains[0][0].defaults.set(1, 92.0);
+        state.pattern.midi_fx_slots[0][0].defaults.set(0, 93.0);
+        state.pattern.midi_fx_slots[0][0].defaults.set(1, 94.0);
+        state.pattern.instrument_slots[0].defaults.set(0, 95.0);
+        state.pattern.instrument_slots[0].defaults.set(1, 96.0);
+        state.pattern.instrument_base_note_offsets[0].store(12.0f32.to_bits(), Ordering::Relaxed);
+
+        let mut live_rack = sample_rack_track_snapshot();
+        live_rack.slots[0].instrument_slot.defaults[0] = 97.0;
+        live_rack.slots[0].instrument_slot.defaults[1] = 98.0;
+        live_rack.slots[0].instrument_base_note_offset = 24.0;
+        state.pattern.rack_tracks.lock().unwrap()[0] = Some(live_rack);
+
+        assert_eq!(
+            state.copy_current_effect_values_to_all_track_patterns(0, 0),
+            2
+        );
+        assert_eq!(
+            state.copy_current_midi_fx_values_to_all_track_patterns(0, 0),
+            2
+        );
+        assert_eq!(
+            state.copy_current_instrument_values_to_all_track_patterns(0),
+            2
+        );
+        assert_eq!(
+            state.copy_current_rack_slot_instrument_values_to_all_track_patterns(0, 0),
+            2
+        );
+
+        let patterns = state.export_pattern_repository();
+        for pattern in &patterns {
+            assert_eq!(&pattern.effect_slots[0][0].defaults[..2], &[91.0, 92.0]);
+            assert_eq!(&pattern.midi_fx_slots[0][0].defaults[..2], &[93.0, 94.0]);
+            assert_eq!(&pattern.instrument_slots[0].defaults[..2], &[95.0, 96.0]);
+            assert_eq!(pattern.instrument_base_note_offsets[0], 12.0);
+            let rack_slot = &pattern.rack_tracks[0].as_ref().unwrap().slots[0];
+            assert_eq!(&rack_slot.instrument_slot.defaults[..2], &[97.0, 98.0]);
+            assert_eq!(rack_slot.instrument_base_note_offset, 24.0);
+        }
+        assert_eq!(patterns[1].effect_slots[0][0].plocks[5][1], Some(555.0));
+        assert_eq!(patterns[1].midi_fx_slots[0][0].plocks[6][1], Some(666.0));
+        assert_eq!(
+            patterns[1].instrument_slots[0].key_locks[&60][0],
+            Some(777.0)
+        );
+        assert_eq!(
+            patterns[1].rack_tracks[0].as_ref().unwrap().slots[0]
+                .instrument_slot
+                .plocks[7][1],
+            Some(888.0)
+        );
+    }
+
+    #[test]
+    fn copy_current_bus_effect_values_updates_all_scenes_without_copying_plocks() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let current = sample_bus_pattern_snapshot(0.25);
+        let other = sample_bus_pattern_snapshot(0.75);
+        state.replace_bus_pattern_repository(vec![current.clone(), other], &current);
+        let source = sample_bus_pattern_snapshot(10.0);
+
+        assert_eq!(
+            state.copy_bus_effect_values_to_all_scene_patterns(0, 1, &source),
+            2
+        );
+
+        let first = state.bus_pattern_snapshot_or_default(0, &source);
+        let second = state.bus_pattern_snapshot_or_default(1, &source);
+        assert_eq!(first[0].effect_defaults[1], vec![11.0]);
+        assert_eq!(second[0].effect_defaults[1], vec![11.0]);
+        assert_eq!(first[0].effect_plocks[1][0][0], Some(1.25));
+        assert_eq!(second[0].effect_plocks[1][0][0], Some(1.75));
     }
 
     #[test]

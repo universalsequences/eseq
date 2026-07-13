@@ -1054,6 +1054,12 @@ impl App {
         );
     }
 
+    pub fn copy_bus_effect_values_to_all_scenes(&self, bus_idx: usize, slot_idx: usize) -> usize {
+        let live_snapshot = self.capture_bus_pattern_snapshot();
+        self.state
+            .copy_bus_effect_values_to_all_scene_patterns(bus_idx, slot_idx, &live_snapshot)
+    }
+
     fn prepare_custom_effect_insert_slot(
         &mut self,
         track: usize,

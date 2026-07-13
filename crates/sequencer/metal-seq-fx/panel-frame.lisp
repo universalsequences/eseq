@@ -18,6 +18,46 @@
     "midi"
     (if (get fx :bus-fx) "bus" "audio")))
 
+(def fx-copy-values-to-all-scenes (fx)
+  (host-command "copy-effect-values-to-all-scenes"
+    (dict :chain (fx-effect-chain-kind fx)
+          :track (get fx :track-idx)
+          :bus (if (get fx :bus-fx) (get fx :bus-idx) nil)
+          :slot (get fx :slot-idx))))
+
+(def instrument-copy-values-to-all-scenes (inst)
+  (host-command "copy-instrument-values-to-all-scenes"
+    (dict :track (get inst :track)
+          :rack-slot (get inst :rack-slot))))
+
+(def header-actions-menu (debug-name action)
+  (menu-button
+    :key debug-name
+    :debug-name debug-name
+    :icon "•••"
+    :options (list "Copy current values to all scenes")
+    :width 2.25 :height 0.70 :font-size 10
+    :bg-color :mixer-control-bg
+    :text-color :dim
+    :menu-bg :dropdown-menu-bg
+    :menu-border-color :dropdown-menu-border
+    :hover-bg :dropdown-hover-bg
+    :on-change (lambda (item) (action))))
+
+(def fx-header-actions-menu (fx)
+  (header-actions-menu
+    (str "effect-header-actions-" (fx-effect-chain-kind fx) "-"
+         (if (get fx :bus-fx) (get fx :bus-idx) (get fx :track-idx)) "-"
+         (get fx :slot-idx))
+    (lambda () (fx-copy-values-to-all-scenes fx))))
+
+(def instrument-header-actions-menu (inst)
+  (header-actions-menu
+    (str "instrument-header-actions-"
+         (get inst :track) "-"
+         (if (= (get inst :rack-slot) nil) "main" (get inst :rack-slot)))
+    (lambda () (instrument-copy-values-to-all-scenes inst))))
+
 (def fx-effect-drag-kind (fx)
   (if (get fx :midi-fx)
     "midi-effect-instance"
@@ -57,7 +97,7 @@
         (if (get fx :bus-fx)
           (fx-select-bus-effect (get fx :bus-idx) (get fx :slot-idx))
           (fx-select-effect (get fx :slot-idx)))))
-    (h-stack :gap 0.5 :align :center
+    (h-stack :gap 0.5 :align :center :width :fill
       (fx-panel-header-leading-spacer)
       (fx-enabled-toggle (enabled-param params) fx
         (if (get fx :midi-fx)
@@ -69,7 +109,8 @@
       (if (fx-has-modulators? fx)
         (effect-mods-toggle-button fx)
         (box))
-      (box :width :fill)
+      (box :flex 1 :height 0.15)
+      (fx-header-actions-menu fx)
       (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
         (button "edit" :background-color :black :width 4 :height 0.75 :align :center :font-size 10
           :on-click (lambda (info)

@@ -343,12 +343,15 @@
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (sampler-panel-drop-sample event))
     (v-stack :gap 0 :height :fill
-      (box :debug-name "sampler-header-box" :height 1 :padding 0 :v-align :center :h-align :start
-        (h-stack :gap 0.5  :width :fill
+      (box :debug-name "sampler-header-box" :width :fill :height 1 :padding 0 :v-align :center :h-align :start
+        (h-stack :gap 0.5 :align :center :width :fill
           (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param (get inst :synth)) false "sampler-enabled")
           (label "Sampler" :font-size 11 :color :white :bg :transparent)
           (instrument-synth-button)
-          (instrument-mods-toggle-button)))
+          (instrument-mods-toggle-button)
+          (box :flex 1 :height 0.15)
+          (instrument-header-actions-menu inst)
+          (box :width 0.25 :height 0.1)))
       (fx-panel-body "sampler-panel-content"
         (sampler-panel-content inst)))))
