@@ -8329,6 +8329,11 @@ pub(crate) fn current_custom_instrument_name(app: &ui::App, track: usize) -> Opt
 }
 
 pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
+    rt.set_reactive(
+        "SEQ",
+        "project-instrument-engines",
+        build_string_list(&project_instrument_engine_names(app)),
+    );
     if app.is_sampler_track(track) {
         let selected_sample = app
             .sampler_path_for_track(track)
@@ -11573,6 +11578,7 @@ mod tests {
                 ("sidebar-presets", test_list(vec![])),
                 ("sidebar-loaded-preset", Value::String(String::new())),
                 ("sidebar-instrument-name", Value::String(String::new())),
+                ("project-instrument-engines", test_list(vec![])),
                 (
                     "sidebar-instrument-display-name",
                     Value::String(String::new()),
@@ -11641,7 +11647,17 @@ mod tests {
                     Some(Value::String(s)) => s.as_str(),
                     _ => "",
                 };
-                Ok(build_instrument_tree_value(query))
+                let project_engines = match args.get(1) {
+                    Some(Value::List(items)) => items
+                        .iter()
+                        .filter_map(|item| match &*item.borrow() {
+                            Value::String(name) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                Ok(build_instrument_tree_value(query, &project_engines))
             });
         editor
             .runtime_mut()
@@ -11882,8 +11898,52 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_browser_project_engine_rows_have_visible_layout() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "project-instrument-engines",
+            build_string_list(&["core/drift/".to_string()]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-refresh-buffer)")
+            .expect("refresh browser after project engines change");
+        let items = editor
+            .runtime_mut()
+            .eval_str("(sbrowser-create-items)")
+            .expect("evaluate project engine tree")
+            .expect("project engine tree value");
+        assert!(
+            value_contains_string(&items, "Engines"),
+            "project engine tree should contain its section: {items:?}"
+        );
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(90, 70);
+
+        let layout = editor.widget_layout().expect("browser layout");
+        let tree = find_layout_node_by_stable_key(&layout, "instruments-tab-tree")
+            .expect("instrument tree layout");
+        let rendered = render_layout_cells(&layout, 90, 70);
+        assert!(
+            tree.rect.width.is_finite()
+                && tree.rect.height.is_finite()
+                && tree.rect.width > 0.0
+                && tree.rect.height > 0.0,
+            "instrument tree should have finite nonzero geometry: {:?}",
+            tree.rect
+        );
+        assert!(
+            rendered.contains("Engines") && rendered.contains("drift"),
+            "project engine section and row should render inside the visible tree:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn metal_seq_instrument_tree_starts_with_builtin_rows() {
-        let tree = build_instrument_tree_value("");
+        let tree = build_instrument_tree_value("", &[]);
         let labels = top_level_tree_field_strings(&tree, "label");
         let kinds = top_level_tree_field_strings(&tree, "kind");
         let names = top_level_tree_field_strings(&tree, "name");
@@ -11909,7 +11969,7 @@ mod tests {
 
     #[test]
     fn metal_seq_instrument_tree_search_filters_builtins_without_headers() {
-        let tree = build_instrument_tree_value("samp");
+        let tree = build_instrument_tree_value("samp", &[]);
         let labels = top_level_tree_field_strings(&tree, "label");
         let kinds = top_level_tree_field_strings(&tree, "kind");
 
@@ -18161,6 +18221,27 @@ mod tests {
             .unwrap_or_else(|| panic!("rack chain list; layout={layout_summaries:#?}"));
         let layer_label = find_layout_node_by_text(&layout, "Layer Alpha")
             .unwrap_or_else(|| panic!("rack layer label; layout={layout_summaries:#?}"));
+        let sampler_small_param_row =
+            find_layout_node_by_debug_name(selected_sampler_panel, "sampler-small-param-row")
+                .unwrap_or_else(|| panic!("sampler small-param row; layout={layout_summaries:#?}"));
+        let sampler_main_param_row =
+            find_layout_node_by_debug_name(selected_sampler_panel, "sampler-main-param-row")
+                .unwrap_or_else(|| panic!("sampler main-param row; layout={layout_summaries:#?}"));
+        let base_label = find_layout_node_by_text(selected_sampler_panel, "base")
+            .unwrap_or_else(|| panic!("rack sampler base label; layout={layout_summaries:#?}"));
+        let gate_label = find_layout_node_by_text(selected_sampler_panel, "gate")
+            .unwrap_or_else(|| panic!("rack sampler gate label; layout={layout_summaries:#?}"));
+        let reverse_control =
+            find_layout_node_by_stable_key(selected_sampler_panel, "sampler-param-5-base")
+                .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+                .unwrap_or_else(|| {
+                    panic!("rack sampler reverse control; layout={layout_summaries:#?}")
+                });
+        assert_eq!(
+            reverse_control.props.get("label"),
+            Some(&Value::String("reverse".to_string())),
+            "sampler param 5 should remain the reverse control"
+        );
         assert!(
             rack_panel.props.contains_key("on-drop"),
             "rack panel should expose an on-drop callback"
@@ -18227,6 +18308,56 @@ mod tests {
             "rack layer label should be measured inside the rack panel, got {:?}; panel={:?}",
             layer_label.rect,
             rack_panel.rect
+        );
+        assert!(
+            sampler_small_param_row.rect.width > 1.0
+                && sampler_small_param_row.rect.height > 1.0
+                && sampler_main_param_row.rect.width > 1.0
+                && sampler_main_param_row.rect.height > 1.0,
+            "rack sampler parameter rows should have finite nonzero geometry; small={:?}, main={:?}",
+            sampler_small_param_row.rect,
+            sampler_main_param_row.rect
+        );
+        assert_layout_inside(
+            base_label,
+            sampler_small_param_row,
+            "rack sampler base label",
+        );
+        assert_layout_inside(
+            gate_label,
+            sampler_main_param_row,
+            "rack sampler gate label",
+        );
+        assert_layout_inside(
+            reverse_control,
+            sampler_main_param_row,
+            "rack sampler reverse control",
+        );
+        assert_layout_inside(
+            base_label,
+            selected_sampler_panel,
+            "visible rack sampler base label",
+        );
+        assert_layout_inside(
+            gate_label,
+            selected_sampler_panel,
+            "visible rack sampler gate label",
+        );
+        assert_layout_inside(
+            reverse_control,
+            selected_sampler_panel,
+            "visible rack sampler reverse control",
+        );
+        assert!(
+            reverse_control.rect.col > gate_label.rect.col
+                && reverse_control.rect.col < gate_label.rect.col + 6.0,
+            "reverse should immediately follow the fixed gate control instead of a misplaced base-note knob; gate={:?}, reverse={:?}",
+            gate_label.rect,
+            reverse_control.rect
+        );
+        assert!(
+            find_layout_node_by_text(selected_sampler_panel, "base_note").is_none(),
+            "the sampler panel should present the semantic base-note control with its compact 'base' label"
         );
 
         let _ = editor.drain_host_commands();
@@ -19099,7 +19230,7 @@ mod tests {
                     Some(Value::String(s)) => s.as_str(),
                     _ => "",
                 };
-                Ok(build_instrument_tree_value(query))
+                Ok(build_instrument_tree_value(query, &[]))
             });
         editor
             .runtime_mut()

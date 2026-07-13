@@ -130,19 +130,23 @@ fn button_shadow(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "shadow-color", theme::BUTTON_SHADOW())
 }
 
+pub(super) fn icon_name_value(value: &str) -> Option<f32> {
+    match value {
+        "plus" | "new" => Some(0.0),
+        "sampler" => Some(1.0),
+        "waveform" => Some(2.0),
+        "piano" | "keys" => Some(3.0),
+        "sliders" | "controls" => Some(4.0),
+        "note-arrow" | "midi-fx" => Some(5.0),
+        "dial" | "preset" | "bookmark" => Some(6.0),
+        "folder" | "project" => Some(7.0),
+        _ => None,
+    }
+}
+
 fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
     match props.get("icon") {
-        Some(Value::Keyword(value)) | Some(Value::String(value)) => match value.as_str() {
-            "plus" | "new" => Some(0.0),
-            "sampler" => Some(1.0),
-            "waveform" => Some(2.0),
-            "piano" | "keys" => Some(3.0),
-            "sliders" | "controls" => Some(4.0),
-            "note-arrow" | "midi-fx" => Some(5.0),
-            "dial" | "preset" | "bookmark" => Some(6.0),
-            "folder" | "project" => Some(7.0),
-            _ => None,
-        },
+        Some(Value::Keyword(value)) | Some(Value::String(value)) => icon_name_value(value),
         _ => None,
     }
 }

@@ -29,6 +29,14 @@ pub(crate) fn build_string_list(items: &[String]) -> Value {
 }
 
 pub(crate) fn build_flat_tree_items(items: &[String]) -> Value {
+    build_tree_items(items, None)
+}
+
+pub(crate) fn build_icon_tree_items(items: &[String], icon: &str) -> Value {
+    build_tree_items(items, Some(icon))
+}
+
+fn build_tree_items(items: &[String], icon: Option<&str>) -> Value {
     use std::collections::HashMap;
     let items: Vec<Rc<RefCell<Value>>> = items
         .iter()
@@ -38,6 +46,12 @@ pub(crate) fn build_flat_tree_items(items: &[String]) -> Value {
                 "label".to_string(),
                 Rc::new(RefCell::new(Value::String(item.clone()))),
             );
+            if let Some(icon) = icon {
+                map.insert(
+                    "icon".to_string(),
+                    Rc::new(RefCell::new(Value::Keyword(icon.to_string()))),
+                );
+            }
             Rc::new(RefCell::new(Value::Map(map)))
         })
         .collect();

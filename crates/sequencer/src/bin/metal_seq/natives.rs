@@ -1215,6 +1215,10 @@ pub(crate) fn init_runtime(
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-presets", Value::List(vec![])),
                 ("sidebar-preset-tree", Value::List(vec![])),
+                (
+                    "project-instrument-engines",
+                    build_string_list(&project_instrument_engine_names(app)),
+                ),
                 ("current-project-name", Value::String(String::new())),
                 // Editor mode state (for inline instrument/effect creation/editing)
                 ("editor-active", Value::Bool(false)),
@@ -4048,7 +4052,8 @@ pub(crate) fn init_runtime(
             Some(Value::String(s)) => s.as_str(),
             _ => "",
         };
-        Ok(build_instrument_tree_value(query))
+        let project_engines = value_string_list(args.get(1));
+        Ok(build_instrument_tree_value(query, &project_engines))
     });
     runtime.register_native("seq-audio-effect-tree", move |args, _ctx| {
         let query = match args.first() {

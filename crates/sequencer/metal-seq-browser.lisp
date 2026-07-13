@@ -607,7 +607,7 @@
   (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
 
 (def sbrowser-create-items ()
-  (seq-saved-instrument-tree sbrowser-filter))
+  (seq-saved-instrument-tree sbrowser-filter SEQ.project-instrument-engines))
 
 (def sbrowser-enter-new-instrument-editor ()
   (set! sbrowser-editor-name "")

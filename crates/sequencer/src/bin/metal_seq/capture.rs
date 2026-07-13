@@ -134,6 +134,7 @@ struct CaptureTrackSpec {
     kind: CaptureTrackKind,
     display_name: Option<String>,
     num_steps: Option<usize>,
+    samples: Vec<String>,
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
 }
@@ -151,8 +152,20 @@ struct ParsedCaptureScript {
 fn parse_capture_script(path: &Path) -> Result<ParsedCaptureScript, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read capture script {}: {error}", path.display()))?;
-    parse_capture_source(&source)
-        .map_err(|error| format!("invalid capture script {}: {error}", path.display()))
+    let mut parsed = parse_capture_source(&source)
+        .map_err(|error| format!("invalid capture script {}: {error}", path.display()))?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| format!("failed to resolve capture working directory: {error}"))?;
+    let script_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    for track in &mut parsed.project.tracks {
+        for sample in &mut track.samples {
+            let sample_path = Path::new(sample);
+            *sample = absolute_path(&cwd, script_dir.join(sample_path))
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    Ok(parsed)
 }
 
 fn parse_capture_source(source: &str) -> Result<ParsedCaptureScript, String> {
@@ -249,6 +262,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
 
     let mut display_name = None;
     let mut num_steps = None;
+    let mut samples = Vec::new();
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
     while cursor < items.len() {
@@ -275,6 +289,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
                 }
                 num_steps = Some(steps);
             }
+            "samples" => samples = expression_string_list(value, ":samples")?,
             "midi-fx" => midi_fx = expression_string_list(value, ":midi-fx")?,
             "audio-fx" => audio_fx = expression_string_list(value, ":audio-fx")?,
             other => return Err(format!("unsupported track option :{other}")),
@@ -282,10 +297,15 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         cursor += 2;
     }
 
+    if !samples.is_empty() && kind != CaptureTrackKind::LayerRack {
+        return Err(":samples is only supported for :layer-rack tracks".to_string());
+    }
+
     Ok(CaptureTrackSpec {
         kind,
         display_name,
         num_steps,
+        samples,
         midi_fx,
         audio_fx,
     })
@@ -347,6 +367,16 @@ fn apply_capture_project(app: &mut ui::App, project: &CaptureProjectSpec) -> Res
         }
         if let Some(num_steps) = spec.num_steps {
             app.state.pattern.track_params[track].set_num_steps(num_steps);
+        }
+        for sample in &spec.samples {
+            app.graph_controller()
+                .add_sampler_slot_to_rack(track, Path::new(sample))
+                .map_err(|error| {
+                    format!(
+                        "failed to add sample {sample:?} to rack track {}: {error}",
+                        track + 1
+                    )
+                })?;
         }
         for effect in &spec.midi_fx {
             app.add_midi_fx_to_track_sync(track, effect)
@@ -560,28 +590,34 @@ mod tests {
         let source = r#"
             (capture-project
               (track :sampler :name "Drums" :num-steps 8 :midi-fx ("arp") :audio-fx '("filter"))
+              (track :layer-rack :samples ("kick.wav" "snare.wav"))
               (track :instrument "core/drift"))
 
             (def-process passthrough :run nil)
             (processes :track 0 (passthrough))
         "#;
         let parsed = parse_capture_source(source).expect("capture source should parse");
-        assert_eq!(parsed.project.tracks.len(), 2);
+        assert_eq!(parsed.project.tracks.len(), 3);
         assert_eq!(
             parsed.project.tracks[0],
             CaptureTrackSpec {
                 kind: CaptureTrackKind::Sampler,
                 display_name: Some("Drums".to_string()),
                 num_steps: Some(8),
+                samples: vec![],
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],
             }
         );
         assert_eq!(
-            parsed.project.tracks[1].kind,
+            parsed.project.tracks[1].samples,
+            vec!["kick.wav".to_string(), "snare.wav".to_string()]
+        );
+        assert_eq!(
+            parsed.project.tracks[2].kind,
             CaptureTrackKind::Instrument("core/drift".to_string())
         );
-        assert_eq!(parsed.project.tracks[1].num_steps, None);
+        assert_eq!(parsed.project.tracks[2].num_steps, None);
         assert!(!parsed.executable_source.contains("capture-project"));
         assert!(parsed.executable_source.contains("def-process passthrough"));
         assert!(parsed.executable_source.contains("processes :track 0"));
@@ -610,6 +646,18 @@ mod tests {
                 "source should fail: {source}"
             );
         }
+    }
+
+    #[test]
+    fn capture_track_samples_are_limited_to_layer_racks() {
+        assert!(
+            parse_capture_source("(capture-project (track :sampler :samples (\"kick.wav\")))")
+                .is_err()
+        );
+        assert!(parse_capture_source(
+            "(capture-project (track :layer-rack :samples (\"kick.wav\")))"
+        )
+        .is_ok());
     }
 
     #[test]

@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_to_descriptor_rebinds_loaded_plock_ids_to_live_node_id() {
+    fn sync_to_descriptor_rebinds_loaded_plock_and_key_lock_ids_to_live_node_id() {
         let desc = EffectDescriptor {
             name: "test".to_string(),
             input_channels: 0,
@@ -521,8 +521,14 @@ mod tests {
             plock_param_ids: (0..crate::sequencer::MAX_STEPS)
                 .map(|_| vec![None])
                 .collect(),
-            key_locks: BTreeMap::new(),
-            key_lock_param_ids: BTreeMap::new(),
+            key_locks: BTreeMap::from([(69, vec![Some(0.7)])]),
+            key_lock_param_ids: BTreeMap::from([(
+                69,
+                vec![Some(ParamNodeId {
+                    logical_id: 10,
+                    node_param_idx: 15,
+                })],
+            )]),
             param_node_indices: vec![15],
             param_node_spans: vec![1],
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
@@ -540,6 +546,14 @@ mod tests {
         assert_eq!(snapshot.plocks[3][0], Some(0.9));
         assert_eq!(
             snapshot.plock_param_ids[3][0],
+            Some(ParamNodeId {
+                logical_id: 42,
+                node_param_idx: 15,
+            })
+        );
+        assert_eq!(snapshot.key_locks[&69][0], Some(0.7));
+        assert_eq!(
+            snapshot.key_lock_param_ids[&69][0],
             Some(ParamNodeId {
                 logical_id: 42,
                 node_param_idx: 15,
@@ -7482,6 +7496,7 @@ impl EffectSlotSnapshot {
         let new_np = desc.params.len();
         let old_defaults = self.defaults.clone();
         let old_plocks = self.plocks.clone();
+        let old_key_locks = self.key_locks.clone();
         let old_tensor_params = self.tensor_params.clone();
 
         self.node_id = node_id;
@@ -7499,6 +7514,8 @@ impl EffectSlotSnapshot {
             .unwrap_or(NO_TRANSPORT_PHASE_PARAM);
         self.plocks = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
         self.plock_param_ids = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
+        self.key_locks = BTreeMap::new();
+        self.key_lock_param_ids = BTreeMap::new();
         self.tensor_params = desc
             .tensor_params
             .iter()
@@ -7539,6 +7556,26 @@ impl EffectSlotSnapshot {
                             ParamNodeId::from_slot_param(node_id, modulator_node_id, raw_idx)
                         });
                 }
+            }
+        }
+        for (note, saved_row) in old_key_locks {
+            let row_len = preserve.min(saved_row.len());
+            for param_idx in 0..row_len {
+                let Some(value) = saved_row[param_idx] else {
+                    continue;
+                };
+                self.key_locks
+                    .entry(note)
+                    .or_insert_with(|| vec![None; new_np])[param_idx] = Some(value);
+                self.key_lock_param_ids
+                    .entry(note)
+                    .or_insert_with(|| vec![None; new_np])[param_idx] = self
+                    .param_node_indices
+                    .get(param_idx)
+                    .copied()
+                    .and_then(|raw_idx| {
+                        ParamNodeId::from_slot_param(node_id, modulator_node_id, raw_idx)
+                    });
             }
         }
         self.recompute_modulation_active_params(desc);

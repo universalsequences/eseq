@@ -3250,14 +3250,37 @@ mod tests {
         let mut plocks = vec![vec![None; desc.params.len()]; MAX_STEPS];
         plocks[3][2] = Some(0.91);
         plocks[4][5] = Some(-0.42);
+        let key_locks = std::collections::BTreeMap::from([(
+            69,
+            vec![None, None, Some(0.73), None, None, Some(-0.31), None, None],
+        )]);
+        let key_lock_param_ids = std::collections::BTreeMap::from([(
+            69,
+            vec![
+                None,
+                None,
+                Some(ParamNodeId {
+                    logical_id: 7,
+                    node_param_idx: 18,
+                }),
+                None,
+                None,
+                Some(ParamNodeId {
+                    logical_id: 7,
+                    node_param_idx: 30,
+                }),
+                None,
+                None,
+            ],
+        )]);
 
         let saved_slot = project::ProjectEffectSlot {
             num_params: desc.params.len() as u32,
             defaults: vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78],
             plocks,
             plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
-            key_locks: std::collections::BTreeMap::new(),
-            key_lock_param_ids: std::collections::BTreeMap::new(),
+            key_locks,
+            key_lock_param_ids,
             param_node_indices: desc
                 .params
                 .iter()
@@ -3283,6 +3306,22 @@ mod tests {
         );
         assert_eq!(restored.plocks[3][2], Some(0.91));
         assert_eq!(restored.plocks[4][5], Some(-0.42));
+        assert_eq!(restored.key_locks[&69][2], Some(0.73));
+        assert_eq!(restored.key_locks[&69][5], Some(-0.31));
+        assert_eq!(
+            restored.key_lock_param_ids[&69][2],
+            Some(ParamNodeId {
+                logical_id: 42,
+                node_param_idx: 18,
+            })
+        );
+        assert_eq!(
+            restored.key_lock_param_ids[&69][5],
+            Some(ParamNodeId {
+                logical_id: 42,
+                node_param_idx: 30,
+            })
+        );
         assert_eq!(
             restored.param_node_indices,
             desc.params

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,7 +10,7 @@ use sequencer::sample_db::{SampleDb, SampleRow, TagFacet};
 use sequencer::ui;
 
 use super::current_custom_instrument_name;
-use super::values::{build_flat_tree_items, list_value, map_value};
+use super::values::{build_icon_tree_items, list_value, map_value};
 
 pub(crate) const SAMPLE_BROWSER_MAX_RESULTS: usize = 2000;
 
@@ -552,6 +552,10 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
                         "kind".to_string(),
                         Rc::new(RefCell::new(Value::String("instrument".to_string()))),
                     );
+                    map.insert(
+                        "icon".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword("piano".to_string()))),
+                    );
                 } else if let Some(folder) = &item.folder {
                     map.insert(
                         "folder".to_string(),
@@ -560,6 +564,10 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
                     map.insert(
                         "kind".to_string(),
                         Rc::new(RefCell::new(Value::String("folder".to_string()))),
+                    );
+                    map.insert(
+                        "icon".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword("folder".to_string()))),
                     );
                 }
                 if !item.children.is_empty() {
@@ -655,7 +663,21 @@ fn filter_instrument_tree_nodes(
         .collect()
 }
 
-pub(crate) fn build_instrument_tree_value(query: &str) -> Value {
+fn project_engine_nodes(engine_names: &[String]) -> Vec<InstrumentTreeNode> {
+    let mut seen = HashSet::new();
+    engine_names
+        .iter()
+        .filter(|name| seen.insert((*name).clone()))
+        .map(|name| InstrumentTreeNode {
+            label: instrument_display_name(name),
+            name: Some(name.clone()),
+            folder: None,
+            children: Vec::new(),
+        })
+        .collect()
+}
+
+pub(crate) fn build_instrument_tree_value(query: &str, project_engines: &[String]) -> Value {
     let query_lower = query.trim().to_lowercase();
     let root = std::path::Path::new("instruments");
     let top = build_instrument_tree_nodes(root, root);
@@ -663,16 +685,49 @@ pub(crate) fn build_instrument_tree_value(query: &str) -> Value {
         &filter_instrument_tree_nodes(&top, &query_lower),
     ));
     let builtin = builtin_instrument_values(&query_lower);
+    let engines = list_items(instrument_tree_nodes_to_value(
+        &filter_instrument_tree_nodes(&project_engine_nodes(project_engines), &query_lower),
+    ));
 
     let mut items = Vec::new();
     if query_lower.is_empty() {
         append_tree_section(&mut items, "Built-in", builtin);
+        append_tree_section(&mut items, "Engines", engines);
         append_tree_section(&mut items, "Library", custom);
     } else {
         items.extend(builtin);
+        items.extend(engines);
         items.extend(custom);
     }
     list_value(items)
+}
+
+pub(crate) fn project_instrument_engine_names(app: &ui::App) -> Vec<String> {
+    let mut engine_ids = Vec::new();
+    for engine_id in app.graph.track_engine_ids.iter().flatten().copied() {
+        if !engine_ids.contains(&engine_id) {
+            engine_ids.push(engine_id);
+        }
+    }
+    for engine_id in app
+        .graph
+        .track_node_ids
+        .iter()
+        .flat_map(|track| track.rack_slots.iter().filter_map(|slot| slot.engine_id))
+    {
+        if !engine_ids.contains(&engine_id) {
+            engine_ids.push(engine_id);
+        }
+    }
+    engine_ids
+        .into_iter()
+        .filter_map(|engine_id| {
+            app.editor
+                .engine_registry
+                .get(engine_id)
+                .map(|engine| engine.name.clone())
+        })
+        .collect()
 }
 
 pub(crate) fn script_root_dir() -> std::path::PathBuf {
@@ -935,7 +990,7 @@ pub(crate) fn build_preset_tree_from_list(items_value: Option<&Value>, query: &s
     if !query.is_empty() {
         items.retain(|item| item.to_lowercase().contains(&query));
     }
-    build_flat_tree_items(&items)
+    build_icon_tree_items(&items, "piano")
 }
 
 fn effect_leaf(label: String, kind: &'static str) -> Value {
@@ -1139,6 +1194,89 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn instrument_tree_places_unique_project_engines_between_builtins_and_library() {
+        let tree = build_instrument_tree_value(
+            "",
+            &["drums/3d-drum/".to_string(), "drums/3d-drum/".to_string()],
+        );
+        let labels = top_level_tree_labels(&tree);
+
+        assert_eq!(
+            &labels[..7],
+            &[
+                "Built-in",
+                "Sampler",
+                "Modulator",
+                "Drum Rack",
+                "Instrument Rack",
+                "Engines",
+                "3d-drum",
+            ]
+        );
+        assert_eq!(labels.iter().filter(|label| *label == "3d-drum").count(), 1);
+    }
+
+    #[test]
+    fn instrument_tree_assigns_piano_and_folder_icons() {
+        let value = instrument_tree_nodes_to_value(&[
+            InstrumentTreeNode {
+                label: "Folder".to_string(),
+                name: None,
+                folder: Some("folder".to_string()),
+                children: Vec::new(),
+            },
+            InstrumentTreeNode {
+                label: "My Instrument".to_string(),
+                name: Some("folder/my-instrument/".to_string()),
+                folder: None,
+                children: Vec::new(),
+            },
+        ]);
+        let Value::List(items) = value else {
+            panic!("instrument tree should be a list");
+        };
+        let folder = items[0].borrow();
+        let instrument = items[1].borrow();
+        let Value::Map(folder) = &*folder else {
+            panic!("folder should be a map");
+        };
+        let Value::Map(instrument) = &*instrument else {
+            panic!("instrument should be a map");
+        };
+
+        assert_eq!(
+            folder.get("icon").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("folder".to_string()))
+        );
+        assert_eq!(
+            instrument.get("icon").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("piano".to_string()))
+        );
+    }
+
+    #[test]
+    fn preset_tree_assigns_piano_icons_to_filtered_rows() {
+        let presets = list_value([
+            Value::String("Brutal Fifths".to_string()),
+            Value::String("Galactic Pad".to_string()),
+        ]);
+        let tree = build_preset_tree_from_list(Some(&presets), "brutal");
+        let Value::List(items) = tree else {
+            panic!("preset tree should be a list");
+        };
+        assert_eq!(items.len(), 1);
+        let item = items[0].borrow();
+        let Value::Map(item) = &*item else {
+            panic!("preset row should be a map");
+        };
+
+        assert_eq!(
+            item.get("icon").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("piano".to_string()))
+        );
     }
 
     #[test]

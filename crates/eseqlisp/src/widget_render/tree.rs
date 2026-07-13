@@ -125,12 +125,7 @@ fn item_bool_field(item: &Value, key: &str, default: bool) -> bool {
 }
 
 fn item_icon_value(item: &Value) -> Option<f32> {
-    match item_string_field(item, "icon")?.as_str() {
-        "plus" | "new" => Some(0.0),
-        "sampler" => Some(1.0),
-        "waveform" => Some(2.0),
-        _ => None,
-    }
+    super::button::icon_name_value(&item_string_field(item, "icon")?)
 }
 
 fn item_is_header(item: &Value) -> bool {

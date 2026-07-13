@@ -15078,6 +15078,47 @@ mod tests {
         assert_eq!(restored.key_locks[&69]["cutoff"], 3000.0);
     }
 
+    #[test]
+    fn instrument_preset_key_locks_roundtrip_through_live_slot_by_param_name() {
+        let desc = crate::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter cutoff param");
+        let source_slot = crate::effects::EffectSlotState::new(&desc, 41);
+        source_slot.set_key_lock(64, cutoff_idx, 300.0);
+        source_slot.set_key_lock(67, cutoff_idx, 1_200.0);
+
+        let preset = super::InstrumentPreset {
+            id: "keyed-vox".to_string(),
+            name: "Keyed Vox".to_string(),
+            base_note_offset: 0.0,
+            params: std::collections::BTreeMap::new(),
+            key_locks: crate::effects::capture_key_locks_by_param_name(&source_slot, &desc),
+        };
+        let json = serde_json::to_string(&preset).expect("serialize keyed preset");
+        let restored_preset: super::InstrumentPreset =
+            serde_json::from_str(&json).expect("deserialize keyed preset");
+        let restored_slot = crate::effects::EffectSlotState::new(&desc, 42);
+        crate::effects::restore_key_locks_by_param_name(
+            &restored_slot,
+            &desc,
+            &restored_preset.key_locks,
+        );
+
+        assert_eq!(restored_slot.key_locks.get(64, cutoff_idx), Some(300.0));
+        assert_eq!(
+            restored_slot.key_locks.get(67, cutoff_idx),
+            Some(1_200.0)
+        );
+        assert_eq!(
+            restored_slot.key_locks.get_id(64, cutoff_idx),
+            restored_slot.param_node_id(cutoff_idx),
+            "restored locks must be rebound to the destination instrument node"
+        );
+    }
+
     fn gv_num(x: f64) -> Value {
         Value::Number(x)
     }

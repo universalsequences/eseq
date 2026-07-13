@@ -105,7 +105,7 @@
   (instrument-param-mod-wrapper p (str key "-mod-wrapper")
     (subtree :key (str key (instrument-param-control-key-mode p))
       (h-stack :align :baseline :gap 0.35
-        (label (get p :name) :font-size 10 :color :white :bg :transparent)
+        (label (sampler-param-display-name p) :font-size 10 :color :white :bg :transparent)
         (number-picker
           :value (fx-param-value p)
           :noui true
@@ -186,10 +186,18 @@
 (def sampler-param-by-name (params name)
   (nth (filter |p| (= (get p :name) name) params) 0))
 
+(def sampler-base-note-param? (p)
+  (= (get p :control) "base-note"))
+
+(def sampler-param-display-name (p)
+  (if (sampler-base-note-param? p)
+    "base"
+    (get p :name)))
+
 (def sampler-small-params (params)
   (filter |p|
     (let ((name (get p :name)))
-      (or (= name "base")
+      (or (sampler-base-note-param? p)
           (= name "attack")
           (= name "release")
           (= name "start")
@@ -205,7 +213,7 @@
         (not (= name "bpm"))
         (not (= name "preserve"))
         (not (= name "fill"))
-        (not (= name "base"))
+        (not (sampler-base-note-param? p))
         (not (= name "attack"))
         (not (= name "release"))
         (not (= name "start"))
@@ -256,12 +264,12 @@
           :on-click |x y r| (fx-set-instrument-value p (max 20 (/ (get p :value) 2))))))))
 
 (def sampler-param-pickers (params inst)
-  (h-stack :gap 0.85 :padding 0.55 :align :center
+  (h-stack :debug-name "sampler-small-param-row" :gap 0.85 :padding 0.55 :align :center
     (each (sampler-small-params params) |p pi|
       (sampler-param-control-number-picker p))))
 
 (def sampler-param-knobs (params inst)
-  (h-stack :gap 0.85 :padding 0.15 :align :start
+  (h-stack :debug-name "sampler-main-param-row" :gap 0.85 :padding 0.15 :align :start
     (sampler-gate-button)
     (each (sampler-main-params params) |p pi|
       (sampler-param-control p))

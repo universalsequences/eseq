@@ -247,7 +247,7 @@
          :selected-border-color :mixer-strip-selected-border
          :corner-radius 3
          :on-click |x y r| (rack-slot-select slot)
-      (h-stack :width :fill :height :fill :gap 0.45 :align :center
+      (h-stack :width :fill :height :fill :gap 0.15 :align :center
         (label (str (+ (get slot :idx) 1))
           :font-size 10
           :color :gray
@@ -300,12 +300,12 @@
             :width 3.55 :height 0.84
             :on-change (lambda (v) (rack-slot-set-max-polyphony slot v))))
         (button "M"
-          :width 1.35 :height 1.02 :padding 0 :font-size 9
+          :width 2.0 :height 1.02 :padding 0 :font-size 9
           :background-color (if (get slot :mute) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
           :color (if (get slot :mute) :black :dim)
           :on-click |x y r| (rack-slot-set-mute slot (not (get slot :mute))))
         (button "S"
-          :width 1.35 :height 1.02 :padding 0 :font-size 9
+          :width 2.0 :height 1.02 :padding 0 :font-size 9
           :background-color (if (get slot :solo) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
           :color (if (get slot :solo) :black :dim)
           :on-click |x y r| (rack-slot-set-solo slot (not (get slot :solo))))))))
