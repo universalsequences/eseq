@@ -1,3 +1,11 @@
+//! Project-global live parameter overrides.
+//!
+//! Macros sit between persisted scene defaults and the DSP live-send path.
+//! Scheduler-time p-locks and process writes remain more specific: they resolve
+//! from scene defaults at trigger time and intentionally do not read this
+//! command-thread-owned table. Consequently `Add` process writes add to base,
+//! not to the current macro value.
+
 use std::collections::HashMap;
 
 use crate::neural::ParamNodeId;
@@ -98,6 +106,8 @@ impl MacroMapping {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Macro {
     pub id: MacroId,
+    /// Immutable, project-unique identity used by declarative scripts.
+    pub key: Option<String>,
     pub name: String,
     pub value: f32,
     pub mappings: Vec<MacroMapping>,
@@ -109,6 +119,7 @@ impl Macro {
     pub fn new(id: MacroId, name: impl Into<String>, kind: MacroKind) -> Self {
         Self {
             id,
+            key: None,
             name: name.into(),
             value: 0.0,
             mappings: Vec::new(),
@@ -233,9 +244,16 @@ impl MacroParamKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroEngineError {
     DuplicateMacroId(MacroId),
+    DuplicateMacroKey(String),
+    InvalidMacroKey,
     MacroIdExhausted,
     UnknownMacro(MacroId),
+    UnknownMapping {
+        macro_id: MacroId,
+        mapping_idx: usize,
+    },
     UnsupportedTarget,
+    NonFiniteValue,
     NonFiniteRange,
 }
 
@@ -294,7 +312,35 @@ impl MacroEngine {
         Ok(id)
     }
 
-    pub fn insert_macro(&mut self, macro_definition: Macro) -> Result<(), MacroEngineError> {
+    /// Idempotently resolves or creates a script-authored mapped macro.
+    /// Existing definitions are returned untouched so script re-evaluation
+    /// cannot reset a user's name, mappings, ranges, or live value.
+    pub fn ensure_macro(
+        &mut self,
+        key: impl AsRef<str>,
+        initial_name: impl Into<String>,
+    ) -> Result<MacroId, MacroEngineError> {
+        let key = normalize_macro_key(key.as_ref())?;
+        if let Some(existing) = self
+            .macros
+            .iter()
+            .find(|macro_definition| macro_definition.key.as_deref() == Some(key.as_str()))
+        {
+            return Ok(existing.id);
+        }
+
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or(MacroEngineError::MacroIdExhausted)?;
+        let mut macro_definition = Macro::new(id, initial_name, MacroKind::Mapped);
+        macro_definition.key = Some(key);
+        self.macros.push(macro_definition);
+        Ok(id)
+    }
+
+    pub fn insert_macro(&mut self, mut macro_definition: Macro) -> Result<(), MacroEngineError> {
         if self
             .macros
             .iter()
@@ -302,11 +348,59 @@ impl MacroEngine {
         {
             return Err(MacroEngineError::DuplicateMacroId(macro_definition.id));
         }
+        if let Some(key) = macro_definition.key.as_deref() {
+            let key = normalize_macro_key(key)?;
+            if self
+                .macros
+                .iter()
+                .any(|existing| existing.key.as_deref() == Some(key.as_str()))
+            {
+                return Err(MacroEngineError::DuplicateMacroKey(key));
+            }
+            macro_definition.key = Some(key);
+        }
         self.next_id = self
             .next_id
             .max(macro_definition.id.checked_add(1).unwrap_or(MacroId::MAX));
         self.macros.push(macro_definition);
         Ok(())
+    }
+
+    /// Restores the persisted allocation cursor without permitting ID reuse.
+    pub fn ensure_next_id_at_least(&mut self, next_id: MacroId) {
+        self.next_id = self.next_id.max(next_id.max(1));
+    }
+
+    pub fn rename_macro(
+        &mut self,
+        id: MacroId,
+        name: impl Into<String>,
+    ) -> Result<(), MacroEngineError> {
+        let Some(macro_definition) = self.macros.iter_mut().find(|item| item.id == id) else {
+            return Err(MacroEngineError::UnknownMacro(id));
+        };
+        macro_definition.name = name.into();
+        Ok(())
+    }
+
+    /// Deletes a macro and returns its targets so the App can re-send whichever
+    /// owner (or base value) is revealed by the deletion.
+    pub fn delete_macro(
+        &mut self,
+        id: MacroId,
+    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+        let Some(index) = self.macros.iter().position(|item| item.id == id) else {
+            return Err(MacroEngineError::UnknownMacro(id));
+        };
+        let removed = self.macros.remove(index);
+        let touched = removed
+            .mappings
+            .into_iter()
+            .filter(|mapping| !mapping.suspended && mapping.resolved_key.is_some())
+            .map(|mapping| (mapping.track, mapping.target))
+            .collect();
+        self.rebuild_ownership();
+        Ok(touched)
     }
 
     pub fn add_mapping(
@@ -322,8 +416,83 @@ impl MacroEngine {
         Ok(())
     }
 
+    pub fn set_mapping_range(
+        &mut self,
+        id: MacroId,
+        mapping_idx: usize,
+        min: f32,
+        max: f32,
+    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+        if !min.is_finite() || !max.is_finite() {
+            return Err(MacroEngineError::NonFiniteRange);
+        }
+        let mapping = self.mapping_mut(id, mapping_idx)?;
+        mapping.range_min = min;
+        mapping.range_max = max;
+        let touched = mapping_touch(mapping);
+        self.rebuild_ownership();
+        Ok(touched.into_iter().collect())
+    }
+
+    pub fn set_mapping_curve(
+        &mut self,
+        id: MacroId,
+        mapping_idx: usize,
+        curve: MacroCurve,
+    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+        let mapping = self.mapping_mut(id, mapping_idx)?;
+        mapping.curve = curve;
+        let touched = mapping_touch(mapping);
+        self.rebuild_ownership();
+        Ok(touched.into_iter().collect())
+    }
+
+    pub fn remove_mapping(
+        &mut self,
+        id: MacroId,
+        mapping_idx: usize,
+    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+        let Some(macro_definition) = self.macros.iter_mut().find(|item| item.id == id) else {
+            return Err(MacroEngineError::UnknownMacro(id));
+        };
+        if mapping_idx >= macro_definition.mappings.len() {
+            return Err(MacroEngineError::UnknownMapping {
+                macro_id: id,
+                mapping_idx,
+            });
+        }
+        let mapping = macro_definition.mappings.remove(mapping_idx);
+        let touched = mapping_touch(&mapping).into_iter().collect();
+        self.rebuild_ownership();
+        Ok(touched)
+    }
+
+    fn mapping_mut(
+        &mut self,
+        id: MacroId,
+        mapping_idx: usize,
+    ) -> Result<&mut MacroMapping, MacroEngineError> {
+        let Some(macro_definition) = self.macros.iter_mut().find(|item| item.id == id) else {
+            return Err(MacroEngineError::UnknownMacro(id));
+        };
+        macro_definition
+            .mappings
+            .get_mut(mapping_idx)
+            .ok_or(MacroEngineError::UnknownMapping {
+                macro_id: id,
+                mapping_idx,
+            })
+    }
+
     pub fn macro_definition(&self, id: MacroId) -> Option<&Macro> {
         self.macros.iter().find(|item| item.id == id)
+    }
+
+    pub fn macro_by_key(&self, key: &str) -> Option<&Macro> {
+        let key = normalize_macro_key(key).ok()?;
+        self.macros
+            .iter()
+            .find(|macro_definition| macro_definition.key.as_deref() == Some(key.as_str()))
     }
 
     pub fn override_value(&self, key: &MacroParamKey) -> Option<f32> {
@@ -468,6 +637,19 @@ impl MacroEngine {
             })
             .collect();
     }
+}
+
+pub fn normalize_macro_key(key: &str) -> Result<String, MacroEngineError> {
+    let key = key.trim().trim_start_matches(':').trim();
+    if key.is_empty() {
+        return Err(MacroEngineError::InvalidMacroKey);
+    }
+    Ok(key.to_ascii_lowercase())
+}
+
+fn mapping_touch(mapping: &MacroMapping) -> Option<(usize, ParamTarget)> {
+    (!mapping.suspended && mapping.resolved_key.is_some())
+        .then(|| (mapping.track, mapping.target.clone()))
 }
 
 pub fn value_is_identity(value: f32) -> bool {
@@ -649,6 +831,118 @@ mod tests {
                 MacroCurve::Linear,
             ),
             Err(MacroEngineError::UnsupportedTarget)
+        );
+    }
+
+    #[test]
+    fn range_and_curve_edits_recompute_an_engaged_mapping() {
+        let (mut engine, id) = mapped_engine(0.0, 1.0);
+        let key = effect_key(11);
+        engine.set_value(id, 0.5);
+
+        assert_eq!(
+            engine.set_mapping_range(id, 0, 10.0, 20.0),
+            Ok(vec![(0, effect_target(11))])
+        );
+        assert_eq!(engine.override_value(&key), Some(15.0));
+
+        engine
+            .set_mapping_curve(id, 0, MacroCurve::Exp)
+            .expect("mapping");
+        assert_eq!(engine.override_value(&key), Some(12.5));
+    }
+
+    #[test]
+    fn unmap_releases_override() {
+        let (mut engine, id) = mapped_engine(0.0, 1.0);
+        let key = effect_key(11);
+        engine.set_value(id, 1.0);
+
+        assert_eq!(
+            engine.remove_mapping(id, 0),
+            Ok(vec![(0, effect_target(11))])
+        );
+        assert_eq!(engine.override_value(&key), None);
+        assert!(engine.macro_definition(id).unwrap().mappings.is_empty());
+    }
+
+    #[test]
+    fn delete_releases_its_overrides_without_reusing_ids() {
+        let (mut engine, first) = mapped_engine(0.0, 1.0);
+        engine.set_value(first, 1.0);
+        engine.delete_macro(first).expect("known macro");
+        assert_eq!(engine.override_value(&effect_key(11)), None);
+
+        let second = engine
+            .create_macro("second", MacroKind::Mapped)
+            .expect("next id");
+        assert_eq!(second, first + 1);
+    }
+
+    #[test]
+    fn keyed_ensure_is_idempotent_and_preserves_user_edits() {
+        let mut engine = MacroEngine::default();
+        let id = engine
+            .ensure_macro(":Performance/Delay-Push", "Delay Push")
+            .expect("ensure macro");
+        engine.rename_macro(id, "My Delay").expect("rename");
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new(0, effect_target(11), 0.2, 0.8, MacroCurve::Log)
+                    .expect("mapping"),
+            )
+            .expect("known macro");
+        engine.set_value(id, 0.75);
+
+        let ensured = engine
+            .ensure_macro("performance/delay-push", "Reset Name")
+            .expect("ensure existing");
+        assert_eq!(ensured, id);
+        assert_eq!(engine.macros().len(), 1);
+        let macro_definition = engine.macro_definition(id).unwrap();
+        assert_eq!(macro_definition.key.as_deref(), Some("performance/delay-push"));
+        assert_eq!(macro_definition.name, "My Delay");
+        assert_eq!(macro_definition.value, 0.75);
+        assert_eq!(macro_definition.mappings.len(), 1);
+        assert_eq!(macro_definition.mappings[0].range_min, 0.2);
+        assert_eq!(macro_definition.mappings[0].curve, MacroCurve::Log);
+    }
+
+    #[test]
+    fn duplicate_persisted_keys_are_rejected() {
+        let mut engine = MacroEngine::default();
+        let first = engine
+            .ensure_macro("player/filter", "Filter")
+            .expect("first macro");
+        let mut duplicate = Macro::new(first + 1, "Duplicate", MacroKind::Mapped);
+        duplicate.key = Some(":PLAYER/FILTER".to_string());
+
+        assert_eq!(
+            engine.insert_macro(duplicate),
+            Err(MacroEngineError::DuplicateMacroKey(
+                "player/filter".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn delete_then_ensure_same_key_allocates_a_fresh_id() {
+        let mut engine = MacroEngine::default();
+        let first = engine.ensure_macro("player/push", "Push").unwrap();
+        engine.delete_macro(first).unwrap();
+        let replacement = engine.ensure_macro("player/push", "Push").unwrap();
+
+        assert_eq!(replacement, first + 1);
+        assert_eq!(engine.macro_by_key(":PLAYER/PUSH").unwrap().id, replacement);
+    }
+
+    #[test]
+    fn empty_script_key_is_rejected() {
+        let mut engine = MacroEngine::default();
+        assert_eq!(
+            engine.ensure_macro(" : ", "Invalid"),
+            Err(MacroEngineError::InvalidMacroKey)
         );
     }
 }

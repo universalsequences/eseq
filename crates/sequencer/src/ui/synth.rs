@@ -1050,11 +1050,7 @@ impl App {
         }
     }
 
-    pub(super) fn effective_instrument_param_value(
-        &self,
-        track: usize,
-        param_idx: usize,
-    ) -> Option<f32> {
+    pub fn effective_instrument_param_value(&self, track: usize, param_idx: usize) -> Option<f32> {
         let slot = self.state.pattern.instrument_slots.get(track)?;
         if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
             return None;

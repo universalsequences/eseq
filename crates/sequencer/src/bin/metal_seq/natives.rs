@@ -93,7 +93,7 @@ fn require_slot_param_index(
     }
 }
 
-fn process_binding_target_from_value(
+pub(super) fn param_target_from_value(
     state: &SequencerState,
     track: usize,
     value: &Value,
@@ -611,7 +611,7 @@ mod process_binding_target_tests {
             vec![sequencer::effects::EffectDescriptor::builtin_filter()],
         );
 
-        let target = process_binding_target_from_value(
+        let target = param_target_from_value(
             &state,
             0,
             &map_value([
@@ -2109,7 +2109,7 @@ pub(crate) fn init_runtime(
             )
             .into());
         }
-        let target = process_binding_target_from_value(&st, track, target)
+        let target = param_target_from_value(&st, track, target)
             .map_err(|error| format!("seq-bind-process-port: {error}"))?;
         if !port_def.allows_parameter_mapping_target(&target) {
             let target_kind = port_def

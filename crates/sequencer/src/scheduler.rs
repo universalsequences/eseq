@@ -7624,9 +7624,10 @@ mod tests {
     use super::{
         apply_fit_to_scale_to_trigger, apply_neuron_output_overrides, delayed_step_sample_time,
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, invoke_process_cascade,
-        midi_fx_window_events_from_step, quantized_live_tick_sample, reconcile_graph_runtimes,
-        resolve_effect_params, resolve_instrument_plocks, resolve_sampler_params,
-        run_midi_fx_chain_for_track, schedule_playing_lookahead, should_reload_neural_runtime,
+        midi_fx_window_events_from_step, process_device_write_value, quantized_live_tick_sample,
+        reconcile_graph_runtimes, resolve_effect_params, resolve_instrument_plocks,
+        resolve_sampler_params, resolved_slot_param_value, run_midi_fx_chain_for_track,
+        schedule_playing_lookahead, should_reload_neural_runtime, slot_param_identity,
         swung_network_sample_time, track_active_note_spans_at_beat, track_note_spans_for_trigger,
         EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState,
         SchedulerLookaheadState, SnapshotSequencerClock,
@@ -7674,6 +7675,73 @@ mod tests {
             pan: 0.0,
             chop: 1.0,
         }
+    }
+
+    #[test]
+    fn macro_live_override_is_masked_by_plock_and_process_add_reads_base() {
+        let descriptor = ParamDescriptor {
+            name: "cutoff".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.2,
+            kind: ParamKind::Continuous { unit: None },
+            scaling: ParamScaling::Linear,
+            node_param_idx: 7,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        };
+        let effect = EffectDescriptor {
+            name: "filter".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![descriptor.clone()],
+        };
+        let mut slot = crate::effects::EffectSlotSnapshot::new_default(&effect, 11);
+        assert!(slot.set_plock(3, 0, 0.9));
+
+        let param_id = slot_param_identity(slot.node_id, slot.modulator_node_id, 7);
+        let target = crate::process::ParamTarget::EffectParam {
+            slot: 0,
+            effect: effect.name.clone(),
+            param: descriptor.name.clone(),
+            param_id,
+        };
+        let key = crate::macro_engine::MacroParamKey::for_effect(0, 0, 0, param_id);
+        let mut macros = crate::macro_engine::MacroEngine::default();
+        let macro_id = macros
+            .create_macro("push", crate::macro_engine::MacroKind::Mapped)
+            .unwrap();
+        macros
+            .add_mapping(
+                macro_id,
+                crate::macro_engine::MacroMapping::new(
+                    0,
+                    target,
+                    0.0,
+                    0.8,
+                    crate::macro_engine::MacroCurve::Linear,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        macros.set_value(macro_id, 1.0);
+        assert_eq!(macros.override_value(&key), Some(0.8));
+
+        assert_eq!(resolved_slot_param_value(&slot, 3, 0, 0.0), 0.9);
+        assert_eq!(
+            process_device_write_value(
+                &descriptor,
+                resolved_slot_param_value(&slot, 0, 0, 0.0),
+                crate::process::ProcessTargetOp::Add,
+                0.1,
+            ),
+            0.3,
+            "scheduler Add writes intentionally ride the persisted base, not the command-thread macro override"
+        );
     }
 
     fn graph_emission(

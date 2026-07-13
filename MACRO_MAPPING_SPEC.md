@@ -2,8 +2,8 @@
 
 Status: draft / not yet implemented (rev 2 — updated after the def-process layer
 landed; seams re-verified 2026-07-11)
-Scope: Phases 1–4 (engine override, write path + commands, mapping-mode UI, macro
-panel) + Phase 6 (scene macros / "push scenes"). Phase 5 (process- or
+Scope: Phases 1–4 (engine override, write path + commands, mapping-mode UI,
+script-authored macro controls) + Phase 6 (scene macros / "push scenes"). Phase 5 (process- or
 sequencer-driven macro values) is explicitly **out of scope** here but the design
 preserves the seam for it — and that seam got much closer with the process layer
 (see §2.4, §9.1).
@@ -40,6 +40,7 @@ patterns* (quantized), independently toggleable from the param morph. See §8.
 |---|---|
 | Override model | Engine **live-override layer** (sample-accurate, composes with p-locks/automation, true instant pop-back). Not host-side snapshot/restore. |
 | Macro scope | **Project-global**. A macro can map to any instrument or effect param anywhere. |
+| Script identity | Each macro may have an immutable, project-unique **stable key**. Script-authored surfaces use the key; numeric `MacroId` remains the engine/persistence identity. Re-evaluating a script must ensure/reuse, never duplicate, its keyed macros. |
 | Triggers | **Continuous knob** + **momentary button**. Sequenceable macro value is deferred (Phase 5). |
 | Range anchoring | **Absolute** device-unit min/max captured at map time. While engaged, the param is fully macro-controlled (UI edits to base are masked until release). |
 | Target type | **Reuse `crate::process::ParamTarget`** (new in rev 2) — do not invent a parallel `MacroTarget` enum. See §2.4/§3.2. |
@@ -205,6 +206,7 @@ pub struct MacroEngine {
 
 pub struct Macro {
     pub id: MacroId,                // stable, never reused (see §7 persistence)
+    pub key: Option<String>,         // immutable script key; unique within project
     pub name: String,
     pub value: f32,                 // 0..1 live position
     pub mappings: Vec<MacroMapping>,
@@ -358,6 +360,7 @@ manual scene switch (§8.5).
 
 ```rust
 MacroCreate { name: String },
+MacroEnsure { key: String, name: String },            // idempotent script declaration
 MacroDelete { id: MacroId },
 MacroRename { id: MacroId, name: String },
 MacroSetValue { id: MacroId, value: f32 },         // knob + button both use this
@@ -385,6 +388,7 @@ Register alongside `set-instrument-param` (~7929) / `set-effect-param` (~8360):
 | Command | Payload | → AppCommand |
 |---|---|---|
 | `macro-create` | `{name}` | `MacroCreate` |
+| `macro-ensure` | `{key, name}` | `MacroEnsure` |
 | `macro-delete` | `{id}` | `MacroDelete` |
 | `macro-rename` | `{id, name}` | `MacroRename` |
 | `macro-set-value` | `{id, value}` | `MacroSetValue` |
@@ -392,6 +396,15 @@ Register alongside `set-instrument-param` (~7929) / `set-effect-param` (~8360):
 | `macro-set-range` | `{id, mapping-idx, min, max}` | `MacroSetRange` |
 | `macro-set-curve` | `{id, mapping-idx, curve}` | `MacroSetCurve` |
 | `macro-unmap` | `{id, mapping-idx}` | `MacroUnmap` |
+
+`macro-ensure` is the declarative/script-facing creation path. Keys are non-empty,
+immutable, and unique within a project. If the key already exists, ensure is a
+no-op and preserves the user's current display name, mappings, ranges, and value;
+the supplied `name` is only the initial display name. If it does not exist, ensure
+allocates a fresh monotonic `MacroId`. Deleting and later ensuring the same key
+allocates a new ID; numeric IDs are still never reused.
+Keys are canonicalized by trimming whitespace and a leading `:`, then ASCII
+lowercasing, so `:Player/Delay-Push` and `player/delay-push` are the same key.
 
 Follow the existing payload-extraction idiom (`map.get("…").and_then(borrow →
 Number/Str)`). The `macro-map-param` payload mirrors the target descriptor
@@ -407,7 +420,7 @@ project's existing state-readback mechanism (the state snapshot / reactive-field
 path in `src/bin/metal_seq/state_values.rs`, as used for effect params and the
 process panels). Expose:
 
-- `macros` → list of `{id, name, kind, value, mappings: [{target-label, min, max, curve, current}]}`
+- `macros` → list of `{id, key, name, kind, value, mappings: [{target-label, min, max, curve, current}]}`
 - `macro-mapping-open` reflection is UI-local (Lisp `defstate`), not engine state.
 
 ### 4.4 Precedence: base vs macro vs p-lock vs process write (must specify)
@@ -442,9 +455,11 @@ snapshot hook is also what Phase 5 would use).
 - Host-command dispatch arms (+ shared payload→`ParamTarget` helper with the
   process binding commands).
 - State readback for macros.
-- Tests: map captures current value + identity; range edit; unmap releases
-  override; delete releases all its overrides and renumbers nothing (IDs stable);
-  precedence behaviors of §4.4 (macro vs p-lock; macro vs Add-write).
+- Tests: keyed ensure is idempotent and preserves user edits; keys survive
+  rename/save/reload and reject duplicates; delete + ensure allocates a fresh ID;
+  map captures current value + identity; range edit; unmap releases override;
+  delete releases all its overrides and renumbers nothing (IDs stable); precedence
+  behaviors of §4.4 (macro vs p-lock; macro vs Add-write).
 
 ---
 
@@ -504,59 +519,60 @@ knob to edit depth. Mirror `param-control-min` / `param-control-max`
 
 ---
 
-## 6. Phase 4 — Macro panel + drive controls
+## 6. Phase 4 — Reusable macro controls + script-authored player surfaces
 
-A new panel modeled on `metal-seq-fx/modulator-panel.lisp` /
-`effect-modulation.lisp` (`effect-mod-control-panel`).
+Macros do **not** own or require a fixed built-in panel. Provide reusable EseqLisp
+components that scripts can compose into small performance interfaces, analogous
+to the neural/graph sequencer demos. The project owns macro definitions and
+mappings; a script owns only presentation and control layout.
 
-### 6.1 Layout
+### 6.1 Example script surface
 
+```lisp
+(macro-ensure :delay-push "Delay Push")
+
+(def player-surface ()
+  (column
+    (macro-knob :macro :delay-push)
+    (macro-momentary :macro :delay-push)
+    (macro-map-button :macro :delay-push)
+    (macro-mapping-editor :macro :delay-push)))
 ```
-┌ Macros ───────────────────────────────────────────────┐
-│ [Macro A*] [Macro B] [+ new]      (selector row)       │
-│                                                        │
-│  ( ) Macro A          [arm-map]  [×]                   │
-│   knob: ◯ 0.42        button: ▢ (momentary)            │
-│                                                        │
-│  mappings:                                             │
-│   • Reverb · size     [min .. max]  curve▾   [unmap]   │
-│   • Delay · feedback  [min .. max]  curve▾   [unmap]   │
-│   • Filter · cutoff   [min .. max]  curve▾   [unmap]   │
-└────────────────────────────────────────────────────────┘
-```
+
+Re-evaluating this source resolves the same keyed project macro. It must not
+duplicate the macro or reset its mappings, ranges, display name, or live value.
 
 ### 6.2 Controls
 
-- **Selector row**: one button per macro (active = highlighted like
-  `effect-mod-selector-row`'s selected state), `+ new` → `macro-create`.
-- **Macro knob**: continuous `0..1`, `on-change → macro-set-value {id, v}`.
+- **`macro-knob`**: continuous `0..1`, `on-change → macro-set-value {id, v}`.
   Reuse `knob-number` as in `modulator-knob`.
-- **Momentary button**: `on-press → macro-set-value {id, 1.0}` (or a configurable
+- **`macro-momentary`**: `on-press → macro-set-value {id, 1.0}` (or a configurable
   engage target), `on-release → macro-set-value {id, 0.0}`. Requires press/release
   events — confirm the button widget exposes both (mod source ON/OFF buttons use
   `on-click`; the momentary needs `on-press`/`on-release` — if absent, add to the
   widget, small).
-- **Arm-map button**: toggles `macro-mapping-open` + sets `macro-mapping-selected`
+- **`macro-map-button`**: toggles `macro-mapping-open` + sets `macro-mapping-selected`
   to this macro's id. Visually "armed" while active (Ableton-style).
-- **Mapping rows**: target label, `number-picker` min + max → `macro-set-range`,
+- **`macro-mapping-editor`**: target label, `number-picker` min + max → `macro-set-range`,
   curve dropdown → `macro-set-curve`, unmap button → `macro-unmap`. Show the
   param's live resolved value as a faint readout.
-- Panel children generated with `each`, never `map` (layout tests pass with
+- Mapping-editor children generated with `each`, never `map` (layout tests pass with
   `map` but live rendering breaks — see repo memory `lisp-ui-each-vs-map`).
 
 ### 6.3 Where it mounts
 
-Project-global, so it is **not** inside a per-device panel. Mount it as its own
-strip/tab in the FX area (sibling to the effect/instrument/process panels — see
-how panels are assembled in `metal-seq-fx.lisp` / `panel-bodies.lisp`). A toggle
-in the transport or FX header opens it.
+Nowhere by default. Scripts mount these components in their own authored buffer
+or tab. This deliberately leaves room for project-specific "player surfaces"
+that combine macros with scene launchers, transport controls, meters, or process
+controls without coupling macro ownership to the FX buffer or any device rack.
 
 ### 6.4 Phase 4 deliverables
 
-- `metal-seq-fx/macro-panel.lisp` (new file; add to the load list).
-- Macro selector + knob + momentary button + arm-map.
-- Mapping rows with range/curve/unmap.
-- Mount point + open/close toggle.
+- Reusable `macro-knob`, `macro-momentary`, `macro-map-button`, and
+  `macro-mapping-editor` EseqLisp components.
+- Idempotent script helper backed by `macro-ensure` and stable-key lookup through
+  `SEQ.macros`.
+- At least one durable experimental player-surface script/capture fixture.
 - `on-press`/`on-release` on the button widget if not already present.
 
 ---
@@ -568,6 +584,7 @@ Add a project-global macro list alongside the existing project-level structures:
 ```rust
 pub struct ProjectMacro {
     pub id: u32,
+    #[serde(default)] pub key: Option<String>,
     pub name: String,
     pub value: f32,
     pub kind: ProjectMacroKind,      // Mapped | Scene(ProjectSceneMacroConfig)
@@ -587,6 +604,9 @@ pub struct ProjectMacroMapping {
 - **IDs are stable and never reused** even across delete (monotonic counter
   persisted). This is the seam Phase 5 depends on: a future process/graph node
   referencing "macro 3" must stay valid. Do not renumber on delete.
+- **Keys are stable and unique within a project.** They are optional so macros
+  created interactively remain valid, but once assigned they are immutable.
+  Project load rejects duplicate keyed macros rather than resolving by order.
 - `ParamTarget` persists its `param_id` (`ParamNodeId`); on load, re-resolve
   against the live descriptors and suspend/flag mappings whose target no longer
   exists — the same staleness handling process bindings and plocks already do
@@ -717,9 +737,9 @@ press/release are shared with mapped macros.
   pattern state; each release returns to *its* captured origin — accept the
   weirdness, document it (matching how momentary keys overlap on hardware).
 
-### 8.6 UI (extends the Phase 4 panel)
+### 8.6 UI (extends the Phase 4 components)
 
-A scene macro's panel row swaps the mapping list for:
+A scene macro's script surface swaps the mapping editor for reusable scene controls:
 
 ```
 │  ( ) Push · Scene 4      [SCENE 4 ▾]  [×]              │
@@ -729,7 +749,7 @@ A scene macro's panel row swaps the mapping list for:
 │   diff: 14 params across 3 tracks   (live readout)     │
 ```
 
-The "diff: N params" readout (computed lazily when the panel is visible) is the
+The "diff: N params" readout (computed lazily when the surface is visible) is the
 main affordance telling the player the push will actually do something.
 
 ### 8.7 Phase 6 deliverables
@@ -738,7 +758,7 @@ main affordance telling the player the push will actually do something.
 - Structural-match + descriptor-domain lerp helpers (+ tests: log-domain morph,
   structure mismatch skipped, epsilon).
 - Quantized steal/return through the existing scene-launch machinery.
-- Commands, persistence (`ProjectMacroKind::Scene`), panel row.
+- Commands, persistence (`ProjectMacroKind::Scene`), reusable scene controls.
 - Edge-rule tests from §8.5.
 
 ---
@@ -774,10 +794,13 @@ Rust (engine, the high-risk surface):
   origin-return.
 
 Lisp/UI (layout + interaction, use the existing layout-test harness):
+- script re-evaluation ensures the same keyed macro and preserves authored/user
+  mappings; reusable controls resolve keys through `SEQ.macros`;
 - mapping-mode green highlight appears on `:modulatable` params only;
   click in armed mode emits `macro-map-param` with correct descriptor;
   range-edit-on-drag changes range not base; mutual exclusion with mods /
-  process-binding arm modes; panel renders with `each` over macros (never `map`).
+  process-binding arm modes; mapping editor renders with `each` over mappings
+  (never `map`).
 
 Manual / `/run`:
 - Map cutoff+feedback+size across 3 effects to one macro; sweep knob → all move;
@@ -822,12 +845,13 @@ Manual / `/run`:
    else is plumbing once this is correct.)
 2. **Phase 2** — commands + dispatch + state readback + tests. Persistence (§7)
    lands here (needed for reload tests).
-3. **Phase 4 minimal** — macro create/select + knob + arm-map button,
-   enough to exercise Phase 1/2 end-to-end via `/run`.
+3. **Phase 4 minimal** — stable-key `macro-ensure` + reusable knob + arm-map
+   button in an experimental script surface, enough to exercise Phases 1–2
+   end-to-end via `/run`.
 4. **Phase 3** — mapping-mode highlight fork + click-to-map + range-edit.
-5. **Phase 4 full** — mapping rows, momentary button, curve, mount/toggle.
+5. **Phase 4 full** — mapping editor, momentary button, curve, and script helpers.
 6. **Phase 6** — scene macros: diff engine + morph first (reuses everything),
-   pattern steal second (touches the scene-launch machinery), panel row last.
+   pattern steal second (touches the scene-launch machinery), scene controls last.
 
 Phases 1–2 + minimal 4 give a testable vertical slice; 3 + full 4 complete the
 hand-mapped UX; 6 delivers the "push scenes" gesture the feature was named for.

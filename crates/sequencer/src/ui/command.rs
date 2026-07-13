@@ -12,7 +12,9 @@
 
 use std::sync::atomic::Ordering;
 
+use crate::macro_engine::{MacroCurve, MacroId};
 use crate::plock_variants::{PlockVariantDomain, PlockVariantKey};
+use crate::process::ParamTarget;
 use crate::sequencer::{
     RackSlotParam, StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput,
     TrackSendSnapshot,
@@ -703,6 +705,46 @@ pub enum AppCommand {
         steps: Vec<usize>,
         param_idx: usize,
         value: f32,
+    },
+
+    // ── Project-global macros ─────────────────────────────────────────────
+    MacroCreate {
+        name: String,
+    },
+    MacroEnsure {
+        key: String,
+        name: String,
+    },
+    MacroDelete {
+        id: MacroId,
+    },
+    MacroRename {
+        id: MacroId,
+        name: String,
+    },
+    MacroSetValue {
+        id: MacroId,
+        value: f32,
+    },
+    MacroMapParam {
+        id: MacroId,
+        track: usize,
+        target: ParamTarget,
+    },
+    MacroSetRange {
+        id: MacroId,
+        mapping_idx: usize,
+        min: f32,
+        max: f32,
+    },
+    MacroSetCurve {
+        id: MacroId,
+        mapping_idx: usize,
+        curve: MacroCurve,
+    },
+    MacroUnmap {
+        id: MacroId,
+        mapping_idx: usize,
     },
 
     // ── Transport ─────────────────────────────────────────────────────────────
@@ -1399,6 +1441,143 @@ mod tests {
     }
 
     #[test]
+    fn macro_commands_capture_descriptor_range_current_value_and_node_identity() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc.clone());
+        app.state.pattern.effect_chains[0][0].apply_descriptor(&desc, 41);
+        app.state.pattern.effect_chains[0][0].defaults.set(0, 0.37);
+        apply_command(
+            &mut app,
+            AppCommand::MacroCreate {
+                name: "Push".to_string(),
+            },
+        );
+        let id = app.macro_engine.macros()[0].id;
+
+        apply_command(
+            &mut app,
+            AppCommand::MacroMapParam {
+                id,
+                track: 0,
+                target: ParamTarget::EffectParam {
+                    slot: 0,
+                    effect: desc.name.clone(),
+                    param: desc.params[0].name.clone(),
+                    param_id: None,
+                },
+            },
+        );
+
+        let mapping = &app.macro_engine.macro_definition(id).unwrap().mappings[0];
+        assert_eq!((mapping.range_min, mapping.range_max), (0.0, 1.0));
+        assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.37));
+        assert_eq!(
+            mapping.target,
+            ParamTarget::EffectParam {
+                slot: 0,
+                effect: desc.name,
+                param: desc.params[0].name.clone(),
+                param_id: Some(ParamNodeId {
+                    logical_id: 41,
+                    node_param_idx: desc.params[0].node_param_idx,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn macro_ensure_command_reuses_key_without_resetting_display_name() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc);
+        apply_command(
+            &mut app,
+            AppCommand::MacroEnsure {
+                key: ":Player/Push".to_string(),
+                name: "Push".to_string(),
+            },
+        );
+        let id = app.macro_engine.macros()[0].id;
+        apply_command(
+            &mut app,
+            AppCommand::MacroRename {
+                id,
+                name: "Performance Push".to_string(),
+            },
+        );
+        apply_command(
+            &mut app,
+            AppCommand::MacroEnsure {
+                key: "player/push".to_string(),
+                name: "Reset Name".to_string(),
+            },
+        );
+
+        assert_eq!(app.macro_engine.macros().len(), 1);
+        assert_eq!(app.macro_engine.macros()[0].id, id);
+        assert_eq!(app.macro_engine.macros()[0].name, "Performance Push");
+        assert_eq!(
+            app.macro_engine.macros()[0].key.as_deref(),
+            Some("player/push")
+        );
+    }
+
+    #[test]
+    fn macro_range_unmap_and_delete_commands_release_without_reusing_ids() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc.clone());
+        let first = app
+            .macro_engine
+            .create_macro("first", MacroKind::Mapped)
+            .expect("id");
+        app.map_macro_param(
+            first,
+            0,
+            ParamTarget::EffectParam {
+                slot: 0,
+                effect: desc.name.clone(),
+                param: desc.params[0].name.clone(),
+                param_id: None,
+            },
+        )
+        .expect("map");
+        apply_command(
+            &mut app,
+            AppCommand::MacroSetValue {
+                id: first,
+                value: 0.5,
+            },
+        );
+        apply_command(
+            &mut app,
+            AppCommand::MacroSetRange {
+                id: first,
+                mapping_idx: 0,
+                min: 0.2,
+                max: 0.6,
+            },
+        );
+        assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.4).abs() < 1.0e-6);
+
+        apply_command(
+            &mut app,
+            AppCommand::MacroUnmap {
+                id: first,
+                mapping_idx: 0,
+            },
+        );
+        assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.5));
+
+        apply_command(&mut app, AppCommand::MacroDelete { id: first });
+        apply_command(
+            &mut app,
+            AppCommand::MacroCreate {
+                name: "second".to_string(),
+            },
+        );
+        assert_eq!(app.macro_engine.macros()[0].id, first + 1);
+    }
+
+    #[test]
     fn instrument_base_edit_is_masked_while_macro_is_engaged_and_restored_on_release() {
         let desc = effect_mod_test_descriptor();
         let mut app = test_app_with_instrument_descriptor(desc.clone());
@@ -1644,6 +1823,15 @@ fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
             | AppCommand::SetTrackSends { .. }
             | AppCommand::SetMasterVolume { .. }
             | AppCommand::AdjustMasterVolume { .. }
+            | AppCommand::MacroCreate { .. }
+            | AppCommand::MacroEnsure { .. }
+            | AppCommand::MacroDelete { .. }
+            | AppCommand::MacroRename { .. }
+            | AppCommand::MacroSetValue { .. }
+            | AppCommand::MacroMapParam { .. }
+            | AppCommand::MacroSetRange { .. }
+            | AppCommand::MacroSetCurve { .. }
+            | AppCommand::MacroUnmap { .. }
     )
 }
 
@@ -2042,7 +2230,6 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             sync_instrument_mod_active_default(app, track, param_idx);
             app.mark_track_sound_dirty(track);
         }
-
         AppCommand::SetInstrumentPlock {
             track,
             step,
@@ -2290,6 +2477,62 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         } => {
             for step in steps {
                 app.set_rack_slot_instrument_plock(track, slot_idx, step, param_idx, value);
+            }
+        }
+
+        // ── Project-global macros ─────────────────────────────────────────
+        AppCommand::MacroCreate { name } => {
+            if let Err(error) = app
+                .macro_engine
+                .create_macro(name, crate::macro_engine::MacroKind::Mapped)
+            {
+                eprintln!("macro-create failed: {error:?}");
+            }
+        }
+        AppCommand::MacroEnsure { key, name } => {
+            if let Err(error) = app.macro_engine.ensure_macro(key, name) {
+                eprintln!("macro-ensure failed: {error:?}");
+            }
+        }
+        AppCommand::MacroDelete { id } => match app.macro_engine.delete_macro(id) {
+            Ok(touched) => app.send_macro_targets(touched),
+            Err(error) => eprintln!("macro-delete failed: {error:?}"),
+        },
+        AppCommand::MacroRename { id, name } => {
+            if let Err(error) = app.macro_engine.rename_macro(id, name) {
+                eprintln!("macro-rename failed: {error:?}");
+            }
+        }
+        AppCommand::MacroSetValue { id, value } => app.set_macro_value(id, value),
+        AppCommand::MacroMapParam { id, track, target } => {
+            if let Err(error) = app.map_macro_param(id, track, target) {
+                eprintln!("macro-map-param failed: {error:?}");
+            }
+        }
+        AppCommand::MacroSetRange {
+            id,
+            mapping_idx,
+            min,
+            max,
+        } => match app
+            .macro_engine
+            .set_mapping_range(id, mapping_idx, min, max)
+        {
+            Ok(touched) => app.send_macro_targets(touched),
+            Err(error) => eprintln!("macro-set-range failed: {error:?}"),
+        },
+        AppCommand::MacroSetCurve {
+            id,
+            mapping_idx,
+            curve,
+        } => match app.macro_engine.set_mapping_curve(id, mapping_idx, curve) {
+            Ok(touched) => app.send_macro_targets(touched),
+            Err(error) => eprintln!("macro-set-curve failed: {error:?}"),
+        },
+        AppCommand::MacroUnmap { id, mapping_idx } => {
+            match app.macro_engine.remove_mapping(id, mapping_idx) {
+                Ok(touched) => app.send_macro_targets(touched),
+                Err(error) => eprintln!("macro-unmap failed: {error:?}"),
             }
         }
 

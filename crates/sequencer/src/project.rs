@@ -5,6 +5,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::{EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
+use crate::macro_engine::{
+    normalize_macro_key, Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping,
+    SceneMacroConfig, StealQuantize,
+};
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
@@ -38,6 +42,211 @@ pub struct ProjectFile {
     pub patterns: Vec<ProjectPattern>,
     #[serde(default)]
     pub groups: Vec<ProjectTrackGroup>,
+    #[serde(default)]
+    pub macros: Vec<ProjectMacro>,
+    #[serde(default = "default_next_macro_id")]
+    pub next_macro_id: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMacro {
+    pub id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub name: String,
+    pub value: f32,
+    #[serde(default)]
+    pub kind: ProjectMacroKind,
+    #[serde(default)]
+    pub mappings: Vec<ProjectMacroMapping>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum ProjectMacroKind {
+    #[default]
+    Mapped,
+    Scene(ProjectSceneMacroConfig),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSceneMacroConfig {
+    pub target_scene: usize,
+    pub morph_params: bool,
+    pub steal_patterns: bool,
+    #[serde(default)]
+    pub quantize: ProjectStealQuantize,
+    #[serde(default)]
+    pub track_mask: Option<Vec<bool>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectStealQuantize {
+    Off,
+    Sixteenth,
+    #[default]
+    Bar,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMacroMapping {
+    pub track: usize,
+    pub target: crate::process::ParamTarget,
+    pub range_min: f32,
+    pub range_max: f32,
+    #[serde(default)]
+    pub curve: ProjectMacroCurve,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectMacroCurve {
+    #[default]
+    Linear,
+    Exp,
+    Log,
+}
+
+fn default_next_macro_id() -> u32 {
+    1
+}
+
+impl From<&Macro> for ProjectMacro {
+    fn from(value: &Macro) -> Self {
+        Self {
+            id: value.id,
+            key: value.key.clone(),
+            name: value.name.clone(),
+            value: value.value,
+            kind: match &value.kind {
+                MacroKind::Mapped => ProjectMacroKind::Mapped,
+                MacroKind::Scene(config) => {
+                    ProjectMacroKind::Scene(ProjectSceneMacroConfig::from(config))
+                }
+            },
+            mappings: value
+                .mappings
+                .iter()
+                .map(ProjectMacroMapping::from)
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<ProjectMacro> for Macro {
+    type Error = MacroEngineError;
+
+    fn try_from(value: ProjectMacro) -> Result<Self, Self::Error> {
+        if !value.value.is_finite() {
+            return Err(MacroEngineError::NonFiniteValue);
+        }
+        let key = value
+            .key
+            .as_deref()
+            .map(normalize_macro_key)
+            .transpose()?;
+        let kind = match value.kind {
+            ProjectMacroKind::Mapped => MacroKind::Mapped,
+            ProjectMacroKind::Scene(config) => MacroKind::Scene(config.into()),
+        };
+        let mut macro_definition = Macro::new(value.id, value.name, kind);
+        macro_definition.key = key;
+        macro_definition.value = value.value.clamp(0.0, 1.0);
+        macro_definition.mappings = value
+            .mappings
+            .into_iter()
+            .map(MacroMapping::try_from)
+            .collect::<Result<_, _>>()?;
+        Ok(macro_definition)
+    }
+}
+
+impl From<&MacroMapping> for ProjectMacroMapping {
+    fn from(value: &MacroMapping) -> Self {
+        Self {
+            track: value.track,
+            target: value.target.clone(),
+            range_min: value.range_min,
+            range_max: value.range_max,
+            curve: value.curve.into(),
+        }
+    }
+}
+
+impl TryFrom<ProjectMacroMapping> for MacroMapping {
+    type Error = MacroEngineError;
+
+    fn try_from(value: ProjectMacroMapping) -> Result<Self, Self::Error> {
+        MacroMapping::new(
+            value.track,
+            value.target,
+            value.range_min,
+            value.range_max,
+            value.curve.into(),
+        )
+    }
+}
+
+impl From<MacroCurve> for ProjectMacroCurve {
+    fn from(value: MacroCurve) -> Self {
+        match value {
+            MacroCurve::Linear => Self::Linear,
+            MacroCurve::Exp => Self::Exp,
+            MacroCurve::Log => Self::Log,
+        }
+    }
+}
+
+impl From<ProjectMacroCurve> for MacroCurve {
+    fn from(value: ProjectMacroCurve) -> Self {
+        match value {
+            ProjectMacroCurve::Linear => Self::Linear,
+            ProjectMacroCurve::Exp => Self::Exp,
+            ProjectMacroCurve::Log => Self::Log,
+        }
+    }
+}
+
+impl From<&SceneMacroConfig> for ProjectSceneMacroConfig {
+    fn from(value: &SceneMacroConfig) -> Self {
+        Self {
+            target_scene: value.target_scene,
+            morph_params: value.morph_params,
+            steal_patterns: value.steal_patterns,
+            quantize: value.quantize.into(),
+            track_mask: value.track_mask.clone(),
+        }
+    }
+}
+
+impl From<ProjectSceneMacroConfig> for SceneMacroConfig {
+    fn from(value: ProjectSceneMacroConfig) -> Self {
+        Self {
+            target_scene: value.target_scene,
+            morph_params: value.morph_params,
+            steal_patterns: value.steal_patterns,
+            quantize: value.quantize.into(),
+            track_mask: value.track_mask,
+        }
+    }
+}
+
+impl From<StealQuantize> for ProjectStealQuantize {
+    fn from(value: StealQuantize) -> Self {
+        match value {
+            StealQuantize::Off => Self::Off,
+            StealQuantize::Sixteenth => Self::Sixteenth,
+            StealQuantize::Bar => Self::Bar,
+        }
+    }
+}
+
+impl From<ProjectStealQuantize> for StealQuantize {
+    fn from(value: ProjectStealQuantize) -> Self {
+        match value {
+            ProjectStealQuantize::Off => Self::Off,
+            ProjectStealQuantize::Sixteenth => Self::Sixteenth,
+            ProjectStealQuantize::Bar => Self::Bar,
+        }
+    }
 }
 
 /// A track group: lightweight metadata folding a set of tracks into one mixer
@@ -1959,6 +2168,8 @@ mod tests {
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
             }],
+            macros: Vec::new(),
+            next_macro_id: 1,
         }
     }
 
@@ -2121,6 +2332,91 @@ mod tests {
             restored.patterns[0].track_params[0].sends[0].destination,
             crate::sequencer::DEFAULT_BUS_B_ID
         );
+    }
+
+    #[test]
+    fn project_macros_roundtrip_stable_ids_ranges_curves_and_identity() {
+        let mut project = sample_project();
+        project.next_macro_id = 9;
+        project.macros = vec![ProjectMacro {
+            id: 7,
+            key: Some("player/delay-push".to_string()),
+            name: "Push".to_string(),
+            value: 0.75,
+            kind: ProjectMacroKind::Mapped,
+            mappings: vec![ProjectMacroMapping {
+                track: 1,
+                target: crate::process::ParamTarget::EffectParam {
+                    slot: 2,
+                    effect: "delay".to_string(),
+                    param: "feedback".to_string(),
+                    param_id: Some(ParamNodeId {
+                        logical_id: 91,
+                        node_param_idx: 4,
+                    }),
+                },
+                range_min: 0.2,
+                range_max: 0.93,
+                curve: ProjectMacroCurve::Exp,
+            }],
+        }];
+
+        let json = serde_json::to_string(&project).expect("serialize macros");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize macros");
+        assert_eq!(restored.next_macro_id, 9);
+        assert_eq!(restored.macros, project.macros);
+        assert_eq!(
+            restored.macros[0].key.as_deref(),
+            Some("player/delay-push")
+        );
+
+        let macro_definition = Macro::try_from(restored.macros[0].clone()).expect("valid macro");
+        assert_eq!(macro_definition.id, 7);
+        assert_eq!(macro_definition.mappings[0].curve, MacroCurve::Exp);
+    }
+
+    #[test]
+    fn project_macro_without_script_key_loads_as_interactive_macro() {
+        let json = r#"{
+            "id": 4,
+            "name": "Interactive",
+            "value": 0.0,
+            "kind": "Mapped",
+            "mappings": []
+        }"#;
+        let restored: ProjectMacro = serde_json::from_str(json).expect("load unkeyed macro");
+
+        assert_eq!(restored.id, 4);
+        assert_eq!(restored.key, None);
+    }
+
+    #[test]
+    fn script_key_survives_user_rename_and_project_conversion() {
+        let mut engine = crate::macro_engine::MacroEngine::default();
+        let id = engine
+            .ensure_macro(":Player/Filter", "Filter")
+            .expect("ensure");
+        engine
+            .rename_macro(id, "Opening Filter")
+            .expect("rename");
+
+        let persisted = ProjectMacro::from(engine.macro_definition(id).unwrap());
+        let restored = Macro::try_from(persisted).expect("restore macro");
+        assert_eq!(restored.key.as_deref(), Some("player/filter"));
+        assert_eq!(restored.name, "Opening Filter");
+    }
+
+    #[test]
+    fn projects_without_macro_fields_load_empty_with_initial_id_cursor() {
+        let project = sample_project();
+        let mut json = serde_json::to_value(project).expect("serialize project");
+        let object = json.as_object_mut().expect("project object");
+        object.remove("macros");
+        object.remove("next_macro_id");
+
+        let restored: ProjectFile = serde_json::from_value(json).expect("load old project");
+        assert!(restored.macros.is_empty());
+        assert_eq!(restored.next_macro_id, 1);
     }
 
     #[test]

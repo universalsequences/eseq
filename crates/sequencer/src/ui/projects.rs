@@ -12,7 +12,7 @@ use crate::neural::ParamNodeId;
 use crate::process::ParamTarget;
 use crate::project::{
     self, chord_snapshot_from_steps_durations_and_delays, project_file_version, ProjectBusChannel,
-    ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
+    ProjectBusPatternSnapshot, ProjectFile, ProjectMacro, ProjectPattern, ProjectReverbState,
     ProjectScratchState, ProjectTrack,
 };
 use crate::sequencer::{
@@ -1311,6 +1311,13 @@ impl App {
             },
             patterns,
             groups: self.groups.clone(),
+            macros: self
+                .macro_engine
+                .macros()
+                .iter()
+                .map(ProjectMacro::from)
+                .collect(),
+            next_macro_id: self.macro_engine.next_id(),
         })
     }
 
@@ -1942,6 +1949,8 @@ impl App {
             custom_effects: _,
             patterns: _,
             groups,
+            macros,
+            next_macro_id,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -2135,6 +2144,21 @@ impl App {
         self.set_reverb_param(0, reverb.size);
         self.set_reverb_param(1, reverb.brightness);
         self.set_reverb_param(2, reverb.replace);
+        let mut macro_engine = crate::macro_engine::MacroEngine::default();
+        let mut restored_values = Vec::with_capacity(macros.len());
+        for project_macro in macros {
+            let macro_definition = crate::macro_engine::Macro::try_from(project_macro)
+                .map_err(|error| format!("invalid persisted macro: {error:?}"))?;
+            restored_values.push((macro_definition.id, macro_definition.value));
+            macro_engine
+                .insert_macro(macro_definition)
+                .map_err(|error| format!("invalid persisted macro id: {error:?}"))?;
+        }
+        macro_engine.ensure_next_id_at_least(next_macro_id);
+        for (id, value) in restored_values {
+            macro_engine.set_value(id, value);
+        }
+        self.macro_engine = macro_engine;
         self.push_all_restored_defaults();
         self.push_all_delay_bpm();
 
@@ -3040,6 +3064,8 @@ mod tests {
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
             }],
+            macros: Vec::new(),
+            next_macro_id: 1,
         }
     }
 

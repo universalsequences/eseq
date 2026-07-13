@@ -538,18 +538,13 @@ impl App {
         }
     }
 
-    pub(super) fn effective_slot_param_value(
+    pub fn effective_slot_param_value(
         &self,
         track: usize,
         slot_idx: usize,
         param_idx: usize,
     ) -> Option<f32> {
-        let slot = self
-            .state
-            .pattern
-            .effect_chains
-            .get(track)?
-            .get(slot_idx)?;
+        let slot = self.state.pattern.effect_chains.get(track)?.get(slot_idx)?;
         if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
             return None;
         }
@@ -559,12 +554,8 @@ impl App {
             slot.modulator_node_id.load(Ordering::Relaxed),
             raw_idx,
         );
-        let key = crate::macro_engine::MacroParamKey::for_effect(
-            track,
-            slot_idx,
-            param_idx,
-            param_id,
-        );
+        let key =
+            crate::macro_engine::MacroParamKey::for_effect(track, slot_idx, param_idx, param_id);
         Some(
             self.macro_engine
                 .effective_value(&key, slot.defaults.get(param_idx)),
@@ -589,6 +580,13 @@ impl App {
     /// directly so both engagement and release reach the DSP immediately.
     pub fn set_macro_value(&mut self, id: crate::macro_engine::MacroId, value: f32) {
         let touched = self.macro_engine.set_value(id, value);
+        self.send_macro_targets(touched);
+    }
+
+    pub(super) fn send_macro_targets(
+        &mut self,
+        touched: Vec<(usize, crate::process::ParamTarget)>,
+    ) {
         for (track, target) in touched {
             match target {
                 crate::process::ParamTarget::EffectParam {
@@ -615,16 +613,16 @@ impl App {
                     self.send_effective_slot_param(track, slot, param_idx);
                 }
                 crate::process::ParamTarget::InstrumentParam { param, .. } => {
-                    let Some(param_idx) = self
-                        .graph
-                        .instrument_descriptors
-                        .get(track)
-                        .and_then(|descriptor| {
-                            descriptor
-                                .params
-                                .iter()
-                                .position(|descriptor| descriptor.has_tag_or_name(&param))
-                        })
+                    let Some(param_idx) =
+                        self.graph
+                            .instrument_descriptors
+                            .get(track)
+                            .and_then(|descriptor| {
+                                descriptor
+                                    .params
+                                    .iter()
+                                    .position(|descriptor| descriptor.has_tag_or_name(&param))
+                            })
                     else {
                         continue;
                     };
@@ -633,6 +631,110 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    /// Resolves a host target against the live descriptor and captures its
+    /// absolute device range and stable node identity at mapping time.
+    pub(super) fn map_macro_param(
+        &mut self,
+        id: crate::macro_engine::MacroId,
+        track: usize,
+        target: crate::process::ParamTarget,
+    ) -> Result<(), crate::macro_engine::MacroEngineError> {
+        let (target, param_idx, min, max) = match target {
+            crate::process::ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                ..
+            } => {
+                let Some(descriptor) = self
+                    .graph
+                    .effect_descriptors
+                    .get(track)
+                    .and_then(|descriptors| descriptors.get(slot))
+                    .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(&effect))
+                else {
+                    return Err(crate::macro_engine::MacroEngineError::UnsupportedTarget);
+                };
+                let Some(param_idx) = descriptor
+                    .params
+                    .iter()
+                    .position(|descriptor| descriptor.has_tag_or_name(&param))
+                else {
+                    return Err(crate::macro_engine::MacroEngineError::UnsupportedTarget);
+                };
+                let param_descriptor = &descriptor.params[param_idx];
+                let Some(slot_state) = self
+                    .state
+                    .pattern
+                    .effect_chains
+                    .get(track)
+                    .and_then(|chain| chain.get(slot))
+                else {
+                    return Err(crate::macro_engine::MacroEngineError::UnsupportedTarget);
+                };
+                let target = crate::process::ParamTarget::EffectParam {
+                    slot,
+                    effect: descriptor.name.clone(),
+                    param: param_descriptor.name.clone(),
+                    param_id: slot_state.param_node_id(param_idx),
+                };
+                (
+                    target,
+                    param_idx,
+                    param_descriptor.min,
+                    param_descriptor.max,
+                )
+            }
+            crate::process::ParamTarget::InstrumentParam { param, .. } => {
+                let Some(descriptor) = self.graph.instrument_descriptors.get(track) else {
+                    return Err(crate::macro_engine::MacroEngineError::UnsupportedTarget);
+                };
+                let Some(param_idx) = descriptor
+                    .params
+                    .iter()
+                    .position(|descriptor| descriptor.has_tag_or_name(&param))
+                else {
+                    return Err(crate::macro_engine::MacroEngineError::UnsupportedTarget);
+                };
+                let param_descriptor = &descriptor.params[param_idx];
+                let Some(slot_state) = self.state.pattern.instrument_slots.get(track) else {
+                    return Err(crate::macro_engine::MacroEngineError::UnsupportedTarget);
+                };
+                let target = crate::process::ParamTarget::InstrumentParam {
+                    param: param_descriptor.name.clone(),
+                    param_id: slot_state.param_node_id(param_idx),
+                };
+                (
+                    target,
+                    param_idx,
+                    param_descriptor.min,
+                    param_descriptor.max,
+                )
+            }
+            _ => return Err(crate::macro_engine::MacroEngineError::UnsupportedTarget),
+        };
+        let resend_target = target.clone();
+        let mapping = crate::macro_engine::MacroMapping::new_resolved(
+            track,
+            target,
+            Some(param_idx),
+            min,
+            max,
+            crate::macro_engine::MacroCurve::Linear,
+        )?;
+        self.macro_engine.add_mapping(id, mapping)?;
+        let engaged = self
+            .macro_engine
+            .macro_definition(id)
+            .is_some_and(|macro_definition| {
+                !crate::macro_engine::value_is_identity(macro_definition.value)
+            });
+        if engaged {
+            self.send_macro_targets(vec![(track, resend_target)]);
+        }
+        Ok(())
     }
 
     fn toggle_slot_boolean(&mut self) {

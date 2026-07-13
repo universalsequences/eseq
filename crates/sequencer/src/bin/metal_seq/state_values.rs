@@ -600,6 +600,93 @@ fn process_param_target_label(target: &sequencer::process::ParamTarget) -> Strin
     }
 }
 
+fn macro_mapping_current_value(
+    app: &ui::App,
+    mapping: &sequencer::macro_engine::MacroMapping,
+) -> Option<f32> {
+    match &mapping.target {
+        sequencer::process::ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            ..
+        } => {
+            let param_idx = app
+                .graph
+                .effect_descriptors
+                .get(mapping.track)?
+                .get(*slot)
+                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?
+                .params
+                .iter()
+                .position(|descriptor| descriptor.has_tag_or_name(param))?;
+            app.effective_slot_param_value(mapping.track, *slot, param_idx)
+        }
+        sequencer::process::ParamTarget::InstrumentParam { param, .. } => {
+            let param_idx = app
+                .graph
+                .instrument_descriptors
+                .get(mapping.track)?
+                .params
+                .iter()
+                .position(|descriptor| descriptor.has_tag_or_name(param))?;
+            app.effective_instrument_param_value(mapping.track, param_idx)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn build_macros_value(app: &ui::App) -> Value {
+    list_value(app.macro_engine.macros().iter().map(|macro_definition| {
+        let kind = match macro_definition.kind {
+            sequencer::macro_engine::MacroKind::Mapped => "mapped",
+            sequencer::macro_engine::MacroKind::Scene(_) => "scene",
+        };
+        let mappings = list_value(macro_definition.mappings.iter().map(|mapping| {
+            let curve = match mapping.curve {
+                sequencer::macro_engine::MacroCurve::Linear => "linear",
+                sequencer::macro_engine::MacroCurve::Exp => "exp",
+                sequencer::macro_engine::MacroCurve::Log => "log",
+            };
+            map_value([
+                (
+                    "target-label",
+                    Value::String(format!(
+                        "Track {} · {}",
+                        mapping.track + 1,
+                        process_param_target_label(&mapping.target)
+                    )),
+                ),
+                ("min", Value::Number(mapping.range_min as f64)),
+                ("max", Value::Number(mapping.range_max as f64)),
+                ("curve", Value::String(curve.to_string())),
+                (
+                    "current",
+                    macro_mapping_current_value(app, mapping)
+                        .map(|value| Value::Number(value as f64))
+                        .unwrap_or(Value::Nil),
+                ),
+                ("suspended", Value::Bool(mapping.suspended)),
+            ])
+        }));
+        map_value([
+            ("id", Value::Number(macro_definition.id as f64)),
+            (
+                "key",
+                macro_definition
+                    .key
+                    .as_ref()
+                    .map(|key| Value::String(key.clone()))
+                    .unwrap_or(Value::Nil),
+            ),
+            ("name", Value::String(macro_definition.name.clone())),
+            ("kind", Value::String(kind.to_string())),
+            ("value", Value::Number(macro_definition.value as f64)),
+            ("mappings", mappings),
+        ])
+    }))
+}
+
 fn process_param_target_is_bindable(target: &sequencer::process::ParamTarget) -> bool {
     !matches!(
         target,
@@ -4113,6 +4200,7 @@ pub(crate) fn sync_track_topology_state(
     record_armed: &Arc<Mutex<Vec<bool>>>,
     track_peak_levels: &[f64],
 ) {
+    rt.set_reactive("SEQ", "macros", build_macros_value(app));
     sync_track_name_state(rt, track_names, app);
     sync_bus_mixer_state(rt, app);
     sync_pattern_state(rt, state);
@@ -17432,6 +17520,69 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.graph.instrument_descriptors = vec![desc];
         app
+    }
+
+    #[test]
+    fn macro_readback_exposes_definition_mapping_range_curve_and_current_value() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(0, 17.5);
+        let id = app
+            .macro_engine
+            .ensure_macro("player/push", "Push")
+            .expect("macro id");
+        app.macro_engine
+            .add_mapping(
+                id,
+                sequencer::macro_engine::MacroMapping::new_resolved(
+                    0,
+                    sequencer::process::ParamTarget::InstrumentParam {
+                        param: desc.params[0].name.clone(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    desc.params[0].min,
+                    desc.params[0].max,
+                    sequencer::macro_engine::MacroCurve::Log,
+                )
+                .expect("mapping"),
+            )
+            .expect("known macro");
+
+        let macros = value_list_maps(&build_macros_value(&app));
+        assert_eq!(macros.len(), 1);
+        assert!(matches!(
+            &*macros[0]["id"].borrow(),
+            Value::Number(value) if *value == id as f64
+        ));
+        assert!(matches!(
+            &*macros[0]["name"].borrow(),
+            Value::String(value) if value == "Push"
+        ));
+        assert!(matches!(
+            &*macros[0]["key"].borrow(),
+            Value::String(value) if value == "player/push"
+        ));
+        let mappings = value_list_maps(&macros[0]["mappings"].borrow());
+        assert_eq!(mappings.len(), 1);
+        assert!(matches!(
+            &*mappings[0]["curve"].borrow(),
+            Value::String(value) if value == "log"
+        ));
+        assert!(matches!(
+            &*mappings[0]["current"].borrow(),
+            Value::Number(value) if (*value - 17.5).abs() < 1.0e-6
+        ));
+        assert!(matches!(
+            &*mappings[0]["min"].borrow(),
+            Value::Number(value) if *value == desc.params[0].min as f64
+        ));
+        assert!(matches!(
+            &*mappings[0]["max"].borrow(),
+            Value::Number(value) if *value == desc.params[0].max as f64
+        ));
     }
 
     fn test_app_with_sampler_descriptor(desc: sequencer::effects::EffectDescriptor) -> ui::App {
