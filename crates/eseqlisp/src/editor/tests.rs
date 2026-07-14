@@ -5710,6 +5710,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         vec![
             ("base", Value::Number(0.0)),
             ("depth-1", Value::Number(0.5)),
+            ("origin", Value::Number(0.0)),
         ],
         true,
     );
@@ -5722,6 +5723,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
             (effect-buffer "*controls*"
               (knob-number :label "cut"
                 :value 0 :min -1 :max 1 :decimals 2
+                :origin (bind "APP" "origin")
                 :base-value (bind "APP" "base") :base-min -1 :base-max 1
                 :selected-mod-slot 1
                 :mod-range-0-slot 1
@@ -5748,6 +5750,11 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         matches!(knob.props.get("mod-ranges"), Some(Value::List(items)) if items.len() == 1),
         "rich mod-ranges prop should survive Lisp -> layout: {:?}",
         knob.props.get("mod-ranges")
+    );
+    assert!(
+        matches!(knob.props.get("origin"), Some(Value::ReactiveRef { .. })),
+        "reactive origin should be accepted by knob-number: {:?}",
+        knob.props.get("origin")
     );
     assert!(
         matches!(

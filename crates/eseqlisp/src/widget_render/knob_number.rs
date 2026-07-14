@@ -18,8 +18,8 @@ use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds,
+    FocusCornerStyle, FocusDecoration, MetalPrimitive, MetalProportionalTextPrimitive,
+    MetalRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -57,6 +57,19 @@ fn format_display(props: &HashMap<String, Value>, value: f32, decimals: u32) -> 
         Some(Value::String(unit)) if !unit.is_empty() => format!("{text} {unit}"),
         _ => text,
     }
+}
+
+fn knob_edit_color(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(
+        props,
+        "edit-color",
+        Color {
+            r: 1.0,
+            g: 0.95,
+            b: 0.25,
+            a: 1.0,
+        },
+    )
 }
 
 fn display_decimals(props: &HashMap<String, Value>) -> u32 {
@@ -112,6 +125,16 @@ mod tests {
         let mut props = numeric_props(0.0, 1.0, 2.0);
         props.insert("value-scale".to_string(), Value::Number(100.0));
         assert_eq!(display_decimals(&props), 0);
+    }
+
+    #[test]
+    fn normalized_origin_defaults_to_min_and_supports_bipolar_zero() {
+        let mut props = numeric_props(-1.0, 1.0, 2.0);
+        props.insert("value".to_string(), Value::Number(0.5));
+        assert_eq!(normalized_value_with_origin(&props), (0.75, 0.0));
+
+        props.insert("origin".to_string(), Value::Number(0.0));
+        assert_eq!(normalized_value_with_origin(&props), (0.75, 0.5));
     }
 
     #[cfg(target_os = "macos")]
@@ -297,9 +320,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn wide_overlay_value_is_centered_in_the_lower_band() {
-        assert!(overlay_value_needs_centered_lower_layout(2.1, 3.0));
-        assert!(!overlay_value_needs_centered_lower_layout(1.1, 3.0));
-
         let mut node = test_knob_node(HashMap::from([
             ("label".to_string(), Value::String("sr".to_string())),
             ("font-size".to_string(), Value::Number(10.5)),
@@ -313,8 +333,14 @@ mod tests {
             cell_h: 43.0,
             ..test_viewport()
         };
-        let layout =
-            knob_number_component_layout(&node, viewport, "sr", "4264500000", "4264500000", true);
+        let layout = knob_number_component_layout(
+            &node,
+            viewport,
+            "sr",
+            "42645000000000000000",
+            "42645000000000000000",
+            true,
+        );
         let value_band = layout.value_band.expect("value band");
         let value_bottom = value_band.row + value_band.height;
         let expected_content_bottom = node.rect.row + node.rect.height - 1.0 / viewport.cell_h;
@@ -322,6 +348,90 @@ mod tests {
         assert_eq!(layout.value_h_align, 0.5);
         assert!((value_bottom - expected_content_bottom).abs() < 0.000_01);
         assert_eq!(layout.value_text_rect, layout.text_rect);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wider_widget_can_keep_the_same_range_value_in_the_compact_pocket() {
+        let mut node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("sr".to_string())),
+            ("font-size".to_string(), Value::Number(10.5)),
+            ("label-font-size".to_string(), Value::Number(10.0)),
+            ("knob-size".to_string(), Value::Number(2.5)),
+        ]));
+        node.rect.width = 4.7;
+        node.rect.height = 2.05;
+        let viewport = WidgetViewport {
+            cell_w: 20.0,
+            cell_h: 43.0,
+            ..test_viewport()
+        };
+        let narrow = knob_number_component_layout(
+            &node,
+            viewport,
+            "sr",
+            "42645000000000",
+            "42645000000000",
+            true,
+        );
+
+        node.rect.width = 8.0;
+        let wide = knob_number_component_layout(
+            &node,
+            viewport,
+            "sr",
+            "42645000000000",
+            "42645000000000",
+            true,
+        );
+
+        assert_eq!(narrow.value_h_align, 0.5);
+        assert_eq!(wide.value_h_align, 1.0);
+        assert_ne!(wide.value_text_rect, wide.text_rect);
+        assert_rect_contains(node.rect, wide.value_text_rect);
+        assert_rect_contains(node.rect, wide.value_band.expect("value band"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_value_pocket_starts_at_the_projected_45_degree_arc_endpoint() {
+        let knob_rect = Rect {
+            row: 1.0,
+            col: 3.0,
+            width: 4.0,
+            height: 4.0,
+        };
+        let text_rect = Rect {
+            row: 0.0,
+            col: 1.0,
+            width: 8.0,
+            height: 6.0,
+        };
+        let ring_outer_radius = knob_rect.width * 0.331;
+        let open_sector_left = knob_rect.col + knob_rect.width * 0.5
+            - ring_outer_radius * std::f32::consts::FRAC_1_SQRT_2;
+        let pocket =
+            compact_overlay_value_text_rect(knob_rect, text_rect, 2.0, open_sector_left, 10.0)
+                .expect("two-cell value should fit the open sector");
+
+        assert_eq!(pocket.col, open_sector_left);
+        assert!(pocket.col + pocket.width <= text_rect.col + text_rect.width);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hidden_value_does_not_require_a_compact_value_pocket() {
+        let node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("gain".to_string())),
+            ("font-size".to_string(), Value::Number(10.0)),
+            ("knob-size".to_string(), Value::Number(1.5)),
+        ]));
+        let layout =
+            knob_number_component_layout(&node, test_viewport(), "gain", "0.00", "0.00", false);
+
+        assert!(layout.value_band.is_none());
+        assert_rect_contains(node.rect, layout.knob_rect);
+        assert_rect_contains(node.rect, layout.label_band.expect("label band"));
     }
 
     #[cfg(target_os = "macos")]
@@ -451,6 +561,34 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn metal_knob_receives_normalized_bipolar_origin() {
+        let node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("pan".to_string())),
+            ("value".to_string(), Value::Number(0.5)),
+            ("min".to_string(), Value::Number(-1.0)),
+            ("max".to_string(), Value::Number(1.0)),
+            ("origin".to_string(), Value::Number(0.0)),
+        ]));
+        let primitives =
+            KNOB_NUMBER_WIDGET.build_metal_primitives("knob-number", &node, test_viewport());
+        let instance = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "knob-number" => Some(instance),
+                _ => None,
+            })
+            .expect("knob-number base instance");
+
+        assert_eq!(instance.value_t, 0.75);
+        assert_eq!(instance.uniform_a[3], 0.5);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn mod_range_arc_uses_display_domain_for_percent_depths() {
         let node = test_knob_node(HashMap::from([
             ("label".to_string(), Value::String("scrub".to_string())),
@@ -522,15 +660,18 @@ fn model_value_from_display(props: &HashMap<String, Value>, value: f32) -> f32 {
     value / value_scale(props)
 }
 
-fn normalized_value(props: &HashMap<String, Value>) -> f32 {
+fn normalized_value_with_origin(props: &HashMap<String, Value>) -> (f32, f32) {
     let value = quantized_value(props, get_f32_prop(props, "value", 0.0));
     let min = get_f32_prop(props, "min", 0.0);
     let max = get_f32_prop(props, "max", 1.0);
     let range = max - min;
     if range > 0.0 {
-        ((value - min) / range).clamp(0.0, 1.0)
+        let value_t = ((value - min) / range).clamp(0.0, 1.0);
+        let origin = get_f32_prop(props, "origin", min);
+        let origin_t = ((origin - min) / range).clamp(0.0, 1.0);
+        (value_t, origin_t)
     } else {
-        0.0
+        (0.0, 0.0)
     }
 }
 
@@ -713,12 +854,38 @@ fn line_height_cells(font_size: f32, cell_h: f32) -> f32 {
 }
 
 #[cfg(target_os = "macos")]
-fn overlay_value_needs_centered_lower_layout(value_width: f32, knob_width: f32) -> bool {
-    // Only the lower-right pocket of the ring is available to compact text;
-    // using the full visible diameter lets signed multi-digit values cross
-    // the arc even though their overall width still fits the primitive.
-    const LOWER_RIGHT_POCKET_WIDTH_FRACTION: f32 = 0.40;
-    value_width > knob_width * LOWER_RIGHT_POCKET_WIDTH_FRACTION
+fn compact_overlay_value_text_rect(
+    knob_rect: Rect,
+    text_rect: Rect,
+    stable_value_width: f32,
+    pocket_left: f32,
+    cell_w: f32,
+) -> Option<Rect> {
+    // The right edge grows only as much as the stable range text needs beyond
+    // its preferred knob-relative anchor, so widening the widget creates usable
+    // room without pulling short values away from the knob.
+    const VALUE_KNOB_OVERHANG_PX: f32 = 4.0;
+
+    let knob_right = knob_rect.col + knob_rect.width;
+    let text_right = text_rect.col + text_rect.width;
+    let pocket_left = pocket_left.max(text_rect.col).min(text_right);
+    let available_width = (text_right - pocket_left).max(0.0);
+    if stable_value_width > available_width {
+        return None;
+    }
+
+    let preferred_right = (knob_right + VALUE_KNOB_OVERHANG_PX / cell_w.max(0.000_001))
+        .min(text_right)
+        .max(pocket_left);
+    let value_right = preferred_right
+        .max(pocket_left + stable_value_width)
+        .min(text_right);
+    Some(Rect {
+        row: text_rect.row,
+        col: pocket_left,
+        width: (value_right - pocket_left).max(0.0),
+        height: text_rect.height,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -898,24 +1065,46 @@ fn knob_number_component_layout(
         height: knob_size,
     };
     row += knob_size + value_gap;
-    let wide_overlay_value = !center_value
-        && has_value
-        && overlay_value_needs_centered_lower_layout(
-            text_width_cells(range_width_text, font_size, cell_w),
-            knob_rect.width,
-        );
-    let value_text_rect = if center_value || wide_overlay_value {
+    const VALUE_KNOB_OVERHANG_PX: f32 = 4.0;
+    const VALUE_BOTTOM_INSET_PX: f32 = 5.0;
+    // Shader `activeRing` reaches p=0.662. Since p spans -1..1, its outer
+    // radius occupies 0.331 of the square knob primitive.
+    const RING_OUTER_RADIUS_FRACTION: f32 = 0.331;
+
+    let overlay_top = if has_label {
+        knob_rect.row
+    } else {
+        content.row
+    };
+    let content_bottom = content.row + content.height;
+    let near_knob_bottom = (knob_rect.row + knob_rect.height + VALUE_KNOB_OVERHANG_PX / cell_h)
+        .min(content_bottom - VALUE_BOTTOM_INSET_PX / cell_h)
+        .max(overlay_top);
+    let stable_value_width = text_width_cells(range_width_text, font_size, cell_w);
+
+    // The arc endpoints are rotated 45 degrees away from the bottom axis. The
+    // left edge of that open sector is the horizontal projection of the outer
+    // ring radius, which gives the value text the space intentionally left
+    // beneath the knob without crossing the drawn arc.
+    let ring_outer_radius = knob_rect.width * RING_OUTER_RADIUS_FRACTION;
+    let open_sector_left =
+        knob_rect.col + knob_rect.width * 0.5 - ring_outer_radius * std::f32::consts::FRAC_1_SQRT_2;
+    let compact_value_text_rect = (!center_value && has_value)
+        .then(|| {
+            compact_overlay_value_text_rect(
+                knob_rect,
+                text_rect,
+                stable_value_width,
+                open_sector_left,
+                cell_w,
+            )
+        })
+        .flatten();
+    let wide_overlay_value = !center_value && has_value && compact_value_text_rect.is_none();
+    let value_text_rect = if !has_value || center_value || wide_overlay_value {
         text_rect
     } else {
-        let value_right = (knob_rect.col + knob_rect.width + 4.0 / cell_w)
-            .min(text_rect.col + text_rect.width)
-            .max(text_rect.col);
-        Rect {
-            row: text_rect.row,
-            col: text_rect.col,
-            width: value_right - text_rect.col,
-            height: text_rect.height,
-        }
+        compact_value_text_rect.expect("visible non-centered values have a compact text rect")
     };
     let value_band = if !has_value {
         None
@@ -927,20 +1116,10 @@ fn knob_number_component_layout(
             height: value_height,
         })
     } else {
-        const VALUE_KNOB_OVERHANG_PX: f32 = 4.0;
-        const VALUE_BOTTOM_INSET_PX: f32 = 5.0;
-
-        let overlay_top = if has_label {
-            knob_rect.row
-        } else {
-            content.row
-        };
-        let content_bottom = content.row + content.height;
         let preferred_bottom = if wide_overlay_value {
             content_bottom
         } else {
-            (knob_rect.row + knob_rect.height + VALUE_KNOB_OVERHANG_PX / cell_h)
-                .min(content_bottom - VALUE_BOTTOM_INSET_PX / cell_h)
+            near_knob_bottom
         }
         .max(overlay_top);
         let overlay_height = natural_value_height.min((preferred_bottom - overlay_top).max(0.0));
@@ -1006,6 +1185,7 @@ impl WidgetDefinition for KnobNumberWidget {
     fn bindable_props(&self) -> &'static [&'static str] {
         &[
             "value",
+            "origin",
             "base-value",
             "base-min",
             "base-max",
@@ -1299,6 +1479,15 @@ impl WidgetDefinition for KnobNumberWidget {
     }
 
     #[cfg(target_os = "macos")]
+    fn metal_focus_decoration(&self, node: &LayoutNode) -> FocusDecoration {
+        FocusDecoration::Corners(FocusCornerStyle::new(resolve_named_color(
+            &node.props,
+            "focus-color",
+            knob_edit_color(&node.props),
+        )))
+    }
+
+    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
@@ -1330,16 +1519,7 @@ impl WidgetDefinition for KnobNumberWidget {
                 a: 1.0,
             },
         );
-        let edit_color = resolve_named_color(
-            &node.props,
-            "edit-color",
-            Color {
-                r: 1.0,
-                g: 0.95,
-                b: 0.25,
-                a: 1.0,
-            },
-        );
+        let edit_color = knob_edit_color(&node.props);
         let cursor_color = resolve_named_color(
             &node.props,
             "cursor-color",
@@ -1402,6 +1582,7 @@ impl WidgetDefinition for KnobNumberWidget {
         let px_h = knob_rect.height * viewport.cell_h;
         let min = get_f32_prop(&node.props, "min", 0.0);
         let max = get_f32_prop(&node.props, "max", 1.0);
+        let (value_t, origin_t) = normalized_value_with_origin(&node.props);
         let default_t = if (max - min).abs() > 0.000_001 {
             ((get_f32_prop(&node.props, "plock-default", value) - min) / (max - min))
                 .clamp(0.0, 1.0)
@@ -1413,14 +1594,14 @@ impl WidgetDefinition for KnobNumberWidget {
             instance: WidgetInstance {
                 ndc_min,
                 ndc_max,
-                value_t: normalized_value(&node.props),
+                value_t,
                 orientation: 0.0,
                 itime: viewport.time_seconds,
                 uniform_a: [
                     if is_focused { 1.0 } else { 0.0 },
                     if plock_active { 1.0 } else { 0.0 },
                     default_t,
-                    0.0,
+                    origin_t,
                 ],
                 uniform_b: [0.0; 4],
                 uniform_c: [0.0; 4],
@@ -1495,7 +1676,7 @@ impl WidgetDefinition for KnobNumberWidget {
                     instance: WidgetInstance {
                         ndc_min,
                         ndc_max,
-                        value_t: normalized_value(&node.props),
+                        value_t,
                         orientation: 0.0,
                         itime: viewport.time_seconds,
                         uniform_a: [if is_focused { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
@@ -1624,7 +1805,12 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float sweep = 4.71238898;
     float rel = fmod((a - start + 6.2831853), 6.2831853);
     float inRange = step(rel, sweep);
-    float active = step(rel, sweep * in.value_t);
+    float valueRel = sweep * clamp(in.value_t, 0.0, 1.0);
+    float originRel = sweep * clamp(in.uniform_a.w, 0.0, 1.0);
+    float fillLo = min(valueRel, originRel);
+    float fillHi = max(valueRel, originRel);
+    float fillSpan = fillHi - fillLo;
+    float active = step(fillLo, rel) * step(rel, fillHi) * step(0.001, fillSpan);
 
     float knobRadius = 0.58;
     float ring = abs(r - knobRadius) - 0.070;
@@ -1636,7 +1822,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float glowMask = smoothstep(aa * 4.0, -aa * 4.0, glowRing) * inRange * active * step(0.5, in.uniform_a.y);
     float trackMask = ringMask * (1.0 - active);
 
-    float notchAngle = start + sweep * in.value_t;
+    float notchAngle = start + valueRel;
     float2 n = float2(cos(notchAngle), sin(notchAngle));
     float notch = length(p - n * knobRadius) - 0.070;
     float notchMask = smoothstep(aa, -aa, notch);

@@ -5,6 +5,8 @@ pub mod cable;
 pub mod dropdown;
 pub mod eq8_editor;
 pub mod event_view;
+#[cfg(target_os = "macos")]
+pub mod focus_decoration;
 pub mod grid;
 pub mod hslider;
 pub mod hstack;
@@ -42,6 +44,9 @@ pub mod vstack;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub mod wrap;
+
+#[cfg(target_os = "macos")]
+pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -853,6 +858,12 @@ pub trait WidgetDefinition: Sync {
     fn metal_vertex_shader(&self, _widget_type: &str) -> Option<&'static str> {
         None
     }
+    /// Optional framework-rendered focus decoration. The decoration is added
+    /// after this widget's own primitives and is bounded by its measured rect.
+    #[cfg(target_os = "macos")]
+    fn metal_focus_decoration(&self, _node: &LayoutNode) -> FocusDecoration {
+        FocusDecoration::None
+    }
     #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
@@ -1223,7 +1234,14 @@ pub fn widget_primitives_for_node(
     }
 
     if let Some(definition) = widget_definition(&node.widget_type) {
-        let primitives = definition.build_metal_primitives(&node.widget_type, node, viewport);
+        let mut primitives = definition.build_metal_primitives(&node.widget_type, node, viewport);
+        if node.focusable && viewport.focused_widget_id == Some(node.widget_id) {
+            primitives.extend(
+                definition
+                    .metal_focus_decoration(node)
+                    .metal_primitives(node.rect, viewport),
+            );
+        }
         if let Some(cache_key) = cache_key {
             WIDGET_PRIMITIVE_CACHE.with(|cache| {
                 let mut cache = cache.borrow_mut();
@@ -1520,6 +1538,19 @@ fn refresh_retained_primitive_run_in_place(
 }
 
 #[cfg(target_os = "macos")]
+fn suppresses_default_focus(node: &LayoutNode) -> bool {
+    widget_definition(&node.widget_type)
+        .map(|definition| {
+            definition.renders_own_focus()
+                || !matches!(
+                    definition.metal_focus_decoration(node),
+                    FocusDecoration::None
+                )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
 fn collect_metal_primitives_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
@@ -1532,11 +1563,9 @@ fn collect_metal_primitives_recursive(
 
     // If a container node is focused, emit a background highlight rect.
     // This renders before children (correct z-order: highlight under content).
-    // Skip for widgets that render their own focus styling (e.g. text-input).
-    let renders_own_focus = widget_definition(&node.widget_type)
-        .map(WidgetDefinition::renders_own_focus)
-        .unwrap_or(false);
-    if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+    // Skip for widgets that render or opt into their own focus styling.
+    let suppresses_default_focus = suppresses_default_focus(node);
+    if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus {
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: node.rect,
             color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1625,9 +1654,7 @@ fn collect_metal_primitive_runs_recursive(
 ) {
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
     let focused_branch = viewport.focused_branch || node_is_focused;
-    let renders_own_focus = widget_definition(&node.widget_type)
-        .map(WidgetDefinition::renders_own_focus)
-        .unwrap_or(false);
+    let suppresses_default_focus = suppresses_default_focus(node);
 
     let node_viewport = WidgetViewport {
         scroll_top: _scroll_top,
@@ -1640,7 +1667,8 @@ fn collect_metal_primitive_runs_recursive(
         let offset_y = state.offset_y;
 
         let mut own = Vec::new();
-        if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+        if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus
+        {
             own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
                 color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1699,7 +1727,8 @@ fn collect_metal_primitive_runs_recursive(
             ..node_viewport
         };
         let mut own = Vec::new();
-        if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+        if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus
+        {
             own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
                 color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1742,7 +1771,7 @@ fn collect_metal_primitive_runs_recursive(
     }
 
     let mut own = Vec::new();
-    if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+    if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus {
         own.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: node.rect,
             color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1792,9 +1821,7 @@ fn collect_metal_primitive_runs_retained_recursive(
     let subtree_dirty = dirty_ancestor || node_is_dirty;
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
     let focused_branch = viewport.focused_branch || node_is_focused;
-    let renders_own_focus = widget_definition(&node.widget_type)
-        .map(WidgetDefinition::renders_own_focus)
-        .unwrap_or(false);
+    let suppresses_default_focus = suppresses_default_focus(node);
 
     let node_viewport = WidgetViewport {
         scroll_top: _scroll_top,
@@ -1817,7 +1844,9 @@ fn collect_metal_primitive_runs_retained_recursive(
             ancestor_widget_ids,
             || {
                 let mut own = Vec::new();
-                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                if node_is_focused
+                    && is_layout_widget_type(&node.widget_type)
+                    && !suppresses_default_focus
                 {
                     own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                         rect: node.rect,
@@ -1892,7 +1921,9 @@ fn collect_metal_primitive_runs_retained_recursive(
             ancestor_widget_ids,
             || {
                 let mut own = Vec::new();
-                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                if node_is_focused
+                    && is_layout_widget_type(&node.widget_type)
+                    && !suppresses_default_focus
                 {
                     own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                         rect: node.rect,
@@ -1948,7 +1979,10 @@ fn collect_metal_primitive_runs_retained_recursive(
         ancestor_widget_ids,
         || {
             let mut own = Vec::new();
-            if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+            if node_is_focused
+                && is_layout_widget_type(&node.widget_type)
+                && !suppresses_default_focus
+            {
                 own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                     rect: node.rect,
                     color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1999,9 +2033,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     let subtree_dirty = dirty_ancestor || node_is_dirty;
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
     let focused_branch = viewport.focused_branch || node_is_focused;
-    let renders_own_focus = widget_definition(&node.widget_type)
-        .map(WidgetDefinition::renders_own_focus)
-        .unwrap_or(false);
+    let suppresses_default_focus = suppresses_default_focus(node);
 
     let node_viewport = WidgetViewport {
         scroll_top: _scroll_top,
@@ -2026,7 +2058,9 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             ancestor_widget_ids,
             || {
                 let mut own = Vec::new();
-                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                if node_is_focused
+                    && is_layout_widget_type(&node.widget_type)
+                    && !suppresses_default_focus
                 {
                     own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                         rect: node.rect,
@@ -2107,7 +2141,9 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             ancestor_widget_ids,
             || {
                 let mut own = Vec::new();
-                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                if node_is_focused
+                    && is_layout_widget_type(&node.widget_type)
+                    && !suppresses_default_focus
                 {
                     own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                         rect: node.rect,
@@ -2169,7 +2205,10 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
         ancestor_widget_ids,
         || {
             let mut own = Vec::new();
-            if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+            if node_is_focused
+                && is_layout_widget_type(&node.widget_type)
+                && !suppresses_default_focus
+            {
                 own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                     rect: node.rect,
                     color: crate::theme::WIDGET_FOCUS_BG(),
@@ -2651,6 +2690,61 @@ mod tests {
         let (runs, _) = collect_metal_primitive_runs(layout, viewport, 0.0, 24);
         let flattened = flatten_metal_primitive_runs(&runs);
         assert_eq!(primitive_tokens(&flattened), primitive_tokens(&flat));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn knob_number_focus_corners_are_added_by_the_shared_primitive_pipeline() {
+        let rect = Rect {
+            row: 2.0,
+            col: 3.0,
+            width: 5.0,
+            height: 3.0,
+        };
+        let mut knob = test_node(
+            42,
+            "knob-number",
+            rect,
+            HashMap::from([
+                ("label".to_string(), Value::String("Pan".to_string())),
+                ("value".to_string(), Value::Number(0.0)),
+                ("min".to_string(), Value::Number(-1.0)),
+                ("max".to_string(), Value::Number(1.0)),
+            ]),
+            Vec::new(),
+        );
+        knob.focusable = true;
+
+        let unfocused = widget_primitives_for_node(&knob, test_viewport());
+        assert_eq!(
+            unfocused
+                .iter()
+                .filter(|primitive| matches!(primitive, MetalPrimitive::ForegroundRect(_)))
+                .count(),
+            0
+        );
+
+        let focused = widget_primitives_for_node(
+            &knob,
+            WidgetViewport {
+                focused_widget_id: Some(knob.widget_id),
+                ..test_viewport()
+            },
+        );
+        let corner_rects: Vec<Rect> = focused
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::ForegroundRect(corner) => Some(corner.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(corner_rects.len(), 8);
+        for corner in corner_rects {
+            assert!(corner.col >= rect.col);
+            assert!(corner.row >= rect.row);
+            assert!(corner.col + corner.width <= rect.col + rect.width);
+            assert!(corner.row + corner.height <= rect.row + rect.height);
+        }
     }
 
     #[cfg(target_os = "macos")]

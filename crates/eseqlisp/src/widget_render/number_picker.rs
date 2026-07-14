@@ -16,8 +16,8 @@ use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds,
+    FocusCornerStyle, FocusDecoration, MetalPrimitive, MetalProportionalTextPrimitive,
+    MetalRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
 };
 #[cfg(target_os = "macos")]
 use crate::backend::Color;
@@ -181,6 +181,59 @@ mod tests {
         assert_eq!(instance.color_d, [0.0, 0.0, 0.0, 0.3]);
         assert!(instance.corner_radius > 0.0);
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn focused_noui_number_picker_uses_shared_focus_corners_only() {
+        let rect = Rect {
+            row: 2.0,
+            col: 4.0,
+            width: 8.0,
+            height: 1.4,
+        };
+        let noui_node = test_number_picker_node(HashMap::from([
+            ("value".to_string(), Value::Number(34.0)),
+            ("noui".to_string(), Value::Bool(true)),
+        ]));
+        let focused_viewport = WidgetViewport {
+            focused_widget_id: Some(noui_node.widget_id),
+            ..test_viewport()
+        };
+        let primitives =
+            crate::widget_render::widget_primitives_for_node(&noui_node, focused_viewport);
+        let corners: Vec<&MetalRectPrimitive> = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::ForegroundRect(corner) => Some(corner),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(corners.len(), 8);
+        for corner in corners {
+            assert!(corner.rect.col >= rect.col);
+            assert!(corner.rect.row >= rect.row);
+            assert!(corner.rect.col + corner.rect.width <= rect.col + rect.width);
+            assert!(corner.rect.row + corner.rect.height <= rect.row + rect.height);
+        }
+
+        let graphical_node = test_number_picker_node(HashMap::from([
+            ("value".to_string(), Value::Number(34.0)),
+            ("noui".to_string(), Value::Bool(false)),
+        ]));
+        let graphical_primitives = crate::widget_render::widget_primitives_for_node(
+            &graphical_node,
+            WidgetViewport {
+                focused_widget_id: Some(graphical_node.widget_id),
+                ..test_viewport()
+            },
+        );
+        assert!(
+            graphical_primitives
+                .iter()
+                .all(|primitive| !matches!(primitive, MetalPrimitive::ForegroundRect(_)))
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -224,6 +277,20 @@ fn value_scale(props: &HashMap<String, Value>) -> f32 {
 
 fn display_value(props: &HashMap<String, Value>, value: f32) -> f32 {
     value * value_scale(props)
+}
+
+#[cfg(target_os = "macos")]
+fn number_picker_edit_color(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(
+        props,
+        "edit-color",
+        Color {
+            r: 1.0,
+            g: 0.95,
+            b: 0.25,
+            a: 1.0,
+        },
+    )
 }
 
 fn model_value_from_display(props: &HashMap<String, Value>, value: f32) -> f32 {
@@ -639,6 +706,18 @@ impl WidgetDefinition for NumberPickerWidget {
     }
 
     #[cfg(target_os = "macos")]
+    fn metal_focus_decoration(&self, node: &LayoutNode) -> FocusDecoration {
+        if !get_bool_prop(&node.props, "noui", false) {
+            return FocusDecoration::None;
+        }
+        FocusDecoration::Corners(FocusCornerStyle::new(resolve_named_color(
+            &node.props,
+            "focus-color",
+            number_picker_edit_color(&node.props),
+        )))
+    }
+
+    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
@@ -669,16 +748,7 @@ impl WidgetDefinition for NumberPickerWidget {
         } else {
             resolve_named_color(&node.props, "text-color", theme::BUTTON_SECONDARY_FG())
         };
-        let edit_color = resolve_named_color(
-            &node.props,
-            "edit-color",
-            Color {
-                r: 1.0,
-                g: 0.95,
-                b: 0.25,
-                a: 1.0,
-            },
-        );
+        let edit_color = number_picker_edit_color(&node.props);
         let cursor_color = resolve_named_color(
             &node.props,
             "cursor-color",

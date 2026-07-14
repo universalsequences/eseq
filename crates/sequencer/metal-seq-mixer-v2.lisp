@@ -690,10 +690,10 @@
             (knob-number :label "pan"
               :key (str "mixer-v2-track-pan-" i)
               :value (bind-seq (mixer-v2-track-pan-field i))
-              :min -1 :max 1 :decimals 2
+              :min -1 :max 1 :origin 0 :decimals 2
               :font-size 9 :label-font-size 8
               :text-color :dim :label-color :dim
-              :width 3.9 :height 2.35 :knob-size 1.88
+              :width 6.5 :height 2.35 :knob-size 2.58
               :on-change (lambda (v)
                 (do
                   (mixer-v2-clear-delete-target)
