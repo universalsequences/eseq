@@ -10,7 +10,8 @@ use super::{
 };
 use crate::backend::Color;
 use crate::layout::{
-    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_map,
+    get_prop_num,
 };
 use crate::theme;
 use crate::vm::Value;
@@ -30,7 +31,8 @@ struct KnobNumberState {
 
 thread_local! {
     static STATES: RefCell<HashMap<u64, KnobNumberState>> = RefCell::new(HashMap::new());
-    static CHAR_WIDTHS: RefCell<HashMap<u32, HashMap<char, f32>>> = RefCell::new(HashMap::new());
+    static CHAR_WIDTHS: RefCell<HashMap<(u32, u32), HashMap<char, f32>>> = RefCell::new(HashMap::new());
+    static LINE_HEIGHTS: RefCell<HashMap<(u32, u32), f32>> = RefCell::new(HashMap::new());
 }
 
 fn get_state(widget_id: u64) -> KnobNumberState {
@@ -161,6 +163,225 @@ mod tests {
             children: Vec::new(),
             focusable: true,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_rect_contains(outer: Rect, inner: Rect) {
+        let epsilon = 0.000_01;
+        assert!(
+            inner.row + epsilon >= outer.row,
+            "{inner:?} starts above {outer:?}"
+        );
+        assert!(
+            inner.col + epsilon >= outer.col,
+            "{inner:?} starts left of {outer:?}"
+        );
+        assert!(
+            inner.row + inner.height <= outer.row + outer.height + epsilon,
+            "{inner:?} extends below {outer:?}"
+        );
+        assert!(
+            inner.col + inner.width <= outer.col + outer.width + epsilon,
+            "{inner:?} extends right of {outer:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn oversized_knob_is_clamped_inside_default_overlay_layout() {
+        let mut node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("pan".to_string())),
+            ("font-size".to_string(), Value::Number(9.0)),
+            ("label-font-size".to_string(), Value::Number(8.0)),
+            ("knob-size".to_string(), Value::Number(20.0)),
+        ]));
+        node.rect.width = 3.9;
+        node.rect.height = 2.35;
+        let viewport = test_viewport();
+        let layout = knob_number_component_layout(&node, viewport, "pan", "0.00", "0.00", true);
+
+        assert_rect_contains(node.rect, layout.knob_rect);
+        assert_rect_contains(node.rect, layout.label_band.expect("label band"));
+        assert_rect_contains(node.rect, layout.value_band.expect("value band"));
+        assert!(layout.knob_rect.height < 20.0);
+        assert_eq!(
+            layout.knob_rect.width * viewport.cell_w,
+            layout.knob_rect.height * viewport.cell_h
+        );
+        let label_bottom = layout.label_band.unwrap().row + layout.label_band.unwrap().height;
+        assert!(
+            layout.knob_rect.row - label_bottom <= 0.11,
+            "label and knob should use only the fixed one-pixel gap: {layout:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn knob_size_is_clamped_by_width_with_non_square_cells() {
+        let mut node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("frequency".to_string())),
+            ("font-size".to_string(), Value::Number(9.0)),
+            ("label-font-size".to_string(), Value::Number(8.0)),
+            ("knob-size".to_string(), Value::Number(20.0)),
+        ]));
+        node.rect.width = 1.5;
+        node.rect.height = 6.0;
+        let viewport = WidgetViewport {
+            cell_w: 8.0,
+            cell_h: 16.0,
+            ..test_viewport()
+        };
+        let layout =
+            knob_number_component_layout(&node, viewport, "frequency", "20 kHz", "20 kHz", true);
+
+        assert_rect_contains(node.rect, layout.knob_rect);
+        assert_rect_contains(node.rect, layout.label_band.expect("label band"));
+        assert_rect_contains(node.rect, layout.value_band.expect("value band"));
+        assert!(layout.knob_rect.width <= node.rect.width);
+        assert_eq!(
+            layout.knob_rect.width * viewport.cell_w,
+            layout.knob_rect.height * viewport.cell_h
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn short_overlay_layout_does_not_overlap_label_and_value_bands() {
+        let mut node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("pan".to_string())),
+            ("font-size".to_string(), Value::Number(12.0)),
+            ("label-font-size".to_string(), Value::Number(12.0)),
+            ("knob-size".to_string(), Value::Number(20.0)),
+        ]));
+        node.rect.height = 0.8;
+        let layout =
+            knob_number_component_layout(&node, test_viewport(), "pan", "0.00", "0.00", true);
+        let label_band = layout.label_band.expect("label band");
+        let value_band = layout.value_band.expect("value band");
+
+        assert_rect_contains(node.rect, label_band);
+        assert_rect_contains(node.rect, layout.knob_rect);
+        assert_rect_contains(node.rect, value_band);
+        assert!(label_band.row + label_band.height <= value_band.row);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn overlay_value_band_tracks_knob_bottom_instead_of_widget_bottom() {
+        let mut node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("speed".to_string())),
+            ("font-size".to_string(), Value::Number(10.0)),
+            ("label-font-size".to_string(), Value::Number(9.0)),
+            ("knob-size".to_string(), Value::Number(1.0)),
+        ]));
+        node.rect.width = 4.7;
+        node.rect.height = 5.0;
+        let viewport = WidgetViewport {
+            cell_w: 20.0,
+            cell_h: 43.0,
+            ..test_viewport()
+        };
+        let layout = knob_number_component_layout(&node, viewport, "speed", "1.0", "1.0", true);
+        let value_band = layout.value_band.expect("value band");
+        let knob_bottom = layout.knob_rect.row + layout.knob_rect.height;
+        let value_bottom = value_band.row + value_band.height;
+
+        assert_eq!(layout.value_h_align, 1.0);
+        assert!((value_bottom - (knob_bottom + 4.0 / viewport.cell_h)).abs() < 0.000_01);
+        assert!(
+            value_bottom < node.rect.row + node.rect.height - 0.5,
+            "value should remain attached to a small knob instead of falling to the widget bottom"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wide_overlay_value_is_centered_in_the_lower_band() {
+        assert!(overlay_value_needs_centered_lower_layout(2.1, 3.0));
+        assert!(!overlay_value_needs_centered_lower_layout(1.1, 3.0));
+
+        let mut node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("sr".to_string())),
+            ("font-size".to_string(), Value::Number(10.5)),
+            ("label-font-size".to_string(), Value::Number(10.0)),
+            ("knob-size".to_string(), Value::Number(2.5)),
+        ]));
+        node.rect.width = 4.7;
+        node.rect.height = 2.05;
+        let viewport = WidgetViewport {
+            cell_w: 20.0,
+            cell_h: 43.0,
+            ..test_viewport()
+        };
+        let layout =
+            knob_number_component_layout(&node, viewport, "sr", "4264500000", "4264500000", true);
+        let value_band = layout.value_band.expect("value band");
+        let value_bottom = value_band.row + value_band.height;
+        let expected_content_bottom = node.rect.row + node.rect.height - 1.0 / viewport.cell_h;
+
+        assert_eq!(layout.value_h_align, 0.5);
+        assert!((value_bottom - expected_content_bottom).abs() < 0.000_01);
+        assert_eq!(layout.value_text_rect, layout.text_rect);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pan_layout_uses_widest_range_endpoint_instead_of_current_value() {
+        let mut props = numeric_props(-1.0, 1.0, 2.0);
+        props.extend([
+            ("label".to_string(), Value::String("pan".to_string())),
+            ("font-size".to_string(), Value::Number(9.0)),
+            ("label-font-size".to_string(), Value::Number(8.0)),
+            ("knob-size".to_string(), Value::Number(1.88)),
+        ]);
+        let mut node = test_knob_node(props);
+        node.rect.width = 3.9;
+        node.rect.height = 2.35;
+        let viewport = test_viewport();
+        let range_width_text = widest_range_display_text(&node.props, 2, 9.0, viewport.cell_w);
+        assert_eq!(range_width_text, "-1.00");
+
+        let positive =
+            knob_number_component_layout(&node, viewport, "pan", "0.16", &range_width_text, true);
+        let negative =
+            knob_number_component_layout(&node, viewport, "pan", "-0.33", &range_width_text, true);
+
+        assert_eq!(positive.value_h_align, 0.5);
+        assert_eq!(positive.value_h_align, negative.value_h_align);
+        assert_eq!(positive.value_band, negative.value_band);
+        assert_eq!(positive.value_text_rect, negative.value_text_rect);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn centered_value_layout_contains_all_three_component_bands() {
+        let node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("Frequency".to_string())),
+            ("font-size".to_string(), Value::Number(10.0)),
+            ("label-font-size".to_string(), Value::Number(10.0)),
+            ("knob-size".to_string(), Value::Number(30.0)),
+            (
+                "value-align".to_string(),
+                Value::Keyword("center".to_string()),
+            ),
+        ]));
+        let layout = knob_number_component_layout(
+            &node,
+            test_viewport(),
+            "Frequency",
+            "191 Hz",
+            "191 Hz",
+            true,
+        );
+        let label_band = layout.label_band.expect("label band");
+        let value_band = layout.value_band.expect("value band");
+
+        assert_rect_contains(node.rect, label_band);
+        assert_rect_contains(node.rect, layout.knob_rect);
+        assert_rect_contains(node.rect, value_band);
+        assert!(label_band.row + label_band.height <= layout.knob_rect.row);
+        assert!(layout.knob_rect.row + layout.knob_rect.height <= value_band.row);
+        assert_eq!(layout.value_h_align, 0.5);
     }
 
     #[cfg(target_os = "macos")]
@@ -420,20 +641,347 @@ fn mod_range_ring_radius(range_index: usize, selected: bool) -> f32 {
 }
 
 #[cfg(target_os = "macos")]
-fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f32) -> f32 {
-    let key = font_size.to_bits();
+fn cache_font_metrics(
+    font_size: f32,
+    chars: &str,
+    measurer: &dyn crate::layout::TextMeasurer,
+    ctx: &MeasureCtx<'_>,
+) {
+    let width_key = (font_size.to_bits(), ctx.cell_w.to_bits());
+    CHAR_WIDTHS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let widths = cache.entry(width_key).or_default();
+        for ch in chars.chars() {
+            widths.entry(ch).or_insert_with(|| {
+                measurer.measure_text_px(&ch.to_string(), font_size) / ctx.cell_w.max(0.000_001)
+            });
+        }
+    });
+
+    let height_key = (font_size.to_bits(), ctx.cell_h.to_bits());
+    LINE_HEIGHTS.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry(height_key)
+            .or_insert_with(|| measurer.line_height_px(font_size) / ctx.cell_h.max(0.000_001));
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn text_width_cells(text: &str, font_size: f32, cell_w: f32) -> f32 {
+    let fallback = font_size * 0.55 / cell_w.max(0.000_001);
+    CHAR_WIDTHS.with(|cache| {
+        cache
+            .borrow()
+            .get(&(font_size.to_bits(), cell_w.to_bits()))
+            .map(|widths| {
+                text.chars()
+                    .map(|ch| widths.get(&ch).copied().unwrap_or(fallback))
+                    .sum()
+            })
+            .unwrap_or_else(|| text.chars().count() as f32 * fallback)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn widest_range_display_text(
+    props: &HashMap<String, Value>,
+    decimals: u32,
+    font_size: f32,
+    cell_w: f32,
+) -> String {
+    let min_text = format_display(props, get_f32_prop(props, "min", 0.0), decimals);
+    let max_text = format_display(props, get_f32_prop(props, "max", 1.0), decimals);
+    if text_width_cells(&min_text, font_size, cell_w)
+        >= text_width_cells(&max_text, font_size, cell_w)
+    {
+        min_text
+    } else {
+        max_text
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn line_height_cells(font_size: f32, cell_h: f32) -> f32 {
+    LINE_HEIGHTS.with(|cache| {
+        cache
+            .borrow()
+            .get(&(font_size.to_bits(), cell_h.to_bits()))
+            .copied()
+            .unwrap_or(font_size * 1.2 / cell_h.max(0.000_001))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn overlay_value_needs_centered_lower_layout(value_width: f32, knob_width: f32) -> bool {
+    // Only the lower-right pocket of the ring is available to compact text;
+    // using the full visible diameter lets signed multi-digit values cross
+    // the arc even though their overall width still fits the primitive.
+    const LOWER_RIGHT_POCKET_WIDTH_FRACTION: f32 = 0.40;
+    value_width > knob_width * LOWER_RIGHT_POCKET_WIDTH_FRACTION
+}
+
+#[cfg(target_os = "macos")]
+fn cursor_x_from_cache(
+    text: &str,
+    cursor_pos: usize,
+    measured_font_size: f32,
+    rendered_font_size: f32,
+    cell_w: f32,
+) -> f32 {
+    let key = (measured_font_size.to_bits(), cell_w.to_bits());
+    let scale = if measured_font_size > 0.0 {
+        rendered_font_size / measured_font_size
+    } else {
+        1.0
+    };
     CHAR_WIDTHS.with(|cw| {
         let cache = cw.borrow();
         if let Some(widths) = cache.get(&key) {
-            let fallback = font_size * 0.55 / cell_w;
+            let fallback = measured_font_size * 0.55 / cell_w;
             text.chars()
                 .take(cursor_pos)
                 .map(|ch| widths.get(&ch).copied().unwrap_or(fallback))
-                .sum()
+                .sum::<f32>()
+                * scale
         } else {
-            cursor_pos as f32 * font_size * 0.55 / cell_w
+            cursor_pos as f32 * rendered_font_size * 0.55 / cell_w
         }
     })
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct KnobNumberComponentLayout {
+    knob_rect: Rect,
+    label_band: Option<Rect>,
+    label_font_size: f32,
+    value_band: Option<Rect>,
+    value_font_size: f32,
+    text_rect: Rect,
+    value_text_rect: Rect,
+    value_h_align: f32,
+}
+
+#[cfg(target_os = "macos")]
+fn fit_font_size(
+    text: &str,
+    requested_font_size: f32,
+    max_width: f32,
+    max_height: f32,
+    viewport: WidgetViewport,
+) -> f32 {
+    if text.is_empty() || requested_font_size <= 0.0 || max_width <= 0.0 || max_height <= 0.0 {
+        return 0.0;
+    }
+    let width = text_width_cells(text, requested_font_size, viewport.cell_w);
+    let height = line_height_cells(requested_font_size, viewport.cell_h);
+    let width_scale = if width > 0.0 { max_width / width } else { 1.0 };
+    let height_scale = if height > 0.0 {
+        max_height / height
+    } else {
+        1.0
+    };
+    requested_font_size * width_scale.min(height_scale).min(1.0).max(0.0) * 0.98
+}
+
+#[cfg(target_os = "macos")]
+fn knob_number_component_layout(
+    node: &LayoutNode,
+    viewport: WidgetViewport,
+    label: &str,
+    value_text: &str,
+    range_width_text: &str,
+    value_visible: bool,
+) -> KnobNumberComponentLayout {
+    const CONTENT_INSET_PX: f32 = 1.0;
+    const TEXT_RASTER_PAD_PX: f32 = 3.0;
+    const COMPONENT_GAP_PX: f32 = 1.0;
+
+    let cell_w = viewport.cell_w.max(0.000_001);
+    let cell_h = viewport.cell_h.max(0.000_001);
+    let inset_x = (CONTENT_INSET_PX / cell_w).min(node.rect.width * 0.5);
+    let inset_y = (CONTENT_INSET_PX / cell_h).min(node.rect.height * 0.5);
+    let content = Rect {
+        row: node.rect.row + inset_y,
+        col: node.rect.col + inset_x,
+        width: (node.rect.width - inset_x * 2.0).max(0.0),
+        height: (node.rect.height - inset_y * 2.0).max(0.0),
+    };
+    let text_pad = (TEXT_RASTER_PAD_PX / cell_w).min(content.width * 0.5);
+    let text_rect = Rect {
+        row: content.row,
+        col: content.col + text_pad,
+        width: (content.width - text_pad * 2.0).max(0.0),
+        height: content.height,
+    };
+
+    let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE).max(0.0);
+    let requested_label_font =
+        get_f32_prop(&node.props, "label-font-size", font_size * 0.88).max(0.0);
+    let has_label = !label.is_empty();
+    let has_value = value_visible && !value_text.is_empty();
+    let natural_label_height = if has_label {
+        line_height_cells(requested_label_font, cell_h)
+    } else {
+        0.0
+    };
+    let requested_label_height = node
+        .props
+        .get("label-height")
+        .and_then(|value| match value {
+            Value::Number(height) => Some((*height as f32).max(0.0)),
+            _ => None,
+        });
+    let mut label_height = requested_label_height
+        .map(|height| natural_label_height.min(height))
+        .unwrap_or(natural_label_height);
+    let natural_value_height = if has_value {
+        line_height_cells(font_size, cell_h)
+    } else {
+        0.0
+    };
+    let gap = COMPONENT_GAP_PX / cell_h;
+    let center_value = matches!(
+        node.props.get("value-align"),
+        Some(Value::Keyword(align)) if align == "center"
+    );
+    let mut label_gap = if has_label { gap } else { 0.0 };
+    let mut value_gap = if center_value && has_value { gap } else { 0.0 };
+    let mut value_height = if center_value {
+        natural_value_height
+    } else {
+        0.0
+    };
+
+    let fixed_height = label_height + label_gap + value_gap + value_height;
+    if fixed_height > content.height && fixed_height > 0.0 {
+        let scale = content.height / fixed_height;
+        label_height *= scale;
+        label_gap *= scale;
+        value_gap *= scale;
+        value_height *= scale;
+    }
+
+    let available_knob_height =
+        (content.height - label_height - label_gap - value_gap - value_height).max(0.0);
+    let available_knob_width_as_height = content.width * cell_w / cell_h;
+    let max_knob_size = available_knob_height.min(available_knob_width_as_height);
+    let requested_knob_size = node
+        .props
+        .get("knob-size")
+        .and_then(|value| match value {
+            Value::Number(size) => Some(*size as f32),
+            _ => None,
+        })
+        .unwrap_or(max_knob_size)
+        .max(0.0);
+    let knob_size = requested_knob_size.min(max_knob_size);
+    let knob_width = knob_size * cell_h / cell_w;
+    let stack_height = label_height + label_gap + knob_size + value_gap + value_height;
+    let mut row = content.row + (content.height - stack_height).max(0.0) * 0.5;
+
+    let label_band = has_label.then(|| {
+        let band = Rect {
+            row,
+            col: text_rect.col,
+            width: text_rect.width,
+            height: label_height,
+        };
+        row += label_height + label_gap;
+        band
+    });
+    let knob_rect = Rect {
+        row,
+        col: content.col + (content.width - knob_width).max(0.0) * 0.5,
+        width: knob_width,
+        height: knob_size,
+    };
+    row += knob_size + value_gap;
+    let wide_overlay_value = !center_value
+        && has_value
+        && overlay_value_needs_centered_lower_layout(
+            text_width_cells(range_width_text, font_size, cell_w),
+            knob_rect.width,
+        );
+    let value_text_rect = if center_value || wide_overlay_value {
+        text_rect
+    } else {
+        let value_right = (knob_rect.col + knob_rect.width + 4.0 / cell_w)
+            .min(text_rect.col + text_rect.width)
+            .max(text_rect.col);
+        Rect {
+            row: text_rect.row,
+            col: text_rect.col,
+            width: value_right - text_rect.col,
+            height: text_rect.height,
+        }
+    };
+    let value_band = if !has_value {
+        None
+    } else if center_value {
+        Some(Rect {
+            row,
+            col: value_text_rect.col,
+            width: value_text_rect.width,
+            height: value_height,
+        })
+    } else {
+        const VALUE_KNOB_OVERHANG_PX: f32 = 4.0;
+        const VALUE_BOTTOM_INSET_PX: f32 = 5.0;
+
+        let overlay_top = if has_label {
+            knob_rect.row
+        } else {
+            content.row
+        };
+        let content_bottom = content.row + content.height;
+        let preferred_bottom = if wide_overlay_value {
+            content_bottom
+        } else {
+            (knob_rect.row + knob_rect.height + VALUE_KNOB_OVERHANG_PX / cell_h)
+                .min(content_bottom - VALUE_BOTTOM_INSET_PX / cell_h)
+        }
+        .max(overlay_top);
+        let overlay_height = natural_value_height.min((preferred_bottom - overlay_top).max(0.0));
+        Some(Rect {
+            row: preferred_bottom - overlay_height,
+            col: value_text_rect.col,
+            width: value_text_rect.width,
+            height: overlay_height,
+        })
+    };
+
+    let label_font_size = label_band
+        .map(|band| {
+            fit_font_size(
+                label,
+                requested_label_font,
+                band.width,
+                band.height,
+                viewport,
+            )
+        })
+        .unwrap_or(0.0);
+    let value_font_size = value_band
+        .map(|band| fit_font_size(value_text, font_size, band.width, band.height, viewport))
+        .unwrap_or(0.0);
+    let value_h_align = if center_value || wide_overlay_value {
+        0.5
+    } else {
+        1.0
+    };
+
+    KnobNumberComponentLayout {
+        knob_rect,
+        label_band,
+        label_font_size,
+        value_band,
+        value_font_size,
+        text_rect,
+        value_text_rect,
+        value_h_align,
+    }
 }
 
 pub struct KnobNumberWidget;
@@ -503,18 +1051,24 @@ impl WidgetDefinition for KnobNumberWidget {
             let font_size = get_prop_num(node, "font-size")
                 .map(f64_to_f32)
                 .unwrap_or(ctx.inherited_font_size);
-            let key = font_size.to_bits();
-            CHAR_WIDTHS.with(|cw| {
-                let mut cache = cw.borrow_mut();
-                cache.entry(key).or_insert_with(|| {
-                    let mut widths = HashMap::new();
-                    for ch in "0123456789.-".chars() {
-                        let px = measurer.measure_text_px(&ch.to_string(), font_size);
-                        widths.insert(ch, px / ctx.cell_w);
-                    }
-                    widths
-                });
+            let label_size = get_prop_num(node, "label-font-size")
+                .map(f64_to_f32)
+                .unwrap_or(font_size * 0.88);
+            let props = get_map(node).unwrap_or_default();
+            let label = props.get("label").and_then(|value| match value {
+                Value::String(label) => Some(label.as_str()),
+                _ => None,
             });
+            let unit = props.get("unit").and_then(|value| match value {
+                Value::String(unit) => Some(unit.as_str()),
+                _ => None,
+            });
+            let mut value_chars = String::from("0123456789.- ");
+            if let Some(unit) = unit {
+                value_chars.push_str(unit);
+            }
+            cache_font_metrics(font_size, &value_chars, measurer, ctx);
+            cache_font_metrics(label_size, label.unwrap_or(""), measurer, ctx);
         }
         Some(Size {
             width: get_prop_num(node, "width").map(f64_to_f32).unwrap_or(5.2),
@@ -756,8 +1310,6 @@ impl WidgetDefinition for KnobNumberWidget {
         let state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
         let show_value = !matches!(node.props.get("show-value"), Some(Value::Bool(false)));
-        let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
-        let label_size = get_f32_prop(&node.props, "label-font-size", font_size * 0.88);
         let text_color = resolve_named_color(
             &node.props,
             "text-color",
@@ -812,85 +1364,39 @@ impl WidgetDefinition for KnobNumberWidget {
         };
         let track_color =
             resolve_named_color(&node.props, "track-color", theme::WIDGET_KNOB_TRACK());
-
-        // `:value-align :center` switches to a stacked layout — label / knob /
-        // value — with the value horizontally centered below the knob (Ableton
-        // Operator-style). Default layout keeps the value tucked into the
-        // bottom-right of the knob arc (Cirklon-style).
-        let center_value = matches!(
-            node.props.get("value-align"),
-            Some(Value::Keyword(k)) if k == "center"
+        let (display_text, fg) = if state.editing {
+            (state.edit_text.clone(), edit_color)
+        } else if is_focused {
+            (format_display(&node.props, value, decimals), edit_color)
+        } else if plock_active {
+            (format_display(&node.props, value, decimals), plock_color)
+        } else {
+            (format_display(&node.props, value, decimals), text_color)
+        };
+        let label = node
+            .props
+            .get("label")
+            .and_then(|value| match value {
+                Value::String(label) => Some(label.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        let value_visible = show_value || state.editing || is_focused;
+        let range_width_text = widest_range_display_text(
+            &node.props,
+            decimals,
+            get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE),
+            viewport.cell_w,
         );
-        let (knob_size, knob_top, value_row, label_row) = if center_value {
-            // The metal text renderer takes `row` as the top of a 1-cell-tall
-            // band and visually centers the glyph inside it. To place a label
-            // inside an arbitrary band, we put `row` at band-center − 0.5 so
-            // the glyph's center lands at the band's center.
-            //
-            // Bands are sized to the actual font (with a small margin) so the
-            // knob keeps whatever vertical space is left — taller widgets get
-            // proportionally bigger knobs, not bigger label/value bands.
-            let cell_h = viewport.cell_h.max(0.000_001);
-            let label_band = (label_size * 1.15 / cell_h).max(0.55);
-            let value_band = (font_size * 1.05 / cell_h).max(0.55);
-            let knob_band = (node.rect.height - label_band - value_band).max(0.5);
-            let knob_size = get_f32_prop(&node.props, "knob-size", knob_band)
-                .max(0.6)
-                .min(knob_band);
-            let label_center = node.rect.row + label_band * 0.5;
-            let value_center = node.rect.row + node.rect.height - value_band * 0.5;
-            let knob_top = node.rect.row + label_band + (knob_band - knob_size) * 0.5;
-            (knob_size, knob_top, value_center - 0.5, label_center - 0.5)
-        } else {
-            // `:label-height N` lets callers shrink the band reserved above
-            // the knob for the label — useful when the widget is short and
-            // the default 45%-of-height reservation eats too much room.
-            let label_height_override = node.props.get("label-height").and_then(|v| {
-                if let Value::Number(n) = v {
-                    Some(*n as f32)
-                } else {
-                    None
-                }
-            });
-            let default_top_band = (node.rect.height * 0.45).max(0.72);
-            let top_band = label_height_override.unwrap_or(default_top_band);
-            // When the label band is overridden, also grow the knob to fill
-            // the remaining vertical space (callers can still pin it via
-            // `:knob-size`).
-            let default_knob_size = if label_height_override.is_some() {
-                (node.rect.height - top_band - 0.05).max(0.6)
-            } else {
-                node.rect.height * 0.53
-            };
-            let knob_size = get_f32_prop(&node.props, "knob-size", default_knob_size)
-                .max(0.6)
-                .min(node.rect.height * 0.9);
-            let large_knob_value_offset = ((knob_size - 1.45).max(0.0) * 1.1).min(0.32);
-            let value_row = (node.rect.row + node.rect.height * 0.62 + large_knob_value_offset)
-                .min(node.rect.row + node.rect.height - 0.55);
-            let knob_top = node.rect.row + top_band;
-            // When the label band is overridden small, the label glyph (which
-            // normally fills a 1-cell band centered on `label_row`) would dip
-            // into the knob. Shift label_row up so the glyph centers in the
-            // narrower label band instead of in a 1-cell window.
-            let label_row = if label_height_override.is_some() {
-                node.rect.row + top_band * 0.5 - 0.5
-            } else {
-                node.rect.row
-            };
-            (knob_size, knob_top, value_row, label_row)
-        };
-        let knob_width = if viewport.cell_w > 0.0 {
-            knob_size * viewport.cell_h / viewport.cell_w
-        } else {
-            knob_size
-        };
-        let knob_rect = Rect {
-            row: knob_top,
-            col: node.rect.col + (node.rect.width - knob_width) * 0.5,
-            width: knob_width,
-            height: knob_size,
-        };
+        let component_layout = knob_number_component_layout(
+            node,
+            viewport,
+            label,
+            &display_text,
+            &range_width_text,
+            value_visible,
+        );
+        let knob_rect = component_layout.knob_rect;
         let (ndc_min, ndc_max) = ndc_bounds(knob_rect, viewport);
         let px_w = knob_rect.width * viewport.cell_w;
         let px_h = knob_rect.height * viewport.cell_h;
@@ -1013,16 +1519,17 @@ impl WidgetDefinition for KnobNumberWidget {
             }
         }
 
-        if let Some(Value::String(label)) = node.props.get("label") {
+        if let Some(label_band) = component_layout.label_band
+            && component_layout.label_font_size >= 0.5
+        {
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
-                    row: label_row,
-                    col: node.rect.col + node.rect.width * 0.5
-                        - (label.chars().count() as f32 * 0.31),
-                    align_width: 0.0,
-                    h_align: 0.0,
-                    text: label.clone(),
-                    font_size: label_size,
+                    row: label_band.row + label_band.height * 0.5 - 0.5,
+                    col: component_layout.text_rect.col,
+                    align_width: component_layout.text_rect.width,
+                    h_align: 0.5,
+                    text: label.to_string(),
+                    font_size: component_layout.label_font_size,
                     scale: 1.0,
                     fg: label_color,
                     bg: Color {
@@ -1035,49 +1542,17 @@ impl WidgetDefinition for KnobNumberWidget {
             ));
         }
 
-        let (display_text, fg) = if state.editing {
-            (state.edit_text.clone(), edit_color)
-        } else if is_focused {
-            (format_display(&node.props, value, decimals), edit_color)
-        } else if plock_active {
-            (format_display(&node.props, value, decimals), plock_color)
-        } else {
-            (format_display(&node.props, value, decimals), text_color)
-        };
-        let text_width_cells = CHAR_WIDTHS.with(|cw| {
-            let cache = cw.borrow();
-            let fallback = font_size * 0.55 / viewport.cell_w.max(0.000_001);
-            cache
-                .get(&font_size.to_bits())
-                .map(|widths| {
-                    display_text
-                        .chars()
-                        .map(|ch| widths.get(&ch).copied().unwrap_or(fallback))
-                        .sum::<f32>()
-                })
-                .unwrap_or_else(|| display_text.chars().count() as f32 * fallback)
-        });
-        let (text_col, align_width, h_align, value_font_size) = if center_value {
-            let available_cells = (node.rect.width - 0.2).max(0.5);
-            let scaled = if text_width_cells > available_cells && text_width_cells > 0.0 {
-                font_size * (available_cells / text_width_cells)
-            } else {
-                font_size
-            };
-            (node.rect.col, node.rect.width, 0.5_f32, scaled)
-        } else {
-            (knob_rect.col + knob_width * 0.55, 0.0, 0.0_f32, font_size)
-        };
-        let text_row = value_row;
-        if show_value || state.editing || is_focused {
+        if let Some(value_band) = component_layout.value_band
+            && component_layout.value_font_size >= 0.5
+        {
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
-                    row: text_row,
-                    col: text_col,
-                    align_width,
-                    h_align,
+                    row: value_band.row + value_band.height * 0.5 - 0.5,
+                    col: component_layout.value_text_rect.col,
+                    align_width: component_layout.value_text_rect.width,
+                    h_align: component_layout.value_h_align,
                     text: display_text.clone(),
-                    font_size: value_font_size,
+                    font_size: component_layout.value_font_size,
                     scale: 1.0,
                     fg,
                     bg: Color {
@@ -1090,30 +1565,43 @@ impl WidgetDefinition for KnobNumberWidget {
             ));
         }
 
-        if is_focused && state.editing {
-            let text_left = if center_value {
-                let scale = if font_size > 0.0 {
-                    value_font_size / font_size
-                } else {
-                    1.0
-                };
-                let rendered_text_width = text_width_cells * scale;
-                node.rect.col + (node.rect.width - rendered_text_width) * 0.5
+        if is_focused
+            && state.editing
+            && let Some(value_band) = component_layout.value_band
+            && component_layout.value_font_size >= 0.5
+        {
+            let requested_value_font =
+                get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE).max(0.0);
+            let text_scale = if requested_value_font > 0.0 {
+                component_layout.value_font_size / requested_value_font
             } else {
-                text_col
+                1.0
             };
+            let text_width =
+                text_width_cells(&display_text, requested_value_font, viewport.cell_w) * text_scale;
+            let text_left = component_layout.value_text_rect.col
+                + (component_layout.value_text_rect.width - text_width).max(0.0)
+                    * component_layout.value_h_align;
             let cursor_x = cursor_x_from_cache(
                 &display_text,
                 state.cursor_pos,
-                value_font_size,
+                requested_value_font,
+                component_layout.value_font_size,
                 viewport.cell_w,
+            );
+            let cursor_width =
+                (1.0 / viewport.cell_w.max(0.000_001)).min(component_layout.value_text_rect.width);
+            let cursor_col = (text_left + cursor_x).clamp(
+                component_layout.value_text_rect.col,
+                component_layout.value_text_rect.col + component_layout.value_text_rect.width
+                    - cursor_width,
             );
             prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: Rect {
-                    row: text_row + 0.08,
-                    col: text_left + cursor_x,
-                    width: 0.08,
-                    height: node.rect.height * 0.36,
+                    row: value_band.row + value_band.height * 0.08,
+                    col: cursor_col,
+                    width: cursor_width,
+                    height: value_band.height * 0.84,
                 },
                 color: cursor_color,
             }));
