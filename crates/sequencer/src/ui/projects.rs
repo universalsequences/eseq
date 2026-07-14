@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crossterm::event::KeyCode;
@@ -1992,10 +1992,7 @@ impl App {
             self.buses
                 .insert(0, BusChannelState::new(BusId::MIX, "Mix"));
         }
-        for bus in self.buses.clone() {
-            self.graph_controller()
-                .ensure_bus_graph_node(bus.id, &bus.name);
-        }
+        self.graph_controller().reconcile_bus_graph_nodes()?;
         // Defensively drop dangling groups: every backing bus must resolve and
         // every member index must be in range (track count is known here).
         let group_track_count = self.tracks.len();

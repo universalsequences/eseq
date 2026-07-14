@@ -7628,9 +7628,9 @@ mod tests {
         reconcile_graph_runtimes, resolve_effect_params, resolve_instrument_plocks,
         resolve_sampler_params, resolved_slot_param_value, run_midi_fx_chain_for_track,
         schedule_playing_lookahead, should_reload_neural_runtime, swung_network_sample_time,
-        track_active_note_spans_at_beat, track_note_spans_for_trigger,
-        EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState,
-        SchedulerLookaheadState, SnapshotSequencerClock,
+        track_active_note_spans_at_beat, track_note_spans_for_trigger, EmittedNetworkEventSource,
+        LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState, SchedulerLookaheadState,
+        SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{

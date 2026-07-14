@@ -1,7 +1,7 @@
 use super::*;
 use eseqlisp::runtime::ReactiveSetResult;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn sampler_modulation_depth_display_range(
@@ -8524,6 +8524,76 @@ fn project_scratch_source_path() -> PathBuf {
     sequencer::paths::project_scratch_source_path()
 }
 
+pub(crate) fn clear_project_script_tabs(editor: &mut Editor) -> Result<(), String> {
+    editor
+        .runtime_mut()
+        .eval_str("(seq-clear-project-script-tabs)")
+        .map_err(|error| format!("Failed to clear project script tabs: {error:?}"))?;
+    editor.refresh_runtime_side_effects();
+    Ok(())
+}
+
+fn project_script_load_path(line: &str) -> Option<String> {
+    let tokens = Parser::new(line.to_string()).parse().ok()?;
+    let expressions = ASTParser::new(tokens).parse().ok()?;
+    let [Expression::List(items)] = expressions.as_slice() else {
+        return None;
+    };
+    match items.as_slice() {
+        [Expression::Symbol(load), Expression::String(path)] if load == "load" => {
+            Some(path.clone())
+        }
+        _ => None,
+    }
+}
+
+fn canonical_project_script_path(path: &str) -> PathBuf {
+    let path = Path::new(path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        sequencer::paths::workspace_root().join(path)
+    };
+    std::fs::canonicalize(&absolute).unwrap_or(absolute)
+}
+
+pub(crate) fn remove_project_script_from_scratch(editor: &mut Editor, source_path: &str) -> bool {
+    let target = canonical_project_script_path(source_path);
+    let Some(buffer) = editor
+        .buffers
+        .iter_mut()
+        .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+    else {
+        return false;
+    };
+
+    let mut removed = false;
+    let mut previous_blank = true;
+    let mut kept = Vec::with_capacity(buffer.lines.len());
+    for line in &buffer.lines {
+        let matches_target = project_script_load_path(line)
+            .is_some_and(|path| canonical_project_script_path(&path) == target);
+        if matches_target {
+            removed = true;
+            continue;
+        }
+        let blank = line.trim().is_empty();
+        if blank && previous_blank {
+            continue;
+        }
+        kept.push(line.clone());
+        previous_blank = blank;
+    }
+    while kept.last().is_some_and(|line| line.trim().is_empty()) {
+        kept.pop();
+    }
+    if removed {
+        buffer.set_text(&kept.join("\n"));
+        editor.mark_needs_redraw();
+    }
+    removed
+}
+
 pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ui::App) {
     let scratch_text = app.editor.scratch_buffer.clone();
     let scratch_cursor = app.editor.scratch_cursor;
@@ -8792,18 +8862,12 @@ pub(crate) fn sync_track_params(
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) {
     let tp = &state.pattern.track_params[track];
-    let selected_step = selected_plock_step(selected);
-    let display_step = displayed_plock_step(state, track, selected_step);
     rt.set_reactive("SEQ", "tp-attack", Value::Number(tp.get_attack_ms() as f64));
     rt.set_reactive(
         "SEQ",
         "tp-release",
         Value::Number(tp.get_release_ms() as f64),
     );
-    let swing = display_step
-        .and_then(|step| state.pattern.swing_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_swing());
-    rt.set_reactive("SEQ", "tp-swing", Value::Number(swing as f64));
     rt.set_reactive("SEQ", "tp-send", Value::Number(tp.get_send() as f64));
     rt.set_reactive("SEQ", "tp-output", build_track_output_label(app, tp));
     rt.set_reactive(
@@ -8863,21 +8927,7 @@ pub(crate) fn sync_track_params(
         "tp-max-polyphony",
         Value::Number(max_polyphony as f64),
     );
-    // Resolve timebase through the same display overlay used by parameter controls.
-    let timebase_label = display_step
-        .and_then(|step| state.pattern.timebase_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_timebase())
-        .label()
-        .to_string();
-    rt.set_reactive("SEQ", "tp-timebase", Value::String(timebase_label));
-    let swing_resolution = display_step
-        .and_then(|step| state.pattern.swing_resolution_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_swing_resolution());
-    rt.set_reactive(
-        "SEQ",
-        "tp-swing-resolution",
-        Value::String(swing_resolution.label().to_string()),
-    );
+    let _ = sync_track_selection_param_binding_fields(rt, state, track, selected);
     rt.set_reactive(
         "SEQ",
         "tp-fts",
@@ -8923,6 +8973,48 @@ pub(crate) fn sync_track_params(
         "track-plock-variants",
         build_track_plock_variants_value(state, track, selected),
     );
+}
+
+/// Refreshes only track-parameter fields whose displayed value follows the
+/// selected step's p-lock. Selection changes should use this instead of
+/// rebuilding every track parameter and option list.
+pub(crate) fn sync_track_selection_param_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) -> bool {
+    let tp = &state.pattern.track_params[track];
+    let selected_step = selected_plock_step(selected);
+    let display_step = displayed_plock_step(state, track, selected_step);
+    let swing = display_step
+        .and_then(|step| state.pattern.swing_plocks[track].get(step))
+        .unwrap_or_else(|| tp.get_swing());
+    let timebase = display_step
+        .and_then(|step| state.pattern.timebase_plocks[track].get(step))
+        .unwrap_or_else(|| tp.get_timebase());
+    let swing_resolution = display_step
+        .and_then(|step| state.pattern.swing_resolution_plocks[track].get(step))
+        .unwrap_or_else(|| tp.get_swing_resolution());
+
+    let mut dirty = rt
+        .set_reactive("SEQ", "tp-swing", Value::Number(swing as f64))
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "tp-timebase",
+            Value::String(timebase.label().to_string()),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "tp-swing-resolution",
+            Value::String(swing_resolution.label().to_string()),
+        )
+        .effects_dirty;
+    dirty
 }
 
 pub(crate) fn sync_track_params_with_neural_selection(
@@ -9268,6 +9360,119 @@ fn build_track_plock_preview_row_for_variant_entry(
 ) -> Option<Rc<RefCell<Value>>> {
     let stored_value = f32::from_bits(entry.value_bits);
     match entry.domain {
+        sequencer::plock_variants::PlockVariantDomain::TrackTimebase => {
+            let default = state.pattern.track_params.get(track)?.get_timebase() as u32 as f32;
+            Some(preview_plock_entry(
+                label,
+                "timebase",
+                "track",
+                "timebase",
+                stored_value,
+                default,
+                0.0,
+                (Timebase::ALL.len() - 1) as f32,
+                None,
+                None,
+                Some(
+                    Timebase::LABELS
+                        .iter()
+                        .map(|label| label.to_string())
+                        .collect(),
+                ),
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::TrackSwing => {
+            let default = state.pattern.track_params.get(track)?.get_swing();
+            Some(preview_plock_entry(
+                label,
+                "swing",
+                "track",
+                "swing",
+                stored_value,
+                default,
+                50.0,
+                75.0,
+                None,
+                None,
+                None,
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::TrackSwingResolution => {
+            let default = state
+                .pattern
+                .track_params
+                .get(track)?
+                .get_swing_resolution() as u32 as f32;
+            Some(preview_plock_entry(
+                label,
+                "swing-resolution",
+                "track",
+                "swing res",
+                stored_value,
+                default,
+                0.0,
+                (SwingResolution::ALL.len() - 1) as f32,
+                None,
+                None,
+                Some(
+                    SwingResolution::LABELS
+                        .iter()
+                        .map(|label| label.to_string())
+                        .collect(),
+                ),
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::MidiEffect => {
+            let effect_name = state
+                .pattern
+                .track_params
+                .get(track)?
+                .midi_fx_chain()
+                .get(entry.slot)?
+                .clone();
+            let desc = sequencer::lisp_host::load_midi_fx_descriptor(&effect_name)?;
+            let param = desc.params.get(entry.param)?;
+            let slot = state.pattern.midi_fx_slots.get(track)?.get(entry.slot)?;
+            Some(preview_plock_entry(
+                label,
+                "midi-fx",
+                &desc.name,
+                &param.name,
+                stored_value,
+                slot.defaults.get(entry.param),
+                param.min,
+                param.max,
+                Some(entry.slot),
+                Some(entry.param),
+                plock_param_options(&param.kind),
+            ))
+        }
+        sequencer::plock_variants::PlockVariantDomain::MidiEffectTensor => {
+            let cell_idx = entry.cell?;
+            let effect_name = state
+                .pattern
+                .track_params
+                .get(track)?
+                .midi_fx_chain()
+                .get(entry.slot)?
+                .clone();
+            let desc = sequencer::lisp_host::load_midi_fx_descriptor(&effect_name)?;
+            let tensor = desc.tensor_params.get(entry.param)?;
+            let slot = state.pattern.midi_fx_slots.get(track)?.get(entry.slot)?;
+            Some(preview_plock_entry(
+                label,
+                "midi-fx-tensor",
+                &desc.name,
+                &tensor_cell_label(tensor, cell_idx),
+                stored_value,
+                live_tensor_default_cell(slot, tensor, entry.param, cell_idx),
+                tensor.min,
+                tensor.max,
+                Some(entry.slot),
+                Some(entry.param),
+                None,
+            ))
+        }
         sequencer::plock_variants::PlockVariantDomain::Instrument => {
             let desc = app.graph.instrument_descriptors.get(track)?;
             let param = desc.params.get(entry.param)?;
@@ -12988,7 +13193,9 @@ mod tests {
         );
         assert_eq!(search_inputs[0].widget_type, "text-input");
         assert!(
-            rail.rect.height > 10.0 && header.rect.height > 0.0 && search_inputs[0].rect.height > 0.0,
+            rail.rect.height > 10.0
+                && header.rect.height > 0.0
+                && search_inputs[0].rect.height > 0.0,
             "rail and relocated search should have finite visible rects: rail={:?}, header={:?}, input={:?}; rendered:\n{rendered}",
             rail.rect,
             header.rect,
@@ -16011,7 +16218,8 @@ mod tests {
 
         assert!(
             key_row.rect.col >= key_panel.rect.col
-                && key_row.rect.col + key_row.rect.width <= key_panel.rect.col + key_panel.rect.width + 0.01,
+                && key_row.rect.col + key_row.rect.width
+                    <= key_panel.rect.col + key_panel.rect.width + 0.01,
             "key row must fit inside the key panel; key_row={:?} key_panel={:?}; layout={layout_summaries:#?}",
             key_row.rect,
             key_panel.rect
@@ -17062,6 +17270,59 @@ mod tests {
     }
 
     #[test]
+    fn track_selection_param_bindings_follow_selected_step_and_restore_defaults() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.pattern.track_params[0].set_swing(55.0);
+        state.pattern.track_params[0].set_timebase(Timebase::Sixteenth);
+        state.pattern.track_params[0]
+            .set_swing_resolution(sequencer::sequencer::SwingResolution::Sixteenth);
+        state.pattern.swing_plocks[0].set(3, 70.0);
+        state.pattern.timebase_plocks[0].set(3, Timebase::EighthTriplet);
+        state.pattern.swing_resolution_plocks[0]
+            .set(3, sequencer::sequencer::SwingResolution::Eighth);
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([3])));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("tp-swing", Value::Number(0.0)),
+                ("tp-timebase", Value::String(String::new())),
+                ("tp-swing-resolution", Value::String(String::new())),
+            ],
+            true,
+        );
+
+        sync_track_selection_param_binding_fields(&mut runtime, &state, 0, &selected_steps);
+        assert_eq!(
+            runtime.eval_str("SEQ.tp-swing").unwrap(),
+            Some(Value::Number(70.0))
+        );
+        assert_eq!(
+            runtime.eval_str("SEQ.tp-timebase").unwrap(),
+            Some(Value::String("8T".to_string()))
+        );
+        assert_eq!(
+            runtime.eval_str("SEQ.tp-swing-resolution").unwrap(),
+            Some(Value::String("1/8".to_string()))
+        );
+
+        selected_steps.lock().unwrap().clear();
+        sync_track_selection_param_binding_fields(&mut runtime, &state, 0, &selected_steps);
+        assert_eq!(
+            runtime.eval_str("SEQ.tp-swing").unwrap(),
+            Some(Value::Number(55.0))
+        );
+        assert_eq!(
+            runtime.eval_str("SEQ.tp-timebase").unwrap(),
+            Some(Value::String("16".to_string()))
+        );
+        assert_eq!(
+            runtime.eval_str("SEQ.tp-swing-resolution").unwrap(),
+            Some(Value::String("1/16".to_string()))
+        );
+    }
+
+    #[test]
     fn displayed_plock_step_uses_selection_before_playback() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let selected_steps = Arc::new(Mutex::new(HashSet::from([5, 2])));
@@ -17162,6 +17423,87 @@ mod tests {
             value_map_number(selected_chip, "color-r"),
             Some(sequencer::plock_variants::VARIANT_PALETTE[1][0] as f64)
         );
+    }
+
+    #[test]
+    fn timebase_only_plock_is_a_colored_variant_with_an_editable_preview_row() {
+        let app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::builtin_sampler(),
+        );
+        app.state.pattern.timebase_plocks[0].set(4, Timebase::Eighth);
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([4])));
+
+        let variants = value_list_maps(&build_track_plock_variants_value(
+            &app.state,
+            0,
+            &selected_steps,
+        ));
+        let def = variants
+            .iter()
+            .find(|map| value_map_string(map, "kind").as_deref() == Some("def"))
+            .expect("default chip");
+        assert_eq!(value_map_bool(def, "current"), Some(false));
+        let variant = variants
+            .iter()
+            .find(|map| {
+                value_map_string(map, "kind").as_deref() == Some("variant")
+                    && value_map_bool(map, "current") == Some(true)
+            })
+            .expect("timebase variant chip");
+        assert_eq!(value_map_number(variant, "count"), Some(1.0));
+        assert_eq!(value_map_string(variant, "label").as_deref(), Some("A"));
+        assert_eq!(
+            number_list_values(&build_step_plock_kinds(&app.state, 0))[4],
+            2.0,
+            "timebase-only steps should use the colored variant rendering path"
+        );
+
+        let rows = value_list_maps(&build_track_plocks_value_for_variant_label(
+            &app, &app.state, 0, "A",
+        ));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            value_map_string(&rows[0], "target").as_deref(),
+            Some("timebase")
+        );
+        assert_eq!(
+            value_map_string(&rows[0], "text-value").as_deref(),
+            Some("8")
+        );
+        assert_eq!(value_map_bool(&rows[0], "preview"), Some(true));
+    }
+
+    #[test]
+    fn recorded_step_expression_does_not_populate_the_variant_strip() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let before_recording = build_track_plock_variants_value(&state, 0, &selected_steps);
+        for step in 0..32 {
+            state.pattern.step_data[0].set(
+                step,
+                StepParam::Velocity,
+                0.5 + step as f32 / 128.0,
+            );
+            state.pattern.step_data[0].set(
+                step,
+                StepParam::Duration,
+                0.5 + (step % 4) as f32 * 0.25,
+            );
+            state.pattern.step_data[0].set(
+                step,
+                StepParam::Transpose,
+                (step as i32 % 12 - 6) as f32,
+            );
+        }
+        let after_recording = build_track_plock_variants_value(&state, 0, &selected_steps);
+        assert_eq!(
+            after_recording, before_recording,
+            "recording step expression must be a no-op for the variant-strip reactive value"
+        );
+        let variants = value_list_maps(&after_recording);
+        assert_eq!(variants.len(), 1, "only the default chip should render");
+        assert_eq!(value_map_string(&variants[0], "kind").as_deref(), Some("def"));
+        assert!(state.plock_variant_registry_snapshot(0).entries.is_empty());
     }
 
     #[test]
@@ -17709,9 +18051,7 @@ mod tests {
     fn macro_readback_exposes_definition_mapping_range_curve_and_current_value() {
         let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
         let mut app = test_app_with_instrument_descriptor(desc.clone());
-        app.state.pattern.instrument_slots[0]
-            .defaults
-            .set(0, 17.5);
+        app.state.pattern.instrument_slots[0].defaults.set(0, 17.5);
         let id = app
             .macro_engine
             .ensure_macro("player/push", "Push")
@@ -18041,6 +18381,50 @@ mod tests {
         ])
     }
 
+    fn test_macro_mapping_value(
+        mapping_idx: usize,
+        track: usize,
+        kind: &str,
+        slot_idx: Option<usize>,
+        device: Option<(&'static str, &str)>,
+        param: &str,
+        min: f64,
+        max: f64,
+    ) -> Value {
+        let mut target = vec![
+            ("kind", Value::String(kind.to_string())),
+            ("param", Value::String(param.to_string())),
+        ];
+        if let Some(slot_idx) = slot_idx {
+            target.push(("slot-idx", Value::Number(slot_idx as f64)));
+        }
+        if let Some((field, value)) = device {
+            target.push((field, Value::String(value.to_string())));
+        }
+        map_value([
+            ("mapping-idx", Value::Number(mapping_idx as f64)),
+            ("track", Value::Number(track as f64)),
+            ("target", map_value(target)),
+            ("target-label", Value::String(param.to_string())),
+            ("min", Value::Number(min)),
+            ("max", Value::Number(max)),
+            ("curve", Value::String("linear".to_string())),
+            ("current", Value::Number(min)),
+            ("suspended", Value::Bool(false)),
+        ])
+    }
+
+    fn test_macro_value_with_mappings(mappings: Vec<Value>) -> Value {
+        map_value([
+            ("id", Value::Number(7.0)),
+            ("key", Value::String("player/delay-push".to_string())),
+            ("name", Value::String("Delay Push".to_string())),
+            ("kind", Value::String("mapped".to_string())),
+            ("value", Value::Number(0.25)),
+            ("mappings", test_list(mappings)),
+        ])
+    }
+
     fn macro_controls_editor(value: f64) -> eseqlisp::Editor {
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(40, 16);
@@ -18057,6 +18441,12 @@ mod tests {
             )],
             false,
         );
+        let macro_state =
+            std::fs::read_to_string("metal-seq-macro-state.lisp").expect("read shared macro state");
+        editor
+            .runtime_mut()
+            .eval_str(&macro_state)
+            .expect("load shared macro state");
         let src =
             std::fs::read_to_string("metal-seq-macros.lisp").expect("read reusable macro controls");
         editor
@@ -18202,6 +18592,277 @@ mod tests {
         assert!(
             layout_node_contains_text_fragment(&updated_layout, "mapping..."),
             "armed map button should expose its active state"
+        );
+    }
+
+    #[test]
+    fn macro_mapping_mode_selects_device_params_and_marks_owned_controls_read_only() {
+        let mut editor = macro_controls_editor(0.25);
+        editor.set_layout_viewport(180, 20);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(0.0));
+
+        let mut effect_param = test_param_map("gain", 0, 0.5, 0.0, 1.0);
+        effect_param.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "effects",
+            test_list(vec![Value::Map(test_fx_map(
+                "track-fx",
+                0,
+                vec![Value::Map(effect_param)],
+            ))]),
+        );
+
+        let instrument = test_instrument_map();
+        let synth = instrument
+            .get("synth")
+            .cloned()
+            .expect("test instrument synth params");
+        {
+            let mut synth_value = synth.borrow_mut();
+            let Value::List(params) = &mut *synth_value else {
+                panic!("test instrument synth should be a list");
+            };
+            let mut cutoff_value = params[0].borrow_mut();
+            let Value::Map(cutoff) = &mut *cutoff_value else {
+                panic!("test instrument cutoff should be a map");
+            };
+            cutoff.insert(
+                "modulatable".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+        }
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "instrument-panel",
+            test_list(vec![Value::Map(instrument)]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "macros",
+            test_list(vec![test_macro_value_with_mappings(vec![])]),
+        );
+        for path in [
+            "metal-seq-fx/state.lisp",
+            "metal-seq-fx/param-controls.lisp",
+        ] {
+            let source = std::fs::read_to_string(path).expect("read macro mapping UI source");
+            let overlays = editor.snapshot_file_backed_sources();
+            let report = editor.runtime_mut().eval_source_transactional(
+                Some(std::path::PathBuf::from(path)),
+                &source,
+                overlays,
+            );
+            assert!(report.success, "load {path}: {}", report.failure_message());
+            editor.process_lisp_reload_report(report);
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! macro-mapping-open true) (set! macro-mapping-selected 7))")
+            .expect("arm macro mapping");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*macro-map-mode-test*"
+                  (box :padding 0
+                    (subtree :key (param-macro-structure-key)
+                      (h-stack :gap 1
+                        (instrument-param-mod-wrapper
+                          (nth (get (nth SEQ.instrument-panel 0) :synth) 0)
+                          "macro-test-instrument"
+                          (box :width 6 :height 4))
+                        (let ((fx (nth SEQ.effects 0)))
+                          (param-mod-wrapper fx (nth (get fx :params) 0)
+                            "macro-test-effect"
+                            (box :width 6 :height 4)))))))
+                "#,
+            )
+            .expect("create macro mapping wrapper test buffer");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("macro mapping wrapper buffer status: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*macro-map-mode-test*")
+            .expect("macro mapping test buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 20);
+        let layout = editor.widget_layout().expect("macro mapping fx layout");
+        assert_finite_layout_tree(&layout);
+        let mut wrappers = Vec::new();
+        collect_layout_nodes_by_debug_name(&layout, "macro-param-map-wrapper", &mut wrappers);
+        assert!(
+            wrappers.len() >= 2,
+            "instrument and effect params should both be highlighted; wrappers={}",
+            wrappers.len(),
+        );
+        for wrapper in &wrappers {
+            assert_finite_nonzero_rect(wrapper, "macro parameter mapping wrapper");
+            assert_eq!(layout_prop_bool(wrapper, "capture-pointer"), Some(true));
+            editor
+                .runtime_mut()
+                .invoke(
+                    wrapper
+                        .props
+                        .get("on-click")
+                        .cloned()
+                        .expect("macro parameter mapping click"),
+                    vec![Value::Nil],
+                )
+                .expect("map highlighted parameter");
+        }
+        let commands = editor.drain_host_commands();
+        let mut mapped_kinds = HashSet::new();
+        for command in &commands {
+            let eseqlisp::host::HostCommand::Custom { name, payload } = command else {
+                continue;
+            };
+            if name != "macro-map-param" {
+                continue;
+            }
+            let Value::Map(payload) = payload else {
+                panic!("macro map payload should be a dict");
+            };
+            assert!(matches!(
+                payload.get("id").map(|value| value.borrow().clone()),
+                Some(Value::Number(7.0))
+            ));
+            assert!(matches!(
+                payload.get("track").map(|value| value.borrow().clone()),
+                Some(Value::Number(0.0))
+            ));
+            if let Some(Value::String(kind)) =
+                payload.get("kind").map(|value| value.borrow().clone())
+            {
+                mapped_kinds.insert(kind);
+            }
+        }
+        assert!(mapped_kinds.contains("instrument"), "commands={commands:?}");
+        assert!(mapped_kinds.contains("effect"), "commands={commands:?}");
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "macros",
+            test_list(vec![test_macro_value_with_mappings(vec![
+                test_macro_mapping_value(0, 0, "instrument", None, None, "cutoff", 0.2, 0.8),
+            ])]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                "(instrument-param-control-min (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+            ),
+            Ok(Some(Value::Number(0.0))),
+            "mapping must not repurpose the device control's value domain"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                "(instrument-param-control-max (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+            ),
+            Ok(Some(Value::Number(1.0)))
+        );
+
+        let layout = editor.widget_layout().expect("mapped macro fx layout");
+        let mapped = find_layout_node_by_debug_name(&layout, "macro-param-owned-wrapper")
+            .expect("mapped parameter should have an owned wrapper");
+        assert_finite_nonzero_rect(mapped, "mapped macro parameter wrapper");
+        assert_eq!(layout_prop_number(mapped, "border-width"), Some(2.0));
+        assert_eq!(layout_prop_number(mapped, "macro-owned"), Some(1.0));
+        assert_eq!(layout_prop_bool(mapped, "capture-pointer"), Some(true));
+        assert!(
+            !mapped.props.contains_key("on-drag") && !mapped.props.contains_key("on-double-click"),
+            "range edits and unmapping belong to the sidebar table"
+        );
+        editor
+            .runtime_mut()
+            .invoke(
+                mapped
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("owned mapping click"),
+                vec![Value::Nil],
+            )
+            .expect("ignore attempts to remap an owned parameter");
+        assert!(editor.drain_host_commands().is_empty());
+    }
+
+    #[test]
+    fn macro_modulation_and_process_mapping_arm_modes_are_mutually_exclusive() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "macros",
+            test_list(vec![test_macro_value_with_mappings(vec![])]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (set! instrument-mods-open true)
+                  (set! effect-mods-open true)
+                  (set! process-map-track 0)
+                  (set! process-map-instance-id 42)
+                  (set! process-map-port "shape")
+                  (macro-toggle-mapping-arm :player/delay-push))
+                "#,
+            )
+            .expect("enter macro mapping mode");
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                "(list macro-mapping-open instrument-mods-open effect-mods-open (process-map-active?))"
+            ),
+            Ok(Some(test_list(vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(false),
+            ])))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (process-map-arm-port 0
+                  (dict :instance-id 42)
+                  (dict :name "shape" :target-kind "device-param"))
+                "#,
+            )
+            .expect("enter process mapping mode");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(list macro-mapping-open (process-map-active?))"),
+            Ok(Some(test_list(vec![Value::Bool(false), Value::Bool(true)])))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(instrument-toggle-mods-view)")
+            .expect("enter modulation mode");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(list macro-mapping-open instrument-mods-open (process-map-active?))"),
+            Ok(Some(test_list(vec![
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(false),
+            ])))
         );
     }
 
@@ -18907,7 +19568,9 @@ mod tests {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
                 assert_eq!(name, "set-rack-slot-instrument-param-option");
                 let Value::Map(payload) = payload else {
-                    panic!("set-rack-slot-instrument-param-option payload should be a dict: {payload:?}");
+                    panic!(
+                        "set-rack-slot-instrument-param-option payload should be a dict: {payload:?}"
+                    );
                 };
                 assert_eq!(
                     payload.get("track").map(|value| value.borrow().clone()),
@@ -19083,8 +19746,7 @@ mod tests {
             "selected rack sampler action menu",
         );
         assert!(
-            selected_sampler_panel.rect.col
-                >= rack_panel.rect.col + rack_panel.rect.width
+            selected_sampler_panel.rect.col >= rack_panel.rect.col + rack_panel.rect.width
                 && selected_sampler_panel.rect.col
                     <= rack_panel.rect.col + rack_panel.rect.width + 1.0,
             "selected sampler panel should sit just to the right of the rack panel; rack={:?}, sampler={:?}",
@@ -21668,6 +22330,213 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_source_only_script_tab_is_closable_and_removes_its_scratch_load() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let source_path = "scripts/process-conductor-demo.lisp";
+
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                r#"
+                (effect-buffer "*source-only-script*" (label "source-only"))
+                (seq-register-script-step-sequencer-tab
+                  "Conductor Demo"
+                  "*source-only-script*"
+                  ""
+                  "{source_path}")
+                (seq-script-append-to-scratch "{source_path}")
+                "#,
+            ))
+            .expect("register source-only project script tab");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer");
+        let close_callback = editor
+            .tile_root
+            .find_leaf_by_buffer_idx(sequencer_idx)
+            .expect("sequencer tile")
+            .tabs
+            .get(1)
+            .and_then(|tab| tab.on_close.clone())
+            .expect("source-only script tab should expose a close callback");
+
+        editor
+            .runtime_mut()
+            .invoke(
+                close_callback,
+                vec![
+                    Value::String("*source-only-script*".to_string()),
+                    Value::Number(1.0),
+                ],
+            )
+            .expect("close source-only script tab");
+        editor.refresh_runtime_side_effects();
+
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                HostCommand::Custom { name, payload }
+                    if name == "remove-project-script-from-scratch"
+                        && extract_string_from_payload(payload, "path")
+                            == Some(source_path.to_string())
+            )),
+            "closing a project script tab should request path-normalized scratch cleanup"
+        );
+
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            Vec::<(String, String)>::new(),
+            "closing the last project script should remove the tab bar"
+        );
+        let scratch = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .map(|buffer| buffer.text())
+            .unwrap_or_default();
+        assert!(
+            !scratch.contains(source_path),
+            "closing a source-only script tab should remove its persisted load form; scratch={scratch:?}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_script_scratch_cleanup_matches_relative_load_to_canonical_source() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let relative_path = "crates/sequencer/scripts/process-conductor-demo.lisp";
+        let canonical_path =
+            std::fs::canonicalize(sequencer::paths::workspace_root().join(relative_path))
+                .expect("canonical process conductor demo path")
+                .display()
+                .to_string();
+        let scratch_source = format!(
+            "(def keep-before true)\n\n(load \"{relative_path}\")\n\n(def keep-after true)"
+        );
+        editor.upsert_scratch_buffer(PROJECT_SCRATCH_BUFFER_NAME, &scratch_source);
+
+        assert!(
+            remove_project_script_from_scratch(&mut editor, &canonical_path),
+            "canonical source path should match the workspace-relative persisted load"
+        );
+
+        let scratch = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .expect("project scratch buffer")
+            .text();
+        assert_eq!(
+            scratch, "(def keep-before true)\n\n(def keep-after true)",
+            "semantic cleanup should preserve unrelated scratch forms and normalize separators"
+        );
+    }
+
+    #[test]
+    fn metal_seq_script_tab_infers_source_path_while_loading_project_scratch() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let script_path = std::env::temp_dir().join(format!(
+            "eseq-inferred-script-tab-source-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script_path,
+            r#"
+            (effect-buffer "*inferred-script-tab*" (label "inferred"))
+            (seq-register-script-step-sequencer-tab
+              "Inferred"
+              "*inferred-script-tab*"
+              "inferred-script"
+              "")
+            "#,
+        )
+        .expect("write inferred script tab fixture");
+        let canonical_path = std::fs::canonicalize(&script_path)
+            .expect("canonical inferred script tab fixture")
+            .display()
+            .to_string();
+        let scratch_source = format!("(load {:?})", script_path.display().to_string());
+
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(project_scratch_source_path()),
+            &scratch_source,
+            overlays,
+        );
+        let _ = std::fs::remove_file(&script_path);
+        assert!(
+            report.success,
+            "project scratch fixture should load: {}",
+            report.failure_message()
+        );
+        editor.process_lisp_reload_report(report);
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-step-tab-source-path (nth seq-registered-step-tabs 0))")
+                .expect("read inferred project source path"),
+            Some(Value::String(canonical_path)),
+            "a script restored by a raw scratch load should retain enough source identity for close cleanup"
+        );
+    }
+
+    #[test]
+    fn metal_seq_project_tab_clear_preserves_non_project_tabs_and_scratch() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let scratch_source = "outgoing project scratch";
+
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                r#"
+                (effect-buffer "*persistent-step-tab*" (label "persistent"))
+                (effect-buffer "*old-project-script*" (label "old project"))
+                (seq-register-step-sequencer-tab "Persistent" "*persistent-step-tab*")
+                (seq-register-script-step-sequencer-tab
+                  "Old Project"
+                  "*old-project-script*"
+                  ""
+                  "scripts/process-conductor-demo.lisp")
+                (set-buffer-text-for "*scratch*" "{scratch_source}")
+                (seq-select-main-step-tab-by-index 3)
+                "#,
+            ))
+            .expect("register mixed step tabs");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.active_buffer().name, "*old-project-script*");
+
+        clear_project_script_tabs(&mut editor).expect("clear old project tabs");
+
+        assert_eq!(editor.active_buffer().name, "*sequencer*");
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                (
+                    "Persistent".to_string(),
+                    "*persistent-step-tab*".to_string()
+                ),
+            ],
+            "a project transition should remove only tabs owned by project scripts"
+        );
+        let scratch = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .map(|buffer| buffer.text())
+            .unwrap_or_default();
+        assert_eq!(
+            scratch, scratch_source,
+            "project-transition cleanup must not edit the scratch buffer being replaced"
+        );
+    }
+
+    #[test]
     fn metal_seq_register_step_sequencer_tab_does_not_restore_main_layout_when_step_tile_absent() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.create_scratch_buffer("*code*", "", eseqlisp::BufferMode::ESeqLisp);
@@ -22949,21 +23818,40 @@ mod tests {
     fn metal_seq_macro_player_script_renders_visible_controls_in_its_own_tab() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.drain_host_commands();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "macros",
-            test_list(vec![
-                test_macro_value(7, "delay-push", "Delay Push", 0.2),
-                test_macro_value(8, "space", "Space", 0.5),
-                test_macro_value(9, "texture", "Texture", 0.8),
-            ]),
-        );
         let src = std::fs::read_to_string("scripts/macro-player-demo.lisp")
             .expect("read macro player demo");
         editor
             .runtime_mut()
             .eval_source_at_path(PathBuf::from("scripts/macro-player-demo.lisp"), &src)
             .expect("evaluate macro player demo");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(
+            commands.len(),
+            3,
+            "each declaration should ensure one macro"
+        );
+        let mut app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::builtin_sampler(),
+        );
+        for command in commands {
+            let eseqlisp::host::HostCommand::Custom { name, payload } = command else {
+                panic!("macro declaration should emit a custom host command");
+            };
+            assert_eq!(name, "macro-ensure");
+            let Value::Map(payload) = payload else {
+                panic!("macro-ensure payload should be a map");
+            };
+            let Value::String(key) = payload["key"].borrow().clone() else {
+                panic!("macro-ensure key should be a string");
+            };
+            let Value::String(name) = payload["name"].borrow().clone() else {
+                panic!("macro-ensure name should be a string");
+            };
+            ui::apply_command(&mut app, ui::AppCommand::MacroEnsure { key, name });
+        }
+        sync_macro_state(editor.runtime_mut(), &app);
+        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
@@ -23019,17 +23907,25 @@ mod tests {
         count_controls(&layout, &mut knob_count, &mut button_count);
         assert_eq!(knob_count, 3);
         assert_eq!(button_count, 3);
-
-        let commands = editor.drain_host_commands();
         assert_eq!(
-            commands.len(),
-            3,
-            "each declaration should ensure one macro"
+            editor
+                .runtime_mut()
+                .eval_str("(get (macro-by-key :delay-push) :name)"),
+            Ok(Some(Value::String("Delay Push".to_string()))),
+            "engine readback should replace the fallback key label"
         );
-        assert!(commands.iter().all(|command| matches!(
-            command,
-            eseqlisp::host::HostCommand::Custom { name, .. } if name == "macro-ensure"
-        )));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(macro-toggle-mapping-arm :delay-push)"),
+            Ok(Some(Value::Bool(true))),
+            "the resolved player control should enter macro map mode"
+        );
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor_has_visible_buffer(&editor, "*macro-mappings*"),
+            "mapping mode should replace the normal browser sidebar with the mapping table"
+        );
         assert_eq!(
             editor.runtime_mut().eval_str(
                 r#"(len (filter |tab| (and (= (nth tab 0) "Player") (= (nth tab 1) "*macro-player*")) seq-registered-step-tabs))"#,
@@ -23247,6 +24143,35 @@ mod tests {
         editor
             .runtime_mut()
             .set_reactive("SEQ", "tp-timebase", Value::String("8T".to_string()));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plocks",
+            test_list(vec![
+                map_value([
+                    ("target", Value::String("timebase".to_string())),
+                    ("default", Value::Number(4.0)),
+                ]),
+                map_value([
+                    ("target", Value::String("swing".to_string())),
+                    ("default", Value::Number(50.0)),
+                ]),
+                map_value([
+                    ("target", Value::String("swing-resolution".to_string())),
+                    ("default", Value::Number(0.0)),
+                ]),
+            ]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plock-variants",
+            test_list(vec![map_value([
+                ("kind", Value::String("variant".to_string())),
+                ("current", Value::Bool(true)),
+                ("color-r", Value::Number(0.2)),
+                ("color-g", Value::Number(0.7)),
+                ("color-b", Value::Number(0.9)),
+            ])]),
+        );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -23274,6 +24199,19 @@ mod tests {
             Some(&Value::String("8T".to_string())),
             "track timebase dropdown should show the current display timebase"
         );
+        for (key, label) in [
+            ("fx-track-timebase", "timebase dropdown"),
+            ("fx-track-swing", "swing number picker"),
+            ("fx-track-swing-resolution", "swing-resolution dropdown"),
+        ] {
+            let control = find_layout_node_by_stable_key(groove_panel, key)
+                .unwrap_or_else(|| panic!("{label} should render"));
+            assert_finite_nonzero_rect(control, label);
+            assert_eq!(layout_prop_number(control, "plock-active"), Some(1.0));
+            assert_eq!(layout_prop_number(control, "plock-color-r"), Some(0.2));
+            assert_eq!(layout_prop_number(control, "plock-color-g"), Some(0.7));
+            assert_eq!(layout_prop_number(control, "plock-color-b"), Some(0.9));
+        }
 
         let label =
             find_layout_node_by_text(track_params_panel, "mute grp").expect("mute group label");

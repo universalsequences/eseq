@@ -138,11 +138,7 @@ impl TryFrom<ProjectMacro> for Macro {
         if !value.value.is_finite() {
             return Err(MacroEngineError::NonFiniteValue);
         }
-        let key = value
-            .key
-            .as_deref()
-            .map(normalize_macro_key)
-            .transpose()?;
+        let key = value.key.as_deref().map(normalize_macro_key).transpose()?;
         let kind = match value.kind {
             ProjectMacroKind::Mapped => MacroKind::Mapped,
             ProjectMacroKind::Scene(config) => MacroKind::Scene(config.into()),
@@ -2179,15 +2175,16 @@ mod tests {
         let identity = crate::process::project_slot_identity_id(
             &project.patterns[0].project_process_chain.slots[0],
         );
-        project.patterns[0].project_process_lane_overrides = vec![
-            std::collections::BTreeMap::from([(
+        project.patterns[0].project_process_lane_overrides =
+            vec![std::collections::BTreeMap::from([(
                 identity,
                 std::collections::BTreeMap::from([(
                     "prob".to_string(),
-                    crate::process::ProcessLane { values: vec![0.25, 0.75] },
+                    crate::process::ProcessLane {
+                        values: vec![0.25, 0.75],
+                    },
                 )]),
-            )]),
-        ];
+            )])];
         let json = serde_json::to_string(&project).expect("serialize current project");
         let restored: ProjectFile =
             serde_json::from_str(&json).expect("deserialize current project");
@@ -2365,10 +2362,7 @@ mod tests {
         let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize macros");
         assert_eq!(restored.next_macro_id, 9);
         assert_eq!(restored.macros, project.macros);
-        assert_eq!(
-            restored.macros[0].key.as_deref(),
-            Some("player/delay-push")
-        );
+        assert_eq!(restored.macros[0].key.as_deref(), Some("player/delay-push"));
 
         let macro_definition = Macro::try_from(restored.macros[0].clone()).expect("valid macro");
         assert_eq!(macro_definition.id, 7);
@@ -2396,9 +2390,7 @@ mod tests {
         let id = engine
             .ensure_macro(":Player/Filter", "Filter")
             .expect("ensure");
-        engine
-            .rename_macro(id, "Opening Filter")
-            .expect("rename");
+        engine.rename_macro(id, "Opening Filter").expect("rename");
 
         let persisted = ProjectMacro::from(engine.macro_definition(id).unwrap());
         let restored = Macro::try_from(persisted).expect("restore macro");

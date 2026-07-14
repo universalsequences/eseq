@@ -806,7 +806,7 @@
       (variant-g (seqv-track-step-value SEQ.track-step-variant-g track step 0))
       (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0)))
     (box
-      :width 3.05 :height 1.45
+      :width 3.05 :height 1.05
       :key (str "seqv-step-cell-" track "-" step)
       :on-mouse-down (lambda (evt)
         (if visible
@@ -825,7 +825,7 @@
       :hide (if visible 0 1)
       :background "cursor-highlight"
       (box
-        :width 3.05 :height 1.45
+        :width 3.05 :height 0.55
         :odd odd
         :active (bind-seq (str "seq-track-step-active-" track "-" step))
         :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
@@ -1347,19 +1347,22 @@
 
 (def seqv-track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))
-        (rows (max 1 (floor (/ (+ num-steps (- sequencer-row-width 1)) sequencer-row-width)))))
-    (v-stack :gap -0.04
-      (box :width 0.1 :height 0.12 :bg :transparent)
-      (each (range 0 rows) |row|
-        (v-stack :gap -0.16
-          (h-stack :gap 0.0
-            (each (range 0 sequencer-row-width) |col|
-              (let ((step (+ (* row sequencer-row-width) col)))
-                (seqv-step-cell
-                  track-idx
-                  step
-                  (< step num-steps)))))
-          (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row))))))
+      (rows (max 1 (floor (/ (+ num-steps (- sequencer-row-width 1)) sequencer-row-width)))))
+    (box :padding 0.15
+      (box :background-color :buffer-bg
+        (v-stack :gap -0.04
+          (box :width 0.1 :height 0.342 :bg :transparent)
+          (each (range 0 rows) |row|
+            (v-stack :gap -0.16
+              (h-stack :gap 0.0
+                (each (range 0 sequencer-row-width) |col|
+                  (let ((step (+ (* row sequencer-row-width) col)))
+                    (seqv-step-cell
+                      track-idx
+                      step
+                      (< step num-steps)))))
+              (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
+  )
 
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.00 :gap 0.0

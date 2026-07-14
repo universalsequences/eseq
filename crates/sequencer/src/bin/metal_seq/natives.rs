@@ -1936,7 +1936,9 @@ pub(crate) fn init_runtime(
     let ui_for_clear_project_lane = ui_invalidations.clone();
     runtime.register_native("seq-clear-project-lane-override", move |args, _ctx| {
         if args.len() != 3 {
-            return Err("seq-clear-project-lane-override: expected (track instance-id inlet)".into());
+            return Err(
+                "seq-clear-project-lane-override: expected (track instance-id inlet)".into(),
+            );
         }
         let Value::Number(track) = args[0] else {
             return Err("seq-clear-project-lane-override: track must be a number".into());
@@ -2883,6 +2885,7 @@ pub(crate) fn init_runtime(
         }
         ui_inv.push(UiInvalidation::StepSelection {
             track: ct.load(Ordering::Relaxed),
+            changed_steps: vec![step],
         });
         Ok(Value::Bool(!was_selected))
     });
@@ -2910,9 +2913,18 @@ pub(crate) fn init_runtime(
         if set.len() == len && (lo..=hi).all(|step| set.contains(&step)) {
             return Ok(Value::Number(len as f64));
         }
-        set.clear();
+        let previous = std::mem::take(&mut *set);
         set.extend(lo..=hi);
-        ui_inv.push(UiInvalidation::StepSelection { track });
+        let mut changed_steps = previous
+            .symmetric_difference(&set)
+            .copied()
+            .collect::<Vec<_>>();
+        changed_steps.sort_unstable();
+        drop(set);
+        ui_inv.push(UiInvalidation::StepSelection {
+            track,
+            changed_steps,
+        });
         Ok(Value::Number(len as f64))
     });
 
@@ -2925,10 +2937,12 @@ pub(crate) fn init_runtime(
         if selected.is_empty() {
             return Ok(Value::Nil);
         }
-        selected.clear();
+        let mut changed_steps = selected.drain().collect::<Vec<_>>();
+        changed_steps.sort_unstable();
         drop(selected);
         ui_inv.push(UiInvalidation::StepSelection {
             track: ct.load(Ordering::Relaxed),
+            changed_steps,
         });
         Ok(Value::Nil)
     });
@@ -2948,9 +2962,18 @@ pub(crate) fn init_runtime(
         let track = ct.load(Ordering::Relaxed);
         let num_steps = st.pattern.track_params[track].get_num_steps();
         let mut set = sel.lock().unwrap();
-        set.clear();
+        let previous = std::mem::take(&mut *set);
         set.extend(0..num_steps);
-        ui_inv.push(UiInvalidation::StepSelection { track });
+        let mut changed_steps = previous
+            .symmetric_difference(&set)
+            .copied()
+            .collect::<Vec<_>>();
+        changed_steps.sort_unstable();
+        drop(set);
+        ui_inv.push(UiInvalidation::StepSelection {
+            track,
+            changed_steps,
+        });
         Ok(Value::Number(num_steps as f64))
     });
 
@@ -2977,7 +3000,10 @@ pub(crate) fn init_runtime(
         ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
             track,
         }));
-        ui_inv.push(UiInvalidation::StepSelection { track });
+        ui_inv.push(UiInvalidation::StepSelection {
+            track,
+            changed_steps: steps.clone(),
+        });
         Ok(Value::Number(steps.len() as f64))
     });
 
@@ -3053,7 +3079,10 @@ pub(crate) fn init_runtime(
         ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
             track,
         }));
-        ui_inv.push(UiInvalidation::StepSelection { track });
+        ui_inv.push(UiInvalidation::StepSelection {
+            track,
+            changed_steps: Vec::new(),
+        });
         Ok(Value::Bool(true))
     });
 
@@ -3116,7 +3145,10 @@ pub(crate) fn init_runtime(
         ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
             track,
         }));
-        ui_inv.push(UiInvalidation::StepSelection { track });
+        ui_inv.push(UiInvalidation::StepSelection {
+            track,
+            changed_steps: Vec::new(),
+        });
         Ok(Value::Bool(true))
     });
 

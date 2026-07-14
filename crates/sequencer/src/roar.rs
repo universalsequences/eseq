@@ -159,7 +159,7 @@ const STATE_CFG_SHAPER: usize = 113; // 3
 const STATE_CFG_FILTER: usize = 116; // 3
 const STATE_CFG_PRE: usize = 119; // 3
 const STATE_XOVER_Z: usize = 122; // 2 ch × 20
-// Per-stage-per-channel runtime blocks (index = stage * 2 + channel).
+                                  // Per-stage-per-channel runtime blocks (index = stage * 2 + channel).
 const STATE_STAGE_RT: usize = 162;
 const STAGE_RT_STRIDE: usize = 64;
 const RT_SVF_IC1: usize = 0;
@@ -273,7 +273,11 @@ fn time_coef(ms: f32, sr: f32) -> f32 {
 
 #[inline]
 fn finite_or(value: f32, fallback: f32) -> f32 {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 #[inline]
@@ -689,10 +693,14 @@ unsafe extern "C" fn roar_process(
     let tone_freq = finite_clamp(*s.add(STATE_TONE_FREQ), 50.0, 18_000.0, 180.0);
     let blend_target = finite_clamp(*s.add(STATE_BLEND), 0.0, 1.0, 0.5);
     let xover_low = finite_clamp(*s.add(STATE_XOVER_LOW), 40.0, 1_000.0, 200.0);
-    let xover_high = finite_clamp(*s.add(STATE_XOVER_HIGH), 500.0, 10_000.0, 2_000.0)
-        .max(xover_low * 1.2);
+    let xover_high =
+        finite_clamp(*s.add(STATE_XOVER_HIGH), 500.0, 10_000.0, 2_000.0).max(xover_low * 1.2);
     let fb_amount_knob = finite_clamp(*s.add(STATE_FB_AMOUNT), 0.0, 1.0, 0.0);
-    let fb_sign = if *s.add(STATE_FB_INVERT) > 0.5 { -1.0 } else { 1.0 };
+    let fb_sign = if *s.add(STATE_FB_INVERT) > 0.5 {
+        -1.0
+    } else {
+        1.0
+    };
     let fb_duck = *s.add(STATE_FB_DUCK) > 0.5;
     let fb_freq = finite_clamp(*s.add(STATE_FB_FREQ), 30.0, 18_000.0, 1_000.0);
     let fb_width = finite_clamp(*s.add(STATE_FB_WIDTH), 0.5, 9.0, 8.0);
@@ -715,8 +723,10 @@ unsafe extern "C" fn roar_process(
     // Feedback bandpass: two one-pole skirts placed half the width above and
     // below the center frequency.
     let half_w = fb_width * 0.5;
-    let fb_hp_coef_target = one_pole_coef((fb_freq * 0.5_f32.powf(half_w)).clamp(10.0, sr * 0.45), sr);
-    let fb_lp_coef_target = one_pole_coef((fb_freq * 2.0_f32.powf(half_w)).clamp(10.0, sr * 0.45), sr);
+    let fb_hp_coef_target =
+        one_pole_coef((fb_freq * 0.5_f32.powf(half_w)).clamp(10.0, sr * 0.45), sr);
+    let fb_lp_coef_target =
+        one_pole_coef((fb_freq * 2.0_f32.powf(half_w)).clamp(10.0, sr * 0.45), sr);
 
     let drive_mod_amt = [
         finite_clamp(*s.add(STATE_MOD_DRIVE_DEPTH_1), -24.0, 24.0, 0.0),
@@ -815,7 +825,11 @@ unsafe extern "C" fn roar_process(
                     0,
                     STAGE_RT_STRIDE,
                 );
-                std::ptr::write_bytes(s.add(STATE_COMB_BUF + block * COMB_BUF_LEN), 0, COMB_BUF_LEN);
+                std::ptr::write_bytes(
+                    s.add(STATE_COMB_BUF + block * COMB_BUF_LEN),
+                    0,
+                    COMB_BUF_LEN,
+                );
             }
             *s.add(STATE_CFG_SHAPER + stage) = shaper as f32;
             *s.add(STATE_CFG_FILTER + stage) = filter as f32;
@@ -891,7 +905,12 @@ unsafe extern "C" fn roar_process(
     }
     let mut meter_post = [0.0_f32; NUM_STAGES];
     for (stage, value) in meter_post.iter_mut().enumerate() {
-        *value = db_to_amp(finite_clamp(*s.add(STATE_METER_POST_DB + stage), -80.0, 40.0, -80.0));
+        *value = db_to_amp(finite_clamp(
+            *s.add(STATE_METER_POST_DB + stage),
+            -80.0,
+            40.0,
+            -80.0,
+        ));
     }
 
     // Tone leg gains (recomputed when the knob moves; smoothed as amps).
@@ -941,8 +960,10 @@ unsafe extern "C" fn roar_process(
         sm_fb_lp += knob_coef * (fb_lp_coef_target - sm_fb_lp);
         for stage in 0..NUM_STAGES {
             let sm = s.add(STATE_SM_STAGE_BASE + stage * SM_STAGE_STRIDE);
-            *sm.add(SM_STAGE_GAIN) += knob_coef * (stage_gain_target[stage] - *sm.add(SM_STAGE_GAIN));
-            *sm.add(SM_STAGE_BIAS) += knob_coef * (stage_bias_target[stage] - *sm.add(SM_STAGE_BIAS));
+            *sm.add(SM_STAGE_GAIN) +=
+                knob_coef * (stage_gain_target[stage] - *sm.add(SM_STAGE_GAIN));
+            *sm.add(SM_STAGE_BIAS) +=
+                knob_coef * (stage_bias_target[stage] - *sm.add(SM_STAGE_BIAS));
             *sm.add(SM_STAGE_LEVEL) +=
                 knob_coef * (stage_level_target[stage] - *sm.add(SM_STAGE_LEVEL));
             *sm.add(SM_STAGE_ENGAGE) +=
@@ -1042,7 +1063,11 @@ unsafe extern "C" fn roar_process(
                 let cond_r = fb_bp_z[3].tanh();
 
                 let in_peak = dry_l.abs().max(dry_r.abs());
-                let duck_coef = if in_peak > duck_env { duck_attack } else { duck_release };
+                let duck_coef = if in_peak > duck_env {
+                    duck_attack
+                } else {
+                    duck_release
+                };
                 duck_env += duck_coef * (in_peak - duck_env);
                 let duck_gain = if fb_duck {
                     (1.0 - 2.5 * duck_env).clamp(0.0, 1.0)
@@ -1078,7 +1103,11 @@ unsafe extern "C" fn roar_process(
                 (wet_l, wet_r)
             };
             let det = det_l.abs().max(det_r.abs());
-            let coef = if det > comp_env { comp_attack } else { comp_release };
+            let coef = if det > comp_env {
+                comp_attack
+            } else {
+                comp_release
+            };
             comp_env += coef * (det - comp_env);
             let level_db = amp_to_db(comp_env);
             let thr_db = COMP_MAX_THR_DB * sm_compress;
@@ -1108,10 +1137,18 @@ unsafe extern "C" fn roar_process(
             let (mn, mx) = (pre_extremes[stage][0], pre_extremes[stage][1]);
             let (mn, mx) = if mn.is_finite() { (mn, mx) } else { (0.0, 0.0) };
             let slot_min = &mut meter_pre[stage * 2];
-            let coef = if mn < *slot_min { meter_attack } else { meter_release };
+            let coef = if mn < *slot_min {
+                meter_attack
+            } else {
+                meter_release
+            };
             *slot_min += coef * (mn - *slot_min);
             let slot_max = &mut meter_pre[stage * 2 + 1];
-            let coef = if mx > *slot_max { meter_attack } else { meter_release };
+            let coef = if mx > *slot_max {
+                meter_attack
+            } else {
+                meter_release
+            };
             *slot_max += coef * (mx - *slot_max);
             let post = &mut meter_post[stage];
             let coef = if stage_out_peak[stage] > *post {
@@ -1323,7 +1360,12 @@ mod tests {
     #[test]
     fn half_wave_dc_is_blocked() {
         let mut state = make_state();
-        set_stage(&mut state, 0, RoarStageField::Shaper, SHAPER_HALF_WAVE as f32);
+        set_stage(
+            &mut state,
+            0,
+            RoarStageField::Shaper,
+            SHAPER_HALF_WAVE as f32,
+        );
         set_stage(&mut state, 0, RoarStageField::Amount, 0.6);
         let n = 2 * SR;
         let (l, _) = render(&mut state, sine(220.0, 0.4), n);
@@ -1489,8 +1531,14 @@ mod tests {
         let _ = render(&mut state, sine(500.0, 0.4), SR);
         let pre_min = state[STATE_METER_PRE];
         let pre_max = state[STATE_METER_PRE + 1];
-        assert!(pre_max > 0.5, "drive-region max should track the driven signal: {pre_max}");
-        assert!(pre_min < -0.2, "drive-region min should go negative: {pre_min}");
+        assert!(
+            pre_max > 0.5,
+            "drive-region max should track the driven signal: {pre_max}"
+        );
+        assert!(
+            pre_min < -0.2,
+            "drive-region min should go negative: {pre_min}"
+        );
         assert!(
             pre_max + pre_min > 0.05,
             "positive bias should skew the region: [{pre_min}, {pre_max}]"
@@ -1518,7 +1566,10 @@ mod tests {
             "300 Hz LP should crush a 4 kHz sine: {open} vs {dark}"
         );
         let comb = run(FILTER_COMB, 1000.0);
-        assert!(comb.is_finite() && comb > 1.0e-3, "comb output died: {comb}");
+        assert!(
+            comb.is_finite() && comb > 1.0e-3,
+            "comb output died: {comb}"
+        );
         let resampled = run(FILTER_RESAMPLE, 2000.0);
         assert!(
             resampled.is_finite() && resampled > 1.0e-3,

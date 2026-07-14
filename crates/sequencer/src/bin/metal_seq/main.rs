@@ -1156,15 +1156,11 @@ fn map_usize(
     key: &str,
 ) -> Option<usize> {
     map_number(map, key).and_then(|value| {
-        (value.is_finite() && value >= 0.0 && value <= usize::MAX as f64)
-            .then_some(value as usize)
+        (value.is_finite() && value >= 0.0 && value <= usize::MAX as f64).then_some(value as usize)
     })
 }
 
-fn map_u32(
-    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
-    key: &str,
-) -> Option<u32> {
+fn map_u32(map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<u32> {
     map_number(map, key).and_then(|value| {
         (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64).then_some(value as u32)
     })
@@ -1810,29 +1806,36 @@ fn sync_step_selection_bindings(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     current_track_idx: usize,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    changed_steps: &[usize],
 ) -> bool {
     let _ = rt.set_reactive("SEQ", &track_step_binding_rev_field(track), Value::Nil);
     let selected = selected_steps.lock().unwrap();
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
-    let selection_value = build_selection_value_from_set(&selected);
     let mut dirty = false;
-    for step in 0..MAX_STEPS {
+    for &step in changed_steps {
+        if step >= MAX_STEPS {
+            continue;
+        }
+        let is_selected = step < num_steps && selected.contains(&step);
         dirty |= rt
             .set_reactive(
                 "SEQ",
                 &track_step_selected_field(track, step),
-                Value::Bool(step < num_steps && selected.contains(&step)),
+                Value::Bool(is_selected),
             )
             .effects_dirty;
+        dirty |= rt
+            .set_reactive_list_index("SEQ", "selected-steps", step, Value::Bool(is_selected))
+            .effects_dirty;
     }
-    dirty |= rt
-        .set_reactive("SEQ", "selected-steps", selection_value)
-        .effects_dirty;
     if let Some(app) = app {
         for viewport in expanded_step_projection.viewports_for_track(track) {
-            for slot in 0..PAGE_SIZE {
+            for &step in changed_steps {
+                let Some(slot) = visible_slot_for_step(viewport, step) else {
+                    continue;
+                };
                 dirty |= sync_expanded_step_slot(
                     rt,
                     state,
@@ -1895,18 +1898,27 @@ fn sync_track_plocks_for_neural_selection(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
 ) -> bool {
-    rt.set_reactive(
-        "SEQ",
-        "track-plocks",
-        build_track_plocks_value_with_neural_selection(
-            app,
-            state,
-            track,
-            selected_steps,
-            Some(selection),
-        ),
-    )
-    .effects_dirty
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            "track-plocks",
+            build_track_plocks_value_with_neural_selection(
+                app,
+                state,
+                track,
+                selected_steps,
+                Some(selection),
+            ),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "track-plock-variants",
+            build_track_plock_variants_value(state, track, selected_steps),
+        )
+        .effects_dirty;
+    dirty
 }
 
 fn sync_track_plock_variant_preview(
@@ -2298,7 +2310,7 @@ fn apply_ui_invalidations(
             | UiInvalidation::Pattern(PatternInvalidation::TrackLength { track })
             | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { track })
             | UiInvalidation::Step { track, .. }
-            | UiInvalidation::StepSelection { track }
+            | UiInvalidation::StepSelection { track, .. }
             | UiInvalidation::ExpandedStepViewport { track, .. }
             | UiInvalidation::TrackMixer { track, .. }
             | UiInvalidation::TrackBusSend { track, .. }
@@ -2445,7 +2457,10 @@ fn apply_ui_invalidations(
                     );
                 }
             },
-            UiInvalidation::StepSelection { track } => {
+            UiInvalidation::StepSelection {
+                track,
+                changed_steps,
+            } => {
                 needs_reactive_cycle |= sync_step_selection_bindings(
                     rt,
                     state,
@@ -2454,44 +2469,22 @@ fn apply_ui_invalidations(
                     selected_steps,
                     current_track_idx,
                     expanded_step_projection,
+                    &changed_steps,
                 );
                 if track == current_track_idx {
                     if fx_visible {
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                state,
-                                track,
-                                &app.graph.effect_descriptors,
-                                selected_steps,
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "midi-effects",
-                            build_midi_effects_value(state, track, selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "instrument-panel",
-                            build_instrument_panel_value(app, track, selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "bus-effects",
-                            build_bus_effects_value_for_selection(app, Some(selected_steps)),
-                        );
-                        sync_track_params_with_neural_selection(
+                        let _ = sync_track_plocks_for_neural_selection(
                             rt,
                             app,
                             state,
                             track,
                             selected_steps,
-                            Some(selected_neural_neurons),
+                            selected_neural_neurons,
                         );
                         needs_reactive_cycle = true;
                     }
+                    needs_reactive_cycle |=
+                        sync_track_selection_param_binding_fields(rt, state, track, selected_steps);
                     needs_reactive_cycle |=
                         sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
                 }
@@ -3772,6 +3765,18 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>(),
         ));
         let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![(
+                "selected-steps",
+                Value::List(
+                    (0..sequencer::sequencer::MAX_STEPS)
+                        .map(|_| std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(false))))
+                        .collect(),
+                ),
+            )],
+            true,
+        );
 
         let expanded_step_projection = std::sync::Arc::new(ExpandedStepProjectionRegistry::new());
         super::sync_step_selection_bindings(
@@ -3782,6 +3787,7 @@ mod tests {
             &selected_steps,
             0,
             &expanded_step_projection,
+            &(0..sequencer::sequencer::MAX_STEPS).collect::<Vec<_>>(),
         );
 
         assert_eq!(
@@ -3795,6 +3801,31 @@ mod tests {
                 .eval_str("(nth SEQ.selected-steps 3)")
                 .expect("read selected step"),
             Some(Value::Bool(true))
+        );
+
+        selected_steps.lock().unwrap().remove(&3);
+        super::sync_step_selection_bindings(
+            &mut runtime,
+            &state,
+            None,
+            0,
+            &selected_steps,
+            0,
+            &expanded_step_projection,
+            &[3],
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.selected-steps 3)")
+                .expect("read cleared step"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.selected-steps 4)")
+                .expect("read unchanged selected step"),
+            Some(Value::Bool(true)),
+            "delta sync must preserve selection indexes outside changed_steps"
         );
     }
 
@@ -4645,13 +4676,31 @@ mod tests {
         std::thread::Builder::new()
             .name("project-92-scene-switch-probe".to_string())
             .stack_size(64 * 1024 * 1024)
-            .spawn(project_92_scene_switch_reports_layout_work_impl)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::SceneSwitch))
             .expect("spawn project 92 scene switch probe")
             .join()
             .expect("project 92 scene switch probe should pass");
     }
 
-    fn project_92_scene_switch_reports_layout_work_impl() {
+    #[test]
+    #[ignore = "release-mode perf probe: sends Escape through the real Lisp binding, selection native, UI invalidation, reactive cycle, and frame build"]
+    fn project_92_escape_clears_48_of_64_selected_steps_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-escape-selection-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::EscapeDeselect))
+            .expect("spawn project 92 Escape selection probe")
+            .join()
+            .expect("project 92 Escape selection probe should pass");
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Project92UiProbe {
+        SceneSwitch,
+        EscapeDeselect,
+    }
+
+    fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
         use super::*;
         use std::collections::HashSet;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4854,6 +4903,139 @@ mod tests {
         refresh_visible_track_topology_layouts(&mut editor);
         editor.update_tile_rects(180, 70);
         let _ = editor.drain_host_commands();
+
+        if probe == Project92UiProbe::EscapeDeselect {
+            const TRACK: usize = 0;
+            const STEP_COUNT: usize = 64;
+            const SELECTED_COUNT: usize = 48;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+
+            let sequencer_buffer_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer should exist")
+                .id;
+            editor.set_active_buffer(sequencer_buffer_id);
+            state.pattern.track_params[TRACK].set_num_steps(STEP_COUNT);
+            for step in 0..STEP_COUNT {
+                state.pattern.patterns[TRACK].set_step_active(step, step % 2 == 0);
+            }
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                TRACK,
+                &selected_steps,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for iteration in 0..(WARMUPS + SAMPLES) {
+                selected_steps.lock().unwrap().extend(0..SELECTED_COUNT);
+                let neural = selected_neural_neurons.lock().unwrap().clone();
+                apply_ui_invalidations(
+                    vec![UiInvalidation::StepSelection {
+                        track: TRACK,
+                        changed_steps: (0..SELECTED_COUNT).collect(),
+                    }],
+                    UiInvalidationApplyCtx {
+                        app: &mut app,
+                        editor: &mut editor,
+                        state: &state,
+                        track_collapsed: &track_collapsed,
+                        bus_state: &bus_state,
+                        current_track_idx: TRACK,
+                        selected_steps: &selected_steps,
+                        selected_neural_neurons: &neural,
+                        piano_roll_selection: &piano_roll_selection,
+                        accumulator_names: &accumulator_names,
+                        cached_track_peak_levels: &cached_track_peak_levels,
+                        cached_bus_peak_levels: &cached_bus_peak_levels,
+                        record_armed: &record_armed,
+                        active_delete_target: &active_delete_target,
+                        active_delete_target_version: &active_delete_target_version,
+                        expanded_step_projection: &expanded_step_projection,
+                        fx_visible: true,
+                        sequencer_visible: true,
+                        mixer_visible: true,
+                    },
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+
+                let started = Instant::now();
+                editor.handle_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Esc,
+                    crossterm::event::KeyModifiers::NONE,
+                ));
+                let invalidations = ui_invalidations.drain();
+                assert!(
+                    selected_steps.lock().unwrap().is_empty(),
+                    "the real Escape binding must clear all selected steps"
+                );
+                assert_eq!(
+                    invalidations,
+                    vec![UiInvalidation::StepSelection {
+                        track: TRACK,
+                        changed_steps: (0..SELECTED_COUNT).collect(),
+                    }],
+                    "Escape must preserve the exact changed-step delta"
+                );
+                apply_ui_invalidations(
+                    invalidations,
+                    UiInvalidationApplyCtx {
+                        app: &mut app,
+                        editor: &mut editor,
+                        state: &state,
+                        track_collapsed: &track_collapsed,
+                        bus_state: &bus_state,
+                        current_track_idx: TRACK,
+                        selected_steps: &selected_steps,
+                        selected_neural_neurons: &neural,
+                        piano_roll_selection: &piano_roll_selection,
+                        accumulator_names: &accumulator_names,
+                        cached_track_peak_levels: &cached_track_peak_levels,
+                        cached_bus_peak_levels: &cached_bus_peak_levels,
+                        record_armed: &record_armed,
+                        active_delete_target: &active_delete_target,
+                        active_delete_target_version: &active_delete_target_version,
+                        expanded_step_projection: &expanded_step_projection,
+                        fx_visible: true,
+                        sequencer_visible: true,
+                        mixer_visible: true,
+                    },
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                if iteration >= WARMUPS {
+                    samples.push(duration_ms(started.elapsed()));
+                }
+            }
+            samples.sort_by(|a, b| a.total_cmp(b));
+            let percentile = |fraction: f64| {
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            eprintln!(
+                "[project-92-escape-deselect] tracks={} steps={} active={} selected={} samples={} median_ms={:.3} p95_ms={:.3} min_ms={:.3} max_ms={:.3}",
+                app.tracks.len(),
+                STEP_COUNT,
+                STEP_COUNT / 2,
+                SELECTED_COUNT,
+                SAMPLES,
+                percentile(0.50),
+                percentile(0.95),
+                samples[0],
+                samples[samples.len() - 1],
+            );
+            return;
+        }
 
         let before_revisions = visible_layout_revisions(&editor);
         let start_pattern = app.state.current_scene_index();
@@ -6992,6 +7174,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "new-project" => {
                         app.start_new_project();
+                        if let Err(error) = clear_project_script_tabs(&mut editor) {
+                            editor.handle_host_event(HostEvent::Status(error));
+                        }
                         push_project_scratch_to_named_buffer(&mut editor, &app);
                         if let Err(error) =
                             evaluate_project_scratch_on_ui_runtime(&mut editor, &app)
@@ -7156,6 +7341,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 )));
                             }
                         }
+                    }
+                    "remove-project-script-from-scratch" => {
+                        let Some(source_path) = extract_string_from_payload(&payload, "path")
+                            .filter(|path| !path.trim().is_empty())
+                        else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Error removing project script: missing path".to_string(),
+                            ));
+                            continue;
+                        };
+                        remove_project_script_from_scratch(&mut editor, &source_path);
                     }
                     "open-script-source-tab" => {
                         let Some(path_str) = extract_string_from_payload(&payload, "path")
@@ -7973,10 +8169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "macro-delete" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(id) = map_u32(map, "id") {
-                                ui::apply_command(
-                                    &mut app,
-                                    ui::AppCommand::MacroDelete { id },
-                                );
+                                ui::apply_command(&mut app, ui::AppCommand::MacroDelete { id });
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -7988,10 +8181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 ui::apply_command(
                                     &mut app,
-                                    ui::AppCommand::MacroRename {
-                                        id,
-                                        name,
-                                    },
+                                    ui::AppCommand::MacroRename { id, name },
                                 );
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
@@ -8031,11 +8221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Ok(target) => {
                                         ui::apply_command(
                                             &mut app,
-                                            ui::AppCommand::MacroMapParam {
-                                                id,
-                                                track,
-                                                target,
-                                            },
+                                            ui::AppCommand::MacroMapParam { id, track, target },
                                         );
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -8103,10 +8289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 ui::apply_command(
                                     &mut app,
-                                    ui::AppCommand::MacroUnmap {
-                                        id,
-                                        mapping_idx,
-                                    },
+                                    ui::AppCommand::MacroUnmap { id, mapping_idx },
                                 );
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
@@ -15727,6 +15910,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if app.has_pending_project_load() {
                         project_load_still_pending = true;
                     } else if was_pending {
+                        if let Err(error) = clear_project_script_tabs(&mut editor) {
+                            editor.handle_host_event(HostEvent::Status(error));
+                        }
                         push_project_scratch_to_named_buffer(&mut editor, &app);
                         eprintln!(
                             "metal_seq: project load completed tracks={} current_project={:?}",

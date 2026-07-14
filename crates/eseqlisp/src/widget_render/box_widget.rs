@@ -1,17 +1,17 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
 #[cfg(target_os = "macos")]
 use super::{
-    get_f32_prop, ndc_bounds, resolve_named_color, MetalCirclePrimitive, MetalCircleVisibleHalf,
-    MetalPrimitive, MetalRectPrimitive, WidgetInstance, WidgetViewport,
+    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPrimitive, MetalRectPrimitive,
+    WidgetInstance, WidgetViewport, get_f32_prop, ndc_bounds, resolve_named_color,
 };
-use super::{resolve_align, Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent};
 #[cfg(target_os = "macos")]
 use crate::backend::Color;
 use crate::layout::{
-    f64_to_f32, get_prop_num, prop_is_keyword, shrink_constraints_xy, Constraints, LayoutCtx,
-    LayoutNode, MeasureCtx, Rect, Size,
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    prop_is_keyword, shrink_constraints_xy,
 };
 use crate::vm::Value;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};

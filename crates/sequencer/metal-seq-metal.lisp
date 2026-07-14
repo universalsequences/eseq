@@ -169,7 +169,7 @@
               (box
                 :active (if visible (if (nth bus-steps step) 1 0) 0)
                 :plocked (if visible (if (nth bus-plocks step) 1 0) 0)
-                :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
+                :selected (if visible (bind-seq-nth "selected-steps" step) 0)
                 :background "aqua-button"
                 :align :center :width 3 :height 1.5
                 :on-mouse-down (lambda (evt)
@@ -186,13 +186,12 @@
                     nil))
                 (tick :active (if visible (if (nth bus-steps step) 1 0) 0)
                       :plocked (if visible (if (nth bus-plocks step) 1 0) 0)
-                      :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)))
+                      :selected (if visible (bind-seq-nth "selected-steps" step) 0)))
               (label (if visible (str (+ step 1)) "")
                 :font-size 10 :bg :transparent
-                :color (if visible
-                         (if (nth SEQ.selected-steps step) :yellow
-                           (if (and SEQ.playing (= (bus-seq-playhead) step)) :white :dim))
-                         :dim))
+                :active (if visible (bind-seq-nth "selected-steps" step) 0)
+                :active-color :yellow
+                :color (if (and visible SEQ.playing (= (bus-seq-playhead) step)) :white :dim))
               (subtree :key (str "bus-step-playhead-probe-" step)
                 (step-playhead-dot
                   :active (if (and visible SEQ.playing (= (bus-seq-playhead) step)) 1 0))))))))
@@ -363,7 +362,7 @@
               (box
                 :active (if visible (if (nth SEQ.steps step) 1 0) 0)
                 :plocked (if visible (if (nth SEQ.step-has-plocks step) 1 0) 0)
-                :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
+                :selected (if visible (bind-seq-nth "selected-steps" step) 0)
                 :background "aqua-button"
                 :align :center :width 3 :height 1.5
                 :on-mouse-down (lambda (evt)
@@ -381,16 +380,15 @@
                 (metal-track-tick
                       :active (if visible (if (nth SEQ.steps step) 1 0) 0)
                       :plocked (if visible (if (nth SEQ.step-has-plocks step) 1 0) 0)
-                      :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
+                      :selected (if visible (bind-seq-nth "selected-steps" step) 0)
                       :track-r (metal-track-color-r)
                       :track-g (metal-track-color-g)
                       :track-b (metal-track-color-b)))
               (label (if visible (str (+ step 1)) "")
                 :font-size 10 :bg :transparent
-                :color (if visible
-                        (if (nth SEQ.selected-steps step) :yellow
-                          :dim)
-                        :dim))
+                :active (if visible (bind-seq-nth "selected-steps" step) 0)
+                :active-color :yellow
+                :color :dim)
               (subtree :key (str "step-playhead-probe-" step)
                 (step-playhead-dot
                   :active (bind-seq (str "playhead-active-" step)))))))))

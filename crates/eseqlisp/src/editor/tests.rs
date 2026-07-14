@@ -33,6 +33,48 @@ fn ctrl_c_ctrl_c_binding_enqueues_host_command() {
 }
 
 #[test]
+fn lisp_key_handler_source_context_tracks_buffer_revisions_and_switches() {
+    let init = r#"
+        (def capture-source ()
+          (host-command "capture-source" (current-buffer-text)))
+        (bind-key "C-k" "capture-source")
+    "#;
+    let mut editor = Editor::new(
+        Runtime::new(),
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*first*", "first");
+
+    let capture = |editor: &mut Editor| {
+        editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        let command = editor
+            .drain_host_commands()
+            .into_iter()
+            .next()
+            .expect("capture-source command");
+        match command {
+            HostCommand::Custom {
+                name,
+                payload: Value::String(source),
+            } => {
+                assert_eq!(name, "capture-source");
+                source
+            }
+            other => panic!("unexpected source capture command: {other:?}"),
+        }
+    };
+
+    assert_eq!(capture(&mut editor), "first");
+    editor.active_buffer_mut().set_text("first revised");
+    assert_eq!(capture(&mut editor), "first revised");
+    editor.open_scratch_buffer("*second*", "second");
+    assert_eq!(capture(&mut editor), "second");
+}
+
+#[test]
 fn focused_text_input_survives_on_change_rerender() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor

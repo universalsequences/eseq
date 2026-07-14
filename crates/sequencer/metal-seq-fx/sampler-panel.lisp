@@ -96,8 +96,8 @@
         :plock-color-r (param-plock-color-r)
         :plock-color-g (param-plock-color-g)
         :plock-color-b (param-plock-color-b)
-        :width 4.7 :height 2.05
-        :knob-size 2.5
+        :width 4.7 :height 2.8
+        :knob-size 1.7
         :on-change (lambda (v) (instrument-set-param-control-value p v))))))
 
 

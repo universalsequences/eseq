@@ -610,6 +610,7 @@ pub struct Editor {
     default_lisp_bindings: LispBindings,
     lisp_bindings: LispBindings,
     runtime: Runtime,
+    runtime_source_context_revision: Option<RuntimeSourceContextRevision>,
     needs_redraw: bool,
     should_quit: bool,
     last_exit: EditorExit,
@@ -659,6 +660,13 @@ pub struct Editor {
     inspect_source_tile_id: Option<TileId>,
     #[cfg(test)]
     test_clipboard: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeSourceContextRevision {
+    buffer_id: BufferId,
+    text_revision: u64,
+    cursor: (usize, usize),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -749,6 +757,7 @@ impl Editor {
             default_lisp_bindings: HashMap::new(),
             lisp_bindings: HashMap::new(),
             runtime,
+            runtime_source_context_revision: None,
             needs_redraw: true,
             should_quit: false,
             last_exit: EditorExit::Closed,
@@ -6283,17 +6292,7 @@ impl Editor {
         }
         self.sync_runtime_source_context();
         self.clear_minibuffer_message();
-        let rendered_args = args
-            .iter()
-            .map(format_lisp_value)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let code = if rendered_args.is_empty() {
-            format!("({fn_name})")
-        } else {
-            format!("({fn_name} {rendered_args})")
-        };
-        let handled = match self.runtime.eval_str(&code) {
+        let handled = match self.runtime.invoke_global(fn_name, args.to_vec()) {
             Ok(Some(Value::Bool(false))) => false,
             Ok(Some(result)) => {
                 self.show_transient_message(format_value_for_minibuffer(&result));
@@ -6485,11 +6484,31 @@ impl Editor {
     fn sync_runtime_source_context(&mut self) {
         self.sync_runtime_context();
         let active = self.active_buffer();
-        let text = active.text();
-        let sexp = sexp_at_cursor(&active.lines, active.cursor);
+        let revision = RuntimeSourceContextRevision {
+            buffer_id: active.id,
+            text_revision: active.revision,
+            cursor: active.cursor,
+        };
+        let previous = self.runtime_source_context_revision;
+        let text_changed = previous.is_none_or(|previous| {
+            previous.buffer_id != revision.buffer_id
+                || previous.text_revision != revision.text_revision
+        });
+        let cursor_changed =
+            text_changed || previous.is_none_or(|previous| previous.cursor != revision.cursor);
+        if !text_changed && !cursor_changed {
+            return;
+        }
+        let text = text_changed.then(|| active.text());
+        let sexp = cursor_changed.then(|| sexp_at_cursor(&active.lines, active.cursor));
         let mut shared = self.runtime.shared.borrow_mut();
-        shared.current_buffer_text = text;
-        shared.current_sexp = sexp;
+        if let Some(text) = text {
+            shared.current_buffer_text = text;
+        }
+        if let Some(sexp) = sexp {
+            shared.current_sexp = sexp;
+        }
+        self.runtime_source_context_revision = Some(revision);
     }
 
     fn apply_widget_tree_to_buffer(

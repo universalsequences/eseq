@@ -15108,10 +15108,7 @@ mod tests {
         );
 
         assert_eq!(restored_slot.key_locks.get(64, cutoff_idx), Some(300.0));
-        assert_eq!(
-            restored_slot.key_locks.get(67, cutoff_idx),
-            Some(1_200.0)
-        );
+        assert_eq!(restored_slot.key_locks.get(67, cutoff_idx), Some(1_200.0));
         assert_eq!(
             restored_slot.key_locks.get_id(64, cutoff_idx),
             restored_slot.param_node_id(cutoff_idx),

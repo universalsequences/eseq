@@ -2384,6 +2384,18 @@ impl Runtime {
         result
     }
 
+    pub fn invoke_global(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, crate::vm::VMError> {
+        let callable = self
+            .vm
+            .global_value(name)
+            .ok_or_else(|| crate::vm::VMError::UnknownVariable(name.to_string()))?;
+        self.invoke(callable, args)
+    }
+
     pub fn run_reactive_cycle(&mut self) {
         let total_started = Instant::now();
         let current_buffer_id = self.shared.borrow().current_buffer_id;

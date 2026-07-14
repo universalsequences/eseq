@@ -156,8 +156,8 @@
 ;; Usage: (macro-map-button :macro :delay-push)
 (def macro-map-button (_macro key)
   (let ((active (macro-mapping-active-for-key? key)))
-    (button (if active "mapping..." "map")
-      :width 3.5 :height 1.0 :font-size 9.0
+    (button "map"
+      :width 4.0 :height 1.0 :font-size 9.0
       :background-color (if active (rgba 0.27 0.78 0.43 1.0) :mixer-control-bg)
       :color (if active :black :dim)
       :on-click (lambda (event) (macro-toggle-mapping-arm key)))))

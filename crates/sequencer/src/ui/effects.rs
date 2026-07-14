@@ -3350,20 +3350,37 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
     ) -> Result<(usize, i32, usize, i32, usize, Option<i32>), String> {
-        let bus_nodes = self
-            .graph
-            .bus_node_ids
-            .get(bus_idx)
-            .ok_or_else(|| format!("Bus {} graph nodes not found", bus_idx + 1))?;
         let bus = self
             .buses
             .get(bus_idx)
             .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        let bus_nodes = self
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == bus.id)
+            .ok_or_else(|| {
+                format!(
+                    "Graph nodes for bus '{}' ({}) not found",
+                    bus.name, bus.id.0
+                )
+            })?;
         if slot_idx >= bus.effect_descriptors.len() || slot_idx >= bus.effect_slots.len() {
             return Err(format!("Bus effect slot {} out of range", slot_idx + 1));
         }
 
-        let slot_id = (crate::sequencer::MAX_TRACKS + bus_idx) * MAX_CUSTOM_FX + slot_idx;
+        // Bus state is reconstructed from each project, while graph bus nodes can
+        // survive a project reload.  Their vector positions therefore are not a
+        // durable identity.  Keep both graph lookup and effect instance identity
+        // tied to BusId so an effect cannot silently attach to another bus after
+        // the project changes the bus ordering.
+        let bus_identity = usize::try_from(bus.id.0)
+            .map_err(|_| format!("Bus id {} is too large for this platform", bus.id.0))?;
+        let slot_id = crate::sequencer::MAX_TRACKS
+            .checked_add(bus_identity)
+            .and_then(|identity| identity.checked_mul(MAX_CUSTOM_FX))
+            .and_then(|base| base.checked_add(slot_idx))
+            .ok_or_else(|| format!("Effect slot identity overflow for bus id {}", bus.id.0))?;
         let mut predecessor_id = bus_nodes.gate_id;
         let mut predecessor_outputs = 2;
         for idx in (0..slot_idx).rev() {
@@ -4019,6 +4036,90 @@ mod tests {
         assert_eq!(adapted_audio_port_connections(2, 1), vec![(0, 0), (1, 0)]);
         assert_eq!(adapted_audio_port_connections(2, 2), vec![(0, 0), (1, 1)]);
         assert_eq!(adapted_audio_port_connections(4, 4), vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn bus_effect_wiring_resolves_graph_nodes_by_bus_id_after_reordering() {
+        let mut app = test_app_with_track_count(0);
+        let first_id = crate::sequencer::BusId(41);
+        let target_id = crate::sequencer::BusId(73);
+        app.buses = vec![
+            crate::ui::BusChannelState::new(target_id, "Loaded project group"),
+            crate::ui::BusChannelState::new(first_id, "Previous project group"),
+        ];
+        app.graph.bus_node_ids = vec![
+            crate::ui::BusNodeIds {
+                id: first_id,
+                left_id: 101,
+                right_id: 102,
+                merge_id: 103,
+                gate_id: 104,
+                volume_id: 105,
+                mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            },
+            crate::ui::BusNodeIds {
+                id: target_id,
+                left_id: 201,
+                right_id: 202,
+                merge_id: 203,
+                gate_id: 204,
+                volume_id: 205,
+                mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            },
+        ];
+
+        let (slot_id, predecessor, _, successor, _, existing) = app
+            .resolve_bus_effect_slot_wiring(0, 0)
+            .expect("loaded project's group bus should resolve by stable id");
+
+        assert_eq!(predecessor, 204, "effect must follow the target bus gate");
+        assert_eq!(successor, 205, "effect must precede the target bus volume");
+        assert_eq!(
+            slot_id,
+            (crate::sequencer::MAX_TRACKS + target_id.0 as usize) * MAX_CUSTOM_FX,
+            "effect instance identity must be stable across bus reordering"
+        );
+        assert_eq!(existing, None);
+    }
+
+    #[test]
+    fn project_bus_reconciliation_restores_indexed_mixer_invariant() {
+        let mut app = test_app_with_track_count(0);
+        let first_id = crate::sequencer::BusId(41);
+        let target_id = crate::sequencer::BusId(73);
+        app.buses = vec![
+            crate::ui::BusChannelState::new(target_id, "Loaded project group"),
+            crate::ui::BusChannelState::new(first_id, "Previous project group"),
+        ];
+        app.graph.bus_node_ids = vec![
+            crate::ui::BusNodeIds {
+                id: first_id,
+                left_id: 101,
+                right_id: 102,
+                merge_id: 103,
+                gate_id: 104,
+                volume_id: 105,
+                mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            },
+            crate::ui::BusNodeIds {
+                id: target_id,
+                left_id: 201,
+                right_id: 202,
+                merge_id: 203,
+                gate_id: 204,
+                volume_id: 205,
+                mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            },
+        ];
+
+        app.graph_controller()
+            .reconcile_bus_graph_nodes()
+            .expect("project bus graph should reconcile");
+
+        assert_eq!(app.graph.bus_node_ids[0].id, target_id);
+        assert_eq!(app.graph.bus_node_ids[0].volume_id, 205);
+        assert_eq!(app.graph.bus_node_ids[1].id, first_id);
+        assert_eq!(app.graph.bus_node_ids[1].volume_id, 105);
     }
 
     #[test]

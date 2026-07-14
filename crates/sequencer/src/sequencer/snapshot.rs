@@ -100,11 +100,8 @@ impl SequencerSnapshot {
         let project_process_chain = state.project_process_chain();
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let live_process_chains = state.pattern.process_chains.lock().unwrap();
-        let live_project_lane_overrides = state
-            .pattern
-            .project_process_lane_overrides
-            .lock()
-            .unwrap();
+        let live_project_lane_overrides =
+            state.pattern.project_process_lane_overrides.lock().unwrap();
         let (effect_descriptors_by_track, instrument_descriptors) =
             state.scratch_runtime_descriptors();
 
@@ -307,9 +304,11 @@ fn apply_macro_overrides(
     overrides: &HashMap<MacroParamKey, f32>,
 ) {
     for (track_idx, track) in tracks.iter_mut().enumerate() {
-        apply_slot_macro_overrides(&mut track.instrument_slot, overrides, |param_idx, param_id| {
-            MacroParamKey::for_instrument(track_idx, param_idx, param_id)
-        });
+        apply_slot_macro_overrides(
+            &mut track.instrument_slot,
+            overrides,
+            |param_idx, param_id| MacroParamKey::for_instrument(track_idx, param_idx, param_id),
+        );
         for (slot_idx, slot) in track.effect_slots.iter_mut().enumerate() {
             apply_slot_macro_overrides(slot, overrides, |param_idx, param_id| {
                 MacroParamKey::for_effect(track_idx, slot_idx, param_idx, param_id)

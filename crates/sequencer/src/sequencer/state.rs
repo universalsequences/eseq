@@ -6699,7 +6699,10 @@ impl SequencerState {
     }
 
     fn clear_variant_locks_for_step_inner(&self, track: usize, step: usize) -> bool {
-        let mut changed = false;
+        let mut changed = clear_track_variant_locks(self, track, step);
+        for slot in &self.pattern.midi_fx_slots[track] {
+            changed |= clear_live_slot_variant_locks(slot, step);
+        }
         for slot in &self.pattern.effect_chains[track] {
             changed |= clear_live_slot_variant_locks(slot, step);
         }
@@ -6718,7 +6721,10 @@ impl SequencerState {
         source_step: usize,
         target_step: usize,
     ) -> bool {
-        let mut changed = false;
+        let mut changed = copy_track_variant_locks(self, track, source_step, target_step);
+        for slot in &self.pattern.midi_fx_slots[track] {
+            changed |= copy_live_slot_variant_locks(slot, source_step, target_step);
+        }
         for slot in &self.pattern.effect_chains[track] {
             changed |= copy_live_slot_variant_locks(slot, source_step, target_step);
         }
@@ -7025,6 +7031,62 @@ fn f32_slices_bits_equal(a: &[f32], b: &[f32]) -> bool {
         && a.iter()
             .zip(b)
             .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+fn clear_track_variant_locks(state: &SequencerState, track: usize, step: usize) -> bool {
+    let mut changed = false;
+    if state.pattern.timebase_plocks[track].has_plock(step) {
+        state.pattern.timebase_plocks[track].clear(step);
+        changed = true;
+    }
+    if state.pattern.swing_plocks[track].has_plock(step) {
+        state.pattern.swing_plocks[track].clear(step);
+        changed = true;
+    }
+    if state.pattern.swing_resolution_plocks[track].has_plock(step) {
+        state.pattern.swing_resolution_plocks[track].clear(step);
+        changed = true;
+    }
+    changed
+}
+
+fn copy_track_variant_locks(
+    state: &SequencerState,
+    track: usize,
+    source_step: usize,
+    target_step: usize,
+) -> bool {
+    let mut changed = false;
+    let source_timebase = state.pattern.timebase_plocks[track].get(source_step);
+    let target_timebase = state.pattern.timebase_plocks[track].get(target_step);
+    if source_timebase != target_timebase {
+        match source_timebase {
+            Some(value) => state.pattern.timebase_plocks[track].set(target_step, value),
+            None => state.pattern.timebase_plocks[track].clear(target_step),
+        }
+        changed = true;
+    }
+
+    let source_swing = state.pattern.swing_plocks[track].get(source_step);
+    let target_swing = state.pattern.swing_plocks[track].get(target_step);
+    if !option_f32_bits_equal(source_swing, target_swing) {
+        match source_swing {
+            Some(value) => state.pattern.swing_plocks[track].set(target_step, value),
+            None => state.pattern.swing_plocks[track].clear(target_step),
+        }
+        changed = true;
+    }
+
+    let source_resolution = state.pattern.swing_resolution_plocks[track].get(source_step);
+    let target_resolution = state.pattern.swing_resolution_plocks[track].get(target_step);
+    if source_resolution != target_resolution {
+        match source_resolution {
+            Some(value) => state.pattern.swing_resolution_plocks[track].set(target_step, value),
+            None => state.pattern.swing_resolution_plocks[track].clear(target_step),
+        }
+        changed = true;
+    }
+    changed
 }
 
 fn clear_live_slot_variant_locks(slot: &EffectSlotState, step: usize) -> bool {
@@ -7366,6 +7428,41 @@ mod tests {
         assert_eq!(slot.key_locks.get(62, cutoff_idx), None);
         assert_eq!(slot.key_locks.get(62, mode_idx), None);
         assert_eq!(slot.key_locks.get(64, cutoff_idx), Some(900.0));
+    }
+
+    #[test]
+    fn step_variant_stamp_and_clear_preserve_step_expression() {
+        let state = make_state_with_tracks(1);
+        state.pattern.timebase_plocks[0].set(2, Timebase::Eighth);
+        state.pattern.swing_plocks[0].set(2, 63.0);
+        state.pattern.swing_resolution_plocks[0].set(2, SwingResolution::Eighth);
+        state.pattern.step_data[0].set(2, StepParam::Velocity, 0.42);
+        state.pattern.step_data[0].set(5, StepParam::Velocity, 0.77);
+
+        let assignment = state.reconcile_plock_variant_registry_for_track(0)[2]
+            .clone()
+            .expect("track locks should produce a variant");
+        assert_eq!(assignment.param_count, 3);
+        assert!(state.stamp_variant_key_to_steps(0, &assignment.key, &[5]));
+        assert_eq!(
+            state.pattern.timebase_plocks[0].get(5),
+            Some(Timebase::Eighth)
+        );
+        assert_eq!(state.pattern.swing_plocks[0].get(5), Some(63.0));
+        assert_eq!(
+            state.pattern.swing_resolution_plocks[0].get(5),
+            Some(SwingResolution::Eighth)
+        );
+        assert_eq!(state.pattern.step_data[0].get(5, StepParam::Velocity), 0.77);
+
+        assert!(state.clear_variant_locks_for_steps(0, &[5]));
+        assert_eq!(state.pattern.timebase_plocks[0].get(5), None);
+        assert_eq!(state.pattern.swing_plocks[0].get(5), None);
+        assert_eq!(state.pattern.swing_resolution_plocks[0].get(5), None);
+        assert_eq!(
+            state.pattern.step_data[0].get(5, StepParam::Velocity),
+            0.77
+        );
     }
 
     fn sample_pattern_snapshot(num_tracks: usize) -> PatternSnapshot {

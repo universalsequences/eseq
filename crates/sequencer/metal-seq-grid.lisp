@@ -95,19 +95,21 @@
 (def seq-step-tab-source-path (tab)
   (if (> (len tab) 3) (nth tab 3) ""))
 
+(def seq-script-step-tab? (tab)
+  (> (len tab) 2))
+
 (def seq-step-tab-matches-buffer? (tab buffer)
   (= (seq-step-tab-buffer tab) buffer))
 
 (def seq-render-step-tab (tab)
-  (let ((name (seq-step-tab-sequencer-name tab))
-        (buffer (seq-step-tab-buffer tab)))
-    (if (= name "")
-      (list (seq-step-tab-label tab) buffer)
+  (let ((buffer (seq-step-tab-buffer tab)))
+    (if (seq-script-step-tab? tab)
       (list (seq-step-tab-label tab)
         buffer
         :on-close
         (lambda (closed-buffer tab-index)
-          (seq-delete-script-sequencer-with-buffer name closed-buffer))))))
+          (seq-delete-script-sequencer-by-buffer closed-buffer)))
+      (list (seq-step-tab-label tab) buffer))))
 
 (def seq-main-step-tabs ()
   (append (list (list "Seq" "*sequencer*")) (map seq-render-step-tab seq-registered-step-tabs)))
@@ -151,13 +153,15 @@
     (seq-refresh-step-tabs-if-present)))
 
 (def seq-register-script-step-sequencer-tab (label buffer sequencer-name source-path)
-  (do
-    (set! seq-registered-step-tabs
-      (append
-        (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
-          seq-registered-step-tabs)
-        (list (list label buffer sequencer-name source-path))))
-    (seq-refresh-step-tabs-if-present)))
+  (let ((project-source-path
+          (if (= source-path "") (current-source-path) source-path)))
+    (do
+      (set! seq-registered-step-tabs
+        (append
+          (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
+            seq-registered-step-tabs)
+          (list (list label buffer sequencer-name project-source-path))))
+      (seq-refresh-step-tabs-if-present))))
 
 (def seq-unregister-step-sequencer-tab (buffer)
   (do
@@ -171,6 +175,14 @@
     (if (= (len seq-registered-step-tabs) 0)
       (clear-window-tabs-for "*sequencer*")
       false)))
+
+(def seq-clear-project-script-tabs ()
+  (let ((script-tabs (filter seq-script-step-tab? seq-registered-step-tabs)))
+    (do
+      (for-each
+        (lambda (tab) (seq-unregister-step-sequencer-tab (seq-step-tab-buffer tab)))
+        script-tabs)
+      true)))
 
 (def seq-select-main-step-tab-by-index (index)
   (let ((tab-index (- index 1))
@@ -315,7 +327,9 @@
   (append-buffer-lines-for "*scratch*" (seq-script-scratch-entry path)))
 
 (def seq-script-remove-from-scratch (path)
-  (remove-buffer-lines-for "*scratch*" (seq-script-scratch-entry path)))
+  (do
+    (remove-buffer-lines-for "*scratch*" (seq-script-scratch-entry path))
+    (host-command "remove-project-script-from-scratch" (dict :path path))))
 
 (def seq-script-register-loaded-tab ()
   (if (not (= script-buffer-name ""))

@@ -2097,6 +2097,23 @@ mod tests {
     }
 
     #[test]
+    fn invoke_global_calls_existing_function_without_compiling_a_call_expression() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str("(def add-offset |value| (+ value 7))")
+            .unwrap();
+
+        assert_eq!(
+            runtime.invoke_global("add-offset", vec![Value::Number(5.0)]),
+            Ok(Some(Value::Number(12.0)))
+        );
+        assert_eq!(
+            runtime.invoke_global("missing-handler", Vec::new()),
+            Err(VMError::UnknownVariable("missing-handler".to_string()))
+        );
+    }
+
+    #[test]
     fn test_re_evaluating_effect_replaces_previous_preview_effect() {
         let mut runtime = Runtime::new();
         runtime.register_reactive("APP", vec![("x", Value::Number(1.0))], true);

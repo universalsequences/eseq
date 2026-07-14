@@ -695,6 +695,56 @@ impl GraphController<'_> {
         self.app.publish_bus_gate_runtime();
     }
 
+    /// Makes the graph bus registry exactly mirror the current project bus
+    /// registry, including ordering. Several realtime/UI bridges intentionally
+    /// use compact bus indices, so this invariant must be restored whenever a
+    /// project replaces `App::buses` while retaining the live graph.
+    pub fn reconcile_bus_graph_nodes(&mut self) -> Result<(), String> {
+        let project_buses = self
+            .app
+            .buses
+            .iter()
+            .map(|bus| (bus.id, bus.name.clone()))
+            .collect::<Vec<_>>();
+        let stale_ids = self
+            .app
+            .graph
+            .bus_node_ids
+            .iter()
+            .map(|nodes| nodes.id)
+            .filter(|id| !project_buses.iter().any(|(project_id, _)| project_id == id))
+            .collect::<Vec<_>>();
+        for id in stale_ids {
+            self.delete_bus_graph_node(id);
+        }
+        for (id, name) in &project_buses {
+            self.ensure_bus_graph_node(*id, name);
+        }
+
+        for (id, name) in &project_buses {
+            if !self
+                .app
+                .graph
+                .bus_node_ids
+                .iter()
+                .any(|nodes| nodes.id == *id)
+            {
+                return Err(format!(
+                    "Graph nodes for bus '{name}' ({}) were not created",
+                    id.0
+                ));
+            }
+        }
+        self.app.graph.bus_node_ids.sort_by_key(|nodes| {
+            project_buses
+                .iter()
+                .position(|(id, _)| *id == nodes.id)
+                .expect("graph bus membership was validated before sorting")
+        });
+        self.app.publish_bus_gate_runtime();
+        Ok(())
+    }
+
     pub fn delete_bus_graph_node(&mut self, id: BusId) {
         let Some(pos) = self
             .app

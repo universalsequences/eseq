@@ -1052,9 +1052,26 @@ mod tests {
         // The roar panel (metal-seq-fx/builtin/roar.lisp) looks these up by
         // name; renaming any of them breaks the custom UI.
         for name in [
-            "enabled", "drive", "tone", "tone freq", "tone mode", "routing", "blend",
-            "xover low", "xover high", "fb mode", "fb time", "fb div", "fb amount",
-            "fb invert", "fb duck", "fb freq", "fb width", "compress", "sc hpf", "output",
+            "enabled",
+            "drive",
+            "tone",
+            "tone freq",
+            "tone mode",
+            "routing",
+            "blend",
+            "xover low",
+            "xover high",
+            "fb mode",
+            "fb time",
+            "fb div",
+            "fb amount",
+            "fb invert",
+            "fb duck",
+            "fb freq",
+            "fb width",
+            "compress",
+            "sc hpf",
+            "output",
             "dry/wet",
         ] {
             assert!(
@@ -3978,7 +3995,12 @@ impl EffectDescriptor {
                 ParamScaling::Exponential,
                 crate::roar::ROAR_PARAM_TONE_FREQ,
             ),
-            options("tone mode", &["tilt", "shelf"], 0.0, crate::roar::ROAR_PARAM_TONE_MODE),
+            options(
+                "tone mode",
+                &["tilt", "shelf"],
+                0.0,
+                crate::roar::ROAR_PARAM_TONE_MODE,
+            ),
             options(
                 "routing",
                 &[
@@ -4020,7 +4042,12 @@ impl EffectDescriptor {
                 ParamScaling::Exponential,
                 crate::roar::ROAR_PARAM_XOVER_HIGH,
             ),
-            options("fb mode", &["time", "note"], 0.0, crate::roar::ROAR_PARAM_FB_MODE),
+            options(
+                "fb mode",
+                &["time", "note"],
+                0.0,
+                crate::roar::ROAR_PARAM_FB_MODE,
+            ),
             continuous(
                 "fb time",
                 0.5,

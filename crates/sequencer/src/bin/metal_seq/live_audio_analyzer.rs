@@ -7,8 +7,8 @@ use std::time::Instant;
 use eseqlisp::live_audio::BandMeterFrame;
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
 use eseqlisp::widget_render::multiband_meter::{collect_band_meter_requests, BandMeterRequest};
-use eseqlisp::widget_render::scope::{collect_scope_requests, ScopeRequest};
 use eseqlisp::widget_render::roar_shaper::collect_roar_meter_requests;
+use eseqlisp::widget_render::scope::{collect_scope_requests, ScopeRequest};
 use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, SpectrogramRequest};
 use sequencer::audio_tap::{self, SpectrogramProcessor};
 use sequencer::audiograph::{self, LiveGraphPtr};
@@ -396,8 +396,7 @@ impl LiveAudioAnalyzerManager {
                         frame.level_db[stage][slot] =
                             state[sequencer::roar::STATE_METER_PRE + stage * 2 + slot];
                     }
-                    frame.gain_db[stage] =
-                        state[sequencer::roar::STATE_METER_POST_DB + stage];
+                    frame.gain_db[stage] = state[sequencer::roar::STATE_METER_POST_DB + stage];
                 }
             } else {
                 for band in 0..3 {

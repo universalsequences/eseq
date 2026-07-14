@@ -2067,9 +2067,11 @@ fn snapshot_slot_default_node_param_value(
     node_param_idx: u64,
     default: f32,
 ) -> f32 {
-    let Some(param_idx) = slot.param_node_indices.iter().position(|idx| {
-        u64::from(*idx) == node_param_idx
-    }) else {
+    let Some(param_idx) = slot
+        .param_node_indices
+        .iter()
+        .position(|idx| u64::from(*idx) == node_param_idx)
+    else {
         return default;
     };
     slot.defaults.get(param_idx).copied().unwrap_or(default)
@@ -2330,7 +2332,11 @@ fn resolve_snapshot_instrument_defaults(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
 ) -> ScheduledInstrumentParams {
-    let Some(slot) = snapshot.tracks.get(track_idx).map(|track| &track.instrument_slot) else {
+    let Some(slot) = snapshot
+        .tracks
+        .get(track_idx)
+        .map(|track| &track.instrument_slot)
+    else {
         return ScheduledInstrumentParams::new();
     };
     let mut params = ScheduledInstrumentParams::new();
@@ -6103,9 +6109,8 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 else {
                     continue;
                 };
-                let kb_default = |param_idx: usize| {
-                    kb_inst_slot.defaults.get(param_idx).copied().unwrap_or(0.0)
-                };
+                let kb_default =
+                    |param_idx: usize| kb_inst_slot.defaults.get(param_idx).copied().unwrap_or(0.0);
                 let kb_instrument_params =
                     resolve_snapshot_instrument_defaults(&data.scheduler_snapshot, kt.track);
                 let attack_samples = kb_default(0) * data.sample_rate as f32 / 1000.0;
@@ -6116,8 +6121,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let kb_enabled = kb_default(4);
                 let kb_reverse = kb_default(5);
                 let kb_loop_mode = kb_default(6);
-                let kb_loop_xfade_samples =
-                    kb_default(7) * data.sample_rate as f32 / 1000.0;
+                let kb_loop_xfade_samples = kb_default(7) * data.sample_rate as f32 / 1000.0;
                 let kb_sr_hz = kb_default(8);
                 let kb_playback_speed = kb_default(12);
                 let kb_warp_preserve = snapshot_slot_default_node_param_value(
@@ -6698,13 +6702,13 @@ mod tests {
         key_locked_live_instrument_params, mute_group_winner_for_block_events,
         rack_slot_matches_routing, rack_slot_playback_transpose, resolve_live_instrument_defaults,
         resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
-        resolved_chord_transpose, sampler_warp_runtime,
-        select_output_channels, select_output_config, store_active_keyboard_note,
-        swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
-        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
-        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
-        FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
-        OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
+        resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
+        select_output_config, store_active_keyboard_note, swing_delay_samples,
+        take_active_keyboard_note, track_accepts_scheduled_trigger, ActiveKeyboardNote,
+        ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent, BlockEventKind, ChopEvent,
+        CountdownEvent, CountdownEventKind, CustomEnginePool, FreePatchTransportRouteState,
+        FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget, OutputDeviceConfig,
+        OutputFormatRange, RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
     use crate::analysis::{pack_ptr, OnsetTableShared};

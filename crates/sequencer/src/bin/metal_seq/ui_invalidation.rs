@@ -21,6 +21,8 @@ pub(crate) enum UiInvalidation {
     },
     StepSelection {
         track: usize,
+        /// Step indexes whose membership in the selection changed.
+        changed_steps: Vec<usize>,
     },
     ExpandedStepViewport {
         track: usize,
@@ -304,6 +306,50 @@ impl UiInvalidationQueue {
         {
             return;
         }
+        if let UiInvalidation::StepSelection {
+            track,
+            changed_steps,
+        } = invalidation
+        {
+            let selection_invalidation = UiInvalidation::StepSelection {
+                track,
+                changed_steps: changed_steps.clone(),
+            };
+            if pending
+                .iter()
+                .any(|entry| invalidation_supersedes(entry, &selection_invalidation))
+            {
+                return;
+            }
+            let previous = pending.iter().find_map(|entry| match entry {
+                UiInvalidation::StepSelection {
+                    track: queued_track,
+                    changed_steps,
+                } if *queued_track == track => Some(changed_steps.clone()),
+                _ => None,
+            });
+            if let Some(previous) = previous {
+                pending.retain(|entry| {
+                    !matches!(entry, UiInvalidation::StepSelection { track: queued_track, .. } if *queued_track == track)
+                });
+                let mut combined = previous
+                    .into_iter()
+                    .chain(changed_steps)
+                    .collect::<Vec<_>>();
+                combined.sort_unstable();
+                combined.dedup();
+                pending.insert(UiInvalidation::StepSelection {
+                    track,
+                    changed_steps: combined,
+                });
+            } else {
+                pending.insert(UiInvalidation::StepSelection {
+                    track,
+                    changed_steps,
+                });
+            }
+            return;
+        }
         pending.retain(|entry| !invalidation_supersedes(&invalidation, entry));
         if pending
             .iter()
@@ -351,7 +397,9 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
             UiInvalidation::Step {
                 track: old_track, ..
             }
-            | UiInvalidation::StepSelection { track: old_track }
+            | UiInvalidation::StepSelection {
+                track: old_track, ..
+            }
             | UiInvalidation::ExpandedStepViewport {
                 track: old_track, ..
             },
@@ -488,6 +536,56 @@ mod tests {
                 track: 1,
                 change: PianoRollInvalidation::Items,
             }]
+        );
+    }
+
+    #[test]
+    fn step_selection_invalidations_merge_changed_steps_per_track() {
+        let queue = UiInvalidationQueue::new();
+        queue.push(UiInvalidation::StepSelection {
+            track: 2,
+            changed_steps: vec![7, 3],
+        });
+        queue.push(UiInvalidation::StepSelection {
+            track: 2,
+            changed_steps: vec![5, 3],
+        });
+        queue.push(UiInvalidation::StepSelection {
+            track: 4,
+            changed_steps: vec![1],
+        });
+
+        assert_eq!(
+            queue.drain(),
+            vec![
+                UiInvalidation::StepSelection {
+                    track: 2,
+                    changed_steps: vec![3, 5, 7],
+                },
+                UiInvalidation::StepSelection {
+                    track: 4,
+                    changed_steps: vec![1],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn whole_track_invalidation_suppresses_later_step_selection_delta() {
+        let queue = UiInvalidationQueue::new();
+        queue.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+            track: 1,
+        }));
+        queue.push(UiInvalidation::StepSelection {
+            track: 1,
+            changed_steps: vec![2, 3],
+        });
+
+        assert_eq!(
+            queue.drain(),
+            vec![UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+                track: 1,
+            })]
         );
     }
 }
