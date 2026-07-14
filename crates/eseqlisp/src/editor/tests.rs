@@ -5545,6 +5545,76 @@ fn editable_widget_buffers_do_not_auto_focus_widgets() {
 }
 
 #[test]
+fn focused_number_picker_escape_cancels_edit_and_runs_global_escape_binding() {
+    let init = r#"
+        (def escape-count (state 0))
+        (def handle-global-escape ()
+          (do
+            (set! escape-count (+ escape-count 1))
+            true))
+        (bind-key "ESC" "handle-global-escape")
+    "#;
+    let runtime = Runtime::with_init_source(init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.set_layout_viewport(30, 8);
+    editor.refresh_runtime_side_effects();
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+                (number-picker
+                  :key "focused-picker"
+                  :value 12
+                  :min 0
+                  :max 99
+                  :decimals 0
+                  :width 8
+                  :height 1.4)
+                "#,
+        )
+        .expect("build number picker")
+        .expect("number picker should produce a widget tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    let _ = editor.widget_layout().expect("number picker layout");
+    assert!(editor.focus_widget_by_stable_key("focused-picker", Some("number-picker")));
+    let picker_id = editor.focused_widget_id().expect("number picker focus");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+    assert!(
+        crate::widget_render::number_picker::number_picker_edit_state(picker_id).editing,
+        "numeric input should put the focused picker into edit mode"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(
+        !crate::widget_render::number_picker::number_picker_edit_state(picker_id).editing,
+        "Escape should cancel the picker edit"
+    );
+    assert_eq!(
+        editor.focused_widget_id(),
+        None,
+        "Escape should blur the picker"
+    );
+    assert_eq!(
+        editor.runtime_mut().eval_str("escape-count").unwrap(),
+        Some(Value::Number(1.0)),
+        "the same Escape keypress should continue to the global binding"
+    );
+}
+
+#[test]
 fn editable_buffers_keep_text_navigation_when_widget_is_unfocused() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -7412,16 +7482,22 @@ fn visible_inactive_tile_binding_write_marks_editor_for_redraw() {
         .expect("meter layout should be cached for visible inactive tile")
         .widget_id;
 
+    // Relaying out the active tree replaces the runtime's widget-binding map.
+    // The editor must immediately restore the union of all visible layouts,
+    // even though their cached layout identities have not changed.
+    editor.set_layout_viewport(61, 12);
+
     editor.clear_needs_redraw();
     let _ = editor.take_dirty_widget_ids();
 
     editor
         .runtime_mut()
         .set_reactive("APP", "peak", Value::Number(0.7));
+    editor.set_layout_viewport(62, 12);
 
     assert!(
         editor.needs_redraw(),
-        "binding-only writes in inactive visible tiles must schedule a render"
+        "binding-only writes in inactive visible tiles must survive an active-tree relayout and schedule a render"
     );
     assert_eq!(editor.take_dirty_widget_ids(), vec![widget_id]);
 }
@@ -7484,6 +7560,85 @@ fn tiled_frame_routes_binding_dirty_ids_to_inactive_tile() {
         .find(|tile| tile.tile_id == meters_tile_id)
         .expect("meters tile should be in tiled frame");
     assert_eq!(meters_tile.frame.dirty_widget_ids, vec![widget_id]);
+}
+
+#[test]
+fn unpresented_tiled_frame_requeues_inactive_tile_widget_dirtiness() {
+    let mut runtime = Runtime::new();
+    runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+    editor.update_tile_rects(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*meters*"
+              (mixer-meter
+                :level-l (bind "APP" "peak")
+                :level-r 0.0
+                :width 2.22
+                :height 4.24))
+            (split-window-right "*meters*")
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 12);
+    editor.sync_reactive_bindings_for_visible_layouts();
+
+    let meters_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*meters*")
+        .unwrap();
+    let meters_tile_id = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| {
+            editor
+                .tile_root
+                .find_leaf(*tile_id)
+                .is_some_and(|leaf| leaf.buffer_idx == meters_idx)
+        })
+        .unwrap();
+    let widget_id = editor
+        .tile_root
+        .find_leaf(meters_tile_id)
+        .and_then(|leaf| leaf.cached_layout.as_ref())
+        .expect("meter layout should be cached")
+        .widget_id;
+
+    let _ = editor.take_dirty_widget_ids();
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "peak", Value::Number(0.7));
+
+    let unpresented = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);
+    let first_dirty = unpresented
+        .tiles
+        .iter()
+        .find(|tile| tile.tile_id == meters_tile_id)
+        .expect("meters tile should be visible")
+        .frame
+        .dirty_widget_ids
+        .clone();
+    assert_eq!(first_dirty, vec![widget_id]);
+
+    crate::ui::frame::requeue_unpresented_tiled_frame(&mut editor, &unpresented);
+    assert!(editor.needs_redraw());
+
+    let retry = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);
+    let retried_dirty = &retry
+        .tiles
+        .iter()
+        .find(|tile| tile.tile_id == meters_tile_id)
+        .expect("meters tile should remain visible")
+        .frame
+        .dirty_widget_ids;
+    assert_eq!(retried_dirty, &first_dirty);
 }
 
 #[test]

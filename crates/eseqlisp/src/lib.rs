@@ -337,9 +337,16 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
 
         if last_render_at.elapsed() >= frame_interval {
             let tiled_frame = frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
-            backend.render_tiled(&tiled_frame)?;
-            editor.clear_needs_redraw();
-            last_render_at = Instant::now();
+            match backend.render_tiled(&tiled_frame)? {
+                metal_backend::TiledRenderStatus::Presented => {
+                    editor.clear_needs_redraw();
+                    last_render_at = Instant::now();
+                }
+                metal_backend::TiledRenderStatus::NotPresented => {
+                    frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
+                    last_render_at = Instant::now();
+                }
+            }
         }
 
         if editor.should_quit() {

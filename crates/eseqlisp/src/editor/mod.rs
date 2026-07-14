@@ -641,6 +641,7 @@ pub struct Editor {
     remembered_split_ratios: HashMap<String, f32>,
     retained_tile_layouts: HashMap<BufferId, Vec<RetainedTileLayout>>,
     visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
+    visible_binding_registry_revision: u64,
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
     active_tab_mouse_capture: Option<TileId>,
@@ -790,6 +791,7 @@ impl Editor {
             remembered_split_ratios: HashMap::new(),
             retained_tile_layouts: HashMap::new(),
             visible_binding_layout_signature: None,
+            visible_binding_registry_revision: 0,
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
             active_tab_mouse_capture: None,
@@ -3905,10 +3907,12 @@ impl Editor {
             .iter()
             .map(|(id, revision, layout)| (*id, *revision, Arc::as_ptr(layout) as usize))
             .collect::<Vec<_>>();
+        let registry_revision = self.runtime.widget_bindings_revision();
         if self
             .visible_binding_layout_signature
             .as_ref()
             .is_some_and(|cached| cached == &signature)
+            && self.visible_binding_registry_revision == registry_revision
         {
             return;
         }
@@ -3916,6 +3920,7 @@ impl Editor {
             visible_layouts.iter().map(|(_, _, layout)| layout.as_ref()),
         );
         self.visible_binding_layout_signature = Some(signature);
+        self.visible_binding_registry_revision = self.runtime.widget_bindings_revision();
     }
 
     pub fn visible_widgets_animating(&self) -> bool {
@@ -4954,6 +4959,22 @@ impl Editor {
             return;
         }
 
+        // Escape is both a local cancellation key and a commonly bound global
+        // command. When a widget has focus, let it cancel any in-progress edit,
+        // then blur it and run the direct Escape binding in the same keypress.
+        // Minibuffers, regions, Vim insert mode, and other modal contexts have
+        // already had the opportunity to consume Escape above.
+        if key.code == KeyCode::Esc
+            && key.modifiers == KeyModifiers::NONE
+            && self.active_leaf().focused_widget_id.is_some()
+        {
+            let _ = self.handle_focused_widget_key(key);
+            self.clear_focused_widget();
+            self.mark_needs_redraw();
+            let _ = self.run_direct_lisp_binding("ESC");
+            return;
+        }
+
         // Focused widget keys take priority over global bindings
         // (so Enter/arrows work in number-pickers, dropdowns, etc.)
         if self.handle_focused_widget_key(key) {
@@ -4970,18 +4991,8 @@ impl Editor {
 
         // Check direct keybinding before treating as chord prefix.
         // This allows e.g. "ESC" to fire even when "ESC ." chords exist.
-        {
-            let ks = key_str(key);
-            if let Some(handler) = self.lisp_bindings.get(&ks).cloned() {
-                if self.builtins.values().any(|cmd| cmd == &handler) {
-                    self.run_command(&handler);
-                    return;
-                } else if self.call_lisp_handler(&handler) {
-                    return;
-                } else {
-                    self.clear_minibuffer_message();
-                }
-            }
+        if self.run_direct_lisp_binding(&key_str(key)) {
+            return;
         }
 
         if self.binding_has_prefix(&key_str(key)) {
@@ -5049,6 +5060,21 @@ impl Editor {
                 self.sync_runtime_context();
             }
             _ => {}
+        }
+    }
+
+    fn run_direct_lisp_binding(&mut self, key: &str) -> bool {
+        let Some(handler) = self.lisp_bindings.get(key).cloned() else {
+            return false;
+        };
+        if self.builtins.values().any(|command| command == &handler) {
+            self.run_command(&handler);
+            true
+        } else if self.call_lisp_handler(&handler) {
+            true
+        } else {
+            self.clear_minibuffer_message();
+            false
         }
     }
 

@@ -107,6 +107,7 @@ pub struct ReactiveRegistry {
     dirty: Vec<(String, String, Value)>,
     batched: Vec<(String, String, Value)>,
     field_to_widgets: HashMap<ReactiveBindingKey, HashSet<u64>>,
+    widget_bindings_revision: u64,
     batching: bool,
 }
 
@@ -132,6 +133,7 @@ impl ReactiveRegistry {
             dirty: Vec::new(),
             batched: Vec::new(),
             field_to_widgets: HashMap::new(),
+            widget_bindings_revision: 0,
             batching: false,
         }
     }
@@ -383,6 +385,7 @@ impl ReactiveRegistry {
         if let Some(layout) = layout {
             self.collect_widget_bindings(layout);
         }
+        self.bump_widget_bindings_revision();
     }
 
     pub fn replace_widget_bindings_for_layout_subtree(
@@ -398,6 +401,7 @@ impl ReactiveRegistry {
         self.field_to_widgets
             .retain(|_, widgets| !widgets.is_empty());
         self.collect_widget_bindings(new_subtree);
+        self.bump_widget_bindings_revision();
     }
 
     pub fn replace_widget_bindings_from_layouts<'a>(
@@ -408,6 +412,11 @@ impl ReactiveRegistry {
         for layout in layouts {
             self.collect_widget_bindings(layout);
         }
+        self.bump_widget_bindings_revision();
+    }
+
+    pub fn widget_bindings_revision(&self) -> u64 {
+        self.widget_bindings_revision
     }
 
     pub fn widget_bindings_snapshot(&self) -> HashMap<ReactiveBindingKey, HashSet<u64>> {
@@ -416,6 +425,11 @@ impl ReactiveRegistry {
 
     pub fn restore_widget_bindings(&mut self, bindings: HashMap<ReactiveBindingKey, HashSet<u64>>) {
         self.field_to_widgets = bindings;
+        self.bump_widget_bindings_revision();
+    }
+
+    fn bump_widget_bindings_revision(&mut self) {
+        self.widget_bindings_revision = self.widget_bindings_revision.wrapping_add(1);
     }
 
     fn collect_widget_bindings(&mut self, node: &LayoutNode) {

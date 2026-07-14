@@ -83,6 +83,12 @@ mod inner {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum TiledRenderStatus {
+        Presented,
+        NotPresented,
+    }
+
     // ── Shader source ─────────────────────────────────────────────────────────
     //
     // Buffer-based vertex input: no vertex descriptor needed.
@@ -4810,7 +4816,10 @@ fragment float4 live_spectrogram_frag(
         }
 
         /// Render a tiled frame with per-tile scissor clipping.
-        pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
+        pub fn render_tiled(
+            &mut self,
+            tiled: &TiledRenderFrame,
+        ) -> Result<TiledRenderStatus, BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
@@ -4823,7 +4832,7 @@ fragment float4 live_spectrogram_frag(
             self.drain_decoded_images(2);
 
             let Some(pipeline) = self.pipeline.clone() else {
-                return Ok(());
+                return Ok(TiledRenderStatus::NotPresented);
             };
             let Some((cell_w, cell_h, atlas_texture)) = self.atlas.as_ref().map(|atlas| {
                 (
@@ -4832,10 +4841,10 @@ fragment float4 live_spectrogram_frag(
                     atlas.texture.clone(),
                 )
             }) else {
-                return Ok(());
+                return Ok(TiledRenderStatus::NotPresented);
             };
             let Some(drawable) = self.layer.nextDrawable() else {
-                return Ok(());
+                return Ok(TiledRenderStatus::NotPresented);
             };
             let texture = drawable.texture();
             let vp_w = texture.width() as f32;
@@ -6062,7 +6071,7 @@ fragment float4 live_spectrogram_frag(
             self.upload_arena.finish_frame(cmdbuf.clone());
             self.stats
                 .note_frame(0, 0, 0, widget_scene_build_time, metal_prep_time);
-            Ok(())
+            Ok(TiledRenderStatus::Presented)
         }
     }
 
@@ -10772,4 +10781,4 @@ fragment float4 live_spectrogram_frag(
 }
 
 #[cfg(target_os = "macos")]
-pub use inner::MetalBackend;
+pub use inner::{MetalBackend, TiledRenderStatus};

@@ -4683,7 +4683,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: sends Escape through the real Lisp binding, selection native, UI invalidation, reactive cycle, and frame build"]
+    #[ignore = "release-mode perf probe: focuses a non-sequencer tile, sends Escape through the real binding and invalidation path, builds the tiled frame, and refreshes the retained Metal primitive scene"]
     fn project_92_escape_clears_48_of_64_selected_steps_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-escape-selection-probe".to_string())
@@ -4917,7 +4917,30 @@ mod tests {
                 .find(|buffer| buffer.name == "*sequencer*")
                 .expect("sequencer buffer should exist")
                 .id;
+            let sequencer_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.id == sequencer_buffer_id)
+                .expect("sequencer buffer index");
+            let step_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == "*step*")
+                .expect("step buffer index");
             editor.set_active_buffer(sequencer_buffer_id);
+            let non_sequencer_tile = editor
+                .split_active_tile(eseqlisp::tile::SplitDir::Vertical, step_buffer_idx)
+                .expect("split visible sequencer and step tiles");
+            editor.switch_active_tile(non_sequencer_tile);
+            let focused_buffer_name = editor.active_buffer().name.clone();
+            assert_eq!(focused_buffer_name, "*step*");
+            assert!(
+                editor.tile_root.leaf_ids().into_iter().any(|tile_id| editor
+                    .tile_root
+                    .find_leaf(tile_id)
+                    .is_some_and(|leaf| leaf.buffer_idx == sequencer_buffer_idx)),
+                "the Escape benchmark must keep *sequencer* visible"
+            );
             state.pattern.track_params[TRACK].set_num_steps(STEP_COUNT);
             for step in 0..STEP_COUNT {
                 state.pattern.patterns[TRACK].set_step_active(step, step % 2 == 0);
@@ -4966,7 +4989,65 @@ mod tests {
                 );
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
-                let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let sequencer_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("visible sequencer frame after selection setup");
+                assert!(
+                    !sequencer_frame.frame.dirty_widget_ids.is_empty(),
+                    "selection setup from {focused_buffer_name} must dirty the visible *sequencer* step widgets"
+                );
+                let selected_layout = sequencer_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("visible sequencer layout after selection setup");
+                let viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: 1440.0,
+                    vp_h: 1120.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: sequencer_frame.frame.focused_widget_id,
+                    focused_branch: false,
+                    tile_content_rows: 70.0,
+                    scroll_top: sequencer_frame.frame.widget_scroll_top
+                        + sequencer_frame.frame.text_scroll_top as f32,
+                    scroll_left: sequencer_frame.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                    selected_layout,
+                    viewport,
+                    viewport.scroll_top,
+                    70,
+                );
+                let retained_run_indices =
+                    eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                let selected_step_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*step*")
+                    .expect("visible step frame after selection setup");
+                let step_viewport = eseqlisp::widget_render::WidgetViewport {
+                    focused_widget_id: selected_step_frame.frame.focused_widget_id,
+                    focused_branch: true,
+                    scroll_top: selected_step_frame.frame.widget_scroll_top
+                        + selected_step_frame.frame.text_scroll_top as f32,
+                    scroll_left: selected_step_frame.frame.widget_layout_scroll_left,
+                    ..viewport
+                };
+
+                assert!(
+                    editor.focus_widget_by_stable_key(
+                        "fx-step-param-velocity",
+                        Some("number-picker")
+                    ),
+                    "the Escape benchmark must reproduce a focused *step* number picker"
+                );
 
                 let started = Instant::now();
                 editor.handle_key(crossterm::event::KeyEvent::new(
@@ -5012,7 +5093,79 @@ mod tests {
                 );
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
-                let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let sequencer_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("visible sequencer frame after Escape");
+                assert!(
+                    !sequencer_frame.frame.dirty_widget_ids.is_empty(),
+                    "Escape from {focused_buffer_name} must dirty the visible *sequencer* step widgets in the same frame"
+                );
+                let deselected_layout = sequencer_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("visible sequencer layout after Escape");
+                let (_, retained_stats) =
+                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        deselected_layout,
+                        viewport,
+                        viewport.scroll_top,
+                        70,
+                        &mut retained_runs,
+                        &retained_run_indices,
+                        &sequencer_frame.frame.dirty_widget_ids,
+                    );
+                assert_eq!(
+                    retained_stats.missing_previous_runs, 0,
+                    "Escape render must update the retained scene without missing runs"
+                );
+                assert_eq!(
+                    retained_stats.invalid_previous_runs, 0,
+                    "Escape render must update the retained scene without invalid runs"
+                );
+                let deselected_step_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*step*")
+                    .expect("visible step frame after Escape");
+                let deselected_step_layout = deselected_step_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("visible step layout after Escape");
+                let (deselected_step_runs, _) =
+                    eseqlisp::widget_render::collect_metal_primitive_runs(
+                        deselected_step_layout,
+                        step_viewport,
+                        step_viewport.scroll_top,
+                        70,
+                    );
+                assert!(
+                    !deselected_step_runs.is_empty(),
+                    "Escape render must rebuild the active *step* Metal scene"
+                );
+                let selected_shells_after_escape = retained_runs
+                    .iter()
+                    .flat_map(|run| &run.primitives)
+                    .filter(|primitive| {
+                        matches!(
+                            eseqlisp::widget_render::innermost_primitive(primitive),
+                            eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                                widget_type,
+                                instance,
+                                ..
+                            } if widget_type == "seqv-step-shell" && instance.uniform_b[0] > 0.5
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    selected_shells_after_escape, 0,
+                    "the retained Metal scene must contain no selected step shells after Escape"
+                );
                 if iteration >= WARMUPS {
                     samples.push(duration_ms(started.elapsed()));
                 }
@@ -5023,7 +5176,8 @@ mod tests {
                 samples[index]
             };
             eprintln!(
-                "[project-92-escape-deselect] tracks={} steps={} active={} selected={} samples={} median_ms={:.3} p95_ms={:.3} min_ms={:.3} max_ms={:.3}",
+                "[project-92-escape-deselect] focused_buffer={} tracks={} steps={} active={} selected={} samples={} median_ms={:.3} p95_ms={:.3} min_ms={:.3} max_ms={:.3}",
+                focused_buffer_name,
                 app.tracks.len(),
                 STEP_COUNT,
                 STEP_COUNT / 2,
@@ -5683,13 +5837,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
             let frame_build_elapsed = frame_build_started.elapsed();
             let render_started = Instant::now();
-            backend
+            let render_status = backend
                 .render_tiled(&tiled_frame)
                 .map_err(|_| "render failed")?;
             let render_elapsed = render_started.elapsed();
             ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
-            editor.clear_needs_redraw();
-            last_render_at = Instant::now();
+            match render_status {
+                eseqlisp::metal_backend::TiledRenderStatus::Presented => {
+                    editor.clear_needs_redraw();
+                    last_render_at = Instant::now();
+                }
+                eseqlisp::metal_backend::TiledRenderStatus::NotPresented => {
+                    eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
+                    last_render_at = Instant::now();
+                }
+            }
             continue;
         }
         if widget_animation_active {
@@ -17772,12 +17934,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if stub_animation_active && !editor.needs_redraw() && !sdf_animation_active {
                 if let Some(tiled_frame) = stub_animation_cache.frame() {
                     let render_started = Instant::now();
-                    backend
+                    let render_status = backend
                         .render_tiled(tiled_frame)
                         .map_err(|_| "render failed")?;
                     ui_loop_stats.note_frame(Duration::ZERO, render_started.elapsed());
+                    if render_status == eseqlisp::metal_backend::TiledRenderStatus::Presented {
+                        last_render_at = Instant::now();
+                        continue;
+                    }
                     last_render_at = Instant::now();
-                    continue;
                 }
             }
         }
@@ -17788,18 +17953,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
             let frame_build_elapsed = frame_build_started.elapsed();
             let render_started = Instant::now();
-            backend
+            let render_status = backend
                 .render_tiled(&tiled_frame)
                 .map_err(|_| "render failed")?;
             let render_elapsed = render_started.elapsed();
             ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
-            editor.clear_needs_redraw();
-            if backend.agent_instrument_stub_animation_visible() {
-                stub_animation_cache.store(viewport_size, tiled_frame);
-            } else {
-                stub_animation_cache.reset();
+            match render_status {
+                eseqlisp::metal_backend::TiledRenderStatus::Presented => {
+                    editor.clear_needs_redraw();
+                    if backend.agent_instrument_stub_animation_visible() {
+                        stub_animation_cache.store(viewport_size, tiled_frame);
+                    } else {
+                        stub_animation_cache.reset();
+                    }
+                    last_render_at = Instant::now();
+                }
+                eseqlisp::metal_backend::TiledRenderStatus::NotPresented => {
+                    eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
+                    last_render_at = Instant::now();
+                }
             }
-            last_render_at = Instant::now();
         }
 
         if editor.should_quit() {
