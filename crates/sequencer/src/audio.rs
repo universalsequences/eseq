@@ -2062,6 +2062,19 @@ fn live_slot_default_node_param_value(
     slot.defaults.get(param_idx)
 }
 
+fn snapshot_slot_default_node_param_value(
+    slot: &EffectSlotSnapshot,
+    node_param_idx: u64,
+    default: f32,
+) -> f32 {
+    let Some(param_idx) = slot.param_node_indices.iter().position(|idx| {
+        u64::from(*idx) == node_param_idx
+    }) else {
+        return default;
+    };
+    slot.defaults.get(param_idx).copied().unwrap_or(default)
+}
+
 fn key_lock_identity_matches(
     key_lock_ids: &std::collections::BTreeMap<u8, Vec<Option<crate::neural::ParamNodeId>>>,
     note: u8,
@@ -2296,6 +2309,37 @@ fn resolve_live_instrument_defaults(
             continue;
         };
         let value = slot.defaults.get(param_idx);
+        if !value.is_finite() {
+            continue;
+        }
+        params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
+    }
+    params.sort_by_key(|param| match param.target {
+        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+    });
+    params
+}
+
+fn resolve_snapshot_instrument_defaults(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+) -> ScheduledInstrumentParams {
+    let Some(slot) = snapshot.tracks.get(track_idx).map(|track| &track.instrument_slot) else {
+        return ScheduledInstrumentParams::new();
+    };
+    let mut params = ScheduledInstrumentParams::new();
+    let num_params = (slot.num_params as usize).min(slot.defaults.len());
+    for param_idx in 0..num_params {
+        let Some((target, idx, span)) = snapshot_param_route(slot, param_idx) else {
+            continue;
+        };
+        let value = slot.defaults[param_idx];
         if !value.is_finite() {
             continue;
         }
@@ -5953,7 +5997,8 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let voice_lid = allocation.logical_id;
-                let default_params = resolve_live_instrument_defaults(&data.state, kt.track);
+                let default_params =
+                    resolve_snapshot_instrument_defaults(&data.scheduler_snapshot, kt.track);
                 let default_tensor_params =
                     resolve_live_instrument_tensor_defaults(&data.state, kt.track);
                 let key_locked_params = key_locked_live_instrument_params(
@@ -6050,32 +6095,42 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     continue;
                 }
                 let tp = &data.state.pattern.track_params[kt.track];
-                let kb_inst_slot = &data.state.pattern.instrument_slots[kt.track];
-                let attack_samples =
-                    kb_inst_slot.defaults.get(0) * data.sample_rate as f32 / 1000.0;
-                let release_samples =
-                    kb_inst_slot.defaults.get(1) * data.sample_rate as f32 / 1000.0;
+                let Some(kb_inst_slot) = data
+                    .scheduler_snapshot
+                    .tracks
+                    .get(kt.track)
+                    .map(|track| &track.instrument_slot)
+                else {
+                    continue;
+                };
+                let kb_default = |param_idx: usize| {
+                    kb_inst_slot.defaults.get(param_idx).copied().unwrap_or(0.0)
+                };
+                let kb_instrument_params =
+                    resolve_snapshot_instrument_defaults(&data.scheduler_snapshot, kt.track);
+                let attack_samples = kb_default(0) * data.sample_rate as f32 / 1000.0;
+                let release_samples = kb_default(1) * data.sample_rate as f32 / 1000.0;
                 let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
-                let kb_start = kb_inst_slot.defaults.get(2);
-                let kb_end = kb_inst_slot.defaults.get(3);
-                let kb_enabled = kb_inst_slot.defaults.get(4);
-                let kb_reverse = kb_inst_slot.defaults.get(5);
-                let kb_loop_mode = kb_inst_slot.defaults.get(6);
+                let kb_start = kb_default(2);
+                let kb_end = kb_default(3);
+                let kb_enabled = kb_default(4);
+                let kb_reverse = kb_default(5);
+                let kb_loop_mode = kb_default(6);
                 let kb_loop_xfade_samples =
-                    kb_inst_slot.defaults.get(7) * data.sample_rate as f32 / 1000.0;
-                let kb_sr_hz = kb_inst_slot.defaults.get(8);
-                let kb_playback_speed = kb_inst_slot.defaults.get(12);
-                let kb_warp_preserve = live_slot_default_node_param_value(
+                    kb_default(7) * data.sample_rate as f32 / 1000.0;
+                let kb_sr_hz = kb_default(8);
+                let kb_playback_speed = kb_default(12);
+                let kb_warp_preserve = snapshot_slot_default_node_param_value(
                     kb_inst_slot,
                     crate::sampler::PARAM_WARP_PRESERVE,
                     crate::sampler::WARP_PRESERVE_DEFAULT as f32,
                 );
-                let kb_warp_seg_loop_mode = live_slot_default_node_param_value(
+                let kb_warp_seg_loop_mode = snapshot_slot_default_node_param_value(
                     kb_inst_slot,
                     crate::sampler::PARAM_WARP_SEG_LOOP_MODE,
                     crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
                 );
-                let kb_warp_seg_envelope = live_slot_default_node_param_value(
+                let kb_warp_seg_envelope = snapshot_slot_default_node_param_value(
                     kb_inst_slot,
                     crate::sampler::PARAM_WARP_SEG_ENVELOPE,
                     crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
@@ -6091,18 +6146,17 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 ) = sampler_warp_runtime(
                     &data.state,
                     kt.track,
-                    kb_inst_slot.defaults.get(9),
-                    kb_inst_slot.defaults.get(10),
-                    kb_inst_slot.defaults.get(11),
+                    kb_default(9),
+                    kb_default(10),
+                    kb_default(11),
                 );
                 if voice.modulator_id > 0 {
                     let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
                     unsafe {
-                        dispatch_sampler_modulator_defaults_to_voice(
+                        dispatch_sampler_modulator_params_to_voice(
                             data.lg.0,
-                            &data.state,
-                            kt.track,
                             voice.modulator_id as u64,
+                            &kb_instrument_params,
                         );
                         send_custom_trigger(
                             data.lg.0,
@@ -6144,13 +6198,12 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         kb_warp_preserve,
                         kb_warp_seg_loop_mode,
                         kb_warp_seg_envelope,
-                        kb_inst_slot.defaults.get(13),
+                        kb_default(13),
                     );
-                    dispatch_sampler_extra_defaults_to_voice(
+                    dispatch_sampler_extra_params_to_voice(
                         data.lg.0,
-                        &data.state,
-                        kt.track,
                         voice_lid,
+                        &kb_instrument_params,
                     );
                 }
                 store_active_keyboard_note(
@@ -6644,7 +6697,8 @@ mod tests {
         free_patch_transport_route_target, instrument_sound_fingerprint,
         key_locked_live_instrument_params, mute_group_winner_for_block_events,
         rack_slot_matches_routing, rack_slot_playback_transpose, resolve_live_instrument_defaults,
-        resolve_live_keyboard_transpose, resolved_chord_transpose, sampler_warp_runtime,
+        resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
+        resolved_chord_transpose, sampler_warp_runtime,
         select_output_channels, select_output_config, store_active_keyboard_note,
         swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
         ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
@@ -6754,6 +6808,44 @@ mod tests {
         assert_eq!(param_value(&c4_params, 1), Some(-12.0));
         assert_eq!(param_value(&d4_params, 1), Some(-7.0));
         assert_eq!(param_value(&offset_params, 1), Some(7.0));
+    }
+
+    #[test]
+    fn live_keyboard_defaults_use_macro_effective_scheduler_snapshot() {
+        let desc = EffectDescriptor::builtin_filter();
+        let state = SequencerState::new(1, vec![crate::sequencer::default_empty_effect_chain()]);
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 42);
+        let param_id = state.pattern.instrument_slots[0].param_node_id(0);
+        let mut macros = crate::macro_engine::MacroEngine::default();
+        let macro_id = macros
+            .create_macro("keyboard", crate::macro_engine::MacroKind::Mapped)
+            .expect("macro");
+        macros
+            .add_mapping(
+                macro_id,
+                crate::macro_engine::MacroMapping::new_resolved(
+                    0,
+                    crate::process::ParamTarget::InstrumentParam {
+                        param: desc.params[0].name.clone(),
+                        param_id,
+                    },
+                    Some(0),
+                    100.0,
+                    900.0,
+                    crate::macro_engine::MacroCurve::Linear,
+                )
+                .expect("mapping"),
+            )
+            .expect("mapped");
+
+        let snapshot = state.publish_macro_overrides(macros.override_snapshot());
+        let defaults = resolve_snapshot_instrument_defaults(&snapshot, 0);
+
+        assert_eq!(
+            param_value(&defaults, desc.params[0].node_param_idx as u64),
+            Some(100.0),
+            "a macro at zero must initialize a new keyboard voice at its mapped minimum"
+        );
     }
 
     #[test]

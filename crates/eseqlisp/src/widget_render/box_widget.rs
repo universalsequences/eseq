@@ -1,17 +1,17 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
 #[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalRectPrimitive, WidgetInstance, WidgetViewport, get_f32_prop, ndc_bounds,
-    resolve_named_color,
+    get_f32_prop, ndc_bounds, resolve_named_color, MetalCirclePrimitive, MetalCircleVisibleHalf,
+    MetalPrimitive, MetalRectPrimitive, WidgetInstance, WidgetViewport,
 };
+use super::{resolve_align, Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent};
 #[cfg(target_os = "macos")]
 use crate::backend::Color;
 use crate::layout::{
-    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-    prop_is_keyword, shrink_constraints_xy,
+    f64_to_f32, get_prop_num, prop_is_keyword, shrink_constraints_xy, Constraints, LayoutCtx,
+    LayoutNode, MeasureCtx, Rect, Size,
 };
 use crate::vm::Value;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
@@ -281,7 +281,7 @@ impl WidgetDefinition for BoxWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["selected", "muted"]
+        &["selected", "muted", "macro-owned"]
     }
 
     fn measure(
@@ -719,6 +719,27 @@ impl WidgetDefinition for BoxWidget {
                 viewport,
                 &node.props,
             ));
+        }
+
+        if box_state_active(&node.props, "macro-owned") {
+            let outer_px = 12.0;
+            let inner_px = 8.0;
+            let margin_px = 2.5;
+            let center = [
+                node.rect.col + (margin_px + outer_px * 0.5) / viewport.cell_w.max(1.0),
+                node.rect.row + (margin_px + outer_px * 0.5) / viewport.cell_h.max(1.0),
+            ];
+            for (radius_px, color) in [
+                (outer_px * 0.5, Color::rgba(0.02, 0.04, 0.025, 1.0)),
+                (inner_px * 0.5, Color::rgba(0.12, 0.95, 0.38, 1.0)),
+            ] {
+                prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+                    center,
+                    radius_px,
+                    color,
+                    visible_half: MetalCircleVisibleHalf::Full,
+                }));
+            }
         }
 
         prims

@@ -1,6 +1,6 @@
 ;; Shared state and sizing constants for the Metal Sequencer effect strip.
 ;; metal-seq-fx.lisp — Effect chain UI for Metal Sequencer
-;; Renders to *fx* buffer. Loaded by metal-seq-grid.lisp.
+;; Renders to *fx* buffer. Loaded by metal-seq-grid.lisp after shared macro state.
 
 (defstate instrument-panel-tab 0)
 (defstate instrument-source-tab 0)

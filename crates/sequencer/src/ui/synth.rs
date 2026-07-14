@@ -930,6 +930,9 @@ impl App {
     }
 
     pub fn send_instrument_param(&self, track: usize, param_idx: usize, value: f32) {
+        if self.graph.lg.0.is_null() {
+            return;
+        }
         let slot = &self.state.pattern.instrument_slots[track];
         let idx = slot.resolve_node_idx(param_idx);
         let span = slot.resolve_node_span(param_idx);

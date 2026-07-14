@@ -3,6 +3,7 @@
 ;; Public entrypoint loaded by metal-seq-grid.lisp. Keep this file as a
 ;; dependency-ordered manifest; implementation lives under metal-seq-fx/.
 
+(load "metal-seq-macro-state.lisp")
 (load "metal-seq-fx/state.lisp")
 (load "metal-seq-fx/panel-frame.lisp")
 (load "metal-seq-fx/drag-drop.lisp")

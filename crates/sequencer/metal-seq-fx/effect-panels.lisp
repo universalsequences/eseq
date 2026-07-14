@@ -144,6 +144,8 @@
 (def instrument-toggle-mods-view ()
   (do
     (set! instrument-panel-tab 0)
+    (if (not instrument-mods-open)
+      (do (macro-clear-mapping-arm) (process-map-clear)))
     (set! instrument-mods-open (not instrument-mods-open))))
 
 (def instrument-mods-toggle-button ()
@@ -164,6 +166,8 @@
              (= effect-mods-bus bus))
       (set! effect-mods-open false)
       (do
+        (macro-clear-mapping-arm)
+        (process-map-clear)
         (set! effect-mods-open true)
         (set! effect-mods-chain chain)
         (set! effect-mods-slot slot)

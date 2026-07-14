@@ -488,6 +488,9 @@ impl App {
         param_idx: usize,
         value: f32,
     ) {
+        if self.graph.lg.0.is_null() {
+            return;
+        }
         let chain = &self.state.pattern.effect_chains[track];
         if slot_idx >= chain.len() {
             return;
@@ -583,10 +586,17 @@ impl App {
         self.send_macro_targets(touched);
     }
 
+    pub fn release_macro(&mut self, id: crate::macro_engine::MacroId) {
+        let touched = self.macro_engine.release(id);
+        self.send_macro_targets(touched);
+    }
+
     pub(super) fn send_macro_targets(
         &mut self,
         touched: Vec<(usize, crate::process::ParamTarget)>,
     ) {
+        self.state
+            .publish_macro_overrides(self.macro_engine.override_snapshot());
         for (track, target) in touched {
             match target {
                 crate::process::ParamTarget::EffectParam {
@@ -725,12 +735,7 @@ impl App {
             crate::macro_engine::MacroCurve::Linear,
         )?;
         self.macro_engine.add_mapping(id, mapping)?;
-        let engaged = self
-            .macro_engine
-            .macro_definition(id)
-            .is_some_and(|macro_definition| {
-                !crate::macro_engine::value_is_identity(macro_definition.value)
-            });
+        let engaged = self.macro_engine.is_engaged(id);
         if engaged {
             self.send_macro_targets(vec![(track, resend_target)]);
         }

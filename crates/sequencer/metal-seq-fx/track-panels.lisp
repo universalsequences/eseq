@@ -20,6 +20,16 @@
       (seq-plock-timebase label)
       (seq-set-timebase label))))
 
+(def fx-track-param-plock-row (target)
+  (nth (filter |row| (= (get row :target) target) SEQ.track-plocks) 0))
+
+(def fx-track-param-plock-active? (target)
+  (if (fx-track-param-plock-row target) true false))
+
+(def fx-track-param-plock-default (target fallback)
+  (let ((row (fx-track-param-plock-row target)))
+    (if row (get row :default) fallback)))
+
 (def fx-track-bus-send-control (send)
   (v-stack :align :center :gap 0.25
     (h-stack :gap 0.25 :align :baseline
@@ -445,14 +455,25 @@
           (v-stack :align :center :gap 0.40
             (label "swg res" :font-size 8 :color :dim :bg :transparent)
             (dropdown :value SEQ.tp-swing-resolution
+              :key "fx-track-swing-resolution"
               :options '("1/16" "1/8" "1/4" "1/2")
               :on-change (lambda (v) (do (cool-off-follow) (seq-set-swing-resolution v)))
+              :plock-active (if (fx-track-param-plock-active? "swing-resolution") 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :width 5.0 :height 1.25 :font-size 9))
           (v-stack :align :center :gap 0.22
             (v-stack :gap 0.5 :align :center
               (label "swing" :font-size 8 :color :dim :bg :transparent)
               (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
+                :key "fx-track-swing"
                 :noui false :font-size 8 :text-color :dim
+                :plock-active (if (fx-track-param-plock-active? "swing") 1 0)
+                :plock-default (fx-track-param-plock-default "swing" SEQ.tp-swing)
+                :plock-color-r (param-plock-color-r)
+                :plock-color-g (param-plock-color-g)
+                :plock-color-b (param-plock-color-b)
                 :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v)))
                 :width 5.2 :height 1.15))
             )
@@ -463,6 +484,10 @@
               :key "fx-track-timebase"
               :options seq-timebase-options
               :on-change (lambda (v) (fx-set-timebase v))
+              :plock-active (if (fx-track-param-plock-active? "timebase") 1 0)
+              :plock-color-r (param-plock-color-r)
+              :plock-color-g (param-plock-color-g)
+              :plock-color-b (param-plock-color-b)
               :width 6.0 :height 1.25 :font-size 9))
 
           (v-stack :align :center :gap 0.40

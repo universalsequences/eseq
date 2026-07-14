@@ -1,10 +1,10 @@
 //! Project-global live parameter overrides.
 //!
 //! Macros sit between persisted scene defaults and the DSP live-send path.
-//! Scheduler-time p-locks and process writes remain more specific: they resolve
-//! from scene defaults at trigger time and intentionally do not read this
-//! command-thread-owned table. Consequently `Add` process writes add to base,
-//! not to the current macro value.
+//! Scheduler-time p-locks and process writes remain more specific. The command
+//! thread publishes this table into immutable scheduler snapshots, where the
+//! macro value becomes the effective default beneath explicit p-locks and
+//! authored process writes.
 
 use std::collections::HashMap;
 
@@ -12,9 +12,6 @@ use crate::neural::ParamNodeId;
 use crate::process::ParamTarget;
 
 pub type MacroId = u32;
-
-/// Values at or below this position disengage a macro.
-pub const MACRO_IDENTITY_EPSILON: f32 = 1.0e-6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MacroCurve {
@@ -252,6 +249,9 @@ pub enum MacroEngineError {
         macro_id: MacroId,
         mapping_idx: usize,
     },
+    TargetAlreadyMapped {
+        owner_id: MacroId,
+    },
     UnsupportedTarget,
     NonFiniteValue,
     NonFiniteRange,
@@ -359,6 +359,21 @@ impl MacroEngine {
             }
             macro_definition.key = Some(key);
         }
+        let mut claimed = HashMap::<MacroParamKey, MacroId>::new();
+        for existing in &self.macros {
+            for mapping in &existing.mappings {
+                if let Some(key) = mapping.resolved_key.clone() {
+                    claimed.insert(key, existing.id);
+                }
+            }
+        }
+        for mapping in &macro_definition.mappings {
+            if let Some(key) = mapping.resolved_key.clone() {
+                if let Some(owner_id) = claimed.insert(key, macro_definition.id) {
+                    return Err(MacroEngineError::TargetAlreadyMapped { owner_id });
+                }
+            }
+        }
         self.next_id = self
             .next_id
             .max(macro_definition.id.checked_add(1).unwrap_or(MacroId::MAX));
@@ -408,12 +423,33 @@ impl MacroEngine {
         id: MacroId,
         mapping: MacroMapping,
     ) -> Result<(), MacroEngineError> {
-        let Some(macro_definition) = self.macros.iter_mut().find(|item| item.id == id) else {
+        if let Some(key) = mapping.resolved_key.as_ref() {
+            if let Some(owner_id) = self.mapping_owner(key) {
+                return Err(MacroEngineError::TargetAlreadyMapped { owner_id });
+            }
+        }
+        let Some(index) = self.macros.iter().position(|item| item.id == id) else {
             return Err(MacroEngineError::UnknownMacro(id));
         };
-        macro_definition.mappings.push(mapping);
+        self.macros[index].mappings.push(mapping);
+        if matches!(self.macros[index].kind, MacroKind::Mapped)
+            && self.macros[index].last_write_order.is_none()
+        {
+            let write_order = self.allocate_write_order();
+            self.macros[index].last_write_order = Some(write_order);
+        }
         self.rebuild_ownership();
         Ok(())
+    }
+
+    fn mapping_owner(&self, key: &MacroParamKey) -> Option<MacroId> {
+        self.macros.iter().find_map(|macro_definition| {
+            macro_definition
+                .mappings
+                .iter()
+                .any(|mapping| mapping.resolved_key.as_ref() == Some(key))
+                .then_some(macro_definition.id)
+        })
     }
 
     pub fn set_mapping_range(
@@ -503,6 +539,17 @@ impl MacroEngine {
         self.override_value(key).unwrap_or(base)
     }
 
+    pub fn is_engaged(&self, id: MacroId) -> bool {
+        self.macro_definition(id)
+            .is_some_and(|macro_definition| macro_definition.last_write_order.is_some())
+    }
+
+    /// Captures the live override layer for publication into an immutable
+    /// scheduler snapshot. The scheduler never reads or locks `MacroEngine`.
+    pub fn override_snapshot(&self) -> HashMap<MacroParamKey, f32> {
+        self.overrides.clone()
+    }
+
     /// Updates one macro and returns every resolved target whose effective
     /// value must be sent again by the App layer.
     pub fn set_value(&mut self, id: MacroId, value: f32) -> Vec<(usize, ParamTarget)> {
@@ -514,11 +561,7 @@ impl MacroEngine {
             return Vec::new();
         };
 
-        let write_order = if value_is_identity(value) {
-            None
-        } else {
-            Some(self.allocate_write_order())
-        };
+        let write_order = Some(self.allocate_write_order());
         let touched = {
             let macro_definition = &mut self.macros[index];
             macro_definition.value = value;
@@ -530,6 +573,23 @@ impl MacroEngine {
                 .map(|mapping| (mapping.track, mapping.target.clone()))
                 .collect()
         };
+        self.rebuild_ownership();
+        touched
+    }
+
+    /// Explicitly releases a momentary macro without overloading value `0`,
+    /// which is a valid engaged minimum for continuous mapped macros.
+    pub fn release(&mut self, id: MacroId) -> Vec<(usize, ParamTarget)> {
+        let Some(macro_definition) = self.macros.iter_mut().find(|item| item.id == id) else {
+            return Vec::new();
+        };
+        macro_definition.last_write_order = None;
+        let touched = macro_definition
+            .mappings
+            .iter()
+            .filter(|mapping| !mapping.suspended && mapping.resolved_key.is_some())
+            .map(|mapping| (mapping.track, mapping.target.clone()))
+            .collect();
         self.rebuild_ownership();
         touched
     }
@@ -584,6 +644,18 @@ impl MacroEngine {
                 touched.push((mapping.track, mapping.target.clone()));
             }
         }
+        let mut claimed = HashMap::<MacroParamKey, MacroId>::new();
+        for macro_definition in &mut self.macros {
+            for mapping in &mut macro_definition.mappings {
+                let Some(key) = mapping.resolved_key.clone() else {
+                    continue;
+                };
+                if claimed.insert(key, macro_definition.id).is_some() {
+                    mapping.resolved_key = None;
+                    mapping.suspended = true;
+                }
+            }
+        }
         self.rebuild_ownership();
         touched
     }
@@ -594,9 +666,6 @@ impl MacroEngine {
             let Some(write_order) = macro_definition.last_write_order else {
                 continue;
             };
-            if value_is_identity(macro_definition.value) {
-                continue;
-            }
             for mapping in &macro_definition.mappings {
                 if mapping.suspended {
                     continue;
@@ -650,10 +719,6 @@ pub fn normalize_macro_key(key: &str) -> Result<String, MacroEngineError> {
 fn mapping_touch(mapping: &MacroMapping) -> Option<(usize, ParamTarget)> {
     (!mapping.suspended && mapping.resolved_key.is_some())
         .then(|| (mapping.track, mapping.target.clone()))
-}
-
-pub fn value_is_identity(value: f32) -> bool {
-    value.is_finite() && value.abs() <= MACRO_IDENTITY_EPSILON
 }
 
 pub fn lerp_curved(range_min: f32, range_max: f32, value: f32, curve: MacroCurve) -> f32 {
@@ -722,54 +787,45 @@ mod tests {
         assert_eq!(engine.effective_value(&key, 0.1), 0.5);
         assert_eq!(engine.effective_value(&key, 0.35), 0.5);
 
-        engine.set_value(id, 0.0);
+        engine.release(id);
         assert_eq!(engine.effective_value(&key, 0.35), 0.35);
         assert_eq!(engine.override_value(&key), None);
     }
 
     #[test]
-    fn identity_epsilon_releases_the_override() {
+    fn zero_is_an_engaged_continuous_macro_minimum() {
         let (mut engine, id) = mapped_engine(0.2, 0.8);
         let key = effect_key(11);
 
         engine.set_value(id, 1.0);
-        engine.set_value(id, MACRO_IDENTITY_EPSILON);
+        engine.set_value(id, 0.0);
 
-        assert_eq!(engine.override_value(&key), None);
-        assert!(value_is_identity(MACRO_IDENTITY_EPSILON));
-        assert!(!value_is_identity(MACRO_IDENTITY_EPSILON * 2.0));
+        assert_eq!(engine.override_value(&key), Some(0.2));
+        assert!(engine.is_engaged(id));
     }
 
     #[test]
-    fn contested_param_is_last_writer_wins_with_ordered_release() {
+    fn one_parameter_can_only_be_owned_by_one_macro() {
         let (mut engine, first) = mapped_engine(0.0, 0.4);
         let second = engine
             .create_macro("second", MacroKind::Mapped)
             .expect("macro id");
-        engine
-            .add_mapping(
+        assert_eq!(
+            engine.add_mapping(
                 second,
                 MacroMapping::new(0, effect_target(11), 0.0, 0.9, MacroCurve::Linear)
                     .expect("mapping"),
-            )
-            .expect("known macro");
+            ),
+            Err(MacroEngineError::TargetAlreadyMapped { owner_id: first })
+        );
         let key = effect_key(11);
 
         engine.set_value(first, 1.0);
         engine.set_value(second, 1.0);
-        assert_eq!(engine.override_value(&key), Some(0.9));
-
-        engine.set_value(second, 0.0);
         assert_eq!(engine.override_value(&key), Some(0.4));
-
-        engine.set_value(second, 1.0);
-        engine.set_value(first, 0.5);
-        assert_eq!(engine.override_value(&key), Some(0.2));
-
-        engine.set_value(first, 0.0);
-        assert_eq!(engine.override_value(&key), Some(0.9));
-        engine.set_value(second, 0.0);
+        engine.release(first);
         assert_eq!(engine.override_value(&key), None);
+        assert!(engine.macro_definition(second).unwrap().mappings.is_empty());
     }
 
     #[test]
@@ -901,7 +957,10 @@ mod tests {
         assert_eq!(ensured, id);
         assert_eq!(engine.macros().len(), 1);
         let macro_definition = engine.macro_definition(id).unwrap();
-        assert_eq!(macro_definition.key.as_deref(), Some("performance/delay-push"));
+        assert_eq!(
+            macro_definition.key.as_deref(),
+            Some("performance/delay-push")
+        );
         assert_eq!(macro_definition.name, "My Delay");
         assert_eq!(macro_definition.value, 0.75);
         assert_eq!(macro_definition.mappings.len(), 1);

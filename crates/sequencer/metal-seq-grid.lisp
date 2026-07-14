@@ -4,7 +4,6 @@
 (load "metal-seq-themes.lisp")
 (seq-theme-mac-osx-dark)
 (load "metal-seq-materials.lisp")
-(load "metal-seq-macros.lisp")
 
 (defstate selected-bus -1)
 
@@ -61,6 +60,7 @@
 (load "metal-seq-browser.lisp")
 (load "metal-seq-mixer-v2.lisp")
 (load "metal-seq-fx.lisp")
+(load "metal-seq-macros.lisp")
 (load "metal-seq-piano-roll.lisp")
 (load "metal-seq-transport.lisp")
 (load "metal-seq-agent.lisp")
@@ -487,7 +487,14 @@
     min-width max-width min-height max-height))
 
 (def seq-samples-sidebar-layout-spec ()
-  (seq-samples-panel-layout-spec 34 42 nil nil))
+  (if (param-macro-mapping-active?)
+    (seq-collapsible-panel-layout-spec "*macro-mappings*"
+      (lambda () (macro-clear-mapping-arm))
+      46 64 nil nil)
+    (seq-samples-panel-layout-spec 34 42 nil nil)))
+
+(def seq-sidebar-ratio ()
+  (if (param-macro-mapping-active?) 0.34 0.2))
 
 (def seq-main-and-mixer-layout-spec ()
   (if mixer-panel-visible
@@ -500,8 +507,8 @@
   (let ((main-layout
           (if samples-sidebar-visible
             (list :cols :gap 1
-              0.2 (seq-samples-sidebar-layout-spec)
-              0.8 (seq-main-and-mixer-layout-spec))
+              (seq-sidebar-ratio) (seq-samples-sidebar-layout-spec)
+              (- 1.0 (seq-sidebar-ratio)) (seq-main-and-mixer-layout-spec))
             (seq-main-and-mixer-layout-spec))))
     (if lower-panel-visible
       (list :rows :gap 1
@@ -608,6 +615,21 @@
       (if (= lower-panel-buffer "*piano-roll*")
         (seq-apply-piano-roll-layout)
         (seq-apply-fx-layout)))))
+
+(defstate macro-mapping-sidebar-was-visible true)
+
+(def macro-mapping-sidebar-open-hook ()
+  (do
+    (set! macro-mapping-sidebar-was-visible samples-sidebar-visible)
+    (set! samples-sidebar-visible true)))
+
+(def macro-mapping-sidebar-refresh-hook ()
+  (seq-refresh-current-layout))
+
+(def macro-mapping-sidebar-close-hook ()
+  (do
+    (set! samples-sidebar-visible macro-mapping-sidebar-was-visible)
+    (seq-refresh-current-layout)))
 
 (def seq-hide-samples-sidebar ()
   (if samples-sidebar-visible

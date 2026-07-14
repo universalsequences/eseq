@@ -2728,6 +2728,9 @@ pub struct SequencerState {
     pub runtime: RuntimeBindingState,
     scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     scheduler_snapshot_version: AtomicU64,
+    /// Command-thread macro values waiting to be folded into the next
+    /// immutable scheduler snapshot. The scheduler never reads this lock.
+    live_macro_overrides: Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
     neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     track_output_events: Mutex<Vec<TrackOutputEvent>>,
@@ -3012,6 +3015,7 @@ impl SequencerState {
             },
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
+            live_macro_overrides: Mutex::new(HashMap::new()),
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             graph_visualizations: Mutex::new(Vec::new()),
             track_output_events: Mutex::new(Vec::new()),
@@ -4284,6 +4288,20 @@ impl SequencerState {
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         let snapshot = Arc::new(SequencerSnapshot::capture(self));
         self.publish_scheduler_snapshot_arc(snapshot)
+    }
+
+    /// Replaces the command-thread macro layer and immediately publishes a
+    /// scheduler snapshot containing those effective defaults.
+    pub fn publish_macro_overrides(
+        &self,
+        overrides: HashMap<crate::macro_engine::MacroParamKey, f32>,
+    ) -> Arc<SequencerSnapshot> {
+        *self.live_macro_overrides.lock().unwrap() = overrides;
+        self.publish_scheduler_snapshot()
+    }
+
+    pub(super) fn live_macro_overrides(&self) -> HashMap<crate::macro_engine::MacroParamKey, f32> {
+        self.live_macro_overrides.lock().unwrap().clone()
     }
 
     fn publish_scheduler_snapshot_arc(

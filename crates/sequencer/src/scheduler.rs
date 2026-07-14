@@ -7627,8 +7627,8 @@ mod tests {
         midi_fx_window_events_from_step, process_device_write_value, quantized_live_tick_sample,
         reconcile_graph_runtimes, resolve_effect_params, resolve_instrument_plocks,
         resolve_sampler_params, resolved_slot_param_value, run_midi_fx_chain_for_track,
-        schedule_playing_lookahead, should_reload_neural_runtime, slot_param_identity,
-        swung_network_sample_time, track_active_note_spans_at_beat, track_note_spans_for_trigger,
+        schedule_playing_lookahead, should_reload_neural_runtime, swung_network_sample_time,
+        track_active_note_spans_at_beat, track_note_spans_for_trigger,
         EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState,
         SchedulerLookaheadState, SnapshotSequencerClock,
     };
@@ -7678,7 +7678,7 @@ mod tests {
     }
 
     #[test]
-    fn macro_live_override_is_masked_by_plock_and_process_add_reads_base() {
+    fn macro_snapshot_is_masked_by_plock_and_process_add_reads_effective_default() {
         let descriptor = ParamDescriptor {
             name: "cutoff".to_string(),
             min: 0.0,
@@ -7700,10 +7700,14 @@ mod tests {
             tensor_params: Vec::new(),
             params: vec![descriptor.clone()],
         };
-        let mut slot = crate::effects::EffectSlotSnapshot::new_default(&effect, 11);
-        assert!(slot.set_plock(3, 0, 0.9));
+        let state = SequencerState::new(
+            1,
+            vec![vec![crate::effects::EffectSlotState::new(&effect, 11)]],
+        );
+        let live_slot = &state.pattern.effect_chains[0][0];
+        live_slot.set_plock(3, 0, 0.9);
 
-        let param_id = slot_param_identity(slot.node_id, slot.modulator_node_id, 7);
+        let param_id = live_slot.param_node_id(0);
         let target = crate::process::ParamTarget::EffectParam {
             slot: 0,
             effect: effect.name.clone(),
@@ -7731,16 +7735,29 @@ mod tests {
         macros.set_value(macro_id, 1.0);
         assert_eq!(macros.override_value(&key), Some(0.8));
 
+        let snapshot = state.publish_macro_overrides(macros.override_snapshot());
+        let slot = &snapshot.tracks[0].effect_slots[0];
+
         assert_eq!(resolved_slot_param_value(&slot, 3, 0, 0.0), 0.9);
-        assert_eq!(
-            process_device_write_value(
+        assert_eq!(resolved_slot_param_value(&slot, 0, 0, 0.0), 0.8);
+        assert!(
+            (process_device_write_value(
                 &descriptor,
                 resolved_slot_param_value(&slot, 0, 0, 0.0),
                 crate::process::ProcessTargetOp::Add,
                 0.1,
-            ),
-            0.3,
-            "scheduler Add writes intentionally ride the persisted base, not the command-thread macro override"
+            ) - 0.9)
+                .abs()
+                < 1.0e-6,
+            "scheduler Add writes must build on the macro-effective default"
+        );
+
+        macros.release(macro_id);
+        let snapshot = state.publish_macro_overrides(macros.override_snapshot());
+        assert_eq!(
+            resolved_slot_param_value(&snapshot.tracks[0].effect_slots[0], 0, 0, 0.0),
+            0.2,
+            "releasing the macro must restore the persisted default in playback snapshots"
         );
     }
 

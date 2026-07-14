@@ -2707,6 +2707,8 @@ impl App {
                 target,
             )
         });
+        self.state
+            .publish_macro_overrides(self.macro_engine.override_snapshot());
 
         self.push_master_volume();
         for track_idx in 0..self.tracks.len() {

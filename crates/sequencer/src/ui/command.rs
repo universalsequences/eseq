@@ -726,6 +726,9 @@ pub enum AppCommand {
         id: MacroId,
         value: f32,
     },
+    MacroRelease {
+        id: MacroId,
+    },
     MacroMapParam {
         id: MacroId,
         track: usize,
@@ -1436,7 +1439,7 @@ mod tests {
         assert_eq!(app.state.pattern.effect_chains[0][0].defaults.get(0), 0.35);
         assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.8));
 
-        app.set_macro_value(id, 0.0);
+        app.release_macro(id);
         assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.35));
     }
 
@@ -1470,7 +1473,11 @@ mod tests {
 
         let mapping = &app.macro_engine.macro_definition(id).unwrap().mappings[0];
         assert_eq!((mapping.range_min, mapping.range_max), (0.0, 1.0));
-        assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.37));
+        assert_eq!(
+            app.effective_slot_param_value(0, 0, 0),
+            Some(0.0),
+            "mapping a zero-position continuous macro must take ownership at its minimum"
+        );
         assert_eq!(
             mapping.target,
             ParamTarget::EffectParam {
@@ -1618,7 +1625,7 @@ mod tests {
         assert_eq!(app.state.pattern.instrument_slots[0].defaults.get(0), 0.4);
         assert_eq!(app.effective_instrument_param_value(0, 0), Some(0.9));
 
-        app.set_macro_value(id, 0.0);
+        app.release_macro(id);
         assert_eq!(app.effective_instrument_param_value(0, 0), Some(0.4));
     }
 
@@ -1828,6 +1835,7 @@ fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
             | AppCommand::MacroDelete { .. }
             | AppCommand::MacroRename { .. }
             | AppCommand::MacroSetValue { .. }
+            | AppCommand::MacroRelease { .. }
             | AppCommand::MacroMapParam { .. }
             | AppCommand::MacroSetRange { .. }
             | AppCommand::MacroSetCurve { .. }
@@ -2504,6 +2512,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             }
         }
         AppCommand::MacroSetValue { id, value } => app.set_macro_value(id, value),
+        AppCommand::MacroRelease { id } => app.release_macro(id),
         AppCommand::MacroMapParam { id, track, target } => {
             if let Err(error) = app.map_macro_param(id, track, target) {
                 eprintln!("macro-map-param failed: {error:?}");

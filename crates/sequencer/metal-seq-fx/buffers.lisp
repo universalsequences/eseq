@@ -79,7 +79,8 @@
     (box :padding 1.0
       (v-stack :gap 0.2
         (fx-track-parameters-panel)
-        (fx-track-accumulator-panel)))))
+        ;(fx-track-accumulator-panel)
+        ))))
 
 (effect-buffer "*fx*"
   (if (fx-has-selected-bus?)
@@ -89,10 +90,14 @@
     ;; Mapping changes the wrapper structure of every compatible parameter.
     ;; A distinct root forces those cached parameter subtrees to be rebuilt
     ;; immediately when mapping is armed from this same panel.
+    (if (param-macro-mapping-active?)
+      (box :debug-name "fx-param-map-active-root" :padding 0
+        (subtree :key (param-macro-structure-key)
+          (fx-track-selection-panel)))
     (if (process-map-active?)
-      (box :debug-name "fx-process-map-active-root" :padding 0
+      (box :debug-name "fx-param-map-active-root" :padding 0
         (fx-track-selection-panel))
-      (fx-track-selection-panel)))))
+      (fx-track-selection-panel))))))
 
 (define-mode "seq-fx-mode" :read-only true)
 (mode-bind-key "seq-fx-mode" "BS" "fx-delete-selected-effect")

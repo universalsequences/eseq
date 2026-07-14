@@ -2159,8 +2159,7 @@ fn sync_effect_param_authoring_display(editor: &mut Editor, sync: EffectParamDis
     }
     ui_dirty |= sync_track_effect_param_value_field_with_neural_selection(
         editor.runtime_mut(),
-        sync.state,
-        sync.effect_descriptors,
+        sync.app,
         sync.track,
         sync.slot_idx,
         sync.param_idx,
@@ -2749,8 +2748,7 @@ fn apply_ui_invalidations(
                         displayed_plock_step(state, track, selected_plock_step(selected_steps));
                     needs_reactive_cycle |= sync_track_effect_param_value_field(
                         rt,
-                        state,
-                        &app.graph.effect_descriptors,
+                        app,
                         track,
                         slot,
                         param,
@@ -8015,6 +8013,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "macro-release" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(id) = map_u32(map, "id") {
+                                ui::apply_command(&mut app, ui::AppCommand::MacroRelease { id });
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
                     "macro-map-param" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(id) = map_u32(map, "id") {
@@ -8839,8 +8845,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             );
                                             if sync_track_effect_param_value_field(
                                                 editor.runtime_mut(),
-                                                &state,
-                                                &app.graph.effect_descriptors,
+                                                &app,
                                                 track,
                                                 slot_idx,
                                                 param_idx,
@@ -17246,6 +17251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 let rt = editor.runtime_mut();
+                sync_macro_state(rt, &app);
                 if app.tracks.is_empty() {
                     sync_track_topology_state(
                         rt,

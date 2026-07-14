@@ -41,8 +41,9 @@ patterns* (quantized), independently toggleable from the param morph. See §8.
 | Override model | Engine **live-override layer** (sample-accurate, composes with p-locks/automation, true instant pop-back). Not host-side snapshot/restore. |
 | Macro scope | **Project-global**. A macro can map to any instrument or effect param anywhere. |
 | Script identity | Each macro may have an immutable, project-unique **stable key**. Script-authored surfaces use the key; numeric `MacroId` remains the engine/persistence identity. Re-evaluating a script must ensure/reuse, never duplicate, its keyed macros. |
-| Triggers | **Continuous knob** + **momentary button**. Sequenceable macro value is deferred (Phase 5). |
+| Triggers | **Continuous knob** + **momentary button**. A continuous mapped macro remains engaged at `0` (its mapped minimum); momentary release is an explicit operation. Sequenceable macro value is deferred (Phase 5). |
 | Range anchoring | **Absolute** device-unit min/max captured at map time. While engaged, the param is fully macro-controlled (UI edits to base are masked until release). |
+| Mapping ownership | **Exclusive per parameter.** A parameter may belong to at most one macro. Mapped device controls are read-only and carry a green ownership dot; ranges are edited in the mapping table. |
 | Target type | **Reuse `crate::process::ParamTarget`** (new in rev 2) — do not invent a parallel `MacroTarget` enum. See §2.4/§3.2. |
 | Scene-macro anchoring | **Live reference, diff at press time** (not a snapshot captured at map time). Editing scene 4 changes what the push does. See §8.2. |
 
@@ -184,9 +185,10 @@ override table. The effective value pushed to any DSP node becomes:
 effective(param) = macro_override(param).unwrap_or(slot.defaults.get(param))
 ```
 
-`slot.defaults` is never written by the macro. When a macro disengages (value
-returns to identity / button released, and no other macro overrides the param),
-the override entry is removed and the base value is re-sent — instant pop-back.
+`slot.defaults` is never written by the macro. A continuous mapped macro stays
+engaged across its full `0..1` domain: `0` means `range_min`, not release. When
+a momentary macro is explicitly released, the override entry is removed and
+the base value is re-sent — instant pop-back.
 
 ### 3.2 Data structures
 
@@ -279,7 +281,7 @@ live macro value — the override still wins until released.
 
 ```rust
 impl MacroEngine {
-    /// Called whenever a macro's value changes (knob drag, button press/release).
+    /// Called whenever a macro's value changes (knob drag or button press).
     /// Returns the set of (track, target) params whose effective value must be
     /// re-sent.
     fn set_value(&mut self, id: MacroId, value: f32) -> Vec<(usize, ParamTarget)> {
@@ -288,32 +290,31 @@ impl MacroEngine {
         let mut touched = vec![];
         for map in &m.mappings {
             let key = MacroParamKey::from(map);
-            if value_is_identity(value) /* e.g. == 0.0 within eps */ {
-                // disengage: drop override unless another macro still owns it
-                self.maybe_release(key);
-            } else {
-                let v = lerp_curved(map.range_min, map.range_max, value, map.curve);
-                self.overrides.insert(key, v);  // last-writer-wins on contested params
-            }
+            let v = lerp_curved(map.range_min, map.range_max, value, map.curve);
+            self.overrides.insert(key, v);  // mapping ownership is exclusive
             touched.push((map.track, map.target.clone()));
         }
         touched
     }
+
+    /// Momentary controls release explicitly; value zero remains meaningful.
+    fn release(&mut self, id: MacroId) -> Vec<(usize, ParamTarget)> { /* ... */ }
 }
 ```
 
 The App layer takes `touched` and calls `send_effective_*` for each, so the DSP
-nodes update. On button release the App calls `set_value(id, 0.0)` which releases
-overrides and re-sends base values → pop-back.
+nodes update. Mapping a continuous macro immediately owns the parameter at its
+current `0..1` position, including zero. On momentary button release the App
+calls `release(id)`, which removes overrides and re-sends base values → pop-back.
 
 ### 3.5 Threading / RT-safety
 
 `send_slot_param` already crosses to the audio graph; macro recompute happens on
 the UI/command thread (same thread as `apply_command`), so the override table is
 **not** touched from the RT audio callback *or the scheduler/lookahead thread*.
-No new locks. Process target writes (§2.4) run in the scheduler and never read
-the override table — they layer at trigger time downstream of whatever value the
-node currently holds, exactly as they do today relative to plain defaults. If,
+The command thread folds a copy into immutable scheduler snapshots, so neither
+audio path locks the engine. Process target writes (§2.4) layer over those
+macro-effective snapshot defaults. If,
 in Phase 5, a process outlet drives a macro, the value is marshalled onto the
 command thread (out of scope here, but the table stays single-threaded).
 
@@ -348,8 +349,8 @@ manual scene switch (§8.5).
 - Rewire `SetEffectParam` / `SetInstrumentParam` apply arms + the
   `push_all_restored_defaults` restore path to use the effective send.
 - Unit tests: override masks base; base edit while engaged pops back to new base;
-  release with no other owner restores; two macros on one param = last-writer-wins
-  then correct release ordering; identity epsilon; scene switch under engaged
+  explicit release restores; a second macro cannot claim an owned parameter;
+  zero remains engaged at `range_min`; scene switch under engaged
   macro re-asserts overrides and suspends stale mappings.
 
 ---
@@ -392,6 +393,7 @@ Register alongside `set-instrument-param` (~7929) / `set-effect-param` (~8360):
 | `macro-delete` | `{id}` | `MacroDelete` |
 | `macro-rename` | `{id, name}` | `MacroRename` |
 | `macro-set-value` | `{id, value}` | `MacroSetValue` |
+| `macro-release` | `{id}` | `MacroRelease` |
 | `macro-map-param` | `{id, kind, track, slot-idx?, param-idx, bus?}` | `MacroMapParam` |
 | `macro-set-range` | `{id, mapping-idx, min, max}` | `MacroSetRange` |
 | `macro-set-curve` | `{id, mapping-idx, curve}` | `MacroSetCurve` |
@@ -431,23 +433,21 @@ Four things can now want the same param. The layers, from "slowest-moving" to
 1. **Base** — `slot.defaults`, per-scene, what the knob shows.
 2. **Macro override** — *live* layer on the send path (this spec). Masks base
    while engaged; between/around triggers the node holds the macro value.
-3. **P-lock** — per-step, resolved at trigger time in the scheduler over
-   `slot.defaults`. Wins over the macro *at the triggered step* (it is the more
-   specific, explicitly-sequenced intent); the node returns to the macro value
-   afterward via the live layer.
+3. **P-lock** — per-step, resolved at trigger time in the scheduler over the
+   macro-effective default published in the immutable scheduler snapshot. Wins
+   over the macro *at the triggered step* (it is the more specific,
+   explicitly-sequenced intent); an un-p-locked trigger resolves back to the
+   macro value.
 4. **Process target write** — per-trigger transient (`Set`/`Add`,
    `apply_process_target_writes`, `scheduler.rs:3370`), layered in the scheduler
    in authored order.
 
-Note an asymmetry to document and test rather than "fix": scheduler-side
-resolution (3, 4) reads `slot.defaults`, **not** the macro override — the
-override table is command-thread-only (§3.5). So a p-locked or process-written
-step computes from *base*, not from the macro value. For `Set`-style writes this
-is exactly the "p-lock wins at the step" rule. For `Add`-style process writes it
-means the offset rides the base rather than the morphed value while a macro is
-engaged — acceptable for v1 (documented), and fixable later by snapshotting the
-override table into the scheduler snapshot if it bothers in practice (that
-snapshot hook is also what Phase 5 would use).
+The mutable override table remains command-thread-only (§3.5). Whenever it
+changes, the command thread publishes a copy into the next immutable scheduler
+snapshot by folding overrides into that snapshot's parameter defaults. The
+scheduler never locks or reads `MacroEngine`. Consequently an un-p-locked step
+keeps the audible macro value, a p-lock replaces it, and an `Add` process write
+adds to the macro-effective value rather than the persisted scene base.
 
 ### 4.5 Phase 2 deliverables
 
@@ -494,27 +494,33 @@ When `macro-mapping-open`:
   target-descriptor assembly as `fx-set-effect-value` / `fx-set-instrument-value`,
 - already-mapped params for the selected macro get a brighter/filled border so the
   user sees the current set,
-- double-click an already-mapped param → `macro-unmap`.
+- parameters owned by any macro cannot be claimed by another macro.
 
 Precedence: macro mapping mode and modulation mapping mode are **mutually
 exclusive** — opening one closes the other. (The process-binding arm mode added
 by the def-process UI is a third arm mode; fold all three into one
 mutually-exclusive "arm mode" selector if the wrappers are getting crowded.)
 
-### 5.3 Range editing while armed
+### 5.3 Ownership display and mapping-table sidebar
 
-Reuse the modulation trick: while `macro-mapping-open`, a mapped knob's `:min`/
-`:max` read from the mapping's `range_min`/`range_max` and dragging the knob edits
-the **range endpoint** (which endpoint = a small toggle, or drag = max / shift-drag
-= min), not the base value. This is the direct analog of how mods-open swaps the
-knob to edit depth. Mirror `param-control-min` / `param-control-max`
-(`param-controls.lisp:323`/`:329`) and the instrument variants (`:548`/`:554`).
+Device controls retain their normal value domain during mapping; clicking the
+control only selects it. Once mapped, a control shows a small green ownership
+dot, reflects the macro's effective live value, and is read-only because the
+macro owns it. Unmapping is performed from the mapping table.
+
+While `macro-mapping-open`, the normal browser sidebar is temporarily replaced
+by a dense **Macro Mappings** table with `Macro`, `Path`, `Name`, `Min`, and
+`Max` columns. Min/max number pickers are the sole range-editing surface. The
+sidebar's previous visibility is restored when mapping closes. This keeps the
+script-authored player surface focused on performance controls and follows the
+Ableton mapping-mode information architecture.
 
 ### 5.4 Phase 3 deliverables
 
 - 2 new defstates.
 - Macro branch in both param wrappers (green highlight, map/unmap clicks).
-- Mapped-state visual (border) + range-edit-on-drag while armed.
+- Mapped-state visual (border while armed, persistent green ownership dot),
+  read-only ownership, and the sidebar mapping table.
 - Mutual exclusion with modulation (and process-binding) arm modes.
 
 ---
@@ -547,15 +553,15 @@ duplicate the macro or reset its mappings, ranges, display name, or live value.
 - **`macro-knob`**: continuous `0..1`, `on-change → macro-set-value {id, v}`.
   Reuse `knob-number` as in `modulator-knob`.
 - **`macro-momentary`**: `on-press → macro-set-value {id, 1.0}` (or a configurable
-  engage target), `on-release → macro-set-value {id, 0.0}`. Requires press/release
+  engage target), `on-release → macro-release {id}`. Requires press/release
   events — confirm the button widget exposes both (mod source ON/OFF buttons use
   `on-click`; the momentary needs `on-press`/`on-release` — if absent, add to the
   widget, small).
 - **`macro-map-button`**: toggles `macro-mapping-open` + sets `macro-mapping-selected`
   to this macro's id. Visually "armed" while active (Ableton-style).
-- **`macro-mapping-editor`**: target label, `number-picker` min + max → `macro-set-range`,
-  curve dropdown → `macro-set-curve`, unmap button → `macro-unmap`. Show the
-  param's live resolved value as a faint readout.
+- **`macro-mapping-editor`**: the reusable row/table implementation mounted by
+  mapping mode in the sidebar. It exposes Macro, Path, Name, min/max number
+  pickers, and unmap. A future expanded editor may add the curve dropdown.
 - Mapping-editor children generated with `each`, never `map` (layout tests pass with
   `map` but live rendering breaks — see repo memory `lisp-ui-each-vs-map`).
 
@@ -667,7 +673,7 @@ On engage (value leaves 0, or button press), the engine builds the mapping set
    metadata (frequencies and times must morph in their display/log domain, not
    raw units — straight-line lerp on a delay time sounds wrong).
 4. Feed the synthesized mappings into the exact same override table + recompute
-   loop as Phases 1–4. Knob = morph position; release = `set_value(id, 0.0)` →
+   loop as Phases 1–4. Knob = morph position; explicit `release(id)` →
    pop back; the synthesized mappings are then discarded.
 
 **Live reference is locked**: the diff happens at press time against the scene
@@ -732,10 +738,10 @@ press/release are shared with mapped macros.
   If scenes ever gain stable IDs, switch to those.
 - **Engage while target == current scene** → no-op morph (diff is empty), steal
   is a no-op; don't error.
-- **Two scene macros engaged at once** → allowed; overrides are
-  last-writer-wins like any two macros (§3.4). Steal: last press wins the
+- **Two scene macros engaged at once** → allowed, but the later scene macro
+  skips parameters already owned by another macro. Steal: last press wins the
   pattern state; each release returns to *its* captured origin — accept the
-  weirdness, document it (matching how momentary keys overlap on hardware).
+  pattern-side overlap and document it.
 
 ### 8.6 UI (extends the Phase 4 components)
 
@@ -784,8 +790,9 @@ Neither is built here; do not break these seams.
 
 Rust (engine, the high-risk surface):
 - override masks base; base edit while engaged → correct pop-back target;
-  release restores; identity epsilon; curve math; last-writer-wins for two macros
-  on one param + ordered release; map captures current value & `ParamNodeId`;
+  explicit release restores; zero remains engaged at the mapped minimum; curve
+  math; exclusive ownership rejects a
+  second macro on one param; map captures current value & `ParamNodeId`;
   stale-identity mapping suspended on reload *and* on scene switch; §4.4
   precedence (macro vs p-lock; macro vs process `Add` write); scene switch under
   engaged macro re-asserts overrides (§3.6).
@@ -798,7 +805,8 @@ Lisp/UI (layout + interaction, use the existing layout-test harness):
   mappings; reusable controls resolve keys through `SEQ.macros`;
 - mapping-mode green highlight appears on `:modulatable` params only;
   click in armed mode emits `macro-map-param` with correct descriptor;
-  range-edit-on-drag changes range not base; mutual exclusion with mods /
+  an owned parameter rejects a second macro, displays its effective value, and
+  cannot be edited from its device control; mutual exclusion with mods /
   process-binding arm modes; mapping editor renders with `each` over mappings
   (never `map`).
 

@@ -22,6 +22,9 @@
   (if (process-map-port-active? track slot port)
     (process-map-clear)
     (do
+      (macro-clear-mapping-arm)
+      (set! instrument-mods-open false)
+      (set! effect-mods-open false)
       (set! process-map-track track)
       (set! process-map-instance-id (get slot :instance-id))
       (set! process-map-port (get port :name))
@@ -34,6 +37,12 @@
     (set! process-map-instance-id 0)
     (set! process-map-port "")
     (set! process-map-target-kind "")))
+
+(def macro-mapping-arm-enter-hook ()
+  (do
+    (process-map-clear)
+    (set! instrument-mods-open false)
+    (set! effect-mods-open false)))
 
 (def process-map-target-map (fx p)
   (if (not (fx-param-has-idx? p))
@@ -82,6 +91,104 @@
   (if (and (process-map-active?) (process-param-bindable? fx p))
     (rgba 0.93 0.65 0.16 0.25)
     :transparent))
+
+(def param-macro-mapping-active? ()
+  (and macro-mapping-open (>= macro-mapping-selected 0)))
+
+(def param-macro-bindable? (fx p)
+  (and (get p :modulatable) (process-map-target-map fx p)))
+
+(def param-macro-selected-definition ()
+  (nth (filter |macro| (= (get macro :id) macro-mapping-selected) SEQ.macros) 0))
+
+(def param-macro-target-structure-key (target)
+  (list (get target :kind)
+        (get target :slot-idx)
+        (get target :effect)
+        (get target :fx)
+        (get target :param)))
+
+(def param-macro-structure-key ()
+  (let ((macro (param-macro-selected-definition)))
+    (str "fx-macro-map-" macro-mapping-selected "-"
+         (if macro
+           (map |mapping|
+             (list (get mapping :mapping-idx)
+                   (get mapping :track)
+                   (param-macro-target-structure-key (get mapping :target))
+                   (get mapping :min)
+                   (get mapping :max))
+             (get macro :mappings))
+           '()))))
+
+(def param-macro-target-equal? (left right)
+  (let ((kind (get left :kind)))
+    (and (= kind (get right :kind))
+         (= (get left :param) (get right :param))
+         (if (= kind "instrument")
+           true
+           (and (= (get left :slot-idx) (get right :slot-idx))
+                (if (= kind "effect")
+                  (= (get left :effect) (get right :effect))
+                  (if (= kind "midi-fx")
+                    (= (get left :fx) (get right :fx))
+                    false)))))))
+
+(def param-macro-mapping-for (fx p)
+  (let ((macro (param-macro-selected-definition))
+        (target (process-map-target-map fx p)))
+    (if (and macro target)
+      (nth
+        (filter |mapping|
+          (and (not (get mapping :suspended))
+               (= (get mapping :track) SEQ.current-track)
+               (param-macro-target-equal? (get mapping :target) target))
+          (get macro :mappings))
+        0)
+      false)))
+
+(def param-macro-owner-definition-for (fx p)
+  (let ((target (process-map-target-map fx p)))
+    (if target
+      (nth
+        (filter |macro|
+          (> (len
+            (filter |mapping|
+              (and (not (get mapping :suspended))
+                   (= (get mapping :track) SEQ.current-track)
+                   (param-macro-target-equal? (get mapping :target) target))
+              (get macro :mappings)))
+            0)
+          SEQ.macros)
+        0)
+      false)))
+
+(def param-macro-owner-mapping-for (fx p)
+  (let ((macro (param-macro-owner-definition-for fx p))
+        (target (process-map-target-map fx p)))
+    (if (and macro target)
+      (nth
+        (filter |mapping|
+          (and (not (get mapping :suspended))
+               (= (get mapping :track) SEQ.current-track)
+               (param-macro-target-equal? (get mapping :target) target))
+          (get macro :mappings))
+        0)
+      false)))
+
+(def param-macro-bg (fx p)
+  (if (and (param-macro-mapping-active?) (param-macro-bindable? fx p))
+    (if (param-macro-mapping-for fx p)
+      (rgba 0.18 0.85 0.42 0.38)
+      (rgba 0.18 0.85 0.42 0.26))
+    :transparent))
+
+(def param-macro-map (fx p)
+  (let ((target (process-map-target-map fx p)))
+    (if (and target (not (param-macro-owner-mapping-for fx p)))
+      (host-command "macro-map-param"
+        (merge target :id macro-mapping-selected :track SEQ.current-track))
+      false)))
 
 (def instrument-target-param-dict (source-p idx)
   (if (instrument-rack-target? source-p)
@@ -394,6 +501,33 @@
     :transparent))
 
 (def param-mod-wrapper (fx p key body)
+  (if (param-macro-mapping-active?)
+    (if (param-macro-bindable? fx p)
+      (let ((mapped (param-macro-mapping-for fx p))
+            (owner (param-macro-owner-definition-for fx p)))
+        (subtree :key (str key "-macro-map")
+          (box :background-color (param-macro-bg fx p)
+               :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
+               :corner-radius 8
+               :border-width (if mapped 2 1)
+               :border-color (if mapped (rgba 0.32 1.0 0.55 1.0)
+                 (if owner (rgba 0.18 0.85 0.42 0.22) (rgba 0.18 0.85 0.42 0.55)))
+               :macro-owned (if owner 1 0)
+               :padding 0.08
+               :capture-pointer true
+               :on-click (lambda (info) (param-macro-map fx p))
+            body)))
+      body)
+  (if (param-macro-owner-definition-for fx p)
+    (subtree :key (str key "-macro-owned")
+      (box :debug-name "macro-param-owned-wrapper"
+           :background-color :transparent
+           :corner-radius 8
+           :border-width 0
+           :macro-owned 1
+           :capture-pointer true
+           :on-click (lambda (info) false)
+        body))
   (if (process-map-active?)
     (if (process-param-bindable? fx p)
       (subtree :key (str key "-process-map")
@@ -414,7 +548,7 @@
              :padding 0.08
              :on-double-click (lambda (info) (param-toggle-modulation fx p))
           body))
-      body)))
+      body)))))
 
 (def fx-param-numeric-value (p)
   (reactive-value (fx-param-value p)))
@@ -603,6 +737,33 @@
     :transparent))
 
 (def instrument-param-mod-wrapper (p key body)
+  (if (param-macro-mapping-active?)
+    (if (param-macro-bindable? false p)
+      (let ((mapped (param-macro-mapping-for false p))
+            (owner (param-macro-owner-definition-for false p)))
+        (subtree :key (str key "-macro-map")
+          (box :background-color (param-macro-bg false p)
+               :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
+               :corner-radius 8
+               :border-width (if mapped 2 1)
+               :border-color (if mapped (rgba 0.32 1.0 0.55 1.0)
+                 (if owner (rgba 0.18 0.85 0.42 0.22) (rgba 0.18 0.85 0.42 0.55)))
+               :macro-owned (if owner 1 0)
+               :padding 0.08
+               :capture-pointer true
+               :on-click (lambda (info) (param-macro-map false p))
+            body)))
+      body)
+  (if (param-macro-owner-definition-for false p)
+    (subtree :key (str key "-macro-owned")
+      (box :debug-name "macro-param-owned-wrapper"
+           :background-color :transparent
+           :corner-radius 8
+           :border-width 0
+           :macro-owned 1
+           :capture-pointer true
+           :on-click (lambda (info) false)
+        body))
   (if (process-map-active?)
     (if (process-param-bindable? false p)
       (subtree :key (str key "-process-map")
@@ -623,4 +784,4 @@
              :padding 0.08
              :on-double-click (lambda (info) (instrument-toggle-param-modulation p))
           body))
-      body)))
+      body)))))

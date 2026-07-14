@@ -636,39 +636,152 @@ fn macro_mapping_current_value(
     }
 }
 
+fn macro_mapping_param_descriptor<'a>(
+    app: &'a ui::App,
+    mapping: &sequencer::macro_engine::MacroMapping,
+) -> Option<(
+    &'a sequencer::effects::EffectDescriptor,
+    &'a sequencer::effects::ParamDescriptor,
+)> {
+    match &mapping.target {
+        sequencer::process::ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            ..
+        } => {
+            let device = app
+                .graph
+                .effect_descriptors
+                .get(mapping.track)?
+                .get(*slot)
+                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?;
+            let param = device
+                .params
+                .iter()
+                .find(|descriptor| descriptor.has_tag_or_name(param))?;
+            Some((device, param))
+        }
+        sequencer::process::ParamTarget::InstrumentParam { param, .. } => {
+            let device = app.graph.instrument_descriptors.get(mapping.track)?;
+            let param = device
+                .params
+                .iter()
+                .find(|descriptor| descriptor.has_tag_or_name(param))?;
+            Some((device, param))
+        }
+        _ => None,
+    }
+}
+
+fn macro_mapping_display_metadata(
+    app: &ui::App,
+    mapping: &sequencer::macro_engine::MacroMapping,
+) -> (String, String, f32, f32, f32, f32, f32, u8, String) {
+    let Some((device, param)) = macro_mapping_param_descriptor(app, mapping) else {
+        return (
+            format!("Track {}", mapping.track + 1),
+            process_param_target_label(&mapping.target),
+            mapping.range_min,
+            mapping.range_max,
+            mapping.range_min,
+            mapping.range_max,
+            1.0,
+            2,
+            String::new(),
+        );
+    };
+    let scale = if param.is_percent() { 100.0 } else { 1.0 };
+    let (decimals, unit) = match &param.kind {
+        sequencer::effects::ParamKind::Boolean | sequencer::effects::ParamKind::Enum { .. } => {
+            (0, String::new())
+        }
+        sequencer::effects::ParamKind::Continuous { unit } => {
+            let decimals = if unit.as_deref() == Some("%") { 1 } else { 2 };
+            (decimals, unit.clone().unwrap_or_default())
+        }
+    };
+    (
+        format!("T{} · {}", mapping.track + 1, device.name),
+        param.name.clone(),
+        param.stored_to_user(mapping.range_min),
+        param.stored_to_user(mapping.range_max),
+        param.stored_to_user(param.min),
+        param.stored_to_user(param.max),
+        scale,
+        decimals,
+        unit,
+    )
+}
+
 pub(crate) fn build_macros_value(app: &ui::App) -> Value {
     list_value(app.macro_engine.macros().iter().map(|macro_definition| {
         let kind = match macro_definition.kind {
             sequencer::macro_engine::MacroKind::Mapped => "mapped",
             sequencer::macro_engine::MacroKind::Scene(_) => "scene",
         };
-        let mappings = list_value(macro_definition.mappings.iter().map(|mapping| {
-            let curve = match mapping.curve {
-                sequencer::macro_engine::MacroCurve::Linear => "linear",
-                sequencer::macro_engine::MacroCurve::Exp => "exp",
-                sequencer::macro_engine::MacroCurve::Log => "log",
-            };
-            map_value([
-                (
-                    "target-label",
-                    Value::String(format!(
-                        "Track {} · {}",
-                        mapping.track + 1,
-                        process_param_target_label(&mapping.target)
-                    )),
-                ),
-                ("min", Value::Number(mapping.range_min as f64)),
-                ("max", Value::Number(mapping.range_max as f64)),
-                ("curve", Value::String(curve.to_string())),
-                (
-                    "current",
-                    macro_mapping_current_value(app, mapping)
-                        .map(|value| Value::Number(value as f64))
-                        .unwrap_or(Value::Nil),
-                ),
-                ("suspended", Value::Bool(mapping.suspended)),
-            ])
-        }));
+        let mappings = list_value(macro_definition.mappings.iter().enumerate().map(
+            |(mapping_idx, mapping)| {
+                let (
+                    path_label,
+                    param_label,
+                    display_min,
+                    display_max,
+                    domain_min,
+                    domain_max,
+                    display_scale,
+                    display_decimals,
+                    display_unit,
+                ) = macro_mapping_display_metadata(app, mapping);
+                let curve = match mapping.curve {
+                    sequencer::macro_engine::MacroCurve::Linear => "linear",
+                    sequencer::macro_engine::MacroCurve::Exp => "exp",
+                    sequencer::macro_engine::MacroCurve::Log => "log",
+                };
+                map_value([
+                    ("mapping-idx", Value::Number(mapping_idx as f64)),
+                    ("track", Value::Number(mapping.track as f64)),
+                    ("target", macro_mapping_target_value(&mapping.target)),
+                    (
+                        "target-label",
+                        Value::String(format!(
+                            "Track {} · {}",
+                            mapping.track + 1,
+                            process_param_target_label(&mapping.target)
+                        )),
+                    ),
+                    ("min", Value::Number(mapping.range_min as f64)),
+                    ("max", Value::Number(mapping.range_max as f64)),
+                    ("path-label", Value::String(path_label)),
+                    ("param-label", Value::String(param_label)),
+                    ("display-min", Value::Number(display_min as f64)),
+                    ("display-max", Value::Number(display_max as f64)),
+                    ("domain-min", Value::Number(domain_min as f64)),
+                    ("domain-max", Value::Number(domain_max as f64)),
+                    ("display-scale", Value::Number(display_scale as f64)),
+                    ("display-decimals", Value::Number(display_decimals as f64)),
+                    ("display-unit", Value::String(display_unit)),
+                    ("curve", Value::String(curve.to_string())),
+                    (
+                        "current",
+                        macro_mapping_current_value(app, mapping)
+                            .map(|value| Value::Number(value as f64))
+                            .unwrap_or(Value::Nil),
+                    ),
+                    (
+                        "display-current",
+                        macro_mapping_current_value(app, mapping)
+                            .and_then(|value| {
+                                macro_mapping_param_descriptor(app, mapping)
+                                    .map(|(_, param)| param.stored_to_user(value))
+                            })
+                            .map(|value| Value::Number(value as f64))
+                            .unwrap_or(Value::Nil),
+                    ),
+                    ("suspended", Value::Bool(mapping.suspended)),
+                ])
+            },
+        ));
         map_value([
             ("id", Value::Number(macro_definition.id as f64)),
             (
@@ -685,6 +798,59 @@ pub(crate) fn build_macros_value(app: &ui::App) -> Value {
             ("mappings", mappings),
         ])
     }))
+}
+
+pub(crate) fn sync_macro_state(rt: &mut Runtime, app: &ui::App) {
+    rt.set_reactive("SEQ", "macros", build_macros_value(app));
+}
+
+fn macro_mapping_target_value(target: &sequencer::process::ParamTarget) -> Value {
+    use sequencer::process::ParamTarget;
+
+    let mut entries = Vec::new();
+    match target {
+        ParamTarget::StepParam { param } => {
+            entries.push(("kind", Value::String("step".to_string())));
+            entries.push(("param", Value::String(param.clone())));
+        }
+        ParamTarget::InstrumentParam { param, .. } => {
+            entries.push(("kind", Value::String("instrument".to_string())));
+            entries.push(("param", Value::String(param.clone())));
+        }
+        ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            ..
+        } => {
+            entries.push(("kind", Value::String("effect".to_string())));
+            entries.push(("slot-idx", Value::Number(*slot as f64)));
+            entries.push(("effect", Value::String(effect.clone())));
+            entries.push(("param", Value::String(param.clone())));
+        }
+        ParamTarget::MidiFxParam { slot, fx, param } => {
+            entries.push(("kind", Value::String("midi-fx".to_string())));
+            entries.push(("slot-idx", Value::Number(*slot as f64)));
+            entries.push(("fx", Value::String(fx.clone())));
+            entries.push(("param", Value::String(param.clone())));
+        }
+        ParamTarget::ProcessInlet { process, inlet, .. } => {
+            entries.push(("kind", Value::String("process-inlet".to_string())));
+            entries.push(("process", Value::String(process.clone())));
+            entries.push(("inlet", Value::String(inlet.clone())));
+        }
+        ParamTarget::RackSlotParam { slot, param } => {
+            entries.push(("kind", Value::String("rack-slot".to_string())));
+            entries.push(("slot-idx", Value::Number(*slot as f64)));
+            entries.push(("param", Value::String(param.clone())));
+        }
+        ParamTarget::RackSlotInstrumentParam { slot, param, .. } => {
+            entries.push(("kind", Value::String("rack-slot-instrument".to_string())));
+            entries.push(("slot-idx", Value::Number(*slot as f64)));
+            entries.push(("param", Value::String(param.clone())));
+        }
+    }
+    map_value(entries)
 }
 
 fn process_param_target_is_bindable(target: &sequencer::process::ParamTarget) -> bool {
@@ -2069,7 +2235,12 @@ pub(crate) fn sync_instrument_param_value_field(
         .and_then(|desc| desc.params.get(param_idx))
         .and_then(|pdesc| {
             app.state.pattern.instrument_slots.get(track).map(|slot| {
-                let stored = slot_param_stored_value(slot, pdesc, param_idx, display_step);
+                let stored = display_step
+                    .and_then(|step| slot.plocks.get(step, param_idx))
+                    .or_else(|| app.effective_instrument_param_value(track, param_idx))
+                    .unwrap_or_else(|| {
+                        slot_param_stored_value(slot, pdesc, param_idx, display_step)
+                    });
                 (pdesc.name.clone(), pdesc.stored_to_user(stored))
             })
         })
@@ -2135,12 +2306,14 @@ pub(crate) fn sync_instrument_param_value_field_with_neural_selection(
         .and_then(|desc| desc.params.get(param_idx))
         .and_then(|pdesc| {
             app.state.pattern.instrument_slots.get(track).map(|slot| {
-                let stored = selected_neural_neurons
-                    .and_then(|selection| {
-                        sequencer::lisp_host::selected_neural_instrument_plock_value(
-                            &app.state, selection, track, param_idx,
-                        )
-                    })
+                let neural_value = selected_neural_neurons.and_then(|selection| {
+                    sequencer::lisp_host::selected_neural_instrument_plock_value(
+                        &app.state, selection, track, param_idx,
+                    )
+                });
+                let stored = neural_value
+                    .or_else(|| display_step.and_then(|step| slot.plocks.get(step, param_idx)))
+                    .or_else(|| app.effective_instrument_param_value(track, param_idx))
                     .unwrap_or_else(|| {
                         slot_param_stored_value(slot, pdesc, param_idx, display_step)
                     });
@@ -2216,25 +2389,31 @@ pub(crate) fn sync_instrument_base_note_value_field(
 
 pub(crate) fn sync_track_effect_param_value_field(
     rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    app: &ui::App,
     track: usize,
     slot_idx: usize,
     param_idx: usize,
     display_step: Option<usize>,
 ) -> bool {
-    if let Some((name, value)) = descriptors
+    if let Some((name, value)) = app
+        .graph
+        .effect_descriptors
         .get(track)
         .and_then(|slots| slots.get(slot_idx))
         .and_then(|desc| desc.params.get(param_idx).map(|p| (&desc.name, p)))
         .and_then(|(_, pdesc)| {
-            state
+            app.state
                 .pattern
                 .effect_chains
                 .get(track)
                 .and_then(|chain| chain.get(slot_idx))
                 .map(|slot| {
-                    let stored = slot_param_stored_value(slot, pdesc, param_idx, display_step);
+                    let stored = display_step
+                        .and_then(|step| slot.plocks.get(step, param_idx))
+                        .or_else(|| app.effective_slot_param_value(track, slot_idx, param_idx))
+                        .unwrap_or_else(|| {
+                            slot_param_stored_value(slot, pdesc, param_idx, display_step)
+                        });
                     (pdesc.name.clone(), stored)
                 })
         })
@@ -2250,8 +2429,7 @@ pub(crate) fn sync_track_effect_param_value_field(
 
 pub(crate) fn sync_track_effect_param_value_field_with_neural_selection(
     rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    app: &ui::App,
     track: usize,
     slot_idx: usize,
     param_idx: usize,
@@ -2260,23 +2438,27 @@ pub(crate) fn sync_track_effect_param_value_field_with_neural_selection(
         &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) -> bool {
-    if let Some((name, value)) = descriptors
+    if let Some((name, value)) = app
+        .graph
+        .effect_descriptors
         .get(track)
         .and_then(|slots| slots.get(slot_idx))
         .and_then(|desc| desc.params.get(param_idx).map(|p| (&desc.name, p)))
         .and_then(|(_, pdesc)| {
-            state
+            app.state
                 .pattern
                 .effect_chains
                 .get(track)
                 .and_then(|chain| chain.get(slot_idx))
                 .map(|slot| {
-                    let stored = selected_neural_neurons
-                        .and_then(|selection| {
-                            sequencer::lisp_host::selected_neural_effect_plock_value(
-                                state, selection, track, slot_idx, param_idx,
-                            )
-                        })
+                    let neural_value = selected_neural_neurons.and_then(|selection| {
+                        sequencer::lisp_host::selected_neural_effect_plock_value(
+                            &app.state, selection, track, slot_idx, param_idx,
+                        )
+                    });
+                    let stored = neural_value
+                        .or_else(|| display_step.and_then(|step| slot.plocks.get(step, param_idx)))
+                        .or_else(|| app.effective_slot_param_value(track, slot_idx, param_idx))
                         .unwrap_or_else(|| {
                             slot_param_stored_value(slot, pdesc, param_idx, display_step)
                         });
@@ -2409,8 +2591,7 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
                     if param_supports_value_binding(pdesc) {
                         needs_ui |= sync_track_effect_param_value_field_with_neural_selection(
                             rt,
-                            state,
-                            &app.graph.effect_descriptors,
+                            app,
                             track,
                             slot_idx,
                             param_idx,
@@ -4200,7 +4381,7 @@ pub(crate) fn sync_track_topology_state(
     record_armed: &Arc<Mutex<Vec<bool>>>,
     track_peak_levels: &[f64],
 ) {
-    rt.set_reactive("SEQ", "macros", build_macros_value(app));
+    sync_macro_state(rt, app);
     sync_track_name_state(rt, track_names, app);
     sync_bus_mixer_state(rt, app);
     sync_pattern_state(rt, state);
@@ -14611,6 +14792,20 @@ mod tests {
             .find_map(|child| find_layout_node_by_debug_name(child, needle))
     }
 
+    fn collect_layout_nodes_by_debug_name<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        needle: &str,
+        out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+    ) {
+        if matches!(node.props.get("debug-name"), Some(Value::String(name)) if name.contains(needle))
+        {
+            out.push(node);
+        }
+        for child in &node.children {
+            collect_layout_nodes_by_debug_name(child, needle, out);
+        }
+    }
+
     fn find_layout_node_by_text<'a>(
         node: &'a eseqlisp::layout::LayoutNode,
         text: &str,
@@ -14811,6 +15006,7 @@ mod tests {
                 (def seq-has-selection? () false)
                 (def fx-clear-selected-effect () false)
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (load "metal-seq-macro-state.lisp")
                 (load "metal-seq-fx/state.lisp")
                 (def visible-params (params)
                   (filter |p| (not (= (get p :name) "enabled")) params))
@@ -14865,6 +15061,7 @@ mod tests {
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-instrument-synth-ui (inst) false)
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (load "metal-seq-macro-state.lisp")
                 (load "metal-seq-fx/state.lisp")
                 (def visible-params (params)
                   (filter |p| (not (= (get p :name) "enabled")) params))
@@ -17113,30 +17310,16 @@ mod tests {
             .set(cutoff_idx, 5000.0);
         state.pattern.effect_chains[0][0].set_plock(3, cutoff_idx, 1200.0);
         let descriptors = vec![vec![desc.clone()]];
+        let mut app = test_app_for_track_visual_state(Arc::clone(&state));
+        app.graph.effect_descriptors = descriptors;
         let field = track_effect_param_value_field(0, 0, cutoff_idx, &desc.params[cutoff_idx].name);
         let mut runtime = Runtime::new();
 
-        sync_track_effect_param_value_field(
-            &mut runtime,
-            &state,
-            &descriptors,
-            0,
-            0,
-            cutoff_idx,
-            Some(3),
-        );
+        sync_track_effect_param_value_field(&mut runtime, &app, 0, 0, cutoff_idx, Some(3));
 
         assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(1200.0));
 
-        sync_track_effect_param_value_field(
-            &mut runtime,
-            &state,
-            &descriptors,
-            0,
-            0,
-            cutoff_idx,
-            None,
-        );
+        sync_track_effect_param_value_field(&mut runtime, &app, 0, 0, cutoff_idx, None);
 
         assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(5000.0));
     }
@@ -17583,6 +17766,268 @@ mod tests {
             &*mappings[0]["max"].borrow(),
             Value::Number(value) if *value == desc.params[0].max as f64
         ));
+        assert!(matches!(
+            &*mappings[0]["mapping-idx"].borrow(),
+            Value::Number(value) if *value == 0.0
+        ));
+        assert!(matches!(
+            &*mappings[0]["track"].borrow(),
+            Value::Number(value) if *value == 0.0
+        ));
+        let target_cell = mappings[0]["target"].borrow();
+        let Value::Map(target) = &*target_cell else {
+            panic!("macro mapping target should be a map");
+        };
+        assert!(matches!(
+            &*target["kind"].borrow(),
+            Value::String(value) if value == "instrument"
+        ));
+        assert!(matches!(
+            &*target["param"].borrow(),
+            Value::String(value) if value == &desc.params[0].name
+        ));
+        assert!(matches!(
+            &*mappings[0]["path-label"].borrow(),
+            Value::String(value) if value.contains("Sampler")
+        ));
+        assert!(matches!(
+            &*mappings[0]["param-label"].borrow(),
+            Value::String(value) if value == &desc.params[0].name
+        ));
+        assert!(matches!(
+            &*mappings[0]["domain-min"].borrow(),
+            Value::Number(value) if *value == desc.params[0].stored_to_user(desc.params[0].min) as f64
+        ));
+    }
+
+    #[test]
+    fn macro_effective_values_are_published_to_instrument_and_effect_controls() {
+        let instrument_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let mut instrument_app = test_app_with_instrument_descriptor(instrument_desc.clone());
+        let instrument_id = instrument_app
+            .macro_engine
+            .create_macro("instrument", sequencer::macro_engine::MacroKind::Mapped)
+            .expect("instrument macro");
+        instrument_app
+            .macro_engine
+            .add_mapping(
+                instrument_id,
+                sequencer::macro_engine::MacroMapping::new_resolved(
+                    0,
+                    sequencer::process::ParamTarget::InstrumentParam {
+                        param: instrument_desc.params[0].name.clone(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    10.0,
+                    30.0,
+                    sequencer::macro_engine::MacroCurve::Linear,
+                )
+                .expect("instrument mapping"),
+            )
+            .expect("unique instrument owner");
+        instrument_app.set_macro_value(instrument_id, 0.5);
+        let mut runtime = Runtime::new();
+        sync_instrument_param_value_field(&mut runtime, &instrument_app, 0, 0, None);
+        let instrument_field = instrument_param_value_field(0, 0, &instrument_desc.params[0].name);
+        assert_eq!(
+            reactive_number(&runtime, "SEQ", &instrument_field),
+            Some(20.0)
+        );
+        sync_instrument_param_value_field(&mut runtime, &instrument_app, 0, 0, Some(4));
+        assert_eq!(
+            reactive_number(&runtime, "SEQ", &instrument_field),
+            Some(20.0),
+            "a playing step without a p-lock must display the macro-effective value"
+        );
+        instrument_app.state.pattern.instrument_slots[0].set_plock(4, 0, 25.0);
+        sync_instrument_param_value_field(&mut runtime, &instrument_app, 0, 0, Some(4));
+        assert_eq!(
+            reactive_number(&runtime, "SEQ", &instrument_field),
+            Some(25.0),
+            "an explicit playing-step p-lock must remain visible above the macro"
+        );
+        instrument_app.set_macro_value(instrument_id, 0.0);
+        sync_instrument_param_value_field(&mut runtime, &instrument_app, 0, 0, None);
+        assert_eq!(
+            reactive_number(&runtime, "SEQ", &instrument_field),
+            Some(10.0),
+            "continuous macro zero must display its mapped minimum, not the stored base"
+        );
+
+        let effect_desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let effect_state = Arc::new(SequencerState::new(
+            1,
+            vec![vec![sequencer::effects::EffectSlotState::new(
+                &effect_desc,
+                0,
+            )]],
+        ));
+        let mut effect_app = test_app_for_track_visual_state(Arc::clone(&effect_state));
+        effect_app.graph.effect_descriptors = vec![vec![effect_desc.clone()]];
+        let effect_id = effect_app
+            .macro_engine
+            .create_macro("effect", sequencer::macro_engine::MacroKind::Mapped)
+            .expect("effect macro");
+        effect_app
+            .macro_engine
+            .add_mapping(
+                effect_id,
+                sequencer::macro_engine::MacroMapping::new_resolved(
+                    0,
+                    sequencer::process::ParamTarget::EffectParam {
+                        slot: 0,
+                        effect: effect_desc.name.clone(),
+                        param: effect_desc.params[0].name.clone(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    100.0,
+                    900.0,
+                    sequencer::macro_engine::MacroCurve::Linear,
+                )
+                .expect("effect mapping"),
+            )
+            .expect("unique effect owner");
+        effect_app.set_macro_value(effect_id, 0.5);
+        sync_track_effect_param_value_field(&mut runtime, &effect_app, 0, 0, 0, None);
+        let effect_field = track_effect_param_value_field(0, 0, 0, &effect_desc.params[0].name);
+        assert_eq!(reactive_number(&runtime, "SEQ", &effect_field), Some(500.0));
+        sync_track_effect_param_value_field(&mut runtime, &effect_app, 0, 0, 0, Some(4));
+        assert_eq!(
+            reactive_number(&runtime, "SEQ", &effect_field),
+            Some(500.0),
+            "a playing step without a p-lock must display the macro-effective effect value"
+        );
+        effect_state.pattern.effect_chains[0][0].set_plock(4, 0, 700.0);
+        sync_track_effect_param_value_field(&mut runtime, &effect_app, 0, 0, 0, Some(4));
+        assert_eq!(
+            reactive_number(&runtime, "SEQ", &effect_field),
+            Some(700.0),
+            "an explicit effect p-lock must remain visible above the macro"
+        );
+    }
+
+    #[test]
+    fn macro_mapping_sidebar_renders_editable_min_max_rows() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        let id = app
+            .macro_engine
+            .ensure_macro("delay-push", "Delay Push")
+            .expect("macro");
+        app.macro_engine
+            .add_mapping(
+                id,
+                sequencer::macro_engine::MacroMapping::new_resolved(
+                    0,
+                    sequencer::process::ParamTarget::InstrumentParam {
+                        param: desc.params[0].name.clone(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    10.0,
+                    30.0,
+                    sequencer::macro_engine::MacroCurve::Linear,
+                )
+                .expect("mapping"),
+            )
+            .expect("unique owner");
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        sync_macro_state(editor.runtime_mut(), &app);
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(do (set! macro-mapping-open true) (set! macro-mapping-selected {id}))"
+            ))
+            .expect("arm mapping");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(set-layout (list :buf "*macro-mappings*" :hide-status true :min-width 46))"#,
+            )
+            .expect("isolate mapping sidebar");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*macro-mappings*")
+            .expect("mapping sidebar buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(64, 24);
+        let layout = editor.widget_layout().expect("mapping sidebar layout");
+        assert_finite_layout_tree(&layout);
+        let row = find_layout_node_by_debug_name(&layout, "macro-mapping-table-row")
+            .unwrap_or_else(|| panic!("mapping table row; layout={layout:#?}"));
+        let min = find_layout_node_by_debug_name(&layout, "macro-mapping-min")
+            .expect("mapping min picker");
+        let max = find_layout_node_by_debug_name(&layout, "macro-mapping-max")
+            .expect("mapping max picker");
+        let unmap = find_layout_node_by_debug_name(&layout, "macro-mapping-unmap")
+            .expect("mapping unmap button");
+        for (node, label) in [(row, "row"), (min, "min"), (max, "max"), (unmap, "unmap")] {
+            assert_finite_nonzero_rect(node, label);
+        }
+        assert_eq!(layout_prop_number(min, "value"), Some(10.0));
+        assert_eq!(layout_prop_number(max, "value"), Some(30.0));
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(
+                min.props.get("on-change").cloned().expect("min callback"),
+                vec![Value::Number(12.5)],
+            )
+            .expect("edit mapping min");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
+                if name == "macro-set-range"
+                    && matches!(payload.get("min").map(|value| value.borrow().clone()), Some(Value::Number(value)) if (value - 12.5).abs() < 1.0e-6)
+        ));
+    }
+
+    #[test]
+    fn macro_epoch_sync_makes_newly_ensured_macro_resolvable_by_player_key() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let mut app = test_app_with_instrument_descriptor(desc);
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![("macros", Value::List(Vec::new()))], false);
+        let macro_state =
+            std::fs::read_to_string("metal-seq-macro-state.lisp").expect("read macro state");
+        runtime
+            .eval_str(&macro_state)
+            .expect("load shared macro state");
+        let macro_controls =
+            std::fs::read_to_string("metal-seq-macros.lisp").expect("read macro controls");
+        runtime
+            .eval_str(&macro_controls)
+            .expect("load macro controls");
+
+        assert_eq!(
+            runtime.eval_str("(macro-id-for-key :delay-push)"),
+            Ok(Some(Value::Number(-1.0)))
+        );
+
+        ui::apply_command(
+            &mut app,
+            ui::AppCommand::MacroEnsure {
+                key: "delay-push".to_string(),
+                name: "Delay Push".to_string(),
+            },
+        );
+        let id = app.macro_engine.macros()[0].id;
+        sync_macro_state(&mut runtime, &app);
+        runtime.run_reactive_cycle();
+
+        assert_eq!(
+            runtime.eval_str("(macro-id-for-key :delay-push)"),
+            Ok(Some(Value::Number(id as f64))),
+            "the UI epoch refresh must publish engine macros before map controls can arm"
+        );
     }
 
     fn test_macro_value(id: u32, key: &str, name: &str, value: f64) -> Value {
