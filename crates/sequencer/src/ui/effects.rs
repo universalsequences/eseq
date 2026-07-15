@@ -4218,6 +4218,60 @@ mod tests {
     }
 
     #[test]
+    fn saved_instrument_swap_while_playing_publishes_current_scheduler_epochs() {
+        let graph = TestLiveGraph::new("playing-saved-instrument-swap-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let manifest = test_instrument_manifest();
+        app.add_compiled_saved_instrument_track_sync(
+            "old",
+            "old source",
+            CustomInstrumentRunMode::Instrument,
+            lisp_host::CompileResult {
+                manifest: manifest.clone(),
+                lib: lisp_host::test_loaded_dgen_lib(),
+                lease: None,
+            },
+        )
+        .expect("initial saved instrument track should load");
+        app.state.start_playback();
+
+        let pattern_epoch_before = app.state.transport.pattern_epoch.load(Ordering::Acquire);
+        let topology_epoch_before = app.state.transport.topology_epoch.load(Ordering::Acquire);
+        let snapshot_version_before = app.state.scheduler_snapshot_version();
+        let new_engine_id = app.cache_instrument_engine(
+            "new",
+            "new source",
+            &manifest,
+            lisp_host::test_loaded_dgen_lib(),
+            None,
+        );
+
+        app.try_swap_track_to_cached_saved_instrument_sync(
+            0,
+            "new",
+            "new source",
+            CustomInstrumentRunMode::Instrument,
+        )
+        .expect("cached instrument should be found")
+        .expect("playing track swap should succeed");
+
+        let live_pattern_epoch = app.state.transport.pattern_epoch.load(Ordering::Acquire);
+        let live_topology_epoch = app.state.transport.topology_epoch.load(Ordering::Acquire);
+        let snapshot = app.state.latest_scheduler_snapshot();
+        assert!(snapshot.transport.playing);
+        assert_eq!(snapshot.tracks[0].engine_id, Some(new_engine_id));
+        assert!(live_pattern_epoch > pattern_epoch_before);
+        assert!(live_topology_epoch > topology_epoch_before);
+        assert_eq!(
+            snapshot.transport.pattern_epoch, live_pattern_epoch,
+            "scheduled events must carry the live epoch accepted by the audio callback"
+        );
+        assert_eq!(snapshot.transport.topology_epoch, live_topology_epoch);
+        assert!(app.state.scheduler_snapshot_version() > snapshot_version_before);
+        graph.process_block();
+    }
+
+    #[test]
     fn audio_port_adapter_duplicates_mono_and_folds_stereo() {
         assert_eq!(adapted_audio_port_connections(1, 1), vec![(0, 0)]);
         assert_eq!(adapted_audio_port_connections(1, 2), vec![(0, 0), (0, 1)]);

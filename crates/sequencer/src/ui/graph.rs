@@ -1782,7 +1782,6 @@ impl GraphController<'_> {
         }
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
-        self.app.state.publish_scheduler_snapshot();
         self.app
             .state
             .transport
@@ -1793,6 +1792,11 @@ impl GraphController<'_> {
             .transport
             .pattern_epoch
             .fetch_add(1, Ordering::Relaxed);
+        // Publish only after both epochs advance. The scheduler stamps queued
+        // events with snapshot.pattern_epoch while the audio callback rejects
+        // events against the live atomic epoch; publishing the old epoch here
+        // silences the swapped track until another transport action republishes.
+        self.app.state.publish_scheduler_snapshot();
         Ok(reset_summary)
     }
 
