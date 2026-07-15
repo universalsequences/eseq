@@ -160,7 +160,6 @@
 (def sbrowser-add-instrument-track (name)
   (set! sbrowser-loading-instrument-name name)
   (host-command "add-track-instrument" (dict :name name))
-  (set! sbrowser-tab "presets")
   (status (str "Loading instrument: " name)))
 
 (def sbrowser-swap-track-instrument (track name)
@@ -182,9 +181,7 @@
 
 (def sbrowser-activate-instrument (name)
   (if (seq-track-custom-instrument? SEQ.current-track)
-    (do
-      (sbrowser-swap-track-instrument SEQ.current-track name)
-      (set! sbrowser-tab "presets"))
+    (sbrowser-swap-track-instrument SEQ.current-track name)
     (do
       (sbrowser-add-instrument-track name)
       (status (str "Adding instrument track: " name)))))

@@ -14076,7 +14076,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_instrument_activation_without_a_track_adds_and_switches_to_presets() {
+    fn metal_seq_browser_instrument_activation_without_a_track_adds_and_stays_on_instruments() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -14106,7 +14106,7 @@ mod tests {
                 .runtime_mut()
                 .eval_str("sbrowser-tab")
                 .expect("read browser tab"),
-            Some(Value::String("presets".to_string()))
+            Some(Value::String("instruments".to_string()))
         );
         assert_eq!(
             editor.runtime_mut().take_status_message(),
@@ -14115,7 +14115,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_instrument_activation_swaps_the_current_custom_track() {
+    fn metal_seq_browser_instrument_activation_swaps_and_stays_on_instruments() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -14155,7 +14155,7 @@ mod tests {
         }
         assert_eq!(
             editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-            Some(Value::String("presets".to_string()))
+            Some(Value::String("instruments".to_string()))
         );
         assert_eq!(
             editor

@@ -65,6 +65,8 @@ affordance (see drum pads, `instrument-panel.lisp:100`).
 - Today: activate always **adds a new track** (`add-track-instrument`).
 - New: activate **replaces the current track's instrument** (Ableton
   behavior), using `SEQ.current-track`.
+  - Keep the Instruments tab active after activation so consecutive
+    double-clicks can audition different instruments quickly.
   - If the project has zero tracks, or the current track is a Rack/Modulator,
     fall back to add-new-track (status line says which happened).
   - Builtin leaves: `sampler` converts the current track (Phase 2); until
