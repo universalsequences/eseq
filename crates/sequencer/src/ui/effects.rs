@@ -4177,7 +4177,7 @@ mod tests {
         assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
 
         let cached_engine_id = app.cache_instrument_engine(
-            "cached",
+            "bank/cached",
             "cached source",
             &manifest,
             lisp_host::test_loaded_dgen_lib(),
@@ -4186,7 +4186,7 @@ mod tests {
         let cached_summary = app
             .try_swap_track_to_cached_saved_instrument_sync(
                 0,
-                "cached",
+                "bank/cached",
                 "cached source",
                 CustomInstrumentRunMode::Instrument,
             )
@@ -4194,13 +4194,13 @@ mod tests {
             .expect("cached swap should succeed");
         assert_eq!(cached_summary.patterns_reset, 1);
         assert_eq!(app.graph.track_engine_ids, vec![Some(cached_engine_id)]);
-        assert_eq!(app.tracks, vec!["old"], "track name must survive the swap");
+        assert_eq!(app.tracks, vec!["cached"]);
         assert!(app.graph.engine_node_ids[0].is_none());
 
         let compiled_summary = app
             .swap_track_to_compiled_saved_instrument_sync(
                 0,
-                "compiled",
+                "bank/compiled",
                 "compiled source",
                 CustomInstrumentRunMode::Instrument,
                 lisp_host::CompileResult {
@@ -4213,7 +4213,7 @@ mod tests {
         assert_eq!(compiled_summary.patterns_reset, 1);
         assert_eq!(app.graph.track_engine_ids, vec![Some(2)]);
         assert!(app.graph.engine_node_ids[cached_engine_id].is_none());
-        assert_eq!(app.tracks, vec!["old"]);
+        assert_eq!(app.tracks, vec!["compiled"]);
         graph.process_block();
     }
 

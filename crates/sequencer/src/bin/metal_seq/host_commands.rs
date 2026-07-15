@@ -12,7 +12,7 @@ use super::state_values::{
     build_midi_effects_value, build_step_has_plocks, build_steps_value, build_track_ids,
     build_track_names, push_solo_mutes, set_current_track_reactive, sync_all_track_sequencer_state,
     sync_fx_param_binding_fields, sync_groups_bindings, sync_step_param_lists,
-    sync_track_mixer_state, sync_track_params, sync_track_peak_fields,
+    sync_track_mixer_state, sync_track_name_state, sync_track_params, sync_track_peak_fields,
 };
 
 pub(crate) struct AddTrackInstrumentCtx<'a> {
@@ -127,6 +127,7 @@ pub(crate) struct SwapTrackInstrumentCtx<'a> {
     pub(crate) editor: &'a mut Editor,
     pub(crate) state: &'a Arc<SequencerState>,
     pub(crate) current_track: &'a Arc<AtomicUsize>,
+    pub(crate) track_names: &'a mut Vec<String>,
     pub(crate) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     pub(crate) fx_epoch: &'a Arc<AtomicUsize>,
     pub(crate) ui_epoch: &'a Arc<AtomicUsize>,
@@ -142,6 +143,7 @@ pub(crate) fn finish_swapped_instrument_track(
         editor,
         state,
         current_track,
+        track_names,
         selected_steps,
         fx_epoch,
         ui_epoch,
@@ -151,6 +153,7 @@ pub(crate) fn finish_swapped_instrument_track(
         .min(app.tracks.len().saturating_sub(1));
     if !app.tracks.is_empty() {
         let rt = editor.runtime_mut();
+        sync_track_name_state(rt, track_names, app);
         sync_all_track_sequencer_state(rt, state, app, selected_track, selected_steps);
         rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));
         sync_step_param_lists(rt, state, selected_track);

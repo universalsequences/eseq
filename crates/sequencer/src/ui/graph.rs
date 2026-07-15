@@ -1780,6 +1780,7 @@ impl GraphController<'_> {
             self.apply_free_patch_idle_voice(track)
                 .expect("free-patch engine runtime was validated before graph mutation");
         }
+        self.app.tracks[track] = instrument_display_name(instrument_name);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app

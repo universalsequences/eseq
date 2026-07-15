@@ -95,9 +95,14 @@ Preserved (the "musical" layer — this is why swapping beats re-adding a track)
   midi-fx chain, …)
 - Track FX chain + effect p-locks, MIDI FX
 - Process chains, *except* bindings that target instrument params (below)
-- Track name/color/group membership, mod connections (they target mod-in
+- Track color/group membership, mod connections (they target mod-in
   clips, which are per-track and instrument-agnostic)
 - `instrument_base_note_offset` (it's effectively track transpose)
+
+Updated:
+
+- Track display name follows the new instrument's leaf name so track badges
+  identify the instrument currently bound to the track
 
 Cleared / reset, in **every pattern**, not just the current one (the
 per-pattern `instrument_slot` layout *must* match the new descriptor — this is
