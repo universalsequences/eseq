@@ -1207,7 +1207,7 @@ impl App {
         Ok(())
     }
 
-    fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
+    pub(super) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
         let num_tracks = self.tracks.len();
         let current_pattern = self.state.current_scene_index();
         let current_track = if num_tracks == 0 {

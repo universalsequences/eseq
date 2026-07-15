@@ -503,6 +503,29 @@ impl MacroEngine {
         Ok(touched)
     }
 
+    /// Removes mappings that belong to the instrument currently occupying a
+    /// custom track. Track effects are separate devices and deliberately keep
+    /// their mappings across an instrument swap.
+    ///
+    /// Suspended mappings are removed too: although they do not own a live
+    /// override, retaining them would allow a later scene revalidation to bind
+    /// an old instrument mapping to the replacement instrument by name.
+    pub fn remove_instrument_mappings_for_track(&mut self, track: usize) -> usize {
+        let mut removed = 0;
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain(|mapping| {
+                let should_remove = mapping.track == track
+                    && matches!(&mapping.target, ParamTarget::InstrumentParam { .. });
+                removed += usize::from(should_remove);
+                !should_remove
+            });
+        }
+        if removed > 0 {
+            self.rebuild_ownership();
+        }
+        removed
+    }
+
     fn mapping_mut(
         &mut self,
         id: MacroId,
@@ -920,6 +943,83 @@ mod tests {
         );
         assert_eq!(engine.override_value(&key), None);
         assert!(engine.macro_definition(id).unwrap().mappings.is_empty());
+    }
+
+    #[test]
+    fn instrument_swap_removes_only_that_tracks_instrument_mappings() {
+        let mut engine = MacroEngine::default();
+        let id = engine
+            .create_macro("mixed targets", MacroKind::Mapped)
+            .expect("macro id");
+        let instrument_target = || ParamTarget::InstrumentParam {
+            param: "tone".to_string(),
+            param_id: None,
+        };
+
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new_resolved(
+                    0,
+                    instrument_target(),
+                    Some(0),
+                    0.0,
+                    1.0,
+                    MacroCurve::Linear,
+                )
+                .expect("resolved instrument mapping"),
+            )
+            .expect("track 1 instrument mapping");
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new(0, instrument_target(), 0.0, 1.0, MacroCurve::Linear)
+                    .expect("suspended instrument mapping"),
+            )
+            .expect("track 1 suspended instrument mapping");
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new(0, effect_target(11), 0.2, 0.8, MacroCurve::Linear)
+                    .expect("effect mapping"),
+            )
+            .expect("track 1 effect mapping");
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new_resolved(
+                    1,
+                    instrument_target(),
+                    Some(0),
+                    0.1,
+                    0.9,
+                    MacroCurve::Linear,
+                )
+                .expect("other track instrument mapping"),
+            )
+            .expect("track 2 instrument mapping");
+        engine.set_value(id, 0.5);
+
+        assert_eq!(engine.remove_instrument_mappings_for_track(0), 2);
+
+        let mappings = &engine.macro_definition(id).expect("macro remains").mappings;
+        assert_eq!(mappings.len(), 2);
+        assert!(mappings.iter().any(|mapping| {
+            mapping.track == 0 && matches!(&mapping.target, ParamTarget::EffectParam { .. })
+        }));
+        assert!(mappings.iter().any(|mapping| {
+            mapping.track == 1 && matches!(&mapping.target, ParamTarget::InstrumentParam { .. })
+        }));
+        assert_eq!(
+            engine.override_value(&MacroParamKey::Instrument { track: 0, param: 0 }),
+            None
+        );
+        assert!(engine
+            .override_value(&effect_key(11))
+            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
+        assert!(engine
+            .override_value(&MacroParamKey::Instrument { track: 1, param: 0 })
+            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
     }
 
     #[test]

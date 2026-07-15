@@ -1775,6 +1775,9 @@ impl GraphController<'_> {
             .expect("instrument reset target was validated before graph mutation");
 
         self.app.sync_scratch_runtime_descriptors();
+        self.app
+            .macro_engine
+            .remove_instrument_mappings_for_track(track);
         self.app.push_instrument_defaults_for_track(track);
         if run_mode == CustomInstrumentRunMode::FreePatch {
             self.apply_free_patch_idle_voice(track)
@@ -1797,7 +1800,9 @@ impl GraphController<'_> {
         // events with snapshot.pattern_epoch while the audio callback rejects
         // events against the live atomic epoch; publishing the old epoch here
         // silences the swapped track until another transport action republishes.
-        self.app.state.publish_scheduler_snapshot();
+        self.app
+            .state
+            .publish_macro_overrides(self.app.macro_engine.override_snapshot());
         Ok(reset_summary)
     }
 
@@ -6137,6 +6142,8 @@ fn delete_without_shift_enabled() -> bool {
 mod tests {
     use super::*;
     use crate::audiograph::LiveGraphPtr;
+    use crate::macro_engine::{MacroCurve, MacroKind, MacroMapping, MacroParamKey};
+    use crate::process::ParamTarget;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{default_empty_effect_chain, SequencerState};
     use crate::ui::AudioBuses;
@@ -6147,6 +6154,14 @@ mod tests {
         ptr: LiveGraphPtr,
         block_size: i32,
         channels: usize,
+    }
+
+    struct TestProjectFile(PathBuf);
+
+    impl Drop for TestProjectFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     impl TestLiveGraph {
@@ -6585,6 +6600,49 @@ mod tests {
         let track_zero_sum = app.graph.track_node_ids[0].voice_sum_id;
         let track_one_slot_before =
             EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[1]);
+        let macro_id = app
+            .macro_engine
+            .create_macro("swap cleanup", MacroKind::Mapped)
+            .expect("macro id");
+        app.macro_engine
+            .add_mapping(
+                macro_id,
+                MacroMapping::new_resolved(
+                    0,
+                    ParamTarget::InstrumentParam {
+                        param: "old tone".to_string(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    0.0,
+                    1.0,
+                    MacroCurve::Linear,
+                )
+                .expect("instrument mapping"),
+            )
+            .expect("instrument mapping should attach");
+        app.macro_engine
+            .add_mapping(
+                macro_id,
+                MacroMapping::new_resolved(
+                    0,
+                    ParamTarget::EffectParam {
+                        slot: 0,
+                        effect: "filter".to_string(),
+                        param: "enabled".to_string(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    0.2,
+                    0.8,
+                    MacroCurve::Linear,
+                )
+                .expect("effect mapping"),
+            )
+            .expect("effect mapping should attach");
+        app.macro_engine.set_value(macro_id, 0.5);
+        app.state
+            .publish_macro_overrides(app.macro_engine.override_snapshot());
 
         let summary = app
             .graph_controller()
@@ -6600,7 +6658,33 @@ mod tests {
         assert_eq!(summary.patterns_reset, 1);
         assert_eq!(app.graph.track_engine_ids, vec![Some(1), Some(0)]);
         assert_eq!(app.graph.track_node_ids[0].voice_sum_id, track_zero_sum);
-        assert_eq!(app.tracks[0], "Track 1", "track name must survive a swap");
+        assert_eq!(
+            app.tracks[0], "new",
+            "track name should follow the replacement instrument"
+        );
+        let macro_mappings = &app
+            .macro_engine
+            .macro_definition(macro_id)
+            .expect("macro should survive the swap")
+            .mappings;
+        assert_eq!(macro_mappings.len(), 1);
+        assert!(matches!(
+            &macro_mappings[0].target,
+            ParamTarget::EffectParam { .. }
+        ));
+        assert_eq!(
+            app.macro_engine
+                .override_value(&MacroParamKey::Instrument { track: 0, param: 0 }),
+            None
+        );
+        assert!(app
+            .macro_engine
+            .override_value(&MacroParamKey::Effect {
+                track: 0,
+                slot: 0,
+                param: 0,
+            })
+            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
         let old_engine = app.graph.engine_node_ids[0]
             .as_ref()
             .expect("shared old engine must remain for track 2");
@@ -6644,12 +6728,90 @@ mod tests {
     }
 
     #[test]
+    fn project_roundtrip_persists_swapped_custom_instrument() {
+        let graph = TestLiveGraph::new("custom-track-swap-project-roundtrip-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 1);
+        for (expected_id, name) in ["old", "new"].into_iter().enumerate() {
+            let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+                name: name.to_string(),
+                source: format!("{name}.lisp"),
+                manifest: manifest.clone(),
+                lib_index: 0,
+                shared_runtime: true,
+            });
+            assert_eq!(engine_id, expected_id);
+        }
+        install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
+
+        app.graph_controller()
+            .swap_custom_track_instrument(
+                0,
+                "new",
+                1,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("track should swap before saving");
+        assert_eq!(app.graph.track_engine_ids, vec![Some(1)]);
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let project_name = format!(
+            "__test-instrument-swap-roundtrip-{}-{nonce}",
+            std::process::id()
+        );
+        let captured = app
+            .capture_project(&project_name)
+            .expect("swapped project should capture");
+        let project_path = crate::project::save_project(&project_name, &captured)
+            .expect("swapped project should save");
+        let _cleanup = TestProjectFile(project_path);
+        let restored =
+            crate::project::load_project(&project_name).expect("swapped project should load");
+
+        assert!(matches!(
+            restored.tracks.as_slice(),
+            [crate::project::ProjectTrack::Custom {
+                instrument_name,
+                ..
+            }] if instrument_name == "new"
+        ));
+        graph.process_block();
+    }
+
+    #[test]
     fn swap_custom_track_leaves_old_binding_intact_when_new_engine_build_fails() {
         let graph = TestLiveGraph::new("custom-track-swap-failure-test");
         let manifest = test_instrument_manifest();
         let lib = lisp_host::test_loaded_dgen_lib();
         let mut app = test_app_with_track_count(&graph, 1);
         install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
+        let macro_id = app
+            .macro_engine
+            .create_macro("failed swap", MacroKind::Mapped)
+            .expect("macro id");
+        app.macro_engine
+            .add_mapping(
+                macro_id,
+                MacroMapping::new_resolved(
+                    0,
+                    ParamTarget::InstrumentParam {
+                        param: "old tone".to_string(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    0.0,
+                    1.0,
+                    MacroCurve::Linear,
+                )
+                .expect("instrument mapping"),
+            )
+            .expect("instrument mapping should attach");
         let old_slot = EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]);
         set_test_graph_build_failure_after(4);
 
@@ -6673,6 +6835,15 @@ mod tests {
         assert_test_slot_snapshot_eq(
             &EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]),
             &old_slot,
+        );
+        assert_eq!(
+            app.macro_engine
+                .macro_definition(macro_id)
+                .expect("failed swap must preserve the macro")
+                .mappings
+                .len(),
+            1,
+            "failed swap must preserve the old instrument mapping"
         );
         let old_engine = app.graph.engine_node_ids[0]
             .as_ref()
