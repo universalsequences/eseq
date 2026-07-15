@@ -27837,6 +27837,147 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_mixer_custom_track_routes_saved_instrument_drops() {
+        fn find_track_drop_target(
+            node: &eseqlisp::layout::LayoutNode,
+            track: f64,
+        ) -> Option<&eseqlisp::layout::LayoutNode> {
+            let matches = node.props.get("drop-meta").is_some_and(|meta| {
+                let Value::Map(meta) = meta else {
+                    return false;
+                };
+                meta.get("kind")
+                    .is_some_and(|kind| *kind.borrow() == Value::String("track".to_string()))
+                    && meta
+                        .get("track")
+                        .is_some_and(|value| *value.borrow() == Value::Number(track))
+            });
+            if matches {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_track_drop_target(child, track))
+        }
+
+        fn assert_accepts_instrument(node: &eseqlisp::layout::LayoutNode, label: &str) {
+            assert_finite_nonzero_rect(node, label);
+            assert!(
+                value_contains_string(
+                    node.props
+                        .get("drop-types")
+                        .unwrap_or_else(|| panic!("{label} should expose drop types")),
+                    "instrument",
+                ),
+                "{label} should accept saved-instrument replacement"
+            );
+            assert!(
+                node.props.contains_key("on-drop"),
+                "{label} should expose a drop callback"
+            );
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom"]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer buffer should exist")
+            .id;
+        editor.set_active_buffer(mixer_id);
+        editor.set_layout_viewport(160, 34);
+        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+
+        let layout = editor.widget_layout().expect("expanded mixer layout");
+        let expanded_strip =
+            find_track_drop_target(&layout, 0.0).expect("expanded mixer track drop target");
+        assert_accepts_instrument(expanded_strip, "expanded mixer instrument drop target");
+
+        let on_drop = expanded_strip
+            .props
+            .get("on-drop")
+            .cloned()
+            .expect("expanded mixer strip drop callback");
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(
+                on_drop,
+                vec![map_value([
+                    ("drag-type", Value::String("instrument".to_string())),
+                    (
+                        "payload",
+                        map_value([
+                            ("kind", Value::String("instrument".to_string())),
+                            ("name", Value::String("core/triton".to_string())),
+                        ]),
+                    ),
+                    (
+                        "target",
+                        map_value([
+                            ("kind", Value::String("track".to_string())),
+                            ("track", Value::Number(0.0)),
+                        ]),
+                    ),
+                ])],
+            )
+            .expect("drop saved instrument on expanded mixer strip");
+        let commands = editor.drain_host_commands();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == "swap-track-instrument"
+                        && matches!(payload, Value::Map(map)
+                            if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                                && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/triton".to_string())))
+            ),
+            "mixer instrument drop should queue one targeted swap: {commands:?}"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-collapsed", test_bool_list(&[true]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+        let layout = editor.widget_layout().expect("collapsed mixer layout");
+        let collapsed_strip =
+            find_track_drop_target(&layout, 0.0).expect("collapsed mixer track drop target");
+        assert_accepts_instrument(collapsed_strip, "collapsed mixer instrument drop target");
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["sampler"]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+        let layout = editor.widget_layout().expect("sampler mixer layout");
+        let sampler_strip =
+            find_track_drop_target(&layout, 0.0).expect("sampler mixer track drop target");
+        assert!(
+            !value_contains_string(
+                sampler_strip
+                    .props
+                    .get("drop-types")
+                    .expect("sampler strip drop types"),
+                "instrument",
+            ),
+            "sampler conversion is outside Phase 1 and must not advertise an instrument drop"
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_process_chain_rows_stack_in_execution_order() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.runtime_mut().set_reactive(

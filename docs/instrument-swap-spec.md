@@ -35,7 +35,7 @@ panels/drum pads already accept them. New drop targets, all with
 - **The instrument panel** of the focused track (`instrument-panel.lisp` /
   `panel-frame.lisp` header) — dropping anywhere on the device panel replaces
   that track's instrument.
-- **Mixer strips** (nice-to-have; same handler, `:track` in drop-meta).
+- **Mixer strips** (same handler, `:track` in drop-meta).
 
 Drop semantics by target track type:
 

@@ -195,11 +195,18 @@
 
 (def mixer-v2-drop-on-track (event)
   (let ((drag-type (get event :drag-type)))
-    (if (= drag-type "sample")
-      (mixer-v2-drop-sample-on-track event)
-      (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
-        (mixer-v2-drop-effect-on-track event)
-        (status "Unsupported drop")))))
+    (if (= drag-type "instrument")
+      (sbrowser-drop-instrument-on-track event)
+      (if (= drag-type "sample")
+        (mixer-v2-drop-sample-on-track event)
+        (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
+          (mixer-v2-drop-effect-on-track event)
+          (status "Unsupported drop"))))))
+
+(def mixer-v2-track-drop-types (i)
+  (if (seq-track-custom-instrument? i)
+    (list "sample" "instrument" "audio-effect" "midi-effect")
+    (list "sample" "audio-effect" "midi-effect")))
 
 (def mixer-v2-drop-effect-on-bus (event)
   (let ((payload (get event :payload))
@@ -656,7 +663,7 @@
       :muted-border-color :mixer-strip-border
       :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
-      :drop-types (list "sample" "audio-effect" "midi-effect")
+      :drop-types (mixer-v2-track-drop-types i)
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (mixer-v2-drop-on-track event))
       :on-click (lambda (event) (mixer-v2-track-body-click event i))
@@ -783,7 +790,7 @@
       :muted-border-color :mixer-strip-border
       :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
-      :drop-types (list "sample" "audio-effect" "midi-effect")
+      :drop-types (mixer-v2-track-drop-types i)
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (mixer-v2-drop-on-track event))
       :on-click (lambda (event) (mixer-v2-track-body-click event i))
