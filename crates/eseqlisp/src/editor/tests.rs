@@ -2135,6 +2135,29 @@ fn vim_normal_mode_supports_basic_motions() {
 }
 
 #[test]
+fn vim_gd_jumps_to_definition() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    let defs_id = editor.open_scratch_buffer("*defs*", "(def target 42)");
+    let callsite_id = editor.open_scratch_buffer("*main*", "(target)");
+    editor.set_active_buffer(callsite_id);
+    editor.active_buffer_mut().cursor = (0, 1);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().id, defs_id);
+    assert_eq!(editor.active_buffer().cursor, (0, 5));
+    assert_eq!(editor.vim_input_mode, VimInputMode::Normal);
+}
+
+#[test]
 fn vim_normal_mode_accepts_shifted_motions_without_inserting() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(

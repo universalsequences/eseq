@@ -8,6 +8,7 @@
 (def ui-lego-gap () 0.06125)
 (def ui-lego-small-h () 1.95)
 (def ui-lego-medium-h () 4.08)
+(def ui-lego-large-h () 5.58)
 (def ui-lego-dense-h () 3.8)
 (def ui-lego-full-h ()
   (+ (ui-lego-medium-h) (ui-lego-small-h) (ui-lego-small-h)
@@ -33,7 +34,7 @@
 (def ui-lego-surface-s (title height accent section surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
-       :corner-radius 7
+       :corner-radius 24
        :border-width 1
        :padding 0.24
        :on-click (ui-section-select-callback section)
@@ -86,7 +87,7 @@
 (def ui-lego-plain-surface-s (height section surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color surface
-       :corner-radius 7
+       :corner-radius 24
        :border-width 1
        :padding 0.16
        :debug-name "ui-lego-plain-surface"
@@ -174,7 +175,7 @@
   (ui-lego-panel-s (ui-lego-dense-h) section (rgba 0.055 0.058 0.064 1.0) body))
 
 (def ui-readout-panel-medium-s (section body)
-  (ui-lego-panel-s (ui-lego-medium-h) section (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-panel-s (ui-lego-large-h) section (rgba 0.055 0.058 0.064 1.0) body))
 
 (def ui-readout-block-medium (title accent body)
   (ui-lego-surface title (ui-lego-medium-h) accent (rgba 0.055 0.058 0.064 1.0) body))
@@ -688,15 +689,17 @@
 (def ui-detail-adsr-s (section title attack decay sustain release)
   (let ((scope (custom-ui-current-scope)))
     (ui-readout-panel-medium-s section
-      (v-stack :width :fill :height :fill :gap 0.08 :align :stretch
+      (v-stack :width :fill :height :fill :gap 0.28 :align :stretch
         (box :width :fill :height 0.34 :h-align :start :v-align :center
-          (label title :font-size 7.8 :color :dim :bg :transparent))
+          (h-stack (box :width 0.5)
+            (label title :font-size 7.8 :color :dim :bg :transparent))
+          )
         (adsr-editor
           :attack (ui-param-bound-value attack 5)
           :decay (ui-param-bound-value decay 120)
           :sustain (ui-param-bound-value sustain 0.7)
           :release (ui-param-bound-value release 120)
-          :width :fill :height 2.08
+          :width :fill :height 3.08
           :background-color :instrument-control-bg
           :on-change (lambda (env)
             (do
@@ -707,6 +710,7 @@
               (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
               (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
         (h-stack :width :fill :height 1.0 :gap 0.24 :align :start
+          (box :width 1)
           (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" (ui-accent-cyan))
           (ui-lego-micro-num-stage-s section :decay decay "dec" 5.1 0 "ms" (ui-accent-cyan))
           (ui-lego-micro-num-stage-s section :sustain sustain "sus" 5.1 2 false (ui-accent-cyan))

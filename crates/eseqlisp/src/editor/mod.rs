@@ -5273,6 +5273,10 @@ impl Editor {
                     self.sync_text_horizontal_scroll_to_viewport();
                     true
                 }
+                (KeyCode::Char('g'), KeyCode::Char('d')) => {
+                    self.goto_definition();
+                    true
+                }
                 _ => true,
             },
             VimPending::Replace => {
