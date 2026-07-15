@@ -12050,6 +12050,7 @@ mod tests {
             vec![
                 ("num-tracks", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
+                ("track-instrument-types", test_list(vec![])),
                 ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-selected-sample", Value::String(String::new())),
@@ -14075,7 +14076,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_instrument_selection_queues_track_and_switches_to_presets() {
+    fn metal_seq_browser_instrument_activation_without_a_track_adds_and_switches_to_presets() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -14106,6 +14107,133 @@ mod tests {
                 .eval_str("sbrowser-tab")
                 .expect("read browser tab"),
             Some(Value::String("presets".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().take_status_message(),
+            Some("Adding instrument track: emulations/digitone".to_string())
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_instrument_activation_swaps_the_current_custom_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom"]),
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-create-item
+                    (dict :kind "instrument" :name "emulations/digitone" :label "digitone"))"#,
+            )
+            .expect("activate instrument on a custom track");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "swap-track-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("instrument swap payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("emulations/digitone".to_string()))
+                );
+            }
+            other => panic!("expected swap-track-instrument host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+            Some(Value::String("presets".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-loading-instrument-name")
+                .unwrap(),
+            Some(Value::String("emulations/digitone".to_string()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_instrument_activation_adds_for_non_swappable_tracks() {
+        for track_type in ["rack", "modulator", "sampler"] {
+            let mut editor = browser_editor_on_instrument_tab();
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "track-instrument-types",
+                test_string_list(&[track_type]),
+            );
+
+            editor
+                .runtime_mut()
+                .eval_str(
+                    r#"(sbrowser-select-create-item
+                        (dict :kind "instrument" :name "core/drift" :label "Drift"))"#,
+                )
+                .unwrap_or_else(|error| panic!("activate from {track_type} track: {error:?}"));
+
+            let commands = editor.drain_host_commands();
+            assert!(
+                matches!(
+                    commands.as_slice(),
+                    [eseqlisp::host::HostCommand::Custom { name, .. }]
+                        if name == "add-track-instrument"
+                ),
+                "{track_type} activation should add a track: {commands:?}"
+            );
+            assert_eq!(
+                editor.runtime_mut().take_status_message(),
+                Some("Adding instrument track: core/drift".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_instrument_drop_shows_a_visible_loading_row() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom"]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-drop-instrument-on-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "instrument" :name "core/triton")
+                          :target (dict :kind "track" :track 0)))"#,
+            )
+            .expect("drop saved instrument on custom track");
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(48, 24);
+
+        let layout = editor.widget_layout().expect("instrument browser layout");
+        let loading_row = find_layout_node_by_stable_key(&layout, "instrument-loading-row")
+            .expect("instrument swap should render its loading row");
+        assert_finite_nonzero_rect(loading_row, "instrument loading row");
+        assert!(
+            find_layout_node_by_text(&layout, "Loading core/triton...").is_some(),
+            "loading row should name the instrument being compiled"
         );
     }
 
@@ -24539,8 +24667,35 @@ mod tests {
 
     #[test]
     fn metal_seq_sequencer_exposes_track_and_empty_space_drop_targets() {
+        fn find_track_drop_target(
+            node: &eseqlisp::layout::LayoutNode,
+            track: f64,
+        ) -> Option<&eseqlisp::layout::LayoutNode> {
+            let matches = node.props.get("drop-meta").is_some_and(|meta| {
+                let Value::Map(meta) = meta else {
+                    return false;
+                };
+                meta.get("kind")
+                    .is_some_and(|kind| *kind.borrow() == Value::String("track".to_string()))
+                    && meta
+                        .get("track")
+                        .is_some_and(|value| *value.borrow() == Value::Number(track))
+            });
+            if matches {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_track_drop_target(child, track))
+        }
+
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom", "sampler"]),
+        );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let sequencer_id = editor
@@ -24575,14 +24730,40 @@ mod tests {
         let row_drop_types = row.get("drop-types").expect("row drop types").borrow();
         assert!(value_contains_string(&row_drop_types, "sample"));
         assert!(
-            !value_contains_string(&row_drop_types, "instrument"),
-            "dropping instruments onto an existing sequencer row should not be accepted"
+            value_contains_string(&row_drop_types, "instrument"),
+            "custom instrument rows should accept saved-instrument replacement"
         );
+
+        let sampler_row = find_widget_map_by_key(&tree, "sequencer-track-drop-1")
+            .expect("sampler sequencer track row");
+        let sampler_drop_types = sampler_row
+            .get("drop-types")
+            .expect("sampler row drop types")
+            .borrow();
+        assert!(
+            !value_contains_string(&sampler_drop_types, "instrument"),
+            "sampler conversion is outside Phase 1 and must not advertise a valid drop target"
+        );
+
+        editor.set_layout_viewport(180, 40);
+        editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+        let layout = editor
+            .widget_layout()
+            .expect("sequencer drop-target layout");
+        let custom_row =
+            find_track_drop_target(&layout, 0.0).expect("custom track drop-target layout node");
+        assert_finite_nonzero_rect(custom_row, "custom track instrument drop target");
     }
 
     #[test]
     fn metal_seq_sequencer_drop_handlers_route_to_existing_host_commands() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom", "custom"]),
+        );
         let _ = editor.drain_host_commands();
         editor
             .runtime_mut()
@@ -24608,6 +24789,42 @@ mod tests {
             }
             other => panic!("expected audition-sample host command, got {other:?}"),
         }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seqv-drop-on-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "instrument" :name "core/triton")
+                          :target (dict :kind "track" :track 1)))"#,
+            )
+            .expect("drop saved instrument on custom sequencer track");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "swap-track-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("swap-track-instrument payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("core/triton".to_string()))
+                );
+            }
+            other => panic!("expected swap-track-instrument host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-loading-instrument-name")
+                .unwrap(),
+            Some(Value::String("core/triton".to_string()))
+        );
 
         editor
             .runtime_mut()
@@ -27523,6 +27740,99 @@ mod tests {
         assert!(
             find_layout_node_by_debug_name(&layout, "process-chain-panel").is_none(),
             "tracks without attached processes must not show a process panel"
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_custom_instrument_panel_routes_saved_instrument_drops() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut instrument = test_instrument_map();
+        instrument.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "instrument-panel",
+            test_list(vec![Value::Map(instrument)]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom"]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer should exist")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("custom instrument panel layout");
+        let panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("custom instrument panel");
+        assert_finite_nonzero_rect(panel, "custom instrument drop target");
+        assert_eq!(
+            panel.props.get("drop-types"),
+            Some(&test_string_list(&["instrument"]))
+        );
+        assert!(
+            matches!(
+                panel.props.get("drop-meta"),
+                Some(Value::Map(meta))
+                    if meta.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+            ),
+            "instrument panel should carry its target track: {:?}",
+            panel.props.get("drop-meta")
+        );
+        let on_drop = panel
+            .props
+            .get("on-drop")
+            .cloned()
+            .expect("custom instrument panel drop callback");
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(
+                on_drop,
+                vec![map_value([
+                    ("drag-type", Value::String("instrument".to_string())),
+                    (
+                        "payload",
+                        map_value([
+                            ("kind", Value::String("instrument".to_string())),
+                            ("name", Value::String("core/triton".to_string())),
+                        ]),
+                    ),
+                    (
+                        "target",
+                        map_value([
+                            ("kind", Value::String("instrument-panel".to_string())),
+                            ("track", Value::Number(0.0)),
+                        ]),
+                    ),
+                ])],
+            )
+            .expect("drop saved instrument on custom instrument panel");
+
+        let commands = editor.drain_host_commands();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == "swap-track-instrument"
+                        && matches!(payload, Value::Map(map)
+                            if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                                && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/triton".to_string())))
+            ),
+            "instrument panel drop should queue one targeted swap: {commands:?}"
         );
     }
 

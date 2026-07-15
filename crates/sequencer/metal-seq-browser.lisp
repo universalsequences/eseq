@@ -2,6 +2,8 @@
 ;; C-x s to open, type to filter, Enter to audition, +/= to add track, q to quit
 ;; Uses tree widget inside scroll container for hierarchical browsing.
 
+(load "metal-seq-track-collapse.lisp")
+
 ;; ── State ──
 (def sbrowser-filter (state ""))
 (def sbrowser-source-buffer "")
@@ -160,6 +162,32 @@
   (host-command "add-track-instrument" (dict :name name))
   (set! sbrowser-tab "presets")
   (status (str "Loading instrument: " name)))
+
+(def sbrowser-swap-track-instrument (track name)
+  (if (or (= name nil) (= name ""))
+    (status "Drop an instrument, not a folder")
+    (if (seq-track-custom-instrument? track)
+      (do
+        (set! sbrowser-loading-instrument-name name)
+        (host-command "swap-track-instrument" (dict :track track :name name))
+        (status (str "Loading instrument swap: " name)))
+      (status "Saved instruments can replace custom instrument tracks"))))
+
+(def sbrowser-drop-instrument-on-track (event)
+  (let ((payload (get event :payload))
+        (target (get event :target)))
+    (sbrowser-swap-track-instrument
+      (get target :track)
+      (get payload :name))))
+
+(def sbrowser-activate-instrument (name)
+  (if (seq-track-custom-instrument? SEQ.current-track)
+    (do
+      (sbrowser-swap-track-instrument SEQ.current-track name)
+      (set! sbrowser-tab "presets"))
+    (do
+      (sbrowser-add-instrument-track name)
+      (status (str "Adding instrument track: " name)))))
 
 (def sbrowser-add-sampler-track ()
   (host-command "add-track-sampler" (dict))
@@ -635,7 +663,7 @@
           (if (= kind "new-instrument")
             (sbrowser-enter-new-instrument-editor)
             (if (= kind "instrument")
-              (sbrowser-add-instrument-track (get item :name))
+              (sbrowser-activate-instrument (get item :name))
               (status "Choose an instrument"))))))))
 
 (def sbrowser-focus-create-item (item)

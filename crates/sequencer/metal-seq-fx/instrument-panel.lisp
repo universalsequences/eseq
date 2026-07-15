@@ -432,6 +432,15 @@
           :color :instrument-panel-bg
           :header :fx-panel-header-bg
           :selected-header :fx-panel-header-selected-bg
+          ;; Rack-slot instruments reuse this panel renderer, but the rack owns
+          ;; their drop semantics. Only a track's main custom instrument is a
+          ;; Phase-1 replacement target.
+          :drop-types (if (= (get inst :rack-slot) nil)
+            (list "instrument")
+            (list))
+          :drop-meta (dict :kind "instrument-panel" :track (get inst :track))
+          :drop-hover-border-color :mixer-strip-selected-border
+          :on-drop (lambda (event) (sbrowser-drop-instrument-on-track event))
           :padding 0
           :height fx-fixed-panel-height
           :selected 0)))))
