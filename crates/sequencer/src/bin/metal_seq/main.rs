@@ -66,9 +66,9 @@ use sequencer::agent::actions::{
 use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
-    CustomInstrumentRunMode, KeyboardTrigger, MidiFxPosition, PatternId, RackSlotParam,
-    SequencerState, StepParam, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
-    MAX_STEPS, SYNC_RESOLUTIONS,
+    CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
+    MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
+    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
@@ -204,8 +204,132 @@ struct PendingSavedInstrumentLoad {
     name: String,
     source: String,
     run_mode: CustomInstrumentRunMode,
-    group_id: Option<u64>,
+    target: SavedInstrumentLoadTarget,
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedInstrumentLoadTarget {
+    AddTrack {
+        group_id: Option<u64>,
+    },
+    SwapTrack {
+        requested_track: usize,
+        voice_sum_id: i32,
+    },
+}
+
+enum SavedInstrumentLoadApply {
+    Added { track: usize, group_id: Option<u64> },
+    Swapped { summary: InstrumentSlotResetSummary },
+}
+
+fn capture_instrument_swap_target(
+    app: &ui::App,
+    track: usize,
+) -> Result<SavedInstrumentLoadTarget, String> {
+    if app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
+        return Err(format!(
+            "Track {} is not a custom instrument track",
+            track + 1
+        ));
+    }
+    if app
+        .graph
+        .track_engine_ids
+        .get(track)
+        .and_then(|engine_id| *engine_id)
+        .is_none()
+    {
+        return Err(format!("Custom track {} has no engine binding", track + 1));
+    }
+    let voice_sum_id = app
+        .graph
+        .track_node_ids
+        .get(track)
+        .map(|nodes| nodes.voice_sum_id)
+        .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
+    Ok(SavedInstrumentLoadTarget::SwapTrack {
+        requested_track: track,
+        voice_sum_id,
+    })
+}
+
+fn resolve_instrument_swap_target(
+    app: &ui::App,
+    requested_track: usize,
+    voice_sum_id: i32,
+) -> Result<usize, String> {
+    let voice_sum_ids = app
+        .graph
+        .track_node_ids
+        .iter()
+        .map(|nodes| nodes.voice_sum_id)
+        .collect::<Vec<_>>();
+    resolve_instrument_swap_target_index(&voice_sum_ids, requested_track, voice_sum_id)
+        .ok_or_else(|| "The instrument swap target was removed while loading".to_string())
+}
+
+fn resolve_instrument_swap_target_index(
+    voice_sum_ids: &[i32],
+    requested_track: usize,
+    voice_sum_id: i32,
+) -> Option<usize> {
+    if voice_sum_ids.get(requested_track) == Some(&voice_sum_id) {
+        Some(requested_track)
+    } else {
+        voice_sum_ids
+            .iter()
+            .position(|candidate| *candidate == voice_sum_id)
+    }
+}
+
+fn try_apply_cached_saved_instrument(
+    app: &mut ui::App,
+    target: SavedInstrumentLoadTarget,
+    name: &str,
+    source: &str,
+    run_mode: CustomInstrumentRunMode,
+) -> Option<Result<SavedInstrumentLoadApply, String>> {
+    match target {
+        SavedInstrumentLoadTarget::AddTrack { group_id } => app
+            .try_add_cached_saved_instrument_track_sync(name, source, run_mode)
+            .map(|result| result.map(|track| SavedInstrumentLoadApply::Added { track, group_id })),
+        SavedInstrumentLoadTarget::SwapTrack {
+            requested_track,
+            voice_sum_id,
+        } => {
+            let track = match resolve_instrument_swap_target(app, requested_track, voice_sum_id) {
+                Ok(track) => track,
+                Err(error) => return Some(Err(error)),
+            };
+            app.try_swap_track_to_cached_saved_instrument_sync(track, name, source, run_mode)
+                .map(|result| result.map(|summary| SavedInstrumentLoadApply::Swapped { summary }))
+        }
+    }
+}
+
+fn apply_compiled_saved_instrument(
+    app: &mut ui::App,
+    target: SavedInstrumentLoadTarget,
+    name: &str,
+    source: &str,
+    run_mode: CustomInstrumentRunMode,
+    result: sequencer::lisp_host::CompileResult,
+) -> Result<SavedInstrumentLoadApply, String> {
+    match target {
+        SavedInstrumentLoadTarget::AddTrack { group_id } => app
+            .add_compiled_saved_instrument_track_sync(name, source, run_mode, result)
+            .map(|track| SavedInstrumentLoadApply::Added { track, group_id }),
+        SavedInstrumentLoadTarget::SwapTrack {
+            requested_track,
+            voice_sum_id,
+        } => {
+            let track = resolve_instrument_swap_target(app, requested_track, voice_sum_id)?;
+            app.swap_track_to_compiled_saved_instrument_sync(track, name, source, run_mode, result)
+                .map(|summary| SavedInstrumentLoadApply::Swapped { summary })
+        }
+    }
 }
 
 struct PendingKeyLockAudition {
@@ -3710,11 +3834,11 @@ mod tests {
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
-        restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
-        show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
-        FxDeleteChain, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
-        NEW_INSTRUMENT_STARTER_DSP,
+        resolve_instrument_swap_target_index, restore_instrument_patcher_layout_source,
+        should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
+        show_instrument_patcher_source_layout_source, track_meter_bindings_visible,
+        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
+        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -3753,6 +3877,24 @@ mod tests {
         assert_eq!(reconciled_track_index(7, 1, 4), Some(1));
         assert_eq!(reconciled_track_index(7, 9, 4), Some(3));
         assert_eq!(reconciled_track_index(0, 0, 0), None);
+    }
+
+    #[test]
+    fn pending_instrument_swap_follows_stable_track_shell_identity() {
+        assert_eq!(
+            resolve_instrument_swap_target_index(&[101, 202, 303], 1, 202),
+            Some(1)
+        );
+        assert_eq!(
+            resolve_instrument_swap_target_index(&[202, 303], 1, 202),
+            Some(0),
+            "a track shifted by deletion should still receive its pending swap"
+        );
+        assert_eq!(
+            resolve_instrument_swap_target_index(&[101, 303], 1, 202),
+            None,
+            "a removed target must not redirect the swap to its former index"
+        );
     }
 
     #[test]
@@ -7012,7 +7154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    "add-track-instrument" => {
+                    "add-track-instrument" | "swap-track-instrument" => {
                         if let Some(pending) = pending_saved_instrument_load.as_ref() {
                             let escaped = escape_lisp_string(&pending.name);
                             let _ = editor.runtime_mut().eval_str(&format!(
@@ -7023,27 +7165,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ));
                             continue;
                         }
-                        let Some(name) = extract_string_from_payload(&payload, "name") else {
+                        let Some(instrument_name) = extract_string_from_payload(&payload, "name")
+                        else {
+                            let _ = editor
+                                .runtime_mut()
+                                .eval_str("(set! sbrowser-loading-instrument-name \"\")");
                             editor.handle_host_event(HostEvent::Status(
                                 "Instrument load is missing a name".to_string(),
                             ));
                             continue;
                         };
-                        let group_id = extract_usize_from_payload(&payload, "group-id")
-                            .map(|group_id| group_id as u64);
-                        let source = match sequencer::lisp_host::load_instrument_source(&name) {
-                            Ok(source) => source,
-                            Err(error) => {
+                        let target = if name == "swap-track-instrument" {
+                            let Some(track) = extract_usize_from_payload(&payload, "track") else {
                                 let _ = editor
                                     .runtime_mut()
                                     .eval_str("(set! sbrowser-loading-instrument-name \"\")");
-                                editor.handle_host_event(HostEvent::Status(format!(
-                                    "Error loading instrument source: {error}"
-                                )));
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Instrument swap is missing a track".to_string(),
+                                ));
                                 continue;
+                            };
+                            match capture_instrument_swap_target(&app, track) {
+                                Ok(target) => target,
+                                Err(error) => {
+                                    let _ = editor
+                                        .runtime_mut()
+                                        .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Cannot swap instrument: {error}"
+                                    )));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            SavedInstrumentLoadTarget::AddTrack {
+                                group_id: extract_usize_from_payload(&payload, "group-id")
+                                    .map(|group_id| group_id as u64),
                             }
                         };
-                        let run_mode = match sequencer::lisp_host::load_instrument_run_mode(&name) {
+                        let escaped = escape_lisp_string(&instrument_name);
+                        let _ = editor.runtime_mut().eval_str(&format!(
+                            "(set! sbrowser-loading-instrument-name \"{escaped}\")"
+                        ));
+                        let source =
+                            match sequencer::lisp_host::load_instrument_source(&instrument_name) {
+                                Ok(source) => source,
+                                Err(error) => {
+                                    let _ = editor
+                                        .runtime_mut()
+                                        .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error loading instrument source: {error}"
+                                    )));
+                                    continue;
+                                }
+                            };
+                        let run_mode = match sequencer::lisp_host::load_instrument_run_mode(
+                            &instrument_name,
+                        ) {
                             Ok(run_mode) => run_mode,
                             Err(error) => {
                                 let _ = editor
@@ -7055,42 +7234,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                         };
-                        if let Some(cached_result) =
-                            app.try_add_cached_saved_instrument_track_sync(&name, &source, run_mode)
-                        {
+                        if let Some(cached_result) = try_apply_cached_saved_instrument(
+                            &mut app,
+                            target,
+                            &instrument_name,
+                            &source,
+                            run_mode,
+                        ) {
                             let _ = editor
                                 .runtime_mut()
                                 .eval_str("(set! sbrowser-loading-instrument-name \"\")");
                             match cached_result {
-                                Ok(idx) => finish_added_instrument_track(
-                                    idx,
-                                    AddTrackInstrumentCtx {
-                                        app: &mut app,
-                                        editor: &mut editor,
-                                        state: &state,
-                                        current_track: &current_track,
-                                        track_names: &mut track_names,
-                                        track_pan_ids: &track_pan_ids,
-                                        record_armed: &record_armed,
-                                        selected_steps: &selected_steps,
-                                        accumulator_names: &accumulator_names,
-                                        cached_track_peak_levels: &cached_track_peak_levels,
-                                        group_id,
-                                        track_groups: &track_groups,
-                                        ui_epoch: &ui_epoch,
-                                        lg_raw,
-                                    },
-                                ),
-                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
-                                    "Error adding instrument track: {error}"
-                                ))),
+                                Ok(SavedInstrumentLoadApply::Added { track, group_id }) => {
+                                    finish_added_instrument_track(
+                                        track,
+                                        AddTrackInstrumentCtx {
+                                            app: &mut app,
+                                            editor: &mut editor,
+                                            state: &state,
+                                            current_track: &current_track,
+                                            track_names: &mut track_names,
+                                            track_pan_ids: &track_pan_ids,
+                                            record_armed: &record_armed,
+                                            selected_steps: &selected_steps,
+                                            accumulator_names: &accumulator_names,
+                                            cached_track_peak_levels: &cached_track_peak_levels,
+                                            group_id,
+                                            track_groups: &track_groups,
+                                            ui_epoch: &ui_epoch,
+                                            lg_raw,
+                                        },
+                                    )
+                                }
+                                Ok(SavedInstrumentLoadApply::Swapped { summary }) => {
+                                    finish_swapped_instrument_track(
+                                        &instrument_name,
+                                        summary,
+                                        SwapTrackInstrumentCtx {
+                                            app: &mut app,
+                                            editor: &mut editor,
+                                            state: &state,
+                                            current_track: &current_track,
+                                            selected_steps: &selected_steps,
+                                            fx_epoch: &fx_epoch,
+                                            ui_epoch: &ui_epoch,
+                                        },
+                                    )
+                                }
+                                Err(error) => {
+                                    let action = match target {
+                                        SavedInstrumentLoadTarget::AddTrack { .. } => {
+                                            "adding instrument track"
+                                        }
+                                        SavedInstrumentLoadTarget::SwapTrack { .. } => {
+                                            "swapping instrument"
+                                        }
+                                    };
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error {action}: {error}"
+                                    )))
+                                }
                             }
                             continue;
                         }
                         let sample_rate = app.graph.sample_rate;
-                        let asset_base = sequencer::lisp_host::instrument_source_path(&name)
-                            .ok()
-                            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+                        let asset_base =
+                            sequencer::lisp_host::instrument_source_path(&instrument_name)
+                                .ok()
+                                .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
                         let compile_source = source.clone();
                         let (tx, rx) = std::sync::mpsc::channel();
                         std::thread::spawn(move || {
@@ -7103,14 +7314,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = tx.send(result);
                         });
                         pending_saved_instrument_load = Some(PendingSavedInstrumentLoad {
-                            name: name.clone(),
+                            name: instrument_name.clone(),
                             source,
                             run_mode,
-                            group_id,
+                            target,
                             receiver: rx,
                         });
+                        let action = match target {
+                            SavedInstrumentLoadTarget::AddTrack { .. } => "Loading instrument",
+                            SavedInstrumentLoadTarget::SwapTrack { .. } => {
+                                "Loading instrument for swap"
+                            }
+                        };
                         editor.handle_host_event(HostEvent::Status(format!(
-                            "Loading instrument: {name}"
+                            "{action}: {instrument_name}"
                         )));
                         editor.mark_needs_redraw();
                     }
@@ -16347,15 +16564,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .runtime_mut()
                 .eval_str("(set! sbrowser-loading-instrument-name \"\")");
             match completed_load {
-                Ok(result) => match app.add_compiled_saved_instrument_track_sync(
+                Ok(result) => match apply_compiled_saved_instrument(
+                    &mut app,
+                    pending.target,
                     &pending.name,
                     &pending.source,
                     pending.run_mode,
                     result,
                 ) {
-                    Ok(idx) => {
+                    Ok(SavedInstrumentLoadApply::Added { track, group_id }) => {
                         finish_added_instrument_track(
-                            idx,
+                            track,
                             AddTrackInstrumentCtx {
                                 app: &mut app,
                                 editor: &mut editor,
@@ -16367,7 +16586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 selected_steps: &selected_steps,
                                 accumulator_names: &accumulator_names,
                                 cached_track_peak_levels: &cached_track_peak_levels,
-                                group_id: pending.group_id,
+                                group_id,
                                 track_groups: &track_groups,
                                 ui_epoch: &ui_epoch,
                                 lg_raw,
@@ -16375,17 +16594,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         editor.mark_needs_redraw();
                     }
+                    Ok(SavedInstrumentLoadApply::Swapped { summary }) => {
+                        finish_swapped_instrument_track(
+                            &pending.name,
+                            summary,
+                            SwapTrackInstrumentCtx {
+                                app: &mut app,
+                                editor: &mut editor,
+                                state: &state,
+                                current_track: &current_track,
+                                selected_steps: &selected_steps,
+                                fx_epoch: &fx_epoch,
+                                ui_epoch: &ui_epoch,
+                            },
+                        );
+                        editor.mark_needs_redraw();
+                    }
                     Err(error) => {
+                        let action = match pending.target {
+                            SavedInstrumentLoadTarget::AddTrack { .. } => "adding instrument track",
+                            SavedInstrumentLoadTarget::SwapTrack { .. } => "swapping instrument",
+                        };
                         editor.handle_host_event(HostEvent::Status(format!(
-                            "Error adding instrument track: {error}"
+                            "Error {action}: {error}"
                         )));
                         editor.mark_needs_redraw();
                     }
                 },
                 Err(error) => {
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "Error loading instrument: {error}"
-                    )));
+                    let action = match pending.target {
+                        SavedInstrumentLoadTarget::AddTrack { .. } => "loading instrument",
+                        SavedInstrumentLoadTarget::SwapTrack { .. } => {
+                            "loading instrument for swap"
+                        }
+                    };
+                    editor.handle_host_event(HostEvent::Status(format!("Error {action}: {error}")));
                     editor.mark_needs_redraw();
                 }
             }

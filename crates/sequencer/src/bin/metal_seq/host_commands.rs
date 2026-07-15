@@ -122,6 +122,101 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     )));
 }
 
+pub(crate) struct SwapTrackInstrumentCtx<'a> {
+    pub(crate) app: &'a mut ui::App,
+    pub(crate) editor: &'a mut Editor,
+    pub(crate) state: &'a Arc<SequencerState>,
+    pub(crate) current_track: &'a Arc<AtomicUsize>,
+    pub(crate) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
+    pub(crate) fx_epoch: &'a Arc<AtomicUsize>,
+    pub(crate) ui_epoch: &'a Arc<AtomicUsize>,
+}
+
+pub(crate) fn finish_swapped_instrument_track(
+    name: &str,
+    summary: sequencer::sequencer::InstrumentSlotResetSummary,
+    ctx: SwapTrackInstrumentCtx<'_>,
+) {
+    let SwapTrackInstrumentCtx {
+        app,
+        editor,
+        state,
+        current_track,
+        selected_steps,
+        fx_epoch,
+        ui_epoch,
+    } = ctx;
+    let selected_track = current_track
+        .load(Ordering::Relaxed)
+        .min(app.tracks.len().saturating_sub(1));
+    if !app.tracks.is_empty() {
+        let rt = editor.runtime_mut();
+        sync_all_track_sequencer_state(rt, state, app, selected_track, selected_steps);
+        rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));
+        sync_step_param_lists(rt, state, selected_track);
+        rt.set_reactive(
+            "SEQ",
+            "effects",
+            build_effects_value(
+                state,
+                selected_track,
+                &app.graph.effect_descriptors,
+                selected_steps,
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "midi-effects",
+            build_midi_effects_value(state, selected_track, selected_steps),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "instrument-panel",
+            build_instrument_panel_value(app, selected_track, selected_steps),
+        );
+        sync_track_params(rt, app, state, selected_track, selected_steps);
+        sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
+        rt.set_reactive(
+            "SEQ",
+            "step-has-plocks",
+            build_step_has_plocks(state, selected_track, &app.graph.effect_descriptors),
+        );
+        rt.run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+    }
+    fx_epoch.fetch_add(1, Ordering::Relaxed);
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+    editor.handle_host_event(HostEvent::Status(instrument_swap_status(name, summary)));
+}
+
+fn instrument_swap_status(
+    name: &str,
+    summary: sequencer::sequencer::InstrumentSlotResetSummary,
+) -> String {
+    let mut details = Vec::new();
+    if summary.patterns_with_cleared_locks > 0 {
+        let count = summary.patterns_with_cleared_locks;
+        details.push(format!(
+            "cleared instrument p-locks in {count} {}",
+            if count == 1 { "pattern" } else { "patterns" }
+        ));
+    }
+    if summary.process_bindings_dropped > 0 {
+        let count = summary.process_bindings_dropped;
+        details.push(format!(
+            "dropped {count} stale process {}",
+            if count == 1 { "binding" } else { "bindings" }
+        ));
+    }
+    let base = format!("Swapped → {name}");
+    if details.is_empty() {
+        base
+    } else {
+        format!("{base} ({})", details.join(", "))
+    }
+}
+
 pub(crate) fn add_new_track_to_group(
     app: &mut ui::App,
     track: usize,
@@ -192,5 +287,27 @@ mod tests {
         assert_eq!(new_track_group_target(&groups, 4, Some(99)), None);
         assert_eq!(new_track_group_target(&groups, 4, None), None);
         assert_eq!(new_track_group_target(&groups, 3, Some(27)), None);
+    }
+
+    #[test]
+    fn instrument_swap_status_reports_destructive_cleanup() {
+        assert_eq!(
+            instrument_swap_status(
+                "core/drift",
+                sequencer::sequencer::InstrumentSlotResetSummary::default(),
+            ),
+            "Swapped → core/drift"
+        );
+        assert_eq!(
+            instrument_swap_status(
+                "core/drift",
+                sequencer::sequencer::InstrumentSlotResetSummary {
+                    patterns_reset: 4,
+                    patterns_with_cleared_locks: 3,
+                    process_bindings_dropped: 1,
+                },
+            ),
+            "Swapped → core/drift (cleared instrument p-locks in 3 patterns, dropped 1 stale process binding)"
+        );
     }
 }

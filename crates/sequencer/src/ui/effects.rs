@@ -526,6 +526,36 @@ impl App {
         }
     }
 
+    pub fn swap_track_to_compiled_saved_instrument_sync(
+        &mut self,
+        track: usize,
+        name: &str,
+        source: &str,
+        run_mode: CustomInstrumentRunMode,
+        result: lisp_host::CompileResult,
+    ) -> Result<crate::sequencer::InstrumentSlotResetSummary, String> {
+        let cache_idx =
+            self.cache_instrument_engine(name, source, &result.manifest, result.lib, result.lease);
+        let manifest = self.editor.engine_registry.engines[cache_idx]
+            .manifest
+            .clone();
+        let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+        let lib_ptr: *const lisp_host::LoadedDGenLib =
+            self.editor.instrument_libs.get(lib_index).ok_or_else(|| {
+                format!("Instrument engine {cache_idx} references missing library {lib_index}")
+            })?;
+        let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
+            self.register_dedicated_instrument_engine(name, source, &manifest, lib_index)?
+        } else {
+            cache_idx
+        };
+        unsafe {
+            self.graph_controller().swap_custom_track_instrument(
+                track, name, engine_id, &manifest, &*lib_ptr, run_mode,
+            )
+        }
+    }
+
     pub fn add_transient_instrument_track_sync(
         &mut self,
         name: &str,
@@ -4045,6 +4075,14 @@ mod tests {
             }
         }
 
+        fn add_gain(&self, gain: f32, name: &str) -> i32 {
+            let name = CString::new(name).expect("test gain name should not contain nul");
+            let node_id =
+                unsafe { crate::audiograph::add_gain_node(self.ptr.0, gain, name.as_ptr()) };
+            assert!(node_id > 0, "test gain node should be allocated");
+            node_id
+        }
+
         fn process_block(&self) {
             let mut output = vec![0.0_f32; self.block_size as usize * self.channels];
             unsafe {
@@ -4060,6 +4098,123 @@ mod tests {
                 crate::audiograph::destroy_live_graph(self.ptr.0);
             }
         }
+    }
+
+    fn test_app_for_live_graph(graph: &TestLiveGraph, track_count: usize) -> App {
+        let state = Arc::new(SequencerState::new(
+            track_count,
+            (0..track_count)
+                .map(|_| default_empty_effect_chain())
+                .collect(),
+        ));
+        let (keyboard_tx, _keyboard_rx) = mpsc::channel();
+        let bus_l_id = graph.add_gain(1.0, "test_bus_l");
+        let bus_r_id = graph.add_gain(1.0, "test_bus_r");
+        App::new(
+            state,
+            graph.ptr,
+            44_100,
+            AudioBuses {
+                bus_l_id,
+                bus_r_id,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: bus_l_id,
+                reverb_node_id: bus_r_id,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        )
+    }
+
+    fn test_instrument_manifest() -> lisp_host::DGenManifest {
+        lisp_host::DGenManifest {
+            dylib_path: std::path::PathBuf::new(),
+            version: 1,
+            process_abi: String::new(),
+            total_memory_slots: 1,
+            params: Vec::new(),
+            groups: Vec::new(),
+            envelopes: Vec::new(),
+            inputs: ["gate", "pitch", "velocity", "trigger"]
+                .into_iter()
+                .enumerate()
+                .map(|(channel, name)| lisp_host::DGenInput {
+                    channel,
+                    name: name.to_string(),
+                })
+                .collect(),
+            modulators: Vec::new(),
+            mod_outputs: Vec::new(),
+            mod_destinations: Vec::new(),
+            n_inputs: 4,
+            n_outputs: 1,
+            tensors: Vec::new(),
+            tensor_init_data: Vec::new(),
+            voice_cell_id: None,
+        }
+    }
+
+    #[test]
+    fn saved_instrument_swap_supports_cached_and_compiled_results() {
+        let graph = TestLiveGraph::new("saved-instrument-swap-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let manifest = test_instrument_manifest();
+        let initial_track = app
+            .add_compiled_saved_instrument_track_sync(
+                "old",
+                "old source",
+                CustomInstrumentRunMode::Instrument,
+                lisp_host::CompileResult {
+                    manifest: manifest.clone(),
+                    lib: lisp_host::test_loaded_dgen_lib(),
+                    lease: None,
+                },
+            )
+            .expect("initial saved instrument track should load");
+        assert_eq!(initial_track, 0);
+        assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
+
+        let cached_engine_id = app.cache_instrument_engine(
+            "cached",
+            "cached source",
+            &manifest,
+            lisp_host::test_loaded_dgen_lib(),
+            None,
+        );
+        let cached_summary = app
+            .try_swap_track_to_cached_saved_instrument_sync(
+                0,
+                "cached",
+                "cached source",
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("cached instrument should be found")
+            .expect("cached swap should succeed");
+        assert_eq!(cached_summary.patterns_reset, 1);
+        assert_eq!(app.graph.track_engine_ids, vec![Some(cached_engine_id)]);
+        assert_eq!(app.tracks, vec!["old"], "track name must survive the swap");
+        assert!(app.graph.engine_node_ids[0].is_none());
+
+        let compiled_summary = app
+            .swap_track_to_compiled_saved_instrument_sync(
+                0,
+                "compiled",
+                "compiled source",
+                CustomInstrumentRunMode::Instrument,
+                lisp_host::CompileResult {
+                    manifest,
+                    lib: lisp_host::test_loaded_dgen_lib(),
+                    lease: None,
+                },
+            )
+            .expect("compiled swap should succeed");
+        assert_eq!(compiled_summary.patterns_reset, 1);
+        assert_eq!(app.graph.track_engine_ids, vec![Some(2)]);
+        assert!(app.graph.engine_node_ids[cached_engine_id].is_none());
+        assert_eq!(app.tracks, vec!["old"]);
+        graph.process_block();
     }
 
     #[test]
