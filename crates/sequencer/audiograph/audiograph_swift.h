@@ -90,6 +90,9 @@ bool graph_connect(LiveGraph *lg, int src_node, int src_port, int dst_node,
 bool graph_disconnect(LiveGraph *lg, int src_node, int src_port, int dst_node,
                       int dst_port);
 
+// Number of producer commands that can be queued without overflowing.
+uint32_t graph_edit_queue_available(const LiveGraph *lg);
+
 bool hot_swap_node(LiveGraph *lg, int node_id, NodeVTable vt, size_t state_size,
                    int nin, int nout, bool xfade,
                    void (*migrate)(void *, void *), const void *initial_state,

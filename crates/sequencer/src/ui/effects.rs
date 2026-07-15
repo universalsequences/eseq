@@ -3990,10 +3990,7 @@ mod tests {
 
     impl TestLiveGraph {
         fn new(label: &str, block_size: i32, sample_rate: i32, channels: usize) -> Self {
-            static INIT: std::sync::Once = std::sync::Once::new();
-            INIT.call_once(|| unsafe {
-                crate::audiograph::initialize_engine(block_size, sample_rate);
-            });
+            crate::audiograph::initialize_engine_for_test(block_size, sample_rate);
 
             let label = CString::new(label).expect("test graph label should not contain nul");
             let ptr = unsafe {

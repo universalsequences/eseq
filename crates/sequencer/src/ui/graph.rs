@@ -271,6 +271,226 @@ fn add_gain_node_checked(
     Ok(node_id)
 }
 
+struct GraphNodeBuildTransaction {
+    lg: *mut crate::audiograph::LiveGraph,
+    node_ids: Vec<i32>,
+    connections: Vec<(i32, i32, i32, i32)>,
+    max_nodes: usize,
+    max_connections: usize,
+    finished: bool,
+}
+
+impl GraphNodeBuildTransaction {
+    fn new(
+        lg: *mut crate::audiograph::LiveGraph,
+        max_nodes: usize,
+        max_connections: usize,
+    ) -> Result<Self, String> {
+        let required_edits = max_nodes
+            .checked_add(max_connections)
+            .and_then(|forward_edits| forward_edits.checked_mul(2))
+            .ok_or_else(|| "Graph edit transaction capacity overflow".to_string())?;
+        unsafe { crate::audiograph::begin_graph_edit_batch(lg) };
+        // GraphEditQueue is single-producer. Reserving room for both the
+        // complete build and its inverse commands makes Drop rollback
+        // infallible without rewinding a queue the audio thread may be reading.
+        let available_edits = unsafe { crate::audiograph::graph_edit_queue_available(lg) } as usize;
+        if available_edits < required_edits {
+            unsafe { crate::audiograph::end_graph_edit_batch(lg) };
+            return Err(format!(
+                "Graph edit queue has room for {available_edits} commands; route construction requires {required_edits} for build and rollback"
+            ));
+        }
+        Ok(Self {
+            lg,
+            node_ids: Vec::with_capacity(max_nodes),
+            connections: Vec::with_capacity(max_connections),
+            max_nodes,
+            max_connections,
+            finished: false,
+        })
+    }
+
+    fn own(&mut self, node_id: i32) -> Result<i32, String> {
+        self.node_ids.push(node_id);
+        #[cfg(test)]
+        record_test_engine_route_node(node_id);
+        if self.node_ids.len() > self.max_nodes {
+            return Err(format!(
+                "Graph edit transaction created more than {} reserved nodes",
+                self.max_nodes
+            ));
+        }
+        Ok(node_id)
+    }
+
+    fn connect(
+        &mut self,
+        src_node: i32,
+        src_port: i32,
+        dst_node: i32,
+        dst_port: i32,
+        context: &str,
+    ) -> Result<(), String> {
+        if self.connections.len() >= self.max_connections {
+            return Err(format!(
+                "{context}: graph edit transaction exceeded its {} reserved connections",
+                self.max_connections
+            ));
+        }
+        let connected = unsafe {
+            crate::audiograph::graph_connect(self.lg, src_node, src_port, dst_node, dst_port)
+        };
+        if !connected {
+            return Err(format!(
+                "{context}: graph_connect({src_node}, {src_port}, {dst_node}, {dst_port}) failed"
+            ));
+        }
+        self.connections
+            .push((src_node, src_port, dst_node, dst_port));
+        #[cfg(test)]
+        record_test_engine_route_connection((src_node, src_port, dst_node, dst_port));
+        Ok(())
+    }
+
+    fn commit(mut self) {
+        unsafe { crate::audiograph::end_graph_edit_batch(self.lg) };
+        self.finished = true;
+    }
+}
+
+impl Drop for GraphNodeBuildTransaction {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let mut rollback_succeeded = true;
+        for &(src_node, src_port, dst_node, dst_port) in self.connections.iter().rev() {
+            let queued = unsafe {
+                crate::audiograph::graph_disconnect(self.lg, src_node, src_port, dst_node, dst_port)
+            };
+            rollback_succeeded &= queued;
+            #[cfg(test)]
+            if queued {
+                record_test_engine_route_rollback_connection((
+                    src_node, src_port, dst_node, dst_port,
+                ));
+            }
+        }
+        for &node_id in self.node_ids.iter().rev() {
+            let queued = unsafe { crate::audiograph::delete_node(self.lg, node_id) };
+            rollback_succeeded &= queued;
+            #[cfg(test)]
+            if queued {
+                record_test_engine_route_rollback_node(node_id);
+            }
+        }
+        unsafe { crate::audiograph::end_graph_edit_batch(self.lg) };
+        self.finished = true;
+        if !rollback_succeeded {
+            eprintln!(
+                "Graph edit rollback could not enqueue every inverse command despite its capacity reservation"
+            );
+        }
+    }
+}
+
+fn add_engine_route_gain_node_checked(
+    lg: *mut crate::audiograph::LiveGraph,
+    gain: f32,
+    name: &str,
+    context: &str,
+) -> Result<i32, String> {
+    #[cfg(test)]
+    if should_fail_test_engine_route_node_add() {
+        return Err(format!(
+            "{context}: injected engine route node allocation failure"
+        ));
+    }
+    add_gain_node_checked(lg, gain, name, context)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ENGINE_ROUTE_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static TEST_ENGINE_ROUTE_NODE_IDS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static TEST_ENGINE_ROUTE_ROLLBACK_NODE_IDS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static TEST_ENGINE_ROUTE_CONNECTIONS: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static TEST_ENGINE_ROUTE_ROLLBACK_CONNECTIONS: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn begin_test_engine_route_capture() {
+    TEST_ENGINE_ROUTE_NODE_IDS.with(|ids| ids.borrow_mut().clear());
+    TEST_ENGINE_ROUTE_ROLLBACK_NODE_IDS.with(|ids| ids.borrow_mut().clear());
+    TEST_ENGINE_ROUTE_CONNECTIONS.with(|connections| connections.borrow_mut().clear());
+    TEST_ENGINE_ROUTE_ROLLBACK_CONNECTIONS.with(|connections| connections.borrow_mut().clear());
+    TEST_ENGINE_ROUTE_FAIL_AFTER.with(|remaining| remaining.set(None));
+}
+
+#[cfg(test)]
+fn set_test_engine_route_failure_after(successful_adds: usize) {
+    begin_test_engine_route_capture();
+    TEST_ENGINE_ROUTE_FAIL_AFTER.with(|remaining| remaining.set(Some(successful_adds)));
+}
+
+#[cfg(test)]
+fn should_fail_test_engine_route_node_add() -> bool {
+    TEST_ENGINE_ROUTE_FAIL_AFTER.with(|remaining| match remaining.get() {
+        Some(0) => {
+            remaining.set(None);
+            true
+        }
+        Some(count) => {
+            remaining.set(Some(count - 1));
+            false
+        }
+        None => false,
+    })
+}
+
+#[cfg(test)]
+fn record_test_engine_route_node(node_id: i32) {
+    TEST_ENGINE_ROUTE_NODE_IDS.with(|ids| ids.borrow_mut().push(node_id));
+}
+
+#[cfg(test)]
+fn record_test_engine_route_rollback_node(node_id: i32) {
+    TEST_ENGINE_ROUTE_ROLLBACK_NODE_IDS.with(|ids| ids.borrow_mut().push(node_id));
+}
+
+#[cfg(test)]
+fn record_test_engine_route_connection(connection: (i32, i32, i32, i32)) {
+    TEST_ENGINE_ROUTE_CONNECTIONS.with(|connections| connections.borrow_mut().push(connection));
+}
+
+#[cfg(test)]
+fn record_test_engine_route_rollback_connection(connection: (i32, i32, i32, i32)) {
+    TEST_ENGINE_ROUTE_ROLLBACK_CONNECTIONS
+        .with(|connections| connections.borrow_mut().push(connection));
+}
+
+#[cfg(test)]
+fn take_test_engine_route_node_ids() -> Vec<i32> {
+    TEST_ENGINE_ROUTE_NODE_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
+#[cfg(test)]
+fn take_test_engine_route_rollback_node_ids() -> Vec<i32> {
+    TEST_ENGINE_ROUTE_ROLLBACK_NODE_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
+#[cfg(test)]
+fn take_test_engine_route_connections() -> Vec<(i32, i32, i32, i32)> {
+    TEST_ENGINE_ROUTE_CONNECTIONS.with(|connections| std::mem::take(&mut *connections.borrow_mut()))
+}
+
+#[cfg(test)]
+fn take_test_engine_route_rollback_connections() -> Vec<(i32, i32, i32, i32)> {
+    TEST_ENGINE_ROUTE_ROLLBACK_CONNECTIONS
+        .with(|connections| std::mem::take(&mut *connections.borrow_mut()))
+}
+
 fn push_graph_param(lg: *mut crate::audiograph::LiveGraph, logical_id: u64, idx: u64, value: f32) {
     if logical_id == 0 {
         return;
@@ -4705,24 +4925,81 @@ impl GraphController<'_> {
         track_mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
     ) -> Result<(), String> {
         self.ensure_engine_slot(engine_id);
+        if engine_id >= self.app.state.runtime.engine_route_lids.len() {
+            return Err(format!(
+                "connect_engine_to_track: engine {engine_id} has no audio-thread route table"
+            ));
+        }
+        if track_idx >= MAX_TRACKS {
+            return Err(format!(
+                "connect_engine_to_track: track {track_idx} exceeds the {MAX_TRACKS}-track runtime limit"
+            ));
+        }
         let Some(existing_engine) = self.app.graph.engine_node_ids[engine_id].as_ref() else {
             return Err(format!(
                 "connect_engine_to_track: missing engine runtime for engine {}",
                 engine_id
             ));
         };
-        if existing_engine.route_gain_ids[track_idx].len() == MAX_VOICES {
+        let (Some(existing_routes), Some(existing_ext_routes)) = (
+            existing_engine.route_gain_ids.get(track_idx),
+            existing_engine.ext_route_gain_ids.get(track_idx),
+        ) else {
+            return Err(format!(
+                "connect_engine_to_track: track {track_idx} is outside engine {engine_id}'s route table"
+            ));
+        };
+        if existing_routes.len() == MAX_VOICES && existing_ext_routes.len() == MAX_VOICES {
             return Ok(());
+        }
+        if !existing_routes.is_empty() || !existing_ext_routes.is_empty() {
+            return Err(format!(
+                "connect_engine_to_track: engine {engine_id} track {track_idx} has incomplete route metadata"
+            ));
         }
         let synth_ids = existing_engine.synth_ids.clone();
         let audio_output_channels = existing_engine.audio_output_channels.clone();
         let primary_mod_output_channel = existing_engine.mod_output_channels.first().copied();
         let modulator_ids = existing_engine.modulator_ids.clone();
+        if synth_ids.len() != MAX_VOICES {
+            return Err(format!(
+                "connect_engine_to_track: engine {engine_id} has {} synth voices, expected {MAX_VOICES}",
+                synth_ids.len()
+            ));
+        }
+        if !modulator_ids.is_empty() && modulator_ids.len() != MAX_VOICES {
+            return Err(format!(
+                "connect_engine_to_track: engine {engine_id} has {} modulator voices, expected 0 or {MAX_VOICES}",
+                modulator_ids.len()
+            ));
+        }
+
+        let route_node_capacity = MAX_VOICES
+            * (2 + if modulator_ids.is_empty() {
+                0
+            } else {
+                EXT_MOD_INPUT_COUNT
+            });
+        let connections_per_voice = 2
+            + usize::from(stereo_route_source_channel(&audio_output_channels, 0).is_some())
+            + usize::from(stereo_route_source_channel(&audio_output_channels, 1).is_some())
+            + usize::from(primary_mod_output_channel.is_some())
+            + if modulator_ids.is_empty() {
+                0
+            } else {
+                EXT_MOD_INPUT_COUNT * 2
+            };
+        let route_connection_capacity = MAX_VOICES * connections_per_voice;
+        let mut transaction = GraphNodeBuildTransaction::new(
+            self.app.graph.lg.0,
+            route_node_capacity,
+            route_connection_capacity,
+        )?;
 
         let mut route_ids = Vec::with_capacity(MAX_VOICES);
         let mut ext_route_ids = Vec::with_capacity(MAX_VOICES);
         for v in 0..MAX_VOICES {
-            let route_l_id = add_gain_node_checked(
+            let route_l_id = transaction.own(add_engine_route_gain_node_checked(
                 self.app.graph.lg.0,
                 0.0,
                 &format!("{}_eng{}_route_{}_l", track_name, engine_id, v),
@@ -4730,9 +5007,9 @@ impl GraphController<'_> {
                     "connect_engine_to_track left route engine {} track {} voice {}",
                     engine_id, track_idx, v
                 ),
-            )?;
+            )?)?;
             if let Some(src_channel) = stereo_route_source_channel(&audio_output_channels, 0) {
-                self.graph_connect_checked(
+                transaction.connect(
                     synth_ids[v],
                     src_channel as i32,
                     route_l_id,
@@ -4743,7 +5020,7 @@ impl GraphController<'_> {
                     ),
                 )?;
             }
-            self.graph_connect_checked(
+            transaction.connect(
                 route_l_id,
                 0,
                 voice_sum_id,
@@ -4755,11 +5032,9 @@ impl GraphController<'_> {
             )?;
 
             let mut route_pair = [route_l_id, 0];
-            self.app.state.runtime.engine_route_lids[engine_id][v][track_idx]
-                .store(route_l_id as u64, Ordering::Release);
 
             if let Some(src_channel) = stereo_route_source_channel(&audio_output_channels, 1) {
-                let route_r_id = add_gain_node_checked(
+                let route_r_id = transaction.own(add_engine_route_gain_node_checked(
                     self.app.graph.lg.0,
                     0.0,
                     &format!("{}_eng{}_route_{}_r", track_name, engine_id, v),
@@ -4767,8 +5042,8 @@ impl GraphController<'_> {
                         "connect_engine_to_track right route engine {} track {} voice {}",
                         engine_id, track_idx, v
                     ),
-                )?;
-                self.graph_connect_checked(
+                )?)?;
+                transaction.connect(
                     synth_ids[v],
                     src_channel as i32,
                     route_r_id,
@@ -4778,7 +5053,7 @@ impl GraphController<'_> {
                         engine_id, track_idx, v
                     ),
                 )?;
-                self.graph_connect_checked(
+                transaction.connect(
                     route_r_id,
                     0,
                     voice_sum_r_id,
@@ -4788,11 +5063,9 @@ impl GraphController<'_> {
                         engine_id, track_idx, v
                     ),
                 )?;
-                self.app.state.runtime.engine_route_lids_r[engine_id][v][track_idx]
-                    .store(route_r_id as u64, Ordering::Release);
                 route_pair[1] = route_r_id;
             } else {
-                let route_r_id = add_gain_node_checked(
+                let route_r_id = transaction.own(add_engine_route_gain_node_checked(
                     self.app.graph.lg.0,
                     0.0,
                     &format!("{}_eng{}_route_{}_r", track_name, engine_id, v),
@@ -4800,8 +5073,8 @@ impl GraphController<'_> {
                         "connect_engine_to_track mirrored right route engine {} track {} voice {}",
                         engine_id, track_idx, v
                     ),
-                )?;
-                self.graph_connect_checked(
+                )?)?;
+                transaction.connect(
                     route_r_id,
                     0,
                     voice_sum_r_id,
@@ -4811,15 +5084,13 @@ impl GraphController<'_> {
                         engine_id, track_idx, v
                     ),
                 )?;
-                self.app.state.runtime.engine_route_lids_r[engine_id][v][track_idx]
-                    .store(route_r_id as u64, Ordering::Release);
                 route_pair[1] = route_r_id;
             }
 
             route_ids.push(route_pair);
 
             if let Some(src_channel) = primary_mod_output_channel {
-                self.graph_connect_checked(
+                transaction.connect(
                     synth_ids[v],
                     src_channel as i32,
                     track_mod_out_id,
@@ -4834,7 +5105,7 @@ impl GraphController<'_> {
             let mut voice_ext_route_ids = [0; EXT_MOD_INPUT_COUNT];
             for input in 0..EXT_MOD_INPUT_COUNT {
                 if !modulator_ids.is_empty() {
-                    let ext_route_id = add_gain_node_checked(
+                    let ext_route_id = transaction.own(add_engine_route_gain_node_checked(
                         self.app.graph.lg.0,
                         0.0,
                         &format!(
@@ -4851,8 +5122,8 @@ impl GraphController<'_> {
                             track_idx,
                             v
                         ),
-                    )?;
-                    self.graph_connect_checked(
+                    )?)?;
+                    transaction.connect(
                         track_mod_in_clip_ids[input],
                         0,
                         ext_route_id,
@@ -4865,7 +5136,7 @@ impl GraphController<'_> {
                             v
                         ),
                     )?;
-                    self.graph_connect_checked(
+                    transaction.connect(
                         ext_route_id,
                         0,
                         modulator_ids[v],
@@ -4878,25 +5149,36 @@ impl GraphController<'_> {
                             v
                         ),
                     )?;
-                    self.app.state.runtime.engine_ext_route_lids[engine_id][v][track_idx][input]
-                        .store(ext_route_id as u64, Ordering::Release);
                     voice_ext_route_ids[input] = ext_route_id;
-                } else {
-                    self.app.state.runtime.engine_ext_route_lids[engine_id][v][track_idx][input]
-                        .store(0, Ordering::Release);
                 }
             }
             ext_route_ids.push(voice_ext_route_ids);
         }
 
-        let Some(engine) = self.app.graph.engine_node_ids[engine_id].as_mut() else {
+        if self.app.graph.engine_node_ids[engine_id].is_none() {
             return Err(format!(
                 "connect_engine_to_track: engine runtime disappeared for engine {}",
                 engine_id
             ));
-        };
+        }
+        transaction.commit();
+        let engine = self.app.graph.engine_node_ids[engine_id]
+            .as_mut()
+            .expect("engine runtime was validated immediately before transaction commit");
         engine.route_gain_ids[track_idx] = route_ids;
         engine.ext_route_gain_ids[track_idx] = ext_route_ids;
+        for voice in 0..MAX_VOICES {
+            let [route_l_id, route_r_id] = engine.route_gain_ids[track_idx][voice];
+            self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+                .store(route_l_id as u64, Ordering::Release);
+            self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+                .store(route_r_id as u64, Ordering::Release);
+            for input in 0..EXT_MOD_INPUT_COUNT {
+                let ext_route_id = engine.ext_route_gain_ids[track_idx][voice][input];
+                self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track_idx][input]
+                    .store(ext_route_id as u64, Ordering::Release);
+            }
+        }
         Ok(())
     }
 
@@ -5535,7 +5817,151 @@ fn delete_without_shift_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::free_patch_idle_route_value;
+    use super::*;
+    use crate::audiograph::LiveGraphPtr;
+    use crate::recorder::MasterRecorder;
+    use crate::sequencer::{default_empty_effect_chain, SequencerState};
+    use crate::ui::AudioBuses;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    struct TestLiveGraph {
+        ptr: LiveGraphPtr,
+        block_size: i32,
+        channels: usize,
+    }
+
+    impl TestLiveGraph {
+        fn new(label: &str) -> Self {
+            const BLOCK_SIZE: i32 = 64;
+            const SAMPLE_RATE: i32 = 44_100;
+            const CHANNELS: usize = 2;
+            crate::audiograph::initialize_engine_for_test(BLOCK_SIZE, SAMPLE_RATE);
+            let label = CString::new(label).expect("test graph label should not contain NUL");
+            let ptr = unsafe {
+                crate::audiograph::create_live_graph(
+                    32,
+                    BLOCK_SIZE,
+                    label.as_ptr(),
+                    CHANNELS as i32,
+                )
+            };
+            assert!(!ptr.is_null(), "test live graph should be created");
+            Self {
+                ptr: LiveGraphPtr(ptr),
+                block_size: BLOCK_SIZE,
+                channels: CHANNELS,
+            }
+        }
+
+        fn add_gain(&self, gain: f32, name: &str) -> i32 {
+            add_gain_node_checked(self.ptr.0, gain, name, "test graph gain")
+                .expect("test gain node should be queued")
+        }
+
+        fn add_voice_modulator(&self, engine_id: usize, voice: usize) -> i32 {
+            let name = CString::new(format!("test_modulator_{voice}"))
+                .expect("test modulator name should not contain NUL");
+            let initial_state =
+                crate::voice_modulator::custom_engine_initial_state(engine_id, voice);
+            let node_id = unsafe {
+                crate::audiograph::add_node(
+                    self.ptr.0,
+                    crate::voice_modulator::voice_modulator_vtable(),
+                    crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+                    name.as_ptr(),
+                    crate::voice_modulator::INPUT_COUNT as i32,
+                    crate::voice_modulator::NUM_OUTPUTS as i32,
+                    (&initial_state as *const crate::voice_modulator::VoiceModulatorInitialState)
+                        .cast(),
+                    std::mem::size_of::<crate::voice_modulator::VoiceModulatorInitialState>(),
+                )
+            };
+            assert!(node_id >= 0, "test modulator node should be queued");
+            node_id
+        }
+
+        fn process_block(&self) {
+            let mut output = vec![0.0_f32; self.block_size as usize * self.channels];
+            unsafe {
+                self.ptr
+                    .process_next_block(output.as_mut_ptr(), self.block_size);
+            }
+        }
+    }
+
+    impl Drop for TestLiveGraph {
+        fn drop(&mut self) {
+            unsafe { crate::audiograph::destroy_live_graph(self.ptr.0) };
+        }
+    }
+
+    struct RouteTargets {
+        voice_sum_id: i32,
+        voice_sum_r_id: i32,
+        track_mod_out_id: i32,
+        track_mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
+    }
+
+    fn test_app(graph: &TestLiveGraph) -> App {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let (keyboard_tx, _keyboard_rx) = mpsc::channel();
+        App::new(
+            state,
+            graph.ptr,
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        )
+    }
+
+    fn install_test_engine(app: &mut App, graph: &TestLiveGraph) -> RouteTargets {
+        let synth_ids = (0..MAX_VOICES)
+            .map(|voice| graph.add_gain(1.0, &format!("test_synth_{voice}")))
+            .collect();
+        let modulator_ids = (0..MAX_VOICES)
+            .map(|voice| graph.add_voice_modulator(0, voice))
+            .collect();
+        app.graph.engine_node_ids = vec![Some(EngineNodeIds {
+            synth_ids,
+            synth_inputs: 0,
+            synth_outputs: 1,
+            audio_output_channels: vec![0],
+            mod_output_channels: vec![0],
+            gatepitch_ids: Vec::new(),
+            modulator_ids,
+            route_gain_ids: (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
+            ext_route_gain_ids: (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
+        })];
+        RouteTargets {
+            voice_sum_id: graph.add_gain(1.0, "test_voice_sum"),
+            voice_sum_r_id: graph.add_gain(1.0, "test_voice_sum_r"),
+            track_mod_out_id: graph.add_gain(1.0, "test_track_mod_out"),
+            track_mod_in_clip_ids: std::array::from_fn(|input| {
+                graph.add_gain(1.0, &format!("test_track_mod_in_{input}"))
+            }),
+        }
+    }
+
+    fn connect_test_engine(app: &mut App, targets: &RouteTargets) -> Result<(), String> {
+        app.graph_controller().connect_engine_to_track(
+            0,
+            0,
+            "Test Track",
+            targets.voice_sum_id,
+            targets.voice_sum_r_id,
+            targets.track_mod_out_id,
+            targets.track_mod_in_clip_ids,
+        )
+    }
 
     #[test]
     fn free_patch_idle_route_stays_closed_while_transport_is_stopped() {
@@ -5547,5 +5973,158 @@ mod tests {
     fn free_patch_idle_route_opens_only_target_track_while_transport_is_playing() {
         assert_eq!(free_patch_idle_route_value(2, 2, true), 1.0);
         assert_eq!(free_patch_idle_route_value(1, 2, true), 0.0);
+    }
+
+    #[test]
+    fn connect_engine_to_track_rolls_back_every_graph_edit_before_publication() {
+        let graph = TestLiveGraph::new("engine-route-rollback-test");
+        let mut app = test_app(&graph);
+        let targets = install_test_engine(&mut app, &graph);
+        set_test_engine_route_failure_after(3);
+
+        let error = {
+            let _batch = GraphEditBatchGuard::new(graph.ptr.0);
+            connect_test_engine(&mut app, &targets)
+                .expect_err("injected route construction failure should be returned")
+        };
+        assert!(error.contains("injected engine route node allocation failure"));
+
+        let engine = app.graph.engine_node_ids[0]
+            .as_ref()
+            .expect("test engine should remain registered");
+        assert!(engine.route_gain_ids[0].is_empty());
+        assert!(engine.ext_route_gain_ids[0].is_empty());
+        for voice in 0..MAX_VOICES {
+            assert_eq!(
+                app.state.runtime.engine_route_lids[0][voice][0].load(Ordering::Acquire),
+                0
+            );
+            assert_eq!(
+                app.state.runtime.engine_route_lids_r[0][voice][0].load(Ordering::Acquire),
+                0
+            );
+            for input in 0..EXT_MOD_INPUT_COUNT {
+                assert_eq!(
+                    app.state.runtime.engine_ext_route_lids[0][voice][0][input]
+                        .load(Ordering::Acquire),
+                    0
+                );
+            }
+        }
+
+        let created_nodes = take_test_engine_route_node_ids();
+        let rolled_back_nodes = take_test_engine_route_rollback_node_ids();
+        assert_eq!(created_nodes.len(), 3);
+        assert_eq!(
+            rolled_back_nodes,
+            created_nodes.iter().rev().copied().collect::<Vec<_>>()
+        );
+        let created_connections = take_test_engine_route_connections();
+        let rolled_back_connections = take_test_engine_route_rollback_connections();
+        assert!(!created_connections.is_empty());
+        assert_eq!(
+            rolled_back_connections,
+            created_connections
+                .iter()
+                .rev()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+
+        for &node_id in &created_nodes {
+            assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, node_id) });
+        }
+        let probe_id = graph.add_gain(0.75, "post_rollback_probe");
+        assert!(
+            probe_id > *created_nodes.iter().max().unwrap(),
+            "compensating rollback must not reuse logical IDs that were already queued"
+        );
+        assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, probe_id) });
+        let mut observed_probe_gain = None;
+        for _ in 0..4 {
+            graph.process_block();
+            let mut state = [0.0_f32; 1];
+            let mut state_size = 0;
+            let copied = unsafe {
+                crate::audiograph::get_node_state_into(
+                    graph.ptr.0,
+                    probe_id,
+                    state.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&state),
+                    &mut state_size,
+                )
+            };
+            if copied {
+                assert_eq!(state_size, std::mem::size_of_val(&state));
+                observed_probe_gain = Some(state[0]);
+                break;
+            }
+        }
+        assert_eq!(observed_probe_gain, Some(0.75));
+        for node_id in created_nodes {
+            let mut state = [0.0_f32; 1];
+            let mut state_size = 0;
+            let copied = unsafe {
+                crate::audiograph::get_node_state_into(
+                    graph.ptr.0,
+                    node_id,
+                    state.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&state),
+                    &mut state_size,
+                )
+            };
+            assert!(!copied, "rolled-back node {node_id} must not remain live");
+            assert_eq!(state_size, 0);
+        }
+    }
+
+    #[test]
+    fn connect_engine_to_track_commits_complete_voice_routes_at_once() {
+        let graph = TestLiveGraph::new("engine-route-commit-test");
+        let mut app = test_app(&graph);
+        let targets = install_test_engine(&mut app, &graph);
+        begin_test_engine_route_capture();
+
+        {
+            let _batch = GraphEditBatchGuard::new(graph.ptr.0);
+            connect_test_engine(&mut app, &targets).expect("complete route build should succeed");
+        }
+
+        let engine = app.graph.engine_node_ids[0]
+            .as_ref()
+            .expect("test engine should remain registered");
+        assert_eq!(engine.route_gain_ids[0].len(), MAX_VOICES);
+        assert_eq!(engine.ext_route_gain_ids[0].len(), MAX_VOICES);
+        for voice in 0..MAX_VOICES {
+            let [left_id, right_id] = engine.route_gain_ids[0][voice];
+            assert!(left_id > 0);
+            assert!(right_id > 0);
+            assert_eq!(
+                app.state.runtime.engine_route_lids[0][voice][0].load(Ordering::Acquire),
+                left_id as u64
+            );
+            assert_eq!(
+                app.state.runtime.engine_route_lids_r[0][voice][0].load(Ordering::Acquire),
+                right_id as u64
+            );
+            for input in 0..EXT_MOD_INPUT_COUNT {
+                let ext_id = engine.ext_route_gain_ids[0][voice][input];
+                assert!(ext_id > 0);
+                assert_eq!(
+                    app.state.runtime.engine_ext_route_lids[0][voice][0][input]
+                        .load(Ordering::Acquire),
+                    ext_id as u64
+                );
+            }
+        }
+
+        assert_eq!(
+            take_test_engine_route_node_ids().len(),
+            MAX_VOICES * (2 + EXT_MOD_INPUT_COUNT)
+        );
+        assert!(!take_test_engine_route_connections().is_empty());
+        assert!(take_test_engine_route_rollback_node_ids().is_empty());
+        assert!(take_test_engine_route_rollback_connections().is_empty());
+        graph.process_block();
     }
 }

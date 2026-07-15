@@ -442,6 +442,17 @@ void end_graph_edit_batch(LiveGraph *lg) {
   }
 }
 
+uint32_t graph_edit_queue_available(const LiveGraph *lg) {
+  if (!lg || !lg->graphEditQueue)
+    return 0;
+  const GraphEditQueue *queue = lg->graphEditQueue;
+  uint32_t head = atomic_load_explicit(&queue->head, memory_order_acquire);
+  uint32_t tail = atomic_load_explicit(&queue->tail, memory_order_acquire);
+  uint32_t used = head - tail;
+  uint32_t usable_capacity = queue->cap - 1;
+  return used < usable_capacity ? usable_capacity - used : 0;
+}
+
 int create_buffer(LiveGraph *lg, int size, int channel_count,
                   const float *source_data) {
   int buffer_id = atomic_fetch_add(&lg->next_buffer_id, 1);
