@@ -603,7 +603,7 @@ fn builtin_instrument_leaf(item: &BuiltinInstrumentDescriptor) -> Value {
         ("name", Value::String(item.name.to_string())),
         ("kind", Value::String("builtin-instrument".to_string())),
         ("icon", Value::Keyword(item.icon.to_string())),
-        ("draggable", Value::Bool(false)),
+        ("draggable", Value::Bool(item.name == "sampler")),
         ("drop-target", Value::Bool(false)),
     ])
 }

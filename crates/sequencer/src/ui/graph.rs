@@ -661,6 +661,21 @@ fn engine_route_build_capacities(engine: &EngineNodeIds) -> (usize, usize) {
     )
 }
 
+fn sampler_voice_build_capacities(voice_count: usize) -> (usize, usize) {
+    let voice_count = voice_count.clamp(1, MAX_VOICES);
+    let nodes_per_voice = 3;
+    let connections_per_voice =
+        4 + 2 + crate::voice_modulator::NUM_OUTPUTS + EXT_MOD_INPUT_COUNT + 2;
+    (
+        voice_count * nodes_per_voice,
+        voice_count * connections_per_voice,
+    )
+}
+
+fn sampler_voice_delete_command_count(track: &TrackNodeIds) -> usize {
+    track.sampler_ids.len() + track.sampler_gatepitch_ids.len() + track.sampler_modulator_ids.len()
+}
+
 fn positive_route_node_count(routes: &[[i32; 2]]) -> usize {
     routes
         .iter()
@@ -1774,16 +1789,338 @@ impl GraphController<'_> {
             )
             .expect("instrument reset target was validated before graph mutation");
 
-        self.app.sync_scratch_runtime_descriptors();
-        self.app
-            .macro_engine
-            .remove_instrument_mappings_for_track(track);
-        self.app.push_instrument_defaults_for_track(track);
         if run_mode == CustomInstrumentRunMode::FreePatch {
             self.apply_free_patch_idle_voice(track)
                 .expect("free-patch engine runtime was validated before graph mutation");
         }
         self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.finish_track_instrument_source_change(track);
+        Ok(reset_summary)
+    }
+
+    pub fn replace_track_with_custom_instrument(
+        &mut self,
+        track: usize,
+        instrument_name: &str,
+        new_engine_id: usize,
+        manifest: &DGenManifest,
+        lib: &LoadedDGenLib,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Result<InstrumentSlotResetSummary, String> {
+        match self.app.graph.track_instrument_types.get(track).copied() {
+            Some(InstrumentType::Custom) => self.swap_custom_track_instrument(
+                track,
+                instrument_name,
+                new_engine_id,
+                manifest,
+                lib,
+                run_mode,
+            ),
+            Some(InstrumentType::Sampler) => self.convert_sampler_track_to_custom_instrument(
+                track,
+                instrument_name,
+                new_engine_id,
+                manifest,
+                lib,
+                run_mode,
+            ),
+            Some(other) => Err(format!(
+                "Track {} has instrument type {other:?}, which cannot be replaced with a custom instrument",
+                track + 1
+            )),
+            None => Err(format!("Invalid track index {}", track + 1)),
+        }
+    }
+
+    fn convert_sampler_track_to_custom_instrument(
+        &mut self,
+        track: usize,
+        instrument_name: &str,
+        new_engine_id: usize,
+        manifest: &DGenManifest,
+        lib: &LoadedDGenLib,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Result<InstrumentSlotResetSummary, String> {
+        if track >= self.app.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        if self.app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Sampler) {
+            return Err(format!("Track {} is not a sampler track", track + 1));
+        }
+        if self.app.graph.track_engine_ids.get(track) != Some(&None) {
+            return Err(format!(
+                "Sampler track {} has an unexpected custom engine binding",
+                track + 1
+            ));
+        }
+        let track_nodes = self
+            .app
+            .graph
+            .track_node_ids
+            .get(track)
+            .cloned()
+            .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
+        if track_nodes.sampler_ids.is_empty()
+            || track_nodes.sampler_gatepitch_ids.len() != track_nodes.sampler_ids.len()
+            || track_nodes.sampler_modulator_ids.len() != track_nodes.sampler_ids.len()
+        {
+            return Err(format!(
+                "Sampler track {} does not have a complete voice pool",
+                track + 1
+            ));
+        }
+        self.app
+            .state
+            .validate_instrument_slot_reset_target(track, new_engine_id)?;
+        if new_engine_id >= self.app.state.runtime.engine_voice_lids.len() {
+            return Err(format!(
+                "Instrument engine runtime slot {new_engine_id} is unavailable; maximum runtime engines is {}",
+                self.app.state.runtime.engine_voice_lids.len()
+            ));
+        }
+
+        let descriptor = lisp_host::instrument_descriptor_from_manifest(instrument_name, manifest);
+        let old_track_name = self.app.tracks[track].clone();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        self.ensure_custom_engine_runtime(new_engine_id, instrument_name, manifest, lib)?;
+        let new_engine = self.app.graph.engine_node_ids[new_engine_id]
+            .as_ref()
+            .ok_or_else(|| format!("Missing runtime for instrument engine {new_engine_id}"))?;
+        let existing_routes = new_engine.route_gain_ids.get(track).ok_or_else(|| {
+            format!(
+                "Track {} is outside engine {new_engine_id}'s route table",
+                track + 1
+            )
+        })?;
+        let existing_ext_routes = new_engine.ext_route_gain_ids.get(track).ok_or_else(|| {
+            format!(
+                "Track {} is outside engine {new_engine_id}'s external route table",
+                track + 1
+            )
+        })?;
+        if !existing_routes.is_empty() || !existing_ext_routes.is_empty() {
+            return Err(format!(
+                "Instrument engine {new_engine_id} already has a route for track {}",
+                track + 1
+            ));
+        }
+        if run_mode == CustomInstrumentRunMode::FreePatch
+            && (new_engine.synth_ids.is_empty() || new_engine.gatepitch_ids.is_empty())
+        {
+            return Err(format!(
+                "Instrument engine {new_engine_id} has no voice 0 runtime for free-patch mode"
+            ));
+        }
+        let (route_nodes, route_connections) = engine_route_build_capacities(new_engine);
+        let route_transaction_commands = (route_nodes + route_connections)
+            .checked_mul(2)
+            .ok_or_else(|| "Instrument route capacity overflow".to_string())?;
+        let required_commands = route_transaction_commands
+            .checked_add(sampler_voice_delete_command_count(&track_nodes))
+            .ok_or_else(|| "Sampler conversion graph capacity overflow".to_string())?;
+        require_graph_edit_queue_capacity(
+            self.app.graph.lg.0,
+            required_commands,
+            "Sampler-to-instrument conversion",
+        )?;
+
+        let new_synth_ids = new_engine.synth_ids.clone();
+        let new_gatepitch_ids = new_engine.gatepitch_ids.clone();
+        let node_id = first_graph_node_identity(&new_engine.synth_ids);
+        let modulator_node_id = first_graph_node_identity(&new_engine.modulator_ids);
+        self.connect_engine_to_track(
+            new_engine_id,
+            track,
+            &old_track_name,
+            track_nodes.voice_sum_id,
+            track_nodes.voice_sum_r_id,
+            track_nodes.mod_out_id,
+            track_nodes.mod_in_clip_ids,
+        )?;
+        self.delete_sampler_voice_nodes(&track_nodes);
+        self.clear_sampler_runtime_pool(track);
+
+        let live_nodes = &mut self.app.graph.track_node_ids[track];
+        live_nodes.sampler_ids.clear();
+        live_nodes.sampler_gatepitch_ids.clear();
+        live_nodes.sampler_modulator_ids.clear();
+        self.app.graph.track_voice_lids[track].clear();
+        self.app.graph.track_buffer_ids[track] = -1;
+        self.app.graph.track_sample_rates[track] = self.app.graph.sample_rate;
+        self.app.graph.track_instrument_types[track] = InstrumentType::Custom;
+        self.app.graph.track_instrument_run_modes[track] = run_mode;
+        self.app.graph.track_engine_ids[track] = Some(new_engine_id);
+        self.app.graph.track_synth_node_ids[track] = new_synth_ids;
+        self.app.graph.track_gatepitch_node_ids[track] = new_gatepitch_ids;
+        self.app.graph.instrument_descriptors[track] = descriptor.clone();
+        let reset_summary = self
+            .app
+            .state
+            .reset_instrument_slot_all_patterns(
+                track,
+                &descriptor,
+                node_id,
+                modulator_node_id,
+                new_engine_id,
+                run_mode,
+            )
+            .expect("instrument reset target was validated before graph mutation");
+        if run_mode == CustomInstrumentRunMode::FreePatch {
+            self.apply_free_patch_idle_voice(track)
+                .expect("free-patch engine runtime was validated before graph mutation");
+        }
+        self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.app.publish_sampler_analysis_runtime(track);
+        self.finish_track_instrument_source_change(track);
+        Ok(reset_summary)
+    }
+
+    pub fn convert_custom_track_to_sampler(
+        &mut self,
+        track: usize,
+        buffer_id: i32,
+        sample_rate: u32,
+        sample_name: &str,
+    ) -> Result<InstrumentSlotResetSummary, String> {
+        if track >= self.app.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        if self.app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
+            return Err(format!(
+                "Track {} is not a custom instrument track",
+                track + 1
+            ));
+        }
+        let old_engine_id = self
+            .app
+            .graph
+            .track_engine_ids
+            .get(track)
+            .and_then(|engine_id| *engine_id)
+            .ok_or_else(|| format!("Custom track {} has no engine binding", track + 1))?;
+        let track_nodes = self
+            .app
+            .graph
+            .track_node_ids
+            .get(track)
+            .cloned()
+            .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
+        self.app.state.validate_sampler_slot_reset_target(track)?;
+        let old_engine = self
+            .app
+            .graph
+            .engine_node_ids
+            .get(old_engine_id)
+            .and_then(|engine| engine.as_ref())
+            .ok_or_else(|| format!("Missing runtime for instrument engine {old_engine_id}"))?;
+        if old_engine
+            .route_gain_ids
+            .get(track)
+            .is_none_or(|routes| routes.len() != MAX_VOICES)
+        {
+            return Err(format!(
+                "Instrument engine {old_engine_id} does not have a complete route for track {}",
+                track + 1
+            ));
+        }
+        let should_delete_old_runtime =
+            !self.engine_is_still_referenced_excluding(old_engine_id, track);
+        let (sampler_nodes, sampler_connections) = sampler_voice_build_capacities(MAX_VOICES);
+        let sampler_transaction_commands = (sampler_nodes + sampler_connections)
+            .checked_mul(2)
+            .ok_or_else(|| "Sampler voice capacity overflow".to_string())?;
+        let old_route_delete_commands = engine_route_delete_command_count(old_engine, track);
+        let old_runtime_delete_commands = if should_delete_old_runtime {
+            engine_runtime_delete_command_count_excluding_track(old_engine, track)
+        } else {
+            0
+        };
+        let required_commands = sampler_transaction_commands
+            .checked_add(old_route_delete_commands)
+            .and_then(|count| count.checked_add(old_runtime_delete_commands))
+            .ok_or_else(|| "Instrument-to-sampler graph capacity overflow".to_string())?;
+
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        require_graph_edit_queue_capacity(
+            self.app.graph.lg.0,
+            required_commands,
+            "Instrument-to-sampler conversion",
+        )?;
+        let voices = self.build_sampler_voices(
+            track,
+            sample_name,
+            buffer_id,
+            sample_rate,
+            track_nodes.voice_sum_id,
+            track_nodes.voice_sum_r_id,
+            track_nodes.mod_in_clip_ids,
+            MAX_VOICES,
+        )?;
+        self.delete_engine_route_for_track(old_engine_id, track);
+        if should_delete_old_runtime {
+            self.delete_engine_runtime(old_engine_id);
+        }
+
+        let descriptor = EffectDescriptor::builtin_sampler();
+        let node_id = first_graph_node_identity(&voices.sampler_ids);
+        let modulator_node_id = first_graph_node_identity(&voices.modulator_ids);
+        self.publish_sampler_voice_runtime(
+            track,
+            &voices.voice_lids,
+            &voices.sampler_ids,
+            &voices.gatepitch_ids,
+            &voices.modulator_ids,
+        );
+        let live_nodes = &mut self.app.graph.track_node_ids[track];
+        live_nodes.sampler_ids = voices.sampler_ids;
+        live_nodes.sampler_gatepitch_ids = voices.gatepitch_ids;
+        live_nodes.sampler_modulator_ids = voices.modulator_ids;
+        self.app.graph.track_voice_lids[track] = voices.voice_lids;
+        self.app.graph.track_buffer_ids[track] = buffer_id;
+        self.app.graph.track_sample_rates[track] = sample_rate;
+        self.app.graph.track_instrument_types[track] = InstrumentType::Sampler;
+        self.app.graph.track_instrument_run_modes[track] = CustomInstrumentRunMode::Instrument;
+        self.app.graph.track_engine_ids[track] = None;
+        self.app.graph.track_synth_node_ids[track].clear();
+        self.app.graph.track_gatepitch_node_ids[track].clear();
+        self.app.graph.instrument_descriptors[track] = descriptor.clone();
+        let reset_summary = self
+            .app
+            .state
+            .reset_sampler_slot_all_patterns(
+                track,
+                &descriptor,
+                node_id,
+                modulator_node_id,
+                (buffer_id, sample_name.to_string(), sample_rate),
+            )
+            .expect("sampler reset target was validated before graph mutation");
+        self.app.tracks[track] = sample_name.to_string();
+        self.app.reset_sampler_bpm_for_analysis(track);
+        self.app.publish_sampler_analysis_runtime(track);
+        self.finish_track_instrument_source_change(track);
+        Ok(reset_summary)
+    }
+
+    fn delete_sampler_voice_nodes(&self, track: &TrackNodeIds) {
+        for node_id in track
+            .sampler_ids
+            .iter()
+            .chain(&track.sampler_gatepitch_ids)
+            .chain(&track.sampler_modulator_ids)
+        {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, *node_id);
+            }
+        }
+    }
+
+    fn finish_track_instrument_source_change(&mut self, track: usize) {
+        self.app.sync_scratch_runtime_descriptors();
+        self.app
+            .macro_engine
+            .remove_instrument_mappings_for_track(track);
+        self.app.push_instrument_defaults_for_track(track);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app
@@ -1803,7 +2140,6 @@ impl GraphController<'_> {
         self.app
             .state
             .publish_macro_overrides(self.app.macro_engine.override_snapshot());
-        Ok(reset_summary)
     }
 
     pub fn add_rack_track(
@@ -4806,9 +5142,18 @@ impl GraphController<'_> {
         let mut gatepitch_ids = Vec::with_capacity(voice_count);
         let mut modulator_ids = Vec::with_capacity(voice_count);
         let mut voice_lids = Vec::with_capacity(voice_count);
+        let (node_capacity, connection_capacity) = sampler_voice_build_capacities(voice_count);
+        let mut transaction = GraphNodeBuildTransaction::new(
+            self.app.graph.lg.0,
+            node_capacity,
+            connection_capacity,
+        )?;
 
         for v in 0..voice_count {
             let gp_name = CString::new(format!("{}_gp_{}", track_name, v)).unwrap();
+            check_test_graph_build_node_add(&format!(
+                "build_sampler_voices pool {sampler_pool_id} voice {v} gatepitch"
+            ))?;
             let gp_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
@@ -4826,10 +5171,14 @@ impl GraphController<'_> {
                     "build_sampler_voices: failed to add gatepitch node for voice {v}"
                 ));
             }
+            let gp_id = transaction.own(gp_id)?;
 
             let mod_name = CString::new(format!("{}_mod_{}", track_name, v)).unwrap();
             let mod_initial_state =
                 crate::voice_modulator::sampler_voice_initial_state(sampler_pool_id, v);
+            check_test_graph_build_node_add(&format!(
+                "build_sampler_voices pool {sampler_pool_id} voice {v} modulator"
+            ))?;
             let mod_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
@@ -4849,92 +5198,92 @@ impl GraphController<'_> {
                     "build_sampler_voices: failed to add modulator node for voice {v}"
                 ));
             }
-            unsafe {
-                crate::audiograph::params_push_wrapper(
-                    self.app.graph.lg.0,
-                    crate::audiograph::ParamMsg {
-                        idx: crate::voice_modulator::PARAM_BPM as u64,
-                        logical_id: mod_id as u64,
-                        fvalue: self.app.state.transport.bpm.load(Ordering::Relaxed) as f32,
-                    },
-                );
-            }
+            let mod_id = transaction.own(mod_id)?;
             let node_name = format!("{}_{}", track_name, v);
+            check_test_graph_build_node_add(&format!(
+                "build_sampler_voices pool {sampler_pool_id} voice {v} sampler"
+            ))?;
             let st = crate::sampler::create_sampler_node(
                 self.app.graph.lg.0,
                 buffer_id,
                 sample_rate,
                 &node_name,
             )?;
-            unsafe {
-                for port in 0..4 {
-                    crate::audiograph::graph_connect(
-                        self.app.graph.lg.0,
-                        gp_id,
-                        port,
-                        mod_id,
-                        port,
-                    );
-                }
-                if !crate::audiograph::graph_connect(
-                    self.app.graph.lg.0,
+            let sampler_id = transaction.own(st.node_id)?;
+            for port in 0..4 {
+                transaction.connect(
                     gp_id,
-                    crate::gatepitch::PARAM_CLOCK_PHASE as i32,
+                    port,
                     mod_id,
-                    crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
-                ) {
-                    return Err(format!(
-                        "build_sampler_voices: failed to connect transport clock for voice {v}"
-                    ));
-                }
-                if !crate::audiograph::graph_connect(
-                    self.app.graph.lg.0,
-                    gp_id,
-                    crate::gatepitch::PARAM_CLOCK_INC as i32,
-                    mod_id,
-                    crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
-                ) {
-                    return Err(format!(
-                        "build_sampler_voices: failed to connect transport clock increment for voice {v}"
-                    ));
-                }
-                for port in 0..crate::voice_modulator::NUM_OUTPUTS {
-                    crate::audiograph::graph_connect(
-                        self.app.graph.lg.0,
-                        mod_id,
-                        port as i32,
-                        st.node_id,
-                        port as i32,
-                    );
-                }
-                for (input, &clip_id) in track_mod_in_clip_ids.iter().enumerate() {
-                    crate::audiograph::graph_connect(
-                        self.app.graph.lg.0,
-                        clip_id,
-                        0,
-                        mod_id,
-                        (4 + input) as i32,
-                    );
-                }
-                crate::audiograph::graph_connect(
-                    self.app.graph.lg.0,
-                    st.node_id,
-                    0,
-                    voice_sum_id,
-                    0,
-                );
-                crate::audiograph::graph_connect(
-                    self.app.graph.lg.0,
-                    st.node_id,
-                    1,
-                    voice_sum_r_id,
-                    0,
-                );
+                    port,
+                    &format!("build_sampler_voices voice {v} gatepitch port {port}"),
+                )?;
             }
-            sampler_ids.push(st.node_id);
+            transaction.connect(
+                gp_id,
+                crate::gatepitch::PARAM_CLOCK_PHASE as i32,
+                mod_id,
+                crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
+                &format!("build_sampler_voices voice {v} transport clock"),
+            )?;
+            transaction.connect(
+                gp_id,
+                crate::gatepitch::PARAM_CLOCK_INC as i32,
+                mod_id,
+                crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
+                &format!("build_sampler_voices voice {v} transport clock increment"),
+            )?;
+            for port in 0..crate::voice_modulator::NUM_OUTPUTS {
+                transaction.connect(
+                    mod_id,
+                    port as i32,
+                    sampler_id,
+                    port as i32,
+                    &format!("build_sampler_voices voice {v} modulator port {port}"),
+                )?;
+            }
+            for (input, &clip_id) in track_mod_in_clip_ids.iter().enumerate() {
+                transaction.connect(
+                    clip_id,
+                    0,
+                    mod_id,
+                    (4 + input) as i32,
+                    &format!("build_sampler_voices voice {v} external mod input {input}"),
+                )?;
+            }
+            transaction.connect(
+                sampler_id,
+                0,
+                voice_sum_id,
+                0,
+                &format!("build_sampler_voices voice {v} left output"),
+            )?;
+            transaction.connect(
+                sampler_id,
+                1,
+                voice_sum_r_id,
+                0,
+                &format!("build_sampler_voices voice {v} right output"),
+            )?;
+            sampler_ids.push(sampler_id);
             gatepitch_ids.push(gp_id);
             modulator_ids.push(mod_id);
             voice_lids.push(st.logical_id);
+        }
+
+        transaction.commit();
+        let bpm = self.app.state.transport.bpm.load(Ordering::Relaxed) as f32;
+        for &mod_id in &modulator_ids {
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.app.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::voice_modulator::PARAM_BPM as u64,
+                        logical_id: mod_id as u64,
+                        fvalue: bpm,
+                    },
+                );
+            }
         }
 
         Ok(SamplerVoiceSetup {
@@ -6724,6 +7073,230 @@ mod tests {
             .expect("new engine should remain live");
         assert_eq!(new_engine.route_gain_ids[0].len(), MAX_VOICES);
         assert_eq!(new_engine.route_gain_ids[1].len(), MAX_VOICES);
+        graph.process_block();
+    }
+
+    #[test]
+    fn sampler_track_converts_to_custom_instrument_without_replacing_its_shell() {
+        let graph = TestLiveGraph::new("sampler-to-custom-conversion-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("blank sampler track should be created");
+        let voice_sum_id = app.graph.track_node_ids[0].voice_sum_id;
+        let voice_sum_r_id = app.graph.track_node_ids[0].voice_sum_r_id;
+        let sampler_ids = app.graph.track_node_ids[0].sampler_ids.clone();
+
+        let summary = app
+            .graph_controller()
+            .replace_track_with_custom_instrument(
+                0,
+                "new",
+                0,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("sampler track should convert to a custom instrument");
+
+        assert_eq!(summary.patterns_reset, 1);
+        assert_eq!(app.tracks, vec!["new".to_string()]);
+        assert_eq!(
+            app.graph.track_instrument_types,
+            vec![InstrumentType::Custom]
+        );
+        assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
+        assert_eq!(app.graph.track_node_ids[0].voice_sum_id, voice_sum_id);
+        assert_eq!(app.graph.track_node_ids[0].voice_sum_r_id, voice_sum_r_id);
+        assert!(app.graph.track_node_ids[0].sampler_ids.is_empty());
+        assert!(app.graph.track_voice_lids[0].is_empty());
+        assert_eq!(app.graph.track_buffer_ids[0], -1);
+        assert_eq!(app.state.runtime.voice_counts[0].load(Ordering::Acquire), 0);
+        assert!(sampler_ids
+            .iter()
+            .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) }));
+        let engine = app.graph.engine_node_ids[0]
+            .as_ref()
+            .expect("new custom engine should remain live");
+        assert_eq!(engine.route_gain_ids[0].len(), MAX_VOICES);
+        assert_eq!(
+            app.state.export_pattern_repository()[0].sample_ids[0],
+            (-1, String::new(), 44_100)
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn sampler_to_custom_conversion_keeps_sampler_binding_when_engine_build_fails() {
+        let graph = TestLiveGraph::new("sampler-to-custom-conversion-rollback-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("blank sampler track should be created");
+        let old_nodes = app.graph.track_node_ids[0].clone();
+        let old_slot = EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]);
+        let old_buffer_id = app.graph.track_buffer_ids[0];
+        set_test_graph_build_failure_after(4);
+
+        let error = app
+            .graph_controller()
+            .replace_track_with_custom_instrument(
+                0,
+                "new",
+                0,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect_err("injected engine failure should abort sampler conversion");
+
+        assert!(error.contains("injected graph node allocation failure"));
+        assert_eq!(
+            app.graph.track_instrument_types,
+            vec![InstrumentType::Sampler]
+        );
+        assert_eq!(app.graph.track_engine_ids, vec![None]);
+        assert_eq!(app.graph.track_buffer_ids, vec![old_buffer_id]);
+        assert_eq!(
+            app.graph.track_node_ids[0].sampler_ids,
+            old_nodes.sampler_ids
+        );
+        assert_eq!(
+            app.graph.track_node_ids[0].sampler_gatepitch_ids,
+            old_nodes.sampler_gatepitch_ids
+        );
+        assert_eq!(
+            app.graph.track_node_ids[0].sampler_modulator_ids,
+            old_nodes.sampler_modulator_ids
+        );
+        assert_test_slot_snapshot_eq(
+            &EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]),
+            &old_slot,
+        );
+        assert!(app.graph.engine_node_ids[0].is_none());
+        let created_nodes = take_test_graph_build_node_ids();
+        assert_eq!(created_nodes.len(), 4);
+        assert_eq!(
+            take_test_graph_build_rollback_node_ids(),
+            created_nodes.iter().rev().copied().collect::<Vec<_>>()
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn custom_track_converts_to_sampler_without_replacing_its_shell() {
+        let graph = TestLiveGraph::new("custom-to-sampler-conversion-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 1);
+        install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
+        let voice_sum_id = app.graph.track_node_ids[0].voice_sum_id;
+        let voice_sum_r_id = app.graph.track_node_ids[0].voice_sum_r_id;
+        let buffer_id = crate::sampler::create_silent_buffer(graph.ptr.0)
+            .expect("silent sampler buffer should be created");
+
+        let summary = app
+            .graph_controller()
+            .convert_custom_track_to_sampler(0, buffer_id, 48_000, "snare")
+            .expect("custom track should convert to a sampler");
+
+        assert_eq!(summary.patterns_reset, 1);
+        assert_eq!(app.tracks, vec!["snare".to_string()]);
+        assert_eq!(
+            app.graph.track_instrument_types,
+            vec![InstrumentType::Sampler]
+        );
+        assert_eq!(app.graph.track_engine_ids, vec![None]);
+        assert_eq!(app.graph.track_node_ids[0].voice_sum_id, voice_sum_id);
+        assert_eq!(app.graph.track_node_ids[0].voice_sum_r_id, voice_sum_r_id);
+        assert_eq!(app.graph.track_node_ids[0].sampler_ids.len(), MAX_VOICES);
+        assert_eq!(app.graph.track_voice_lids[0].len(), MAX_VOICES);
+        assert_eq!(app.graph.track_buffer_ids[0], buffer_id);
+        assert_eq!(app.graph.track_sample_rates[0], 48_000);
+        assert!(app.graph.engine_node_ids[0].is_none());
+        assert_eq!(
+            app.state.runtime.voice_counts[0].load(Ordering::Acquire),
+            MAX_VOICES as u32
+        );
+        assert_eq!(
+            app.state.export_pattern_repository()[0].sample_ids[0],
+            (buffer_id, "snare".to_string(), 48_000)
+        );
+
+        let sample_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/ir/lexicon-300-rich-plate.wav");
+        app.sampler_paths.push(Some(sample_path.clone()));
+        app.register_loaded_sample_path("snare", buffer_id, sample_path.clone());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let project_name = format!(
+            "__test-custom-to-sampler-roundtrip-{}-{nonce}",
+            std::process::id()
+        );
+        let captured = app
+            .capture_project(&project_name)
+            .expect("converted sampler project should capture");
+        let project_path = crate::project::save_project(&project_name, &captured)
+            .expect("converted sampler project should save");
+        let _cleanup = TestProjectFile(project_path);
+        let restored = crate::project::load_project(&project_name)
+            .expect("converted sampler project should load");
+        assert!(matches!(
+            restored.tracks.as_slice(),
+            [crate::project::ProjectTrack::Sampler { sample_path: restored_path, .. }]
+                if restored_path == &sample_path.to_string_lossy()
+        ));
+        graph.process_block();
+    }
+
+    #[test]
+    fn custom_to_sampler_conversion_keeps_custom_binding_when_voice_build_fails() {
+        let graph = TestLiveGraph::new("custom-to-sampler-conversion-rollback-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 1);
+        install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
+        let old_slot = EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]);
+        let old_sum = app.graph.track_node_ids[0].voice_sum_id;
+        let buffer_id = crate::sampler::create_silent_buffer(graph.ptr.0)
+            .expect("silent sampler buffer should be created");
+        set_test_graph_build_failure_after(4);
+
+        let error = app
+            .graph_controller()
+            .convert_custom_track_to_sampler(0, buffer_id, 48_000, "snare")
+            .expect_err("injected sampler voice failure should abort conversion");
+
+        assert!(error.contains("injected graph node allocation failure"));
+        assert_eq!(
+            app.graph.track_instrument_types,
+            vec![InstrumentType::Custom]
+        );
+        assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
+        assert_eq!(app.graph.track_node_ids[0].voice_sum_id, old_sum);
+        assert!(app.graph.track_node_ids[0].sampler_ids.is_empty());
+        assert_eq!(app.graph.track_buffer_ids, vec![-1]);
+        assert_eq!(app.state.runtime.voice_counts[0].load(Ordering::Acquire), 0);
+        assert_test_slot_snapshot_eq(
+            &EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]),
+            &old_slot,
+        );
+        let old_engine = app.graph.engine_node_ids[0]
+            .as_ref()
+            .expect("old custom engine should remain live");
+        assert_eq!(old_engine.route_gain_ids[0].len(), MAX_VOICES);
+        let created_nodes = take_test_graph_build_node_ids();
+        assert_eq!(created_nodes.len(), 4);
+        assert_eq!(
+            take_test_graph_build_rollback_node_ids(),
+            created_nodes.iter().rev().copied().collect::<Vec<_>>()
+        );
         graph.process_block();
     }
 

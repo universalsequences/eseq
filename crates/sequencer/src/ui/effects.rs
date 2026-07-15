@@ -495,9 +495,10 @@ impl App {
             cache_idx
         };
         Some(unsafe {
-            self.graph_controller().swap_custom_track_instrument(
-                track, name, engine_id, &manifest, &*lib_ptr, run_mode,
-            )
+            self.graph_controller()
+                .replace_track_with_custom_instrument(
+                    track, name, engine_id, &manifest, &*lib_ptr, run_mode,
+                )
         })
     }
 
@@ -550,9 +551,10 @@ impl App {
             cache_idx
         };
         unsafe {
-            self.graph_controller().swap_custom_track_instrument(
-                track, name, engine_id, &manifest, &*lib_ptr, run_mode,
-            )
+            self.graph_controller()
+                .replace_track_with_custom_instrument(
+                    track, name, engine_id, &manifest, &*lib_ptr, run_mode,
+                )
         }
     }
 

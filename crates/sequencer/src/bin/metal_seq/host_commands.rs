@@ -193,7 +193,7 @@ pub(crate) fn finish_swapped_instrument_track(
     editor.handle_host_event(HostEvent::Status(instrument_swap_status(name, summary)));
 }
 
-fn instrument_swap_status(
+pub(crate) fn instrument_swap_status(
     name: &str,
     summary: sequencer::sequencer::InstrumentSlotResetSummary,
 ) -> String {
@@ -210,6 +210,13 @@ fn instrument_swap_status(
         details.push(format!(
             "dropped {count} stale process {}",
             if count == 1 { "binding" } else { "bindings" }
+        ));
+    }
+    if summary.neural_overrides_dropped > 0 {
+        let count = summary.neural_overrides_dropped;
+        details.push(format!(
+            "dropped {count} stale neural {}",
+            if count == 1 { "override" } else { "overrides" }
         ));
     }
     let base = format!("Swapped → {name}");
@@ -308,9 +315,10 @@ mod tests {
                     patterns_reset: 4,
                     patterns_with_cleared_locks: 3,
                     process_bindings_dropped: 1,
+                    neural_overrides_dropped: 2,
                 },
             ),
-            "Swapped → core/drift (cleared instrument p-locks in 3 patterns, dropped 1 stale process binding)"
+            "Swapped → core/drift (cleared instrument p-locks in 3 patterns, dropped 1 stale process binding, dropped 2 stale neural overrides)"
         );
     }
 }

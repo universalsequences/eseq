@@ -9,14 +9,18 @@
     (lambda (track) (not (seq-track-collapsed? track)))
     (range 0 SEQ.num-tracks)))
 
-;; Saved-instrument replacement is deliberately narrower than general track
-;; selection. Phase 1 only rebinds existing custom-instrument tracks; sampler,
-;; rack, and modulator conversion have different teardown requirements.
 (def seq-track-custom-instrument? (track)
   (and (>= track 0)
     (< track SEQ.num-tracks)
     (< track (len SEQ.track-instrument-types))
     (= (nth SEQ.track-instrument-types track) "custom")))
+
+(def seq-track-replaceable-instrument? (track)
+  (and (>= track 0)
+    (< track SEQ.num-tracks)
+    (< track (len SEQ.track-instrument-types))
+    (let ((kind (nth SEQ.track-instrument-types track)))
+      (or (= kind "custom") (= kind "sampler")))))
 
 ;; Track identity icons intentionally share the same icon names as the sound
 ;; browser tabs. Keeping the mapping here prevents the mixer and sequencer from

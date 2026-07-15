@@ -138,7 +138,7 @@
       (do
         (mixer-v2-clear-delete-target)
         (if path
-          (host-command "load-sample-into-track" (dict :track track :path path :preserve-browser-context true))
+          (sbrowser-drop-sample-on-track event)
           (status "Drop a sample file, not a folder"))))))
 
 (def mixer-v2-drop-sample-new-track (event)
@@ -204,7 +204,7 @@
           (status "Unsupported drop"))))))
 
 (def mixer-v2-track-drop-types (i)
-  (if (seq-track-custom-instrument? i)
+  (if (seq-track-replaceable-instrument? i)
     (list "sample" "instrument" "audio-effect" "midi-effect")
     (list "sample" "audio-effect" "midi-effect")))
 

@@ -12345,6 +12345,25 @@ mod tests {
             .collect()
     }
 
+    fn top_level_tree_field_bools(value: &Value, field: &str) -> Vec<Option<bool>> {
+        let Value::List(items) = value else {
+            panic!("tree should be a list: {value:?}");
+        };
+        items
+            .iter()
+            .map(|item| {
+                let item = item.borrow();
+                let Value::Map(map) = &*item else {
+                    return None;
+                };
+                map.get(field).and_then(|value| match &*value.borrow() {
+                    Value::Bool(value) => Some(*value),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
     fn tree_contains_kind(value: &Value, expected_kind: &str) -> bool {
         match value {
             Value::Map(map) => {
@@ -12426,6 +12445,7 @@ mod tests {
         let labels = top_level_tree_field_strings(&tree, "label");
         let kinds = top_level_tree_field_strings(&tree, "kind");
         let names = top_level_tree_field_strings(&tree, "name");
+        let draggable = top_level_tree_field_bools(&tree, "draggable");
 
         assert_eq!(
             &labels[..5],
@@ -12444,6 +12464,17 @@ mod tests {
         assert_eq!(kinds[4].as_deref(), Some("builtin-instrument"));
         assert_eq!(names[3].as_deref(), Some("rack"));
         assert_eq!(names[4].as_deref(), Some("layer-rack"));
+        assert_eq!(
+            &draggable[..5],
+            &[
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(false)
+            ],
+            "sampler should be the only draggable builtin instrument"
+        );
     }
 
     #[test]
@@ -14168,7 +14199,7 @@ mod tests {
 
     #[test]
     fn metal_seq_browser_instrument_activation_adds_for_non_swappable_tracks() {
-        for track_type in ["rack", "modulator", "sampler"] {
+        for track_type in ["rack", "modulator"] {
             let mut editor = browser_editor_on_instrument_tab();
             editor
                 .runtime_mut()
@@ -14201,6 +14232,74 @@ mod tests {
                 Some("Adding instrument track: core/drift".to_string())
             );
         }
+    }
+
+    #[test]
+    fn metal_seq_browser_saved_instrument_activation_replaces_a_sampler_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["sampler"]),
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-create-item
+                    (dict :kind "instrument" :name "core/drift" :label "Drift"))"#,
+            )
+            .expect("activate saved instrument from a sampler track");
+
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "swap-track-instrument"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                            && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/drift".to_string())))
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+            Some(Value::String("instruments".to_string()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_builtin_sampler_activation_converts_the_current_custom_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom"]),
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-create-item
+                    (dict :kind "builtin-instrument" :name "sampler" :label "Sampler"))"#,
+            )
+            .expect("activate builtin sampler from a custom track");
+
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "swap-track-builtin-instrument"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                            && map.get("name").is_some_and(|value| *value.borrow() == Value::String("sampler".to_string())))
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+            Some(Value::String("samples".to_string()))
+        );
     }
 
     #[test]
@@ -24741,8 +24840,8 @@ mod tests {
             .expect("sampler row drop types")
             .borrow();
         assert!(
-            !value_contains_string(&sampler_drop_types, "instrument"),
-            "sampler conversion is outside Phase 1 and must not advertise a valid drop target"
+            value_contains_string(&sampler_drop_types, "instrument"),
+            "sampler rows should accept conversion to a saved instrument"
         );
 
         editor.set_layout_viewport(180, 40);
@@ -24778,16 +24877,26 @@ mod tests {
         assert_eq!(commands.len(), 1);
         match &commands[0] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "audition-sample");
+                assert_eq!(name, "convert-track-to-sampler");
                 let Value::Map(payload) = payload else {
-                    panic!("audition-sample payload should be a dict: {payload:?}");
+                    panic!("sampler conversion payload should be a dict: {payload:?}");
                 };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
                 assert_eq!(
                     payload.get("path").map(|value| value.borrow().clone()),
                     Some(Value::String("samples/kick.wav".to_string()))
                 );
+                assert_eq!(
+                    payload
+                        .get("preserve-browser-context")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Bool(true))
+                );
             }
-            other => panic!("expected audition-sample host command, got {other:?}"),
+            other => panic!("expected convert-track-to-sampler host command, got {other:?}"),
         }
 
         editor
@@ -27780,7 +27889,7 @@ mod tests {
         assert_finite_nonzero_rect(panel, "custom instrument drop target");
         assert_eq!(
             panel.props.get("drop-types"),
-            Some(&test_string_list(&["instrument"]))
+            Some(&test_string_list(&["sample", "instrument"]))
         );
         assert!(
             matches!(
@@ -27801,7 +27910,7 @@ mod tests {
         editor
             .runtime_mut()
             .invoke(
-                on_drop,
+                on_drop.clone(),
                 vec![map_value([
                     ("drag-type", Value::String("instrument".to_string())),
                     (
@@ -27834,6 +27943,129 @@ mod tests {
             ),
             "instrument panel drop should queue one targeted swap: {commands:?}"
         );
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(
+                on_drop,
+                vec![map_value([
+                    ("drag-type", Value::String("sample".to_string())),
+                    (
+                        "payload",
+                        map_value([("path", Value::String("samples/snare.wav".to_string()))]),
+                    ),
+                    (
+                        "target",
+                        map_value([
+                            ("kind", Value::String("instrument-panel".to_string())),
+                            ("track", Value::Number(0.0)),
+                        ]),
+                    ),
+                ])],
+            )
+            .expect("drop sample on custom instrument panel");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "convert-track-to-sampler"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                            && map.get("path").is_some_and(|value| *value.borrow() == Value::String("samples/snare.wav".to_string())))
+        ));
+    }
+
+    #[test]
+    fn metal_seq_fx_sampler_panel_routes_sample_and_instrument_drops() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "instrument-panel",
+            test_list(vec![Value::Map(test_sampler_instrument_map(0))]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["sampler"]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer should exist")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("sampler panel layout");
+        let panel = find_layout_node_by_debug_name(&layout, "sampler-panel")
+            .expect("sampler panel should render");
+        assert_finite_nonzero_rect(panel, "sampler panel drop target");
+        assert!(value_contains_string(
+            panel.props.get("drop-types").expect("sampler drop types"),
+            "sample"
+        ));
+        assert!(value_contains_string(
+            panel.props.get("drop-types").expect("sampler drop types"),
+            "instrument"
+        ));
+        let on_drop = panel
+            .props
+            .get("on-drop")
+            .cloned()
+            .expect("sampler panel drop callback");
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(
+                on_drop.clone(),
+                vec![map_value([
+                    ("drag-type", Value::String("sample".to_string())),
+                    (
+                        "payload",
+                        map_value([("path", Value::String("samples/snare.wav".to_string()))]),
+                    ),
+                    ("target", map_value([("track", Value::Number(0.0))])),
+                ])],
+            )
+            .expect("drop sample on sampler panel");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "load-sample-into-track"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                            && map.get("path").is_some_and(|value| *value.borrow() == Value::String("samples/snare.wav".to_string())))
+        ));
+
+        editor
+            .runtime_mut()
+            .invoke(
+                on_drop,
+                vec![map_value([
+                    ("drag-type", Value::String("instrument".to_string())),
+                    (
+                        "payload",
+                        map_value([
+                            ("kind", Value::String("instrument".to_string())),
+                            ("name", Value::String("core/triton".to_string())),
+                        ]),
+                    ),
+                    ("target", map_value([("track", Value::Number(0.0))])),
+                ])],
+            )
+            .expect("drop saved instrument on sampler panel");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "swap-track-instrument"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                            && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/triton".to_string())))
+        ));
     }
 
     #[test]
@@ -27965,16 +28197,7 @@ mod tests {
         let layout = editor.widget_layout().expect("sampler mixer layout");
         let sampler_strip =
             find_track_drop_target(&layout, 0.0).expect("sampler mixer track drop target");
-        assert!(
-            !value_contains_string(
-                sampler_strip
-                    .props
-                    .get("drop-types")
-                    .expect("sampler strip drop types"),
-                "instrument",
-            ),
-            "sampler conversion is outside Phase 1 and must not advertise an instrument drop"
-        );
+        assert_accepts_instrument(sampler_strip, "sampler mixer instrument drop target");
     }
 
     #[test]
@@ -33225,7 +33448,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_sampler_panel_accepts_sample_drops_for_current_track() {
+    fn metal_seq_sampler_panel_accepts_sample_and_instrument_drops_for_current_track() {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
@@ -33233,6 +33456,10 @@ mod tests {
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(3.0)),
+                (
+                    "track-instrument-types",
+                    test_string_list(&["sampler", "sampler", "sampler"]),
+                ),
                 ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
@@ -33313,8 +33540,9 @@ mod tests {
                 panel.props.get("drop-types"),
                 Some(Value::List(items))
                     if items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "sample"))
+                        && items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "instrument"))
             ),
-            "sampler panel should accept sample drops: {:?}",
+            "sampler panel should accept sample and instrument drops: {:?}",
             panel.props.get("drop-types")
         );
         assert!(
@@ -33328,40 +33556,6 @@ mod tests {
             "sampler panel drop metadata should target track 2: {:?}",
             panel.props.get("drop-meta")
         );
-
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(sampler-panel-drop-sample
-                    (dict :payload (dict :path "samples/snare.wav")
-                          :target (dict :track 2)))"#,
-            )
-            .expect("drop sample on sampler panel");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "load-sample-into-track");
-                let Value::Map(payload) = payload else {
-                    panic!("sampler panel drop payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("track").map(|value| value.borrow().clone()),
-                    Some(Value::Number(2.0))
-                );
-                assert_eq!(
-                    payload.get("path").map(|value| value.borrow().clone()),
-                    Some(Value::String("samples/snare.wav".to_string()))
-                );
-                assert_eq!(
-                    payload
-                        .get("preserve-browser-context")
-                        .map(|value| value.borrow().clone()),
-                    Some(Value::Bool(true))
-                );
-            }
-            other => panic!("expected load-sample-into-track host command, got {other:?}"),
-        }
     }
 
     #[test]

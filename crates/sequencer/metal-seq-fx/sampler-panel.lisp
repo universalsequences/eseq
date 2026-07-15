@@ -49,19 +49,10 @@
     _
     nil))
 
-(def sampler-panel-drop-sample (event)
-  (let ((payload (get event :payload))
-      (target (get event :target)))
-    (let ((path (get payload :path))
-        (track (get target :track)))
-      (if path
-        (host-command "load-sample-into-track" (dict :track track :path path :preserve-browser-context true))
-        (status "Drop a sample file, not a folder")))))
-
 (def sampler-panel-drop-types (inst)
   (if (instrument-rack-target? inst)
     '()
-    (list "sample")))
+    (list "sample" "instrument")))
 
 (def sampler-panel-drop-meta (inst)
   (if (instrument-rack-target? inst)
@@ -341,7 +332,7 @@
     :drop-types (sampler-panel-drop-types inst)
     :drop-meta (sampler-panel-drop-meta inst)
     :drop-hover-border-color :mixer-strip-selected-border
-    :on-drop (lambda (event) (sampler-panel-drop-sample event))
+    :on-drop (lambda (event) (sbrowser-drop-sound-on-track event))
     (v-stack :gap 0 :height :fill
       (box :debug-name "sampler-header-box" :width :fill :height 1 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0.5 :align :center :width :fill

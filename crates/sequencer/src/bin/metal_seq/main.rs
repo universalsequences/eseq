@@ -228,20 +228,26 @@ fn capture_instrument_swap_target(
     app: &ui::App,
     track: usize,
 ) -> Result<SavedInstrumentLoadTarget, String> {
-    if app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
-        return Err(format!(
-            "Track {} is not a custom instrument track",
-            track + 1
-        ));
-    }
-    if app
-        .graph
-        .track_engine_ids
-        .get(track)
-        .and_then(|engine_id| *engine_id)
-        .is_none()
-    {
-        return Err(format!("Custom track {} has no engine binding", track + 1));
+    match app.graph.track_instrument_types.get(track) {
+        Some(InstrumentType::Custom) => {
+            if app
+                .graph
+                .track_engine_ids
+                .get(track)
+                .and_then(|engine_id| *engine_id)
+                .is_none()
+            {
+                return Err(format!("Custom track {} has no engine binding", track + 1));
+            }
+        }
+        Some(InstrumentType::Sampler) => {}
+        Some(other) => {
+            return Err(format!(
+                "Track {} has instrument type {other:?}, which cannot be replaced",
+                track + 1
+            ));
+        }
+        None => return Err(format!("Track {} does not exist", track + 1)),
     }
     let voice_sum_id = app
         .graph
@@ -3011,7 +3017,12 @@ fn reset_sampler_waveform_view(editor: &mut Editor) {
     }
 }
 
-fn load_sample_into_sampler_track(
+struct SamplerTrackLoadResult {
+    name: String,
+    reset_summary: Option<InstrumentSlotResetSummary>,
+}
+
+fn load_or_convert_sampler_track(
     app: &mut ui::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
@@ -3020,29 +3031,63 @@ fn load_sample_into_sampler_track(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     lg_raw: *mut sequencer::audiograph::LiveGraph,
     track: usize,
-    path: &Path,
-) -> Result<String, String> {
+    path: Option<&Path>,
+) -> Result<SamplerTrackLoadResult, String> {
     if track >= app.tracks.len() {
         return Err(format!("Track {} does not exist", track + 1));
     }
-    if !app.is_sampler_track(track) {
-        return Err("Drop samples onto sampler tracks".to_string());
+    let instrument_type = app.graph.track_instrument_types[track];
+    if !matches!(
+        instrument_type,
+        InstrumentType::Sampler | InstrumentType::Custom
+    ) {
+        return Err("Samples can only replace sampler or custom instrument tracks".to_string());
+    }
+    if instrument_type == InstrumentType::Sampler && path.is_none() {
+        return Ok(SamplerTrackLoadResult {
+            name: app.tracks[track].clone(),
+            reset_summary: None,
+        });
     }
 
-    let loaded = sequencer::sampler::load_wav_buffer(lg_raw, path)?;
-    app.submit_sample_analysis(&loaded);
-    let new_buffer_id = loaded.buffer_id;
-    let sample_rate = loaded.sample_rate;
-    let new_name = sequencer::sample_db::display_title_for_sample_path(path).unwrap_or(loaded.name);
-    register_waveform_sample(path);
-    app.graph_controller()
-        .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
-    app.graph.track_buffer_ids[track] = new_buffer_id;
-    app.graph.track_sample_rates[track] = sample_rate;
-    app.tracks[track] = new_name.clone();
-    app.register_loaded_sample_path(&new_name, new_buffer_id, path.to_path_buf());
-    if track < app.sampler_paths.len() {
-        app.sampler_paths[track] = Some(path.to_path_buf());
+    let resolved_path = path
+        .map(Path::to_path_buf)
+        .or_else(|| app.sampler_path_for_track(track));
+    let (new_buffer_id, sample_rate, new_name) = if let Some(path) = resolved_path.as_deref() {
+        let loaded = sequencer::sampler::load_wav_buffer(lg_raw, path)?;
+        app.submit_sample_analysis(&loaded);
+        let name = sequencer::sample_db::display_title_for_sample_path(path)
+            .unwrap_or(loaded.name.clone());
+        register_waveform_sample(path);
+        (loaded.buffer_id, loaded.sample_rate, name)
+    } else {
+        (
+            sequencer::sampler::create_silent_buffer(lg_raw)?,
+            app.graph.sample_rate,
+            format!("Sampler {}", track + 1),
+        )
+    };
+
+    let reset_summary = if instrument_type == InstrumentType::Sampler {
+        app.graph_controller()
+            .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
+        app.graph.track_buffer_ids[track] = new_buffer_id;
+        app.graph.track_sample_rates[track] = sample_rate;
+        app.tracks[track] = new_name.clone();
+        None
+    } else {
+        Some(app.graph_controller().convert_custom_track_to_sampler(
+            track,
+            new_buffer_id,
+            sample_rate,
+            &new_name,
+        )?)
+    };
+    if let Some(path) = resolved_path {
+        app.register_loaded_sample_path(&new_name, new_buffer_id, path.clone());
+        if track < app.sampler_paths.len() {
+            app.sampler_paths[track] = Some(path);
+        }
     }
     app.reset_sampler_bpm_for_analysis(track);
     app.publish_sampler_analysis_runtime(track);
@@ -3071,7 +3116,10 @@ fn load_sample_into_sampler_track(
     sync_sidebar_browser(rt, app, track);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
-    Ok(new_name)
+    Ok(SamplerTrackLoadResult {
+        name: new_name,
+        reset_summary,
+    })
 }
 
 const AGENT_INSTRUMENT_STUB_DSP: &str = r#"; Provisional silent instrument used while Agent Mode is designing the real patch.
@@ -6337,7 +6385,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ));
                                 continue;
                             };
-                            match load_sample_into_sampler_track(
+                            match load_or_convert_sampler_track(
                                 &mut app,
                                 &mut editor,
                                 &state,
@@ -6346,12 +6394,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &selected_steps,
                                 lg_raw,
                                 track,
-                                path,
+                                Some(path),
                             ) {
-                                Ok(new_name) => {
-                                    editor.handle_host_event(HostEvent::Status(format!(
-                                        "Audition: {new_name}"
-                                    )));
+                                Ok(result) => {
+                                    let status = result.reset_summary.map_or_else(
+                                        || format!("Audition: {}", result.name),
+                                        |summary| {
+                                            host_commands::instrument_swap_status(
+                                                "sampler", summary,
+                                            )
+                                        },
+                                    );
+                                    editor.handle_host_event(HostEvent::Status(status));
                                 }
                                 Err(e) => {
                                     editor.handle_host_event(HostEvent::Status(format!(
@@ -6968,7 +7022,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )),
                         }
                     }
-                    "load-sample-into-track" => {
+                    "swap-track-builtin-instrument" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let instrument = extract_string_from_payload(&payload, "name");
+                        match (track, instrument.as_deref()) {
+                            (Some(track), Some("sampler")) => {
+                                match load_or_convert_sampler_track(
+                                    &mut app,
+                                    &mut editor,
+                                    &state,
+                                    &current_track,
+                                    &mut track_names,
+                                    &selected_steps,
+                                    lg_raw,
+                                    track,
+                                    None,
+                                ) {
+                                    Ok(result) => {
+                                        let _ = editor
+                                            .runtime_mut()
+                                            .eval_str("(set! sbrowser-tab \"samples\")");
+                                        let status = result.reset_summary.map_or_else(
+                                            || format!("Sampler already active ({})", result.name),
+                                            |summary| {
+                                                host_commands::instrument_swap_status(
+                                                    "sampler", summary,
+                                                )
+                                            },
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(status));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Cannot convert track to sampler: {error}"),
+                                    )),
+                                }
+                            }
+                            (Some(_), Some(name)) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Builtin instrument conversion is not supported for {name}"
+                                )))
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Builtin instrument swap is missing a track or name".to_string(),
+                            )),
+                        }
+                    }
+                    "load-sample-into-track" | "convert-track-to-sampler" => {
                         let path_str = extract_path_from_payload(&payload);
                         let track = extract_usize_from_payload(&payload, "track");
                         let preserve_browser_context =
@@ -6985,7 +7084,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                 }
                                 let path = Path::new(&path_str);
-                                match load_sample_into_sampler_track(
+                                match load_or_convert_sampler_track(
                                     &mut app,
                                     &mut editor,
                                     &state,
@@ -6994,13 +7093,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &selected_steps,
                                     lg_raw,
                                     track,
-                                    path,
+                                    Some(path),
                                 ) {
-                                    Ok(new_name) => {
-                                        editor.handle_host_event(HostEvent::Status(format!(
-                                            "Loaded sample on track {}: {new_name}",
-                                            track + 1
-                                        )));
+                                    Ok(result) => {
+                                        let status = result.reset_summary.map_or_else(
+                                            || {
+                                                format!(
+                                                    "Loaded sample on track {}: {}",
+                                                    track + 1,
+                                                    result.name
+                                                )
+                                            },
+                                            |summary| {
+                                                format!(
+                                                    "{}; loaded {}",
+                                                    host_commands::instrument_swap_status(
+                                                        "sampler", summary,
+                                                    ),
+                                                    result.name
+                                                )
+                                            },
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(status));
                                     }
                                     Err(e) => {
                                         if preserve_browser_context {

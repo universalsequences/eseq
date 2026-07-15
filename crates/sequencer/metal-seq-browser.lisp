@@ -165,22 +165,52 @@
 (def sbrowser-swap-track-instrument (track name)
   (if (or (= name nil) (= name ""))
     (status "Drop an instrument, not a folder")
-    (if (seq-track-custom-instrument? track)
+    (if (seq-track-replaceable-instrument? track)
       (do
         (set! sbrowser-loading-instrument-name name)
         (host-command "swap-track-instrument" (dict :track track :name name))
         (status (str "Loading instrument swap: " name)))
-      (status "Saved instruments can replace custom instrument tracks"))))
+      (status "Saved instruments can replace sampler or custom instrument tracks"))))
+
+(def sbrowser-swap-track-builtin-instrument (track name)
+  (if (and (= name "sampler") (seq-track-replaceable-instrument? track))
+    (do
+      (host-command "swap-track-builtin-instrument" (dict :track track :name name))
+      (set! sbrowser-tab "samples")
+      (status "Loading sampler"))
+    (status "Only sampler conversion is supported")))
 
 (def sbrowser-drop-instrument-on-track (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
-    (sbrowser-swap-track-instrument
-      (get target :track)
-      (get payload :name))))
+    (if (= (get payload :kind) "builtin-instrument")
+      (sbrowser-swap-track-builtin-instrument
+        (get target :track)
+        (get payload :name))
+      (sbrowser-swap-track-instrument
+        (get target :track)
+        (get payload :name)))))
+
+(def sbrowser-drop-sample-on-track (event)
+  (let ((payload (get event :payload))
+        (target (get event :target)))
+    (let ((path (get payload :path))
+          (track (get target :track)))
+      (if path
+        (if (seq-track-custom-instrument? track)
+          (host-command "convert-track-to-sampler"
+            (dict :track track :path path :preserve-browser-context true))
+          (host-command "load-sample-into-track"
+            (dict :track track :path path :preserve-browser-context true)))
+        (status "Drop a sample file, not a folder")))))
+
+(def sbrowser-drop-sound-on-track (event)
+  (if (= (get event :drag-type) "instrument")
+    (sbrowser-drop-instrument-on-track event)
+    (sbrowser-drop-sample-on-track event)))
 
 (def sbrowser-activate-instrument (name)
-  (if (seq-track-custom-instrument? SEQ.current-track)
+  (if (seq-track-replaceable-instrument? SEQ.current-track)
     (sbrowser-swap-track-instrument SEQ.current-track name)
     (do
       (sbrowser-add-instrument-track name)
@@ -649,12 +679,18 @@
           (sbrowser-add-layer-rack-track)
           (status "Choose an instrument"))))))
 
+(def sbrowser-activate-builtin-instrument (name)
+  (if (and (= name "sampler")
+           (seq-track-replaceable-instrument? SEQ.current-track))
+    (sbrowser-swap-track-builtin-instrument SEQ.current-track name)
+    (sbrowser-add-builtin-instrument-track name)))
+
 (def sbrowser-select-create-item (item)
   (let ((kind (get item :kind)))
     (if (= kind "header")
       false
       (if (= kind "builtin-instrument")
-        (sbrowser-add-builtin-instrument-track (get item :name))
+        (sbrowser-activate-builtin-instrument (get item :name))
         (if (= kind "sampler")
           (sbrowser-enter-create-sampler-mode)
           (if (= kind "new-instrument")

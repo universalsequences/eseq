@@ -214,6 +214,26 @@ pub fn remap_neural_network_routes_after_track_delete(
     }
 }
 
+/// Removes instrument-parameter writes owned by a replaced track while
+/// preserving effect writes and writes targeting every other track.
+pub fn remove_instrument_overrides_for_track(
+    networks: &mut [ProjectNeuralNetwork],
+    target_track: usize,
+) -> usize {
+    let mut removed = 0;
+    for network in networks {
+        for neuron in &mut network.neurons {
+            let before = neuron.output_overrides.instrument.len();
+            neuron
+                .output_overrides
+                .instrument
+                .retain(|override_param| override_param.target_track != target_track);
+            removed += before - neuron.output_overrides.instrument.len();
+        }
+    }
+    removed
+}
+
 /// Advance `last_index` past any grid boundaries already at or before `start_beats`,
 /// then return the next boundary that falls in `(start_beats, end_beats]`, if any.
 ///
@@ -1207,6 +1227,58 @@ mod tests {
             EventSource::Network { neuron, .. } => neuron,
             EventSource::Step { .. } => panic!("expected network event"),
         }
+    }
+
+    #[test]
+    fn instrument_source_replacement_removes_only_target_track_instrument_overrides() {
+        let param_id = ParamNodeId {
+            logical_id: 10,
+            node_param_idx: 2,
+        };
+        let mut network = ProjectNeuralNetwork::default();
+        network.neurons[0].output_overrides.instrument = vec![
+            ProjectParamOverride {
+                target_track: 0,
+                param_id,
+                param_index: 0,
+                value: 0.25,
+            },
+            ProjectParamOverride {
+                target_track: 1,
+                param_id,
+                param_index: 0,
+                value: 0.75,
+            },
+        ];
+        network.neurons[0]
+            .output_overrides
+            .effects
+            .push(ProjectEffectParamOverride {
+                target_track: 0,
+                slot_index: 0,
+                param_id,
+                param_index: 0,
+                value: 0.5,
+            });
+
+        assert_eq!(
+            remove_instrument_overrides_for_track(&mut [network.clone()], 9),
+            0
+        );
+        assert_eq!(
+            remove_instrument_overrides_for_track(std::slice::from_mut(&mut network), 0),
+            1
+        );
+        assert_eq!(
+            network.neurons[0].output_overrides.instrument,
+            vec![ProjectParamOverride {
+                target_track: 1,
+                param_id,
+                param_index: 0,
+                value: 0.75,
+            }]
+        );
+        assert_eq!(network.neurons[0].output_overrides.effects.len(), 1);
     }
 
     #[test]

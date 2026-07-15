@@ -336,7 +336,7 @@
       (if path
         (do
           (seqv-activate-track-for-edit track)
-          (host-command "audition-sample" (dict :path path)))
+          (sbrowser-drop-sample-on-track event))
         (status "Drop a sample file, not a folder")))))
 
 (def seqv-drop-on-track (event)
@@ -1388,7 +1388,7 @@
           :selected-border-color :mixer-strip-selected-border
           :muted-border-color :mixer-strip-border
           :drop-hover-border-color :mixer-strip-selected-border
-          :drop-types (if (seq-track-custom-instrument? i)
+          :drop-types (if (seq-track-replaceable-instrument? i)
             (list "sample" "instrument")
             (list "sample"))
           :drop-meta (dict :kind "track" :track i)

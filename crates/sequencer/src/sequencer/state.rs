@@ -525,6 +525,47 @@ pub struct InstrumentSlotResetSummary {
     pub patterns_reset: usize,
     pub patterns_with_cleared_locks: usize,
     pub process_bindings_dropped: usize,
+    pub neural_overrides_dropped: usize,
+}
+
+enum InstrumentSourceReset {
+    Custom {
+        engine_id: usize,
+        run_mode: CustomInstrumentRunMode,
+    },
+    Sampler {
+        sample_id: (i32, String, u32),
+    },
+}
+
+impl InstrumentSourceReset {
+    fn instrument_type(&self) -> InstrumentType {
+        match self {
+            Self::Custom { .. } => InstrumentType::Custom,
+            Self::Sampler { .. } => InstrumentType::Sampler,
+        }
+    }
+
+    fn run_mode(&self) -> CustomInstrumentRunMode {
+        match self {
+            Self::Custom { run_mode, .. } => *run_mode,
+            Self::Sampler { .. } => CustomInstrumentRunMode::Instrument,
+        }
+    }
+
+    fn engine_id(&self) -> Option<usize> {
+        match self {
+            Self::Custom { engine_id, .. } => Some(*engine_id),
+            Self::Sampler { .. } => None,
+        }
+    }
+
+    fn sample_id(&self) -> (i32, String, u32) {
+        match self {
+            Self::Custom { .. } => (-1, String::new(), 44_100),
+            Self::Sampler { sample_id } => sample_id.clone(),
+        }
+    }
 }
 
 const INSTRUMENT_PLOCK_VARIANT_DOMAINS: &[PlockVariantDomain] = &[
@@ -553,19 +594,20 @@ impl TrackPatternData {
         descriptor: &EffectDescriptor,
         node_id: u32,
         modulator_node_id: u32,
-        engine_id: usize,
-        run_mode: CustomInstrumentRunMode,
+        source: &InstrumentSourceReset,
     ) -> (bool, usize) {
         let cleared_locks = instrument_slot_has_locks(&self.instrument_slot);
         self.instrument_slot =
             EffectSlotSnapshot::new_default_with_modulator(descriptor, node_id, modulator_node_id);
         self.track_sound_state = TrackSoundState {
-            engine_id: Some(engine_id),
+            engine_id: source.engine_id(),
             loaded_preset: None,
             dirty: false,
         };
-        self.instrument_type = InstrumentType::Custom;
-        self.instrument_run_mode = run_mode;
+        self.sample_id = source.sample_id();
+        self.instrument_type = source.instrument_type();
+        self.instrument_run_mode = source.run_mode();
+        self.rack_track = None;
         self.plock_variant_registry
             .remove_domains(INSTRUMENT_PLOCK_VARIANT_DOMAINS);
         self.key_lock_variant_registry
@@ -3359,16 +3401,9 @@ impl SequencerState {
         pool.patterns.len()
     }
 
-    /// Replace one custom track's instrument-owned state in the live pattern
-    /// and every stored track pattern while preserving the musical lane,
-    /// mixer, effects, MIDI FX, and track-level automation.
-    pub fn validate_instrument_slot_reset_target(
-        &self,
-        track: usize,
-        engine_id: usize,
-    ) -> Result<(), String> {
-        u32::try_from(engine_id)
-            .map_err(|_| format!("Instrument engine id {engine_id} exceeds the runtime format"))?;
+    /// Validates the shared state lanes needed to replace a track's instrument
+    /// source without mutating any state.
+    fn validate_instrument_source_reset_target(&self, track: usize) -> Result<(), String> {
         let require_track = |len: usize, collection: &str| {
             if track < len {
                 Ok(())
@@ -3405,6 +3440,10 @@ impl SequencerState {
             "process chains",
         )?;
         require_track(
+            self.pattern.rack_tracks.lock().unwrap().len(),
+            "rack track state",
+        )?;
+        require_track(
             self.pattern.plock_variant_registries.lock().unwrap().len(),
             "p-lock variant registries",
         )?;
@@ -3423,6 +3462,20 @@ impl SequencerState {
         Ok(())
     }
 
+    pub fn validate_instrument_slot_reset_target(
+        &self,
+        track: usize,
+        engine_id: usize,
+    ) -> Result<(), String> {
+        u32::try_from(engine_id)
+            .map_err(|_| format!("Instrument engine id {engine_id} exceeds the runtime format"))?;
+        self.validate_instrument_source_reset_target(track)
+    }
+
+    pub fn validate_sampler_slot_reset_target(&self, track: usize) -> Result<(), String> {
+        self.validate_instrument_source_reset_target(track)
+    }
+
     pub fn reset_instrument_slot_all_patterns(
         &self,
         track: usize,
@@ -3434,24 +3487,67 @@ impl SequencerState {
     ) -> Option<InstrumentSlotResetSummary> {
         self.validate_instrument_slot_reset_target(track, engine_id)
             .ok()?;
-        let engine_id_flag = u32::try_from(engine_id).ok()?;
+        self.reset_instrument_source_all_patterns(
+            track,
+            descriptor,
+            node_id,
+            modulator_node_id,
+            InstrumentSourceReset::Custom {
+                engine_id,
+                run_mode,
+            },
+        )
+    }
+
+    pub fn reset_sampler_slot_all_patterns(
+        &self,
+        track: usize,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+        sample_id: (i32, String, u32),
+    ) -> Option<InstrumentSlotResetSummary> {
+        self.validate_sampler_slot_reset_target(track).ok()?;
+        self.reset_instrument_source_all_patterns(
+            track,
+            descriptor,
+            node_id,
+            modulator_node_id,
+            InstrumentSourceReset::Sampler { sample_id },
+        )
+    }
+
+    fn reset_instrument_source_all_patterns(
+        &self,
+        track: usize,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+        source: InstrumentSourceReset,
+    ) -> Option<InstrumentSlotResetSummary> {
+        let engine_id_flag = source
+            .engine_id()
+            .and_then(|engine_id| u32::try_from(engine_id).ok())
+            .unwrap_or(u32::MAX);
         let live_slot = self.pattern.instrument_slots.get(track)?;
         let live_had_locks = instrument_slot_has_locks(&EffectSlotSnapshot::capture(live_slot));
 
         live_slot.clear();
         live_slot.apply_descriptor_with_modulator(descriptor, node_id, modulator_node_id);
-        self.pattern.instrument_run_modes[track].store(run_mode.runtime_flag(), Ordering::Relaxed);
+        self.pattern.instrument_run_modes[track]
+            .store(source.run_mode().runtime_flag(), Ordering::Relaxed);
         self.runtime.instrument_run_mode_flags[track]
-            .store(run_mode.runtime_flag(), Ordering::Release);
+            .store(source.run_mode().runtime_flag(), Ordering::Release);
         self.runtime.instrument_type_flags[track]
-            .store(InstrumentType::Custom.runtime_flag(), Ordering::Release);
+            .store(source.instrument_type().runtime_flag(), Ordering::Release);
         self.runtime.track_engine_ids[track].store(engine_id_flag, Ordering::Release);
 
         self.pattern.track_sound_state.lock().unwrap()[track] = TrackSoundState {
-            engine_id: Some(engine_id),
+            engine_id: source.engine_id(),
             loaded_preset: None,
             dirty: false,
         };
+        self.pattern.rack_tracks.lock().unwrap()[track] = None;
 
         self.pattern.plock_variant_registries.lock().unwrap()[track]
             .remove_domains(INSTRUMENT_PLOCK_VARIANT_DOMAINS);
@@ -3469,18 +3565,23 @@ impl SequencerState {
         };
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
+        let neural_overrides_dropped = scenes
+            .scenes
+            .iter_mut()
+            .map(|scene| {
+                crate::neural::remove_instrument_overrides_for_track(
+                    &mut scene.neural_networks,
+                    track,
+                )
+            })
+            .sum();
         let effective_pattern_id = scenes.effective_pattern_id(track);
         let pool = &mut scenes.track_pools[track];
         let mut patterns_with_cleared_locks = 0;
         for (pattern_id, data) in &mut pool.patterns {
             let stored_had_locks = instrument_slot_has_locks(&data.instrument_slot);
-            let (cleared_locks, dropped_bindings) = data.reset_instrument_source(
-                descriptor,
-                node_id,
-                modulator_node_id,
-                engine_id,
-                run_mode,
-            );
+            let (cleared_locks, dropped_bindings) =
+                data.reset_instrument_source(descriptor, node_id, modulator_node_id, &source);
             let cleared_locks = if Some(*pattern_id) == effective_pattern_id {
                 live_had_locks || stored_had_locks
             } else {
@@ -3494,6 +3595,7 @@ impl SequencerState {
             patterns_reset: pool.patterns.len(),
             patterns_with_cleared_locks,
             process_bindings_dropped,
+            neural_overrides_dropped,
         })
     }
 
@@ -7729,16 +7831,16 @@ mod tests {
             state.pattern.swing_resolution_plocks[0].get(5),
             Some(SwingResolution::Eighth)
         );
-        assert_eq!(state.pattern.step_data[0].get(5, StepParam::Velocity), 0.77);
+        assert_eq!(
+            state.pattern.step_data[0].get(5, StepParam::Velocity),
+            0.77
+        );
 
         assert!(state.clear_variant_locks_for_steps(0, &[5]));
         assert_eq!(state.pattern.timebase_plocks[0].get(5), None);
         assert_eq!(state.pattern.swing_plocks[0].get(5), None);
         assert_eq!(state.pattern.swing_resolution_plocks[0].get(5), None);
-        assert_eq!(
-            state.pattern.step_data[0].get(5, StepParam::Velocity),
-            0.77
-        );
+        assert_eq!(state.pattern.step_data[0].get(5, StepParam::Velocity), 0.77);
     }
 
     fn sample_pattern_snapshot(num_tracks: usize) -> PatternSnapshot {
@@ -7862,6 +7964,29 @@ mod tests {
                     loaded_preset: Some(format!("preset-{scene}")),
                     dirty: true,
                 };
+                let param_id = crate::neural::ParamNodeId {
+                    logical_id: 100 + scene as u64,
+                    node_param_idx: 0,
+                };
+                let mut network = ProjectNeuralNetwork::default();
+                network.neurons[0].output_overrides.instrument.push(
+                    crate::neural::ProjectParamOverride {
+                        target_track: 0,
+                        param_id,
+                        param_index: 0,
+                        value: 0.25,
+                    },
+                );
+                network.neurons[0].output_overrides.effects.push(
+                    crate::neural::ProjectEffectParamOverride {
+                        target_track: 0,
+                        slot_index: 0,
+                        param_id,
+                        param_index: 0,
+                        value: 0.75,
+                    },
+                );
+                snapshot.neural_networks = vec![network];
                 snapshot.process_chains[0] = instrument_swap_process_chain();
                 snapshot.plock_variant_registries[0] =
                     composite_instrument_effect_variant_registry();
@@ -7909,6 +8034,7 @@ mod tests {
 
         assert_eq!(summary.patterns_reset, 3);
         assert_eq!(summary.patterns_with_cleared_locks, 3);
+        assert_eq!(summary.neural_overrides_dropped, 3);
         assert_eq!(
             f32::from_bits(state.pattern.instrument_base_note_offsets[0].load(Ordering::Relaxed)),
             -7.0
@@ -7960,6 +8086,7 @@ mod tests {
                 .iter()
                 .all(|tensor| tensor.plocks.is_empty()));
             assert_eq!(actual.instrument_types[0], InstrumentType::Custom);
+            assert_eq!(actual.sample_ids[0], (-1, String::new(), 44_100));
             assert_eq!(
                 actual.instrument_run_modes[0],
                 CustomInstrumentRunMode::Instrument
@@ -7988,6 +8115,77 @@ mod tests {
                 bindings["survives"],
                 Some(ParamTarget::EffectParam { .. })
             ));
+            assert!(actual.neural_networks[0].neurons[0]
+                .output_overrides
+                .instrument
+                .is_empty());
+            assert_eq!(
+                actual.neural_networks[0].neurons[0]
+                    .output_overrides
+                    .effects
+                    .len(),
+                1,
+                "effect neural overrides should survive scene {scene}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampler_conversion_sets_sample_identity_and_type_in_every_pattern() {
+        let descriptor = EffectDescriptor::builtin_sampler();
+        let snapshots = (0..3)
+            .map(|scene| {
+                let mut snapshot = sample_pattern_snapshot(1);
+                snapshot.track_bits[0][0] = 10 + scene;
+                snapshot.instrument_types[0] = InstrumentType::Custom;
+                snapshot.instrument_run_modes[0] = CustomInstrumentRunMode::FreePatch;
+                snapshot.track_sound_states[0] = TrackSoundState {
+                    engine_id: Some(4),
+                    loaded_preset: Some(format!("preset-{scene}")),
+                    dirty: true,
+                };
+                snapshot.rack_tracks[0] = Some(sample_rack_track_snapshot());
+                snapshot
+            })
+            .collect::<Vec<_>>();
+        let state = SequencerState::new(1, vec![vec![EffectSlotState::new(&descriptor, 90)]]);
+        state.replace_pattern_repository(snapshots, 0);
+        state.pattern.rack_tracks.lock().unwrap()[0] = Some(sample_rack_track_snapshot());
+
+        let summary = state
+            .reset_sampler_slot_all_patterns(
+                0,
+                &descriptor,
+                800,
+                801,
+                (42, "snare".to_string(), 48_000),
+            )
+            .expect("valid track should convert to sampler");
+
+        assert_eq!(summary.patterns_reset, 3);
+        assert_eq!(
+            state.runtime.instrument_type_flags[0].load(Ordering::Acquire),
+            InstrumentType::Sampler.runtime_flag()
+        );
+        assert_eq!(
+            state.runtime.track_engine_ids[0].load(Ordering::Acquire),
+            u32::MAX
+        );
+        assert!(state.pattern.rack_tracks.lock().unwrap()[0].is_none());
+        for (scene, snapshot) in state.export_pattern_repository().iter().enumerate() {
+            assert_eq!(snapshot.track_bits[0][0], 10 + scene as u64);
+            assert_eq!(snapshot.instrument_types[0], InstrumentType::Sampler);
+            assert_eq!(
+                snapshot.instrument_run_modes[0],
+                CustomInstrumentRunMode::Instrument
+            );
+            assert_eq!(snapshot.sample_ids[0], (42, "snare".to_string(), 48_000));
+            assert_eq!(snapshot.track_sound_states[0].engine_id, None);
+            assert_eq!(snapshot.track_sound_states[0].loaded_preset, None);
+            assert!(!snapshot.track_sound_states[0].dirty);
+            assert!(snapshot.rack_tracks[0].is_none());
+            assert_eq!(snapshot.instrument_slots[0].node_id, 800);
+            assert_eq!(snapshot.instrument_slots[0].modulator_node_id, 801);
         }
     }
 
