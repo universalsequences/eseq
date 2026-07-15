@@ -3362,6 +3362,67 @@ impl SequencerState {
     /// Replace one custom track's instrument-owned state in the live pattern
     /// and every stored track pattern while preserving the musical lane,
     /// mixer, effects, MIDI FX, and track-level automation.
+    pub fn validate_instrument_slot_reset_target(
+        &self,
+        track: usize,
+        engine_id: usize,
+    ) -> Result<(), String> {
+        u32::try_from(engine_id)
+            .map_err(|_| format!("Instrument engine id {engine_id} exceeds the runtime format"))?;
+        let require_track = |len: usize, collection: &str| {
+            if track < len {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Track {} is missing from {collection} (length {len})",
+                    track + 1
+                ))
+            }
+        };
+        require_track(self.pattern.instrument_slots.len(), "live instrument slots")?;
+        require_track(
+            self.pattern.instrument_run_modes.len(),
+            "pattern instrument run modes",
+        )?;
+        require_track(
+            self.runtime.instrument_run_mode_flags.len(),
+            "runtime instrument run modes",
+        )?;
+        require_track(
+            self.runtime.instrument_type_flags.len(),
+            "runtime instrument types",
+        )?;
+        require_track(
+            self.runtime.track_engine_ids.len(),
+            "runtime track engine bindings",
+        )?;
+        require_track(
+            self.pattern.track_sound_state.lock().unwrap().len(),
+            "track sound state",
+        )?;
+        require_track(
+            self.pattern.process_chains.lock().unwrap().len(),
+            "process chains",
+        )?;
+        require_track(
+            self.pattern.plock_variant_registries.lock().unwrap().len(),
+            "p-lock variant registries",
+        )?;
+        require_track(
+            self.pattern
+                .key_lock_variant_registries
+                .lock()
+                .unwrap()
+                .len(),
+            "key-lock variant registries",
+        )?;
+        require_track(
+            self.pattern.scenes.lock().unwrap().track_pools.len(),
+            "stored track pattern pools",
+        )?;
+        Ok(())
+    }
+
     pub fn reset_instrument_slot_all_patterns(
         &self,
         track: usize,
@@ -3371,36 +3432,9 @@ impl SequencerState {
         engine_id: usize,
         run_mode: CustomInstrumentRunMode,
     ) -> Option<InstrumentSlotResetSummary> {
+        self.validate_instrument_slot_reset_target(track, engine_id)
+            .ok()?;
         let engine_id_flag = u32::try_from(engine_id).ok()?;
-        if track >= self.pattern.instrument_run_modes.len()
-            || track >= self.runtime.instrument_run_mode_flags.len()
-            || track >= self.runtime.instrument_type_flags.len()
-            || track >= self.runtime.track_engine_ids.len()
-        {
-            return None;
-        }
-        if track >= self.pattern.track_sound_state.lock().unwrap().len() {
-            return None;
-        }
-        if track >= self.pattern.process_chains.lock().unwrap().len() {
-            return None;
-        }
-        if track >= self.pattern.plock_variant_registries.lock().unwrap().len() {
-            return None;
-        }
-        if track
-            >= self
-                .pattern
-                .key_lock_variant_registries
-                .lock()
-                .unwrap()
-                .len()
-        {
-            return None;
-        }
-        if track >= self.pattern.scenes.lock().unwrap().track_pools.len() {
-            return None;
-        }
         let live_slot = self.pattern.instrument_slots.get(track)?;
         let live_had_locks = instrument_slot_has_locks(&EffectSlotSnapshot::capture(live_slot));
 

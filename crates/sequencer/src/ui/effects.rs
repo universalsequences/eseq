@@ -240,7 +240,7 @@ impl App {
         )
     }
 
-    fn sync_scratch_runtime_descriptors(&self) {
+    pub(super) fn sync_scratch_runtime_descriptors(&self) {
         self.state.set_scratch_runtime_descriptors(
             self.graph.effect_descriptors.clone(),
             self.graph.instrument_descriptors.clone(),
@@ -462,6 +462,42 @@ impl App {
         Some(unsafe {
             self.graph_controller()
                 .add_custom_track(name, engine_id, &manifest, &*lib_ptr, run_mode)
+        })
+    }
+
+    pub fn try_swap_track_to_cached_saved_instrument_sync(
+        &mut self,
+        track: usize,
+        name: &str,
+        source: &str,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Option<Result<crate::sequencer::InstrumentSlotResetSummary, String>> {
+        let cache_idx = self.cached_instrument_engine_idx(name, source)?;
+        let manifest = self.editor.engine_registry.engines[cache_idx]
+            .manifest
+            .clone();
+        let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+        let lib_ptr: *const lisp_host::LoadedDGenLib =
+            match self.editor.instrument_libs.get(lib_index) {
+                Some(lib) => lib,
+                None => {
+                    return Some(Err(format!(
+                        "Instrument engine {cache_idx} references missing library {lib_index}"
+                    )))
+                }
+            };
+        let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
+            match self.register_dedicated_instrument_engine(name, source, &manifest, lib_index) {
+                Ok(engine_id) => engine_id,
+                Err(error) => return Some(Err(error)),
+            }
+        } else {
+            cache_idx
+        };
+        Some(unsafe {
+            self.graph_controller().swap_custom_track_instrument(
+                track, name, engine_id, &manifest, &*lib_ptr, run_mode,
+            )
         })
     }
 

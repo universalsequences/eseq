@@ -430,6 +430,31 @@ pub struct LoadedDGenLib {
 unsafe impl Send for LoadedDGenLib {}
 unsafe impl Sync for LoadedDGenLib {}
 
+#[cfg(test)]
+pub(crate) fn test_loaded_dgen_lib() -> LoadedDGenLib {
+    unsafe extern "C" fn silent_process(
+        _inputs: *const *mut f32,
+        outputs: *const *mut f32,
+        frame_count: c_int,
+        _memory_read: *mut c_void,
+        _memory_write: *mut c_void,
+        _host_sample_rate: c_float,
+    ) {
+        if outputs.is_null() || frame_count <= 0 {
+            return;
+        }
+        let output = *outputs;
+        if !output.is_null() {
+            std::ptr::write_bytes(output, 0, frame_count as usize);
+        }
+    }
+
+    LoadedDGenLib {
+        process_fn: silent_process,
+        _handle: std::ptr::null_mut(),
+    }
+}
+
 // ── Compile result (for async compilation) ──
 
 pub struct CompileResult {

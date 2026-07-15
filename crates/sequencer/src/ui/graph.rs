@@ -6,10 +6,11 @@ use std::sync::atomic::Ordering;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
-    rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentType, ModDestination,
-    RackRouting, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, TrackOutput,
-    TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE, DRUM_RACK_TOTAL_PAD_NOTES,
-    EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
+    rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentSlotResetSummary,
+    InstrumentType, ModDestination, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, TrackOutput, TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE,
+    DRUM_RACK_LAST_PAD_NOTE, DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS,
+    MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
@@ -314,7 +315,7 @@ impl GraphNodeBuildTransaction {
     fn own(&mut self, node_id: i32) -> Result<i32, String> {
         self.node_ids.push(node_id);
         #[cfg(test)]
-        record_test_engine_route_node(node_id);
+        record_test_graph_build_node(node_id);
         if self.node_ids.len() > self.max_nodes {
             return Err(format!(
                 "Graph edit transaction created more than {} reserved nodes",
@@ -349,7 +350,7 @@ impl GraphNodeBuildTransaction {
         self.connections
             .push((src_node, src_port, dst_node, dst_port));
         #[cfg(test)]
-        record_test_engine_route_connection((src_node, src_port, dst_node, dst_port));
+        record_test_graph_build_connection((src_node, src_port, dst_node, dst_port));
         Ok(())
     }
 
@@ -372,7 +373,7 @@ impl Drop for GraphNodeBuildTransaction {
             rollback_succeeded &= queued;
             #[cfg(test)]
             if queued {
-                record_test_engine_route_rollback_connection((
+                record_test_graph_build_rollback_connection((
                     src_node, src_port, dst_node, dst_port,
                 ));
             }
@@ -382,7 +383,7 @@ impl Drop for GraphNodeBuildTransaction {
             rollback_succeeded &= queued;
             #[cfg(test)]
             if queued {
-                record_test_engine_route_rollback_node(node_id);
+                record_test_graph_build_rollback_node(node_id);
             }
         }
         unsafe { crate::audiograph::end_graph_edit_batch(self.lg) };
@@ -401,42 +402,45 @@ fn add_engine_route_gain_node_checked(
     name: &str,
     context: &str,
 ) -> Result<i32, String> {
-    #[cfg(test)]
-    if should_fail_test_engine_route_node_add() {
-        return Err(format!(
-            "{context}: injected engine route node allocation failure"
-        ));
-    }
+    check_test_graph_build_node_add(context)?;
     add_gain_node_checked(lg, gain, name, context)
+}
+
+fn check_test_graph_build_node_add(context: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if should_fail_test_graph_build_node_add() {
+        return Err(format!("{context}: injected graph node allocation failure"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 thread_local! {
-    static TEST_ENGINE_ROUTE_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    static TEST_ENGINE_ROUTE_NODE_IDS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
-    static TEST_ENGINE_ROUTE_ROLLBACK_NODE_IDS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
-    static TEST_ENGINE_ROUTE_CONNECTIONS: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
-    static TEST_ENGINE_ROUTE_ROLLBACK_CONNECTIONS: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static TEST_GRAPH_BUILD_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static TEST_GRAPH_BUILD_NODE_IDS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static TEST_GRAPH_BUILD_ROLLBACK_NODE_IDS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static TEST_GRAPH_BUILD_CONNECTIONS: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static TEST_GRAPH_BUILD_ROLLBACK_CONNECTIONS: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
-fn begin_test_engine_route_capture() {
-    TEST_ENGINE_ROUTE_NODE_IDS.with(|ids| ids.borrow_mut().clear());
-    TEST_ENGINE_ROUTE_ROLLBACK_NODE_IDS.with(|ids| ids.borrow_mut().clear());
-    TEST_ENGINE_ROUTE_CONNECTIONS.with(|connections| connections.borrow_mut().clear());
-    TEST_ENGINE_ROUTE_ROLLBACK_CONNECTIONS.with(|connections| connections.borrow_mut().clear());
-    TEST_ENGINE_ROUTE_FAIL_AFTER.with(|remaining| remaining.set(None));
+fn begin_test_graph_build_capture() {
+    TEST_GRAPH_BUILD_NODE_IDS.with(|ids| ids.borrow_mut().clear());
+    TEST_GRAPH_BUILD_ROLLBACK_NODE_IDS.with(|ids| ids.borrow_mut().clear());
+    TEST_GRAPH_BUILD_CONNECTIONS.with(|connections| connections.borrow_mut().clear());
+    TEST_GRAPH_BUILD_ROLLBACK_CONNECTIONS.with(|connections| connections.borrow_mut().clear());
+    TEST_GRAPH_BUILD_FAIL_AFTER.with(|remaining| remaining.set(None));
 }
 
 #[cfg(test)]
-fn set_test_engine_route_failure_after(successful_adds: usize) {
-    begin_test_engine_route_capture();
-    TEST_ENGINE_ROUTE_FAIL_AFTER.with(|remaining| remaining.set(Some(successful_adds)));
+fn set_test_graph_build_failure_after(successful_adds: usize) {
+    begin_test_graph_build_capture();
+    TEST_GRAPH_BUILD_FAIL_AFTER.with(|remaining| remaining.set(Some(successful_adds)));
 }
 
 #[cfg(test)]
-fn should_fail_test_engine_route_node_add() -> bool {
-    TEST_ENGINE_ROUTE_FAIL_AFTER.with(|remaining| match remaining.get() {
+fn should_fail_test_graph_build_node_add() -> bool {
+    TEST_GRAPH_BUILD_FAIL_AFTER.with(|remaining| match remaining.get() {
         Some(0) => {
             remaining.set(None);
             true
@@ -450,44 +454,44 @@ fn should_fail_test_engine_route_node_add() -> bool {
 }
 
 #[cfg(test)]
-fn record_test_engine_route_node(node_id: i32) {
-    TEST_ENGINE_ROUTE_NODE_IDS.with(|ids| ids.borrow_mut().push(node_id));
+fn record_test_graph_build_node(node_id: i32) {
+    TEST_GRAPH_BUILD_NODE_IDS.with(|ids| ids.borrow_mut().push(node_id));
 }
 
 #[cfg(test)]
-fn record_test_engine_route_rollback_node(node_id: i32) {
-    TEST_ENGINE_ROUTE_ROLLBACK_NODE_IDS.with(|ids| ids.borrow_mut().push(node_id));
+fn record_test_graph_build_rollback_node(node_id: i32) {
+    TEST_GRAPH_BUILD_ROLLBACK_NODE_IDS.with(|ids| ids.borrow_mut().push(node_id));
 }
 
 #[cfg(test)]
-fn record_test_engine_route_connection(connection: (i32, i32, i32, i32)) {
-    TEST_ENGINE_ROUTE_CONNECTIONS.with(|connections| connections.borrow_mut().push(connection));
+fn record_test_graph_build_connection(connection: (i32, i32, i32, i32)) {
+    TEST_GRAPH_BUILD_CONNECTIONS.with(|connections| connections.borrow_mut().push(connection));
 }
 
 #[cfg(test)]
-fn record_test_engine_route_rollback_connection(connection: (i32, i32, i32, i32)) {
-    TEST_ENGINE_ROUTE_ROLLBACK_CONNECTIONS
+fn record_test_graph_build_rollback_connection(connection: (i32, i32, i32, i32)) {
+    TEST_GRAPH_BUILD_ROLLBACK_CONNECTIONS
         .with(|connections| connections.borrow_mut().push(connection));
 }
 
 #[cfg(test)]
-fn take_test_engine_route_node_ids() -> Vec<i32> {
-    TEST_ENGINE_ROUTE_NODE_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+fn take_test_graph_build_node_ids() -> Vec<i32> {
+    TEST_GRAPH_BUILD_NODE_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
 }
 
 #[cfg(test)]
-fn take_test_engine_route_rollback_node_ids() -> Vec<i32> {
-    TEST_ENGINE_ROUTE_ROLLBACK_NODE_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+fn take_test_graph_build_rollback_node_ids() -> Vec<i32> {
+    TEST_GRAPH_BUILD_ROLLBACK_NODE_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
 }
 
 #[cfg(test)]
-fn take_test_engine_route_connections() -> Vec<(i32, i32, i32, i32)> {
-    TEST_ENGINE_ROUTE_CONNECTIONS.with(|connections| std::mem::take(&mut *connections.borrow_mut()))
+fn take_test_graph_build_connections() -> Vec<(i32, i32, i32, i32)> {
+    TEST_GRAPH_BUILD_CONNECTIONS.with(|connections| std::mem::take(&mut *connections.borrow_mut()))
 }
 
 #[cfg(test)]
-fn take_test_engine_route_rollback_connections() -> Vec<(i32, i32, i32, i32)> {
-    TEST_ENGINE_ROUTE_ROLLBACK_CONNECTIONS
+fn take_test_graph_build_rollback_connections() -> Vec<(i32, i32, i32, i32)> {
+    TEST_GRAPH_BUILD_ROLLBACK_CONNECTIONS
         .with(|connections| std::mem::take(&mut *connections.borrow_mut()))
 }
 
@@ -546,6 +550,66 @@ fn host_signal_output_for_input(
     }
 }
 
+#[derive(Clone, Copy)]
+enum CustomHostInputSource {
+    GatePitch(i32),
+    Modulator(i32),
+}
+
+#[derive(Clone, Copy)]
+struct CustomHostInputRoute {
+    source: CustomHostInputSource,
+    input_channel: i32,
+}
+
+fn custom_host_input_routes(
+    manifest: &DGenManifest,
+    context: &str,
+) -> Result<Vec<CustomHostInputRoute>, String> {
+    let mut routes = Vec::new();
+    for input in &manifest.inputs {
+        if input.channel >= manifest.n_inputs {
+            return Err(format!(
+                "{context}: manifest input '{}' references channel {} but instrument has {} inputs",
+                input.name, input.channel, manifest.n_inputs
+            ));
+        }
+        if manifest
+            .modulators
+            .iter()
+            .any(|modulator| modulator.input_channel == input.channel)
+        {
+            continue;
+        }
+        if let Some(host_output) = host_signal_output_for_input(manifest, input) {
+            routes.push(CustomHostInputRoute {
+                source: CustomHostInputSource::GatePitch(host_output),
+                input_channel: input.channel as i32,
+            });
+        }
+    }
+
+    for modulator in &manifest.modulators {
+        if modulator.input_channel >= manifest.n_inputs {
+            return Err(format!(
+                "{context}: modulator '{}' references channel {} but instrument has {} inputs",
+                modulator.name, modulator.input_channel, manifest.n_inputs
+            ));
+        }
+        if modulator.slot == 0 || modulator.slot > crate::voice_modulator::NUM_OUTPUTS {
+            return Err(format!(
+                "{context}: modulator '{}' has invalid slot {}",
+                modulator.name, modulator.slot
+            ));
+        }
+        routes.push(CustomHostInputRoute {
+            source: CustomHostInputSource::Modulator((modulator.slot - 1) as i32),
+            input_channel: modulator.input_channel as i32,
+        });
+    }
+    Ok(routes)
+}
+
 fn manifest_mod_output_channels(manifest: &DGenManifest) -> Vec<usize> {
     let output_count = manifest.n_outputs.max(1);
     let mut channels = Vec::new();
@@ -574,6 +638,101 @@ fn stereo_route_source_channel(audio_channels: &[usize], route_idx: usize) -> Op
             .or_else(|| audio_channels.first().copied()),
         _ => None,
     }
+}
+
+fn engine_route_build_capacities(engine: &EngineNodeIds) -> (usize, usize) {
+    let route_nodes_per_voice = 2 + if engine.modulator_ids.is_empty() {
+        0
+    } else {
+        EXT_MOD_INPUT_COUNT
+    };
+    let connections_per_voice = 2
+        + usize::from(stereo_route_source_channel(&engine.audio_output_channels, 0).is_some())
+        + usize::from(stereo_route_source_channel(&engine.audio_output_channels, 1).is_some())
+        + usize::from(!engine.mod_output_channels.is_empty())
+        + if engine.modulator_ids.is_empty() {
+            0
+        } else {
+            EXT_MOD_INPUT_COUNT * 2
+        };
+    (
+        MAX_VOICES * route_nodes_per_voice,
+        MAX_VOICES * connections_per_voice,
+    )
+}
+
+fn positive_route_node_count(routes: &[[i32; 2]]) -> usize {
+    routes
+        .iter()
+        .flat_map(|route_pair| route_pair.iter())
+        .filter(|route_id| **route_id > 0)
+        .count()
+}
+
+fn positive_ext_route_node_count(routes: &[[i32; EXT_MOD_INPUT_COUNT]]) -> usize {
+    routes
+        .iter()
+        .flat_map(|route_ids| route_ids.iter())
+        .filter(|route_id| **route_id > 0)
+        .count()
+}
+
+fn engine_route_delete_command_count(engine: &EngineNodeIds, track: usize) -> usize {
+    let route_nodes = engine
+        .route_gain_ids
+        .get(track)
+        .map(|routes| positive_route_node_count(routes))
+        .unwrap_or(0);
+    let ext_route_nodes = engine
+        .ext_route_gain_ids
+        .get(track)
+        .map(|routes| positive_ext_route_node_count(routes))
+        .unwrap_or(0);
+    let mod_output_disconnects = if engine.mod_output_channels.is_empty() {
+        0
+    } else {
+        engine.synth_ids.len()
+    };
+    route_nodes + ext_route_nodes + mod_output_disconnects
+}
+
+fn engine_runtime_delete_command_count_excluding_track(
+    engine: &EngineNodeIds,
+    excluded_track: usize,
+) -> usize {
+    let route_nodes = engine
+        .route_gain_ids
+        .iter()
+        .enumerate()
+        .filter(|(track, _)| *track != excluded_track)
+        .map(|(_, routes)| positive_route_node_count(routes))
+        .sum::<usize>();
+    let ext_route_nodes = engine
+        .ext_route_gain_ids
+        .iter()
+        .enumerate()
+        .filter(|(track, _)| *track != excluded_track)
+        .map(|(_, routes)| positive_ext_route_node_count(routes))
+        .sum::<usize>();
+    route_nodes
+        + ext_route_nodes
+        + engine.synth_ids.len()
+        + engine.modulator_ids.len()
+        + engine.gatepitch_ids.len()
+}
+
+fn require_graph_edit_queue_capacity(
+    lg: *mut crate::audiograph::LiveGraph,
+    required: usize,
+    context: &str,
+) -> Result<(), String> {
+    let available = unsafe { crate::audiograph::graph_edit_queue_available(lg) } as usize;
+    if available < required {
+        return Err(format!(
+            "{context}: graph edit queue has room for {available} commands; {required} are required"
+        ));
+    }
+    Ok(())
 }
 
 impl App {
@@ -1413,6 +1572,228 @@ impl GraphController<'_> {
         }
         self.debug_assert_track_vectors_aligned();
         Ok(idx)
+    }
+
+    pub fn swap_custom_track_instrument(
+        &mut self,
+        track: usize,
+        instrument_name: &str,
+        new_engine_id: usize,
+        manifest: &DGenManifest,
+        lib: &LoadedDGenLib,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Result<InstrumentSlotResetSummary, String> {
+        if track >= self.app.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        if self.app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
+            return Err(format!(
+                "Track {} is not a custom instrument track",
+                track + 1
+            ));
+        }
+        let old_engine_id = self
+            .app
+            .graph
+            .track_engine_ids
+            .get(track)
+            .and_then(|engine_id| *engine_id)
+            .ok_or_else(|| format!("Custom track {} has no engine binding", track + 1))?;
+        let track_nodes = self
+            .app
+            .graph
+            .track_node_ids
+            .get(track)
+            .cloned()
+            .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
+        for (len, collection) in [
+            (
+                self.app.graph.track_instrument_run_modes.len(),
+                "instrument run modes",
+            ),
+            (
+                self.app.graph.track_synth_node_ids.len(),
+                "track synth node ids",
+            ),
+            (
+                self.app.graph.track_gatepitch_node_ids.len(),
+                "track gatepitch node ids",
+            ),
+            (
+                self.app.graph.instrument_descriptors.len(),
+                "instrument descriptors",
+            ),
+        ] {
+            if track >= len {
+                return Err(format!(
+                    "Track {} is missing from {collection} (length {len})",
+                    track + 1
+                ));
+            }
+        }
+        self.app
+            .state
+            .validate_instrument_slot_reset_target(track, new_engine_id)?;
+        if new_engine_id >= self.app.state.runtime.engine_voice_lids.len() {
+            return Err(format!(
+                "Instrument engine runtime slot {new_engine_id} is unavailable; maximum runtime engines is {}",
+                self.app.state.runtime.engine_voice_lids.len()
+            ));
+        }
+
+        let descriptor = lisp_host::instrument_descriptor_from_manifest(instrument_name, manifest);
+        let track_name = self.app.tracks[track].clone();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let (new_synth_ids, new_gatepitch_ids, node_id, modulator_node_id) = {
+            self.ensure_custom_engine_runtime(new_engine_id, instrument_name, manifest, lib)?;
+
+            let new_engine = self.app.graph.engine_node_ids[new_engine_id]
+                .as_ref()
+                .ok_or_else(|| format!("Missing runtime for instrument engine {new_engine_id}"))?;
+            let existing_routes = new_engine.route_gain_ids.get(track).ok_or_else(|| {
+                format!(
+                    "Track {} is outside engine {new_engine_id}'s route table",
+                    track + 1
+                )
+            })?;
+            let existing_ext_routes =
+                new_engine.ext_route_gain_ids.get(track).ok_or_else(|| {
+                    format!(
+                        "Track {} is outside engine {new_engine_id}'s external route table",
+                        track + 1
+                    )
+                })?;
+            if new_engine_id != old_engine_id
+                && (!existing_routes.is_empty() || !existing_ext_routes.is_empty())
+            {
+                return Err(format!(
+                    "Instrument engine {new_engine_id} already has a route for track {}",
+                    track + 1
+                ));
+            }
+
+            let old_engine = self
+                .app
+                .graph
+                .engine_node_ids
+                .get(old_engine_id)
+                .and_then(|engine| engine.as_ref())
+                .ok_or_else(|| format!("Missing runtime for instrument engine {old_engine_id}"))?;
+            if old_engine
+                .route_gain_ids
+                .get(track)
+                .is_none_or(|routes| routes.len() != MAX_VOICES)
+            {
+                return Err(format!(
+                    "Instrument engine {old_engine_id} does not have a complete route for track {}",
+                    track + 1
+                ));
+            }
+
+            let should_delete_old_runtime = new_engine_id != old_engine_id
+                && !self.engine_is_still_referenced_excluding(old_engine_id, track);
+            if new_engine_id != old_engine_id {
+                let (route_nodes, route_connections) = engine_route_build_capacities(new_engine);
+                let route_transaction_commands =
+                    (route_nodes + route_connections)
+                        .checked_mul(2)
+                        .ok_or_else(|| "Instrument route capacity overflow".to_string())?;
+                let old_route_delete_commands =
+                    engine_route_delete_command_count(old_engine, track);
+                let old_runtime_delete_commands = if should_delete_old_runtime {
+                    engine_runtime_delete_command_count_excluding_track(old_engine, track)
+                } else {
+                    0
+                };
+                let required_commands = route_transaction_commands
+                    .checked_add(old_route_delete_commands)
+                    .and_then(|count| count.checked_add(old_runtime_delete_commands))
+                    .ok_or_else(|| "Instrument swap graph capacity overflow".to_string())?;
+                require_graph_edit_queue_capacity(
+                    self.app.graph.lg.0,
+                    required_commands,
+                    "Instrument swap",
+                )?;
+            }
+
+            if run_mode == CustomInstrumentRunMode::FreePatch
+                && (new_engine.synth_ids.is_empty() || new_engine.gatepitch_ids.is_empty())
+            {
+                return Err(format!(
+                    "Instrument engine {new_engine_id} has no voice 0 runtime for free-patch mode"
+                ));
+            }
+            let new_synth_ids = new_engine.synth_ids.clone();
+            let new_gatepitch_ids = new_engine.gatepitch_ids.clone();
+            let node_id = first_graph_node_identity(&new_engine.synth_ids);
+            let modulator_node_id = first_graph_node_identity(&new_engine.modulator_ids);
+
+            self.connect_engine_to_track(
+                new_engine_id,
+                track,
+                &track_name,
+                track_nodes.voice_sum_id,
+                track_nodes.voice_sum_r_id,
+                track_nodes.mod_out_id,
+                track_nodes.mod_in_clip_ids,
+            )?;
+
+            let new_engine = self.app.graph.engine_node_ids[new_engine_id]
+                .as_ref()
+                .expect("new engine runtime was validated above");
+            debug_assert_eq!(
+                new_engine.route_gain_ids[track].len(),
+                MAX_VOICES,
+                "successful route construction must publish every voice"
+            );
+
+            if new_engine_id != old_engine_id {
+                self.delete_engine_route_for_track(old_engine_id, track);
+                if should_delete_old_runtime {
+                    self.delete_engine_runtime(old_engine_id);
+                }
+            }
+            (new_synth_ids, new_gatepitch_ids, node_id, modulator_node_id)
+        };
+
+        self.app.graph.track_engine_ids[track] = Some(new_engine_id);
+        self.app.graph.track_synth_node_ids[track] = new_synth_ids;
+        self.app.graph.track_gatepitch_node_ids[track] = new_gatepitch_ids;
+        self.app.graph.track_instrument_run_modes[track] = run_mode;
+        self.app.graph.instrument_descriptors[track] = descriptor.clone();
+        let reset_summary = self
+            .app
+            .state
+            .reset_instrument_slot_all_patterns(
+                track,
+                &descriptor,
+                node_id,
+                modulator_node_id,
+                new_engine_id,
+                run_mode,
+            )
+            .expect("instrument reset target was validated before graph mutation");
+
+        self.app.sync_scratch_runtime_descriptors();
+        self.app.push_instrument_defaults_for_track(track);
+        if run_mode == CustomInstrumentRunMode::FreePatch {
+            self.apply_free_patch_idle_voice(track)
+                .expect("free-patch engine runtime was validated before graph mutation");
+        }
+        self.app.state.schedule_mod_resync();
+        self.app.state.request_all_accumulator_resets();
+        self.app.state.publish_scheduler_snapshot();
+        self.app
+            .state
+            .transport
+            .topology_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app
+            .state
+            .transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(reset_summary)
     }
 
     pub fn add_rack_track(
@@ -2988,47 +3369,27 @@ impl GraphController<'_> {
     }
 
     fn delete_track_engine_routes(&mut self, track_idx: usize) {
-        for (engine_id, engine) in self.app.graph.engine_node_ids.iter_mut().enumerate() {
-            let Some(engine) = engine.as_mut() else {
-                continue;
-            };
-            if track_idx >= engine.route_gain_ids.len() {
-                continue;
-            }
-            for route_pair in &engine.route_gain_ids[track_idx] {
-                for &route_id in route_pair {
-                    if route_id <= 0 {
-                        continue;
-                    }
-                    unsafe {
-                        crate::audiograph::delete_node(self.app.graph.lg.0, route_id);
-                    }
-                }
-            }
-            engine.route_gain_ids[track_idx].clear();
-            for voice in 0..MAX_VOICES {
-                self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
-                    .store(0, Ordering::Release);
-                self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
-                    .store(0, Ordering::Release);
-                for input in 0..EXT_MOD_INPUT_COUNT {
-                    self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track_idx]
-                        [input]
-                        .store(0, Ordering::Release);
-                }
-            }
-            if track_idx < engine.ext_route_gain_ids.len() {
-                for route_ids in &engine.ext_route_gain_ids[track_idx] {
-                    for &route_id in route_ids {
-                        if route_id > 0 {
-                            unsafe {
-                                crate::audiograph::delete_node(self.app.graph.lg.0, route_id);
-                            }
-                        }
-                    }
-                }
-                engine.ext_route_gain_ids[track_idx].clear();
-            }
+        let engine_ids = self
+            .app
+            .graph
+            .engine_node_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(engine_id, engine)| {
+                let engine = engine.as_ref()?;
+                let has_audio_routes = engine
+                    .route_gain_ids
+                    .get(track_idx)
+                    .is_some_and(|routes| !routes.is_empty());
+                let has_ext_routes = engine
+                    .ext_route_gain_ids
+                    .get(track_idx)
+                    .is_some_and(|routes| !routes.is_empty());
+                (has_audio_routes || has_ext_routes).then_some(engine_id)
+            })
+            .collect::<Vec<_>>();
+        for engine_id in engine_ids {
+            self.delete_engine_route_for_track(engine_id, track_idx);
         }
     }
 
@@ -3133,6 +3494,12 @@ impl GraphController<'_> {
     }
 
     fn delete_engine_route_for_track(&mut self, engine_id: usize, track_idx: usize) {
+        let track_mod_out_id = self
+            .app
+            .graph
+            .track_node_ids
+            .get(track_idx)
+            .map(|nodes| nodes.mod_out_id);
         let Some(engine) = self
             .app
             .graph
@@ -3142,6 +3509,22 @@ impl GraphController<'_> {
         else {
             return;
         };
+        if let (Some(track_mod_out_id), Some(mod_output_channel)) = (
+            track_mod_out_id,
+            engine.mod_output_channels.first().copied(),
+        ) {
+            for &synth_id in &engine.synth_ids {
+                unsafe {
+                    crate::audiograph::graph_disconnect(
+                        self.app.graph.lg.0,
+                        synth_id,
+                        mod_output_channel as i32,
+                        track_mod_out_id,
+                        0,
+                    );
+                }
+            }
+        }
         if track_idx < engine.route_gain_ids.len() {
             for route_pair in &engine.route_gain_ids[track_idx] {
                 for &route_id in route_pair {
@@ -4644,60 +5027,20 @@ impl GraphController<'_> {
         gp_id: i32,
         mod_id: i32,
         synth_id: i32,
-        manifest: &DGenManifest,
+        routes: &[CustomHostInputRoute],
         context: &str,
     ) -> Result<(), String> {
-        for input in &manifest.inputs {
-            if input.channel >= manifest.n_inputs {
-                return Err(format!(
-                    "{context}: manifest input '{}' references channel {} but instrument has {} inputs",
-                    input.name, input.channel, manifest.n_inputs
-                ));
-            }
-            if manifest
-                .modulators
-                .iter()
-                .any(|modulator| modulator.input_channel == input.channel)
-            {
-                continue;
-            }
-            let Some(host_output) = host_signal_output_for_input(manifest, input) else {
-                continue;
+        for route in routes {
+            let (source_node, source_port) = match route.source {
+                CustomHostInputSource::GatePitch(port) => (gp_id, port),
+                CustomHostInputSource::Modulator(port) => (mod_id, port),
             };
             self.graph_connect_checked(
-                gp_id,
-                host_output,
+                source_node,
+                source_port,
                 synth_id,
-                input.channel as i32,
-                &format!(
-                    "{context} host input '{}' channel {}",
-                    input.name, input.channel
-                ),
-            )?;
-        }
-
-        for modulator in &manifest.modulators {
-            if modulator.input_channel >= manifest.n_inputs {
-                return Err(format!(
-                    "{context}: modulator '{}' references channel {} but instrument has {} inputs",
-                    modulator.name, modulator.input_channel, manifest.n_inputs
-                ));
-            }
-            if modulator.slot == 0 || modulator.slot > crate::voice_modulator::NUM_OUTPUTS {
-                return Err(format!(
-                    "{context}: modulator '{}' has invalid slot {}",
-                    modulator.name, modulator.slot
-                ));
-            }
-            self.graph_connect_checked(
-                mod_id,
-                (modulator.slot - 1) as i32,
-                synth_id,
-                modulator.input_channel as i32,
-                &format!(
-                    "{context} modulator '{}' slot {} channel {}",
-                    modulator.name, modulator.slot, modulator.input_channel
-                ),
+                route.input_channel,
+                &format!("{context} host channel {}", route.input_channel),
             )?;
         }
         Ok(())
@@ -4721,13 +5064,23 @@ impl GraphController<'_> {
             return Ok(());
         }
 
+        let context = format!("ensure_custom_engine_runtime engine {engine_id}");
+        let host_routes = custom_host_input_routes(manifest, &context)?;
+        let mut transaction = GraphNodeBuildTransaction::new(
+            self.app.graph.lg.0,
+            MAX_VOICES * 3,
+            MAX_VOICES * (host_routes.len() + 6),
+        )?;
         let mut gatepitch_ids = Vec::with_capacity(MAX_VOICES);
         let mut synth_ids = Vec::with_capacity(MAX_VOICES);
         let mut modulator_ids = Vec::with_capacity(MAX_VOICES);
         let mut voice_lids = Vec::with_capacity(MAX_VOICES);
 
         for v in 0..MAX_VOICES {
-            let gp_name = CString::new(format!("{}_gp_{}", name, v)).unwrap();
+            let voice_context = format!("{context} voice {v}");
+            let gp_name = CString::new(format!("{}_gp_{}", name, v))
+                .map_err(|_| format!("{voice_context}: gatepitch node name contains NUL"))?;
+            check_test_graph_build_node_add(&format!("{voice_context} gatepitch"))?;
             let gp_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
@@ -4741,15 +5094,15 @@ impl GraphController<'_> {
                 )
             };
             if gp_id < 0 {
-                return Err(format!(
-                    "ensure_custom_engine_runtime: failed to add gatepitch node for engine {} voice {}",
-                    engine_id, v
-                ));
+                return Err(format!("{voice_context}: failed to add gatepitch node"));
             }
+            let gp_id = transaction.own(gp_id)?;
 
-            let mod_name = CString::new(format!("{}_mod_{}", name, v)).unwrap();
+            let mod_name = CString::new(format!("{}_mod_{}", name, v))
+                .map_err(|_| format!("{voice_context}: modulator node name contains NUL"))?;
             let mod_initial_state =
                 crate::voice_modulator::custom_engine_initial_state(engine_id, v);
+            check_test_graph_build_node_add(&format!("{voice_context} modulator"))?;
             let mod_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
@@ -4765,31 +5118,19 @@ impl GraphController<'_> {
                 )
             };
             if mod_id < 0 {
-                return Err(format!(
-                    "ensure_custom_engine_runtime: failed to add modulator node for engine {} voice {}",
-                    engine_id, v
-                ));
+                return Err(format!("{voice_context}: failed to add modulator node"));
             }
-            unsafe {
-                crate::audiograph::params_push_wrapper(
-                    self.app.graph.lg.0,
-                    crate::audiograph::ParamMsg {
-                        idx: crate::voice_modulator::PARAM_BPM as u64,
-                        logical_id: mod_id as u64,
-                        fvalue: self.app.state.transport.bpm.load(Ordering::Relaxed) as f32,
-                    },
-                );
-            }
+            let mod_id = transaction.own(mod_id)?;
 
             let slot_id = engine_id * MAX_VOICES + v;
-            lisp_host::set_dgen_instrument_fn(slot_id, lib.process_fn);
-            lisp_host::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
             let init_msg = lisp_host::build_init_message_for_voice(slot_id, manifest, v);
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
             let state_size = lisp_host::dgen_total_state_slots(manifest.total_memory_slots)
                 * std::mem::size_of::<f32>();
 
-            let synth_name = CString::new(format!("{}_engine_synth_{}", name, v)).unwrap();
+            let synth_name = CString::new(format!("{}_engine_synth_{}", name, v))
+                .map_err(|_| format!("{voice_context}: synth node name contains NUL"))?;
+            check_test_graph_build_node_add(&format!("{voice_context} synth"))?;
             let synth_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
@@ -4804,76 +5145,40 @@ impl GraphController<'_> {
             };
             if synth_id < 0 {
                 return Err(format!(
-                    "ensure_custom_engine_runtime: failed to add synth node for engine {} voice {} (manifest.n_inputs={})",
-                    engine_id, v, manifest.n_inputs
+                    "{voice_context}: failed to add synth node (manifest.n_inputs={})",
+                    manifest.n_inputs
                 ));
             }
-            self.connect_custom_host_inputs(
-                gp_id,
-                mod_id,
-                synth_id,
-                manifest,
-                &format!("ensure_custom_engine_runtime engine {engine_id} voice {v}"),
-            )?;
-            self.graph_connect_checked(
-                gp_id,
-                0,
-                mod_id,
-                0,
-                &format!(
-                    "ensure_custom_engine_runtime engine {} voice {}",
-                    engine_id, v
-                ),
-            )?;
-            self.graph_connect_checked(
-                gp_id,
-                1,
-                mod_id,
-                1,
-                &format!(
-                    "ensure_custom_engine_runtime engine {} voice {}",
-                    engine_id, v
-                ),
-            )?;
-            self.graph_connect_checked(
-                gp_id,
-                2,
-                mod_id,
-                2,
-                &format!(
-                    "ensure_custom_engine_runtime engine {} voice {}",
-                    engine_id, v
-                ),
-            )?;
-            self.graph_connect_checked(
-                gp_id,
-                3,
-                mod_id,
-                3,
-                &format!(
-                    "ensure_custom_engine_runtime engine {} voice {}",
-                    engine_id, v
-                ),
-            )?;
-            self.graph_connect_checked(
+            let synth_id = transaction.own(synth_id)?;
+            for route in &host_routes {
+                let (source_node, source_port) = match route.source {
+                    CustomHostInputSource::GatePitch(port) => (gp_id, port),
+                    CustomHostInputSource::Modulator(port) => (mod_id, port),
+                };
+                transaction.connect(
+                    source_node,
+                    source_port,
+                    synth_id,
+                    route.input_channel,
+                    &format!("{voice_context} host channel {}", route.input_channel),
+                )?;
+            }
+            for port in 0..4 {
+                transaction.connect(gp_id, port, mod_id, port, &voice_context)?;
+            }
+            transaction.connect(
                 gp_id,
                 crate::gatepitch::PARAM_CLOCK_PHASE as i32,
                 mod_id,
                 crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
-                &format!(
-                    "ensure_custom_engine_runtime engine {} voice {} transport clock",
-                    engine_id, v
-                ),
+                &format!("{voice_context} transport clock"),
             )?;
-            self.graph_connect_checked(
+            transaction.connect(
                 gp_id,
                 crate::gatepitch::PARAM_CLOCK_INC as i32,
                 mod_id,
                 crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
-                &format!(
-                    "ensure_custom_engine_runtime engine {} voice {} transport clock increment",
-                    engine_id, v
-                ),
+                &format!("{voice_context} transport clock increment"),
             )?;
             gatepitch_ids.push(gp_id);
             modulator_ids.push(mod_id);
@@ -4881,6 +5186,24 @@ impl GraphController<'_> {
             voice_lids.push(gp_id as u64);
         }
 
+        // The process registry must be ready before the batch can reach the
+        // audio thread. No fallible operations remain after this publication.
+        for v in 0..MAX_VOICES {
+            let slot_id = engine_id * MAX_VOICES + v;
+            lisp_host::set_dgen_instrument_fn(slot_id, lib.process_fn);
+            lisp_host::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
+        }
+        transaction.commit();
+
+        let bpm = self.app.state.transport.bpm.load(Ordering::Relaxed) as f32;
+        for &mod_id in &modulator_ids {
+            push_graph_param(
+                self.app.graph.lg.0,
+                mod_id as u64,
+                crate::voice_modulator::PARAM_BPM as u64,
+                bpm,
+            );
+        }
         let audio_output_channels = manifest_audio_output_channels(manifest);
         let mod_output_channels = manifest_mod_output_channels(manifest);
         self.app.graph.engine_node_ids[engine_id] = Some(EngineNodeIds {
@@ -4974,22 +5297,8 @@ impl GraphController<'_> {
             ));
         }
 
-        let route_node_capacity = MAX_VOICES
-            * (2 + if modulator_ids.is_empty() {
-                0
-            } else {
-                EXT_MOD_INPUT_COUNT
-            });
-        let connections_per_voice = 2
-            + usize::from(stereo_route_source_channel(&audio_output_channels, 0).is_some())
-            + usize::from(stereo_route_source_channel(&audio_output_channels, 1).is_some())
-            + usize::from(primary_mod_output_channel.is_some())
-            + if modulator_ids.is_empty() {
-                0
-            } else {
-                EXT_MOD_INPUT_COUNT * 2
-            };
-        let route_connection_capacity = MAX_VOICES * connections_per_voice;
+        let (route_node_capacity, route_connection_capacity) =
+            engine_route_build_capacities(existing_engine);
         let mut transaction = GraphNodeBuildTransaction::new(
             self.app.graph.lg.0,
             route_node_capacity,
@@ -5229,6 +5538,10 @@ impl GraphController<'_> {
         manifest: &DGenManifest,
         lib: &LoadedDGenLib,
     ) -> Result<(), String> {
+        let host_routes = custom_host_input_routes(
+            manifest,
+            &format!("rebuild_custom_engine_runtime engine {engine_id}"),
+        )?;
         let Some(mut engine) = self.app.graph.engine_node_ids[engine_id].take() else {
             return Err("Missing engine runtime".to_string());
         };
@@ -5330,7 +5643,7 @@ impl GraphController<'_> {
                 gp_id,
                 mod_id,
                 synth_id,
-                manifest,
+                &host_routes,
                 &format!("rebuild_custom_engine_runtime engine {engine_id} voice {v}"),
             )?;
             for route_pair in engine
@@ -5822,6 +6135,7 @@ mod tests {
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{default_empty_effect_chain, SequencerState};
     use crate::ui::AudioBuses;
+    use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Mutex};
 
     struct TestLiveGraph {
@@ -5923,6 +6237,168 @@ mod tests {
         )
     }
 
+    fn test_app_with_track_count(graph: &TestLiveGraph, track_count: usize) -> App {
+        let state = Arc::new(SequencerState::new(
+            track_count,
+            (0..track_count)
+                .map(|_| default_empty_effect_chain())
+                .collect(),
+        ));
+        let (keyboard_tx, _keyboard_rx) = mpsc::channel();
+        App::new(
+            state,
+            graph.ptr,
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        )
+    }
+
+    fn test_instrument_manifest() -> DGenManifest {
+        DGenManifest {
+            dylib_path: PathBuf::new(),
+            version: 1,
+            process_abi: String::new(),
+            total_memory_slots: 1,
+            params: Vec::new(),
+            groups: Vec::new(),
+            envelopes: Vec::new(),
+            inputs: ["gate", "pitch", "velocity", "trigger"]
+                .into_iter()
+                .enumerate()
+                .map(|(channel, name)| lisp_host::DGenInput {
+                    channel,
+                    name: name.to_string(),
+                })
+                .collect(),
+            modulators: Vec::new(),
+            mod_outputs: Vec::new(),
+            mod_destinations: Vec::new(),
+            n_inputs: 4,
+            n_outputs: 1,
+            tensors: Vec::new(),
+            tensor_init_data: Vec::new(),
+            voice_cell_id: None,
+        }
+    }
+
+    fn install_custom_track_swap_fixture(
+        app: &mut App,
+        graph: &TestLiveGraph,
+        track_count: usize,
+        manifest: &DGenManifest,
+        lib: &LoadedDGenLib,
+    ) {
+        {
+            let _batch = GraphEditBatchGuard::new(graph.ptr.0);
+            app.graph_controller()
+                .ensure_custom_engine_runtime(0, "old", manifest, lib)
+                .expect("old engine should materialize");
+        }
+        let (synth_ids, gatepitch_ids, node_id, modulator_node_id) = {
+            let engine = app.graph.engine_node_ids[0]
+                .as_ref()
+                .expect("old engine should exist");
+            (
+                engine.synth_ids.clone(),
+                engine.gatepitch_ids.clone(),
+                first_graph_node_identity(&engine.synth_ids),
+                first_graph_node_identity(&engine.modulator_ids),
+            )
+        };
+        let descriptor = lisp_host::instrument_descriptor_from_manifest("old", manifest);
+
+        for track in 0..track_count {
+            let nodes = TrackNodeIds {
+                sampler_ids: Vec::new(),
+                sampler_gatepitch_ids: Vec::new(),
+                sampler_modulator_ids: Vec::new(),
+                voice_sum_id: graph.add_gain(1.0, &format!("track_{track}_voice_sum")),
+                voice_sum_r_id: graph.add_gain(1.0, &format!("track_{track}_voice_sum_r")),
+                pan_id: graph.add_gain(1.0, &format!("track_{track}_pan")),
+                filter_id: graph.add_gain(1.0, &format!("track_{track}_filter")),
+                delay_id: graph.add_gain(1.0, &format!("track_{track}_delay")),
+                send_id: graph.add_gain(1.0, &format!("track_{track}_send")),
+                mod_out_id: graph.add_gain(1.0, &format!("track_{track}_mod_out")),
+                mod_in_clip_ids: std::array::from_fn(|input| {
+                    graph.add_gain(1.0, &format!("track_{track}_mod_in_{input}"))
+                }),
+                mod_env_id: graph.add_gain(1.0, &format!("track_{track}_mod_env")),
+                bus_send_ids: Vec::new(),
+                rack_slots: Vec::new(),
+            };
+            {
+                let _batch = GraphEditBatchGuard::new(graph.ptr.0);
+                app.graph_controller()
+                    .connect_engine_to_track(
+                        0,
+                        track,
+                        &format!("Track {}", track + 1),
+                        nodes.voice_sum_id,
+                        nodes.voice_sum_r_id,
+                        nodes.mod_out_id,
+                        nodes.mod_in_clip_ids,
+                    )
+                    .expect("old engine route should connect");
+            }
+            app.tracks.push(format!("Track {}", track + 1));
+            app.graph.track_node_ids.push(nodes);
+            app.graph.track_buffer_ids.push(-1);
+            app.graph.track_sample_rates.push(44_100);
+            app.graph.track_voice_lids.push(Vec::new());
+            app.graph
+                .track_instrument_types
+                .push(InstrumentType::Custom);
+            app.graph
+                .track_instrument_run_modes
+                .push(CustomInstrumentRunMode::Instrument);
+            app.graph.track_engine_ids.push(Some(0));
+            app.graph.track_synth_node_ids.push(synth_ids.clone());
+            app.graph
+                .track_gatepitch_node_ids
+                .push(gatepitch_ids.clone());
+            app.graph
+                .effect_descriptors
+                .push(EffectDescriptor::default_full_chain());
+            app.graph.instrument_descriptors.push(descriptor.clone());
+            app.graph.record_armed.push(false);
+            app.state
+                .reset_instrument_slot_all_patterns(
+                    track,
+                    &descriptor,
+                    node_id,
+                    modulator_node_id,
+                    0,
+                    CustomInstrumentRunMode::Instrument,
+                )
+                .expect("initial instrument state should reset");
+        }
+        app.sync_scratch_runtime_descriptors();
+    }
+
+    fn assert_test_slot_snapshot_eq(actual: &EffectSlotSnapshot, expected: &EffectSlotSnapshot) {
+        assert_eq!(actual.node_id, expected.node_id);
+        assert_eq!(actual.modulator_node_id, expected.modulator_node_id);
+        assert_eq!(actual.num_params, expected.num_params);
+        assert_eq!(actual.defaults, expected.defaults);
+        assert_eq!(actual.plocks, expected.plocks);
+        assert_eq!(actual.plock_param_ids, expected.plock_param_ids);
+        assert_eq!(actual.key_locks, expected.key_locks);
+        assert_eq!(actual.key_lock_param_ids, expected.key_lock_param_ids);
+        assert_eq!(actual.param_node_indices, expected.param_node_indices);
+        assert_eq!(actual.param_node_spans, expected.param_node_spans);
+        assert_eq!(actual.tensor_params.len(), expected.tensor_params.len());
+    }
+
     fn install_test_engine(app: &mut App, graph: &TestLiveGraph) -> RouteTargets {
         let synth_ids = (0..MAX_VOICES)
             .map(|voice| graph.add_gain(1.0, &format!("test_synth_{voice}")))
@@ -5976,18 +6452,244 @@ mod tests {
     }
 
     #[test]
+    fn ensure_custom_engine_runtime_rolls_back_before_runtime_publication() {
+        let graph = TestLiveGraph::new("engine-materialization-rollback-test");
+        let mut app = test_app(&graph);
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        set_test_graph_build_failure_after(4);
+
+        let error = {
+            let _batch = GraphEditBatchGuard::new(graph.ptr.0);
+            app.graph_controller()
+                .ensure_custom_engine_runtime(0, "test", &manifest, &lib)
+                .expect_err("injected engine materialization failure should be returned")
+        };
+        assert!(error.contains("injected graph node allocation failure"));
+        assert_eq!(app.graph.engine_node_ids.len(), 1);
+        assert!(app.graph.engine_node_ids[0].is_none());
+        assert_eq!(
+            app.state.runtime.engine_voice_counts[0].load(Ordering::Acquire),
+            0
+        );
+        for voice in 0..MAX_VOICES {
+            assert_eq!(
+                app.state.runtime.engine_voice_lids[0][voice].load(Ordering::Acquire),
+                0
+            );
+            assert_eq!(
+                app.state.runtime.engine_synth_node_ids[0][voice].load(Ordering::Acquire),
+                0
+            );
+            assert_eq!(
+                app.state.runtime.engine_modulator_node_ids[0][voice].load(Ordering::Acquire),
+                0
+            );
+        }
+
+        let created_nodes = take_test_graph_build_node_ids();
+        let rolled_back_nodes = take_test_graph_build_rollback_node_ids();
+        assert_eq!(created_nodes.len(), 4);
+        assert_eq!(
+            rolled_back_nodes,
+            created_nodes.iter().rev().copied().collect::<Vec<_>>()
+        );
+        let created_connections = take_test_graph_build_connections();
+        assert!(!created_connections.is_empty());
+        assert_eq!(
+            take_test_graph_build_rollback_connections(),
+            created_connections
+                .iter()
+                .rev()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+
+        for &node_id in &created_nodes {
+            assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, node_id) });
+        }
+        graph.process_block();
+        for node_id in created_nodes {
+            let mut state = [0.0_f32; 1];
+            let mut state_size = 0;
+            assert!(!unsafe {
+                crate::audiograph::get_node_state_into(
+                    graph.ptr.0,
+                    node_id,
+                    state.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&state),
+                    &mut state_size,
+                )
+            });
+            assert_eq!(state_size, 0);
+        }
+    }
+
+    #[test]
+    fn ensure_custom_engine_runtime_publishes_only_complete_voice_pool() {
+        let graph = TestLiveGraph::new("engine-materialization-commit-test");
+        let mut app = test_app(&graph);
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        begin_test_graph_build_capture();
+
+        {
+            let _batch = GraphEditBatchGuard::new(graph.ptr.0);
+            app.graph_controller()
+                .ensure_custom_engine_runtime(0, "test", &manifest, &lib)
+                .expect("engine materialization should succeed");
+        }
+
+        let engine = app.graph.engine_node_ids[0]
+            .as_ref()
+            .expect("complete engine should be published");
+        assert_eq!(engine.gatepitch_ids.len(), MAX_VOICES);
+        assert_eq!(engine.modulator_ids.len(), MAX_VOICES);
+        assert_eq!(engine.synth_ids.len(), MAX_VOICES);
+        assert_eq!(
+            app.state.runtime.engine_voice_counts[0].load(Ordering::Acquire),
+            MAX_VOICES as u32
+        );
+        for voice in 0..MAX_VOICES {
+            assert_eq!(
+                app.state.runtime.engine_voice_lids[0][voice].load(Ordering::Acquire),
+                engine.gatepitch_ids[voice] as u64
+            );
+            assert_eq!(
+                app.state.runtime.engine_synth_node_ids[0][voice].load(Ordering::Acquire),
+                engine.synth_ids[voice] as u32
+            );
+            assert_eq!(
+                app.state.runtime.engine_modulator_node_ids[0][voice].load(Ordering::Acquire),
+                engine.modulator_ids[voice] as u32
+            );
+        }
+        assert_eq!(take_test_graph_build_node_ids().len(), MAX_VOICES * 3);
+        assert!(take_test_graph_build_rollback_node_ids().is_empty());
+        assert!(take_test_graph_build_rollback_connections().is_empty());
+        graph.process_block();
+    }
+
+    #[test]
+    fn swap_custom_track_rebinds_only_the_target_and_collects_unreferenced_runtime() {
+        let graph = TestLiveGraph::new("custom-track-swap-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 2);
+        install_custom_track_swap_fixture(&mut app, &graph, 2, &manifest, &lib);
+        let track_zero_sum = app.graph.track_node_ids[0].voice_sum_id;
+        let track_one_slot_before =
+            EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[1]);
+
+        let summary = app
+            .graph_controller()
+            .swap_custom_track_instrument(
+                0,
+                "new",
+                1,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("first track should swap to the new engine");
+        assert_eq!(summary.patterns_reset, 1);
+        assert_eq!(app.graph.track_engine_ids, vec![Some(1), Some(0)]);
+        assert_eq!(app.graph.track_node_ids[0].voice_sum_id, track_zero_sum);
+        assert_eq!(app.tracks[0], "Track 1", "track name must survive a swap");
+        let old_engine = app.graph.engine_node_ids[0]
+            .as_ref()
+            .expect("shared old engine must remain for track 2");
+        assert!(old_engine.route_gain_ids[0].is_empty());
+        assert_eq!(old_engine.route_gain_ids[1].len(), MAX_VOICES);
+        let new_engine = app.graph.engine_node_ids[1]
+            .as_ref()
+            .expect("new engine should be materialized");
+        assert_eq!(new_engine.route_gain_ids[0].len(), MAX_VOICES);
+        assert!(new_engine.route_gain_ids[1].is_empty());
+        assert_test_slot_snapshot_eq(
+            &EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[1]),
+            &track_one_slot_before,
+        );
+        assert_eq!(
+            app.state.runtime.track_engine_ids[1].load(Ordering::Acquire),
+            0
+        );
+
+        app.graph_controller()
+            .swap_custom_track_instrument(
+                1,
+                "new",
+                1,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("second track should swap to the already materialized engine");
+        assert_eq!(app.graph.track_engine_ids, vec![Some(1), Some(1)]);
+        assert!(
+            app.graph.engine_node_ids[0].is_none(),
+            "unreferenced old graph runtime should be collected"
+        );
+        let new_engine = app.graph.engine_node_ids[1]
+            .as_ref()
+            .expect("new engine should remain live");
+        assert_eq!(new_engine.route_gain_ids[0].len(), MAX_VOICES);
+        assert_eq!(new_engine.route_gain_ids[1].len(), MAX_VOICES);
+        graph.process_block();
+    }
+
+    #[test]
+    fn swap_custom_track_leaves_old_binding_intact_when_new_engine_build_fails() {
+        let graph = TestLiveGraph::new("custom-track-swap-failure-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 1);
+        install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
+        let old_slot = EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]);
+        set_test_graph_build_failure_after(4);
+
+        let error = app
+            .graph_controller()
+            .swap_custom_track_instrument(
+                0,
+                "new",
+                1,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect_err("injected engine build failure should abort the swap");
+        assert!(error.contains("injected graph node allocation failure"));
+        assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
+        assert_eq!(
+            app.state.runtime.track_engine_ids[0].load(Ordering::Acquire),
+            0
+        );
+        assert_test_slot_snapshot_eq(
+            &EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]),
+            &old_slot,
+        );
+        let old_engine = app.graph.engine_node_ids[0]
+            .as_ref()
+            .expect("old engine runtime must remain live");
+        assert_eq!(old_engine.route_gain_ids[0].len(), MAX_VOICES);
+        assert!(app.graph.engine_node_ids[1].is_none());
+        graph.process_block();
+    }
+
+    #[test]
     fn connect_engine_to_track_rolls_back_every_graph_edit_before_publication() {
         let graph = TestLiveGraph::new("engine-route-rollback-test");
         let mut app = test_app(&graph);
         let targets = install_test_engine(&mut app, &graph);
-        set_test_engine_route_failure_after(3);
+        set_test_graph_build_failure_after(3);
 
         let error = {
             let _batch = GraphEditBatchGuard::new(graph.ptr.0);
             connect_test_engine(&mut app, &targets)
                 .expect_err("injected route construction failure should be returned")
         };
-        assert!(error.contains("injected engine route node allocation failure"));
+        assert!(error.contains("injected graph node allocation failure"));
 
         let engine = app.graph.engine_node_ids[0]
             .as_ref()
@@ -6012,15 +6714,15 @@ mod tests {
             }
         }
 
-        let created_nodes = take_test_engine_route_node_ids();
-        let rolled_back_nodes = take_test_engine_route_rollback_node_ids();
+        let created_nodes = take_test_graph_build_node_ids();
+        let rolled_back_nodes = take_test_graph_build_rollback_node_ids();
         assert_eq!(created_nodes.len(), 3);
         assert_eq!(
             rolled_back_nodes,
             created_nodes.iter().rev().copied().collect::<Vec<_>>()
         );
-        let created_connections = take_test_engine_route_connections();
-        let rolled_back_connections = take_test_engine_route_rollback_connections();
+        let created_connections = take_test_graph_build_connections();
+        let rolled_back_connections = take_test_graph_build_rollback_connections();
         assert!(!created_connections.is_empty());
         assert_eq!(
             rolled_back_connections,
@@ -6083,7 +6785,7 @@ mod tests {
         let graph = TestLiveGraph::new("engine-route-commit-test");
         let mut app = test_app(&graph);
         let targets = install_test_engine(&mut app, &graph);
-        begin_test_engine_route_capture();
+        begin_test_graph_build_capture();
 
         {
             let _batch = GraphEditBatchGuard::new(graph.ptr.0);
@@ -6119,12 +6821,12 @@ mod tests {
         }
 
         assert_eq!(
-            take_test_engine_route_node_ids().len(),
+            take_test_graph_build_node_ids().len(),
             MAX_VOICES * (2 + EXT_MOD_INPUT_COUNT)
         );
-        assert!(!take_test_engine_route_connections().is_empty());
-        assert!(take_test_engine_route_rollback_node_ids().is_empty());
-        assert!(take_test_engine_route_rollback_connections().is_empty());
+        assert!(!take_test_graph_build_connections().is_empty());
+        assert!(take_test_graph_build_rollback_node_ids().is_empty());
+        assert!(take_test_graph_build_rollback_connections().is_empty());
         graph.process_block();
     }
 }
