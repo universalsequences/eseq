@@ -5971,6 +5971,7 @@ impl Editor {
                     );
                 } else {
                     self.widget_cursor = WidgetCursor::Default;
+                    crate::widget_render::set_pointer_hover_widget(None);
                 }
             }
             MouseEventKind::ScrollUp => {

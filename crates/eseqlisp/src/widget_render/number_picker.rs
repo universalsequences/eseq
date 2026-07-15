@@ -475,6 +475,7 @@ impl WidgetDefinition for NumberPickerWidget {
     fn bindable_props(&self) -> &'static [&'static str] {
         &[
             "value",
+            "active",
             "plock-active",
             "plock-color-r",
             "plock-color-g",
@@ -741,9 +742,17 @@ impl WidgetDefinition for NumberPickerWidget {
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
+        let active = get_bool_prop(&node.props, "active", false);
         let plocked = plock_active(&node.props);
         let plock_color = plock_color(&node.props);
-        let text_color = if plocked {
+        let active_color = resolve_named_color(
+            &node.props,
+            "active-color",
+            Color::rgba(113.0 / 255.0, 191.0 / 255.0, 207.0 / 255.0, 1.0),
+        );
+        let text_color = if active {
+            active_color
+        } else if plocked {
             plock_color
         } else {
             resolve_named_color(&node.props, "text-color", theme::BUTTON_SECONDARY_FG())
@@ -949,7 +958,7 @@ impl WidgetDefinition for NumberPickerWidget {
             }));
         }
 
-        if plocked {
+        if plocked || active {
             let underline_rect = Rect {
                 row: node.rect.row + node.rect.height - 0.08,
                 col: node.rect.col,
@@ -958,7 +967,7 @@ impl WidgetDefinition for NumberPickerWidget {
             };
             prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: underline_rect,
-                color: plock_color,
+                color: if active { active_color } else { plock_color },
             }));
         }
 

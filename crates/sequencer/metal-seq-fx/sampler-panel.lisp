@@ -248,8 +248,8 @@
           :plock-color-r (param-plock-color-r)
           :plock-color-g (param-plock-color-g)
           :plock-color-b (param-plock-color-b)
-          :width 4.0 :height 2.05
-          :knob-size 3.0
+          :width 4.0 :height 2.70
+          :knob-size 1.7
           :on-change (lambda (v) (instrument-set-param-control-value p v)))))
     (v-stack :gap 0.12 :align :center
       (box :height 0.02)

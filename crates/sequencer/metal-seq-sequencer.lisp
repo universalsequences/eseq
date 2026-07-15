@@ -591,8 +591,8 @@
         (sdf/fill (sdf/circle 0.53)
           (material
             :color (if (= odd 1)
-              (rgba 0.15 0.155 0.155 1.0)
-              (rgba 0.015 0.016 0.025 1.0))))
+              (rgba 0.15 0.155 0.155 0.6)
+              (rgba 0.015 0.016 0.025 0.8))))
         (sdf/fill
           (sdf/translate 0 0.70
             (sdf/rounded-rect 0.52 0.10 0.05))

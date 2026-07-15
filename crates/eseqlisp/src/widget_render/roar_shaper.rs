@@ -425,8 +425,16 @@ mod tests {
             gain_db: [0.0; 3],
         };
         let display = display_from_props(&props, Some(frame));
-        assert!((display.drive_min + 0.125).abs() < 1.0e-6, "{}", display.drive_min);
-        assert!((display.drive_max - 0.25).abs() < 1.0e-6, "{}", display.drive_max);
+        assert!(
+            (display.drive_min + 0.125).abs() < 1.0e-6,
+            "{}",
+            display.drive_min
+        );
+        assert!(
+            (display.drive_max - 0.25).abs() < 1.0e-6,
+            "{}",
+            display.drive_max
+        );
     }
 
     #[test]

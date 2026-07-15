@@ -25,9 +25,9 @@ pub mod number_picker;
 pub mod patcher;
 pub mod phaser_notch;
 pub mod response_curve_editor;
-pub mod scope;
 pub mod roar_filter;
 pub mod roar_shaper;
+pub mod scope;
 pub mod scroll;
 pub mod sdf_widget;
 pub mod spectrogram;
@@ -73,12 +73,30 @@ use objc2_app_kit::{
 
 static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    static POINTER_HOVER_WIDGET_ID: RefCell<Option<u64>> = const { RefCell::new(None) };
+}
+
 pub fn bump_widget_state_generation() {
     WIDGET_STATE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn widget_state_generation() -> u64 {
     WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
+}
+
+pub fn set_pointer_hover_widget(widget_id: Option<u64>) {
+    POINTER_HOVER_WIDGET_ID.with(|hovered| {
+        let mut hovered = hovered.borrow_mut();
+        if *hovered != widget_id {
+            *hovered = widget_id;
+            bump_widget_state_generation();
+        }
+    });
+}
+
+pub fn pointer_hovered(widget_id: u64) -> bool {
+    POINTER_HOVER_WIDGET_ID.with(|hovered| *hovered.borrow() == Some(widget_id))
 }
 
 fn haptic_quantum(min: f32, max: f32) -> f32 {
@@ -2386,6 +2404,8 @@ pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> 
 pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -> bool {
     match props.get(key) {
         Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => *n > 0.5,
+        Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot) > 0.5,
         _ => default,
     }
 }

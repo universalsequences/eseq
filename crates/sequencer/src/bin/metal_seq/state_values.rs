@@ -17479,11 +17479,7 @@ mod tests {
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let before_recording = build_track_plock_variants_value(&state, 0, &selected_steps);
         for step in 0..32 {
-            state.pattern.step_data[0].set(
-                step,
-                StepParam::Velocity,
-                0.5 + step as f32 / 128.0,
-            );
+            state.pattern.step_data[0].set(step, StepParam::Velocity, 0.5 + step as f32 / 128.0);
             state.pattern.step_data[0].set(
                 step,
                 StepParam::Duration,
@@ -17502,7 +17498,10 @@ mod tests {
         );
         let variants = value_list_maps(&after_recording);
         assert_eq!(variants.len(), 1, "only the default chip should render");
-        assert_eq!(value_map_string(&variants[0], "kind").as_deref(), Some("def"));
+        assert_eq!(
+            value_map_string(&variants[0], "kind").as_deref(),
+            Some("def")
+        );
         assert!(state.plock_variant_registry_snapshot(0).entries.is_empty());
     }
 
@@ -19064,9 +19063,10 @@ mod tests {
 
         let app = test_app_with_rack_panel();
         app.state.update_live_rack_slot(0, 0, |slot| {
-            assert!(slot
-                .param_plocks
-                .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25));
+            assert!(
+                slot.param_plocks
+                    .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25)
+            );
             slot.instrument_slot.defaults[8] = 44_100.0;
             assert!(slot.instrument_slot.set_plock(3, 8, 22_050.0));
         });
@@ -23784,9 +23784,12 @@ mod tests {
                 continue;
             };
             match items.as_slice() {
-                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
-                    if form == "def" && name == "script-buffer-name" =>
-                {
+                [
+                    Expression::Symbol(form),
+                    Expression::Symbol(name),
+                    Expression::String(value),
+                    ..,
+                ] if form == "def" && name == "script-buffer-name" => {
                     script_buffer_name = Some(value.clone());
                 }
                 [Expression::Symbol(form), Expression::String(target), ..]
@@ -38068,6 +38071,24 @@ mod tests {
             "instrument panel should occupy visible measured space, got {:?}",
             instrument_panel.rect
         );
+        for tab_text in ["Amp", "Filter"] {
+            let tab = find_layout_node_by_text(&layout, tab_text)
+                .unwrap_or_else(|| panic!("{tab_text} envelope tab should render"));
+            assert!(
+                tab.rect.width > 1.0 && tab.rect.height > 0.2,
+                "{tab_text} envelope tab should have visible geometry, got {:?}",
+                tab.rect
+            );
+        }
+        for divider_name in ["adsr-tabs-divider", "adsr-controls-divider"] {
+            let divider = find_layout_node_by_debug_name(&layout, divider_name)
+                .unwrap_or_else(|| panic!("{divider_name} should render"));
+            assert!(
+                divider.rect.width > 20.0 && divider.rect.height > 0.0,
+                "{divider_name} should span the wide envelope panel, got {:?}",
+                divider.rect
+            );
+        }
 
         for suffix in [
             "strike_mask",
@@ -38077,6 +38098,152 @@ mod tests {
             "gliss_range",
             "body1_freq",
             "mic_blend",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_membrane_hat_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let hat_ui = std::fs::read_to_string("instruments/drums/membrane-hat/ui.lisp")
+            .expect("read membrane-hat ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/drums/membrane-hat/ui.lisp".to_string(),
+            hat_ui,
+        )));
+        let mut hat_inst = test_instrument_map();
+        hat_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("open", 0, 0.25, 0.0, 1.0)),
+                Value::Map(test_param_map("choke", 1, 0.35, 0.0, 1.0)),
+                Value::Map(test_param_map("decay", 2, 900.0, 60.0, 6000.0)),
+                Value::Map(test_param_map("tilt", 3, 0.55, 0.0, 1.5)),
+                Value::Map(test_param_map("tune", 4, -1.0, -36.0, 24.0)),
+                Value::Map(test_param_map("plate_ratio", 5, 1.32, 0.5, 3.0)),
+                Value::Map(test_param_map("strike", 6, 0.7, 0.0, 1.0)),
+                Value::Map(test_param_map("stick_hard", 7, 0.015, 0.0005, 0.05)),
+                Value::Map(test_param_map("stick_speed", 8, 0.03, 0.002, 0.2)),
+                Value::Map(test_param_map("scrape", 9, 0.4, 0.0, 1.0)),
+                Value::Map(test_param_map("rattle", 10, 1.0, 0.0, 4.0)),
+                Value::Map(test_param_map("contact_loss", 11, 0.012, 0.0, 0.08)),
+                Value::Map(test_param_map("sizzle", 12, 0.8, 0.0, 4.0)),
+                Value::Map(test_param_map("wash", 13, 0.5, 0.0, 2.0)),
+                Value::Map(test_param_map("bottom_mix", 14, 0.7, 0.0, 2.0)),
+                Value::Map(test_param_map("body1_freq", 15, 3800.0, 200.0, 12000.0)),
+                Value::Map(test_param_map("body1_gain", 16, 0.8, 0.0, 8.0)),
+                Value::Map(test_param_map("body2_freq", 17, 8200.0, 400.0, 16000.0)),
+                Value::Map(test_param_map("body2_gain", 18, 0.6, 0.0, 8.0)),
+                Value::Map(test_param_map("level", 19, 0.5, 0.0, 2.0)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(hat_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load membrane-hat custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("membrane-hat fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("membrane-hat layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 40.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        for suffix in [
+            "open",
+            "choke",
+            "decay",
+            "strike",
+            "rattle",
+            "wash",
+            "tune",
+            "sizzle",
+            "body1_freq",
+            "level",
         ] {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
@@ -38496,6 +38663,15 @@ mod tests {
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
+        fn find_focusable_descendant(
+            node: &eseqlisp::layout::LayoutNode,
+        ) -> Option<&eseqlisp::layout::LayoutNode> {
+            if node.focusable {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_focusable_descendant)
+        }
+
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let wave3_ui = std::fs::read_to_string("instruments/monomachine/wave3/ui.lisp")
             .expect("read wave3 ui");
@@ -38516,6 +38692,7 @@ mod tests {
                 Value::Map(test_param_map("bits", 5, 12.0, 4.0, 16.0)),
                 Value::Map(test_param_map("flt_width", 6, 6.5, 0.1, 9.0)),
                 Value::Map(test_param_map("sfrq", 7, 440.0, 20.0, 8000.0)),
+                Value::Map(test_param_map("fenv_decay_ms", 8, 1000.0, 1.0, 8000.0)),
             ]))),
         );
 
@@ -38589,6 +38766,7 @@ mod tests {
             "bits",
             "flt_width",
             "sfrq",
+            "fenv_decay_ms",
         ] {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
@@ -38598,6 +38776,17 @@ mod tests {
                 node.rect
             );
         }
+
+        let bits = find_stable_key_suffix(&layout, "bits").expect("bits control");
+        let filter_decay = find_stable_key_suffix(&layout, "fenv_decay_ms")
+            .expect("filter envelope decay control");
+        let bits_picker = find_focusable_descendant(bits).expect("bits number picker");
+        let filter_decay_picker =
+            find_focusable_descendant(filter_decay).expect("filter decay number picker");
+        assert_ne!(
+            bits_picker.stable_widget_id, filter_decay_picker.stable_widget_id,
+            "focusable descendants of distinct keyed controls need distinct stable identities"
+        );
     }
 
     #[test]
@@ -38941,12 +39130,16 @@ mod tests {
                 Value::Map(test_param_map("osc2_on", 7, 0.0, 0.0, 1.0)),
                 Value::Map(test_param_map("osc2_set", 8, 0.0, 0.0, 19.0)),
                 Value::Map(test_param_map("osc2_wave", 9, 0.0, 0.0, 15.0)),
-                Value::Map(test_param_map("filter_mode", 10, 0.0, 0.0, 2.0)),
-                Value::Map(test_param_map("cutoff", 11, 9000.0, 40.0, 16000.0)),
-                Value::Map(test_param_map("resonance", 12, 0.6, 0.5, 6.0)),
-                Value::Map(test_param_map("amp_attack_ms", 13, 3.0, 1.0, 8000.0)),
-                Value::Map(test_param_map("volume_db", 14, -8.0, -60.0, 6.0)),
-                Value::Map(test_param_map("vel_sens", 15, 0.6, 0.0, 1.0)),
+                Value::Map(test_param_map("osc2_warp", 10, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("osc2_fold", 11, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("osc2_semi", 12, 0.0, -24.0, 24.0)),
+                Value::Map(test_param_map("osc2_detune", 13, 0.0, -50.0, 50.0)),
+                Value::Map(test_param_map("osc2_gain_db", 14, -6.0, -60.0, 6.0)),
+                Value::Map(test_param_map("filter_mode", 15, 0.0, 0.0, 2.0)),
+                Value::Map(test_param_map("cutoff", 16, 9000.0, 40.0, 16000.0)),
+                Value::Map(test_param_map("resonance", 17, 0.6, 0.5, 6.0)),
+                Value::Map(test_param_map("amp_attack_ms", 18, 3.0, 1.0, 8000.0)),
+                Value::Map(test_param_map("volume_db", 19, -8.0, -60.0, 6.0)),
             ]))),
         );
 
@@ -39019,9 +39212,60 @@ mod tests {
         let viewer = find_layout_node_by_widget_type(&layout, "wavetable-viewer")
             .expect("wavetable viewer widget");
         assert!(
-            viewer.rect.width > 10.0 && viewer.rect.height > 3.0,
-            "wavetable viewer should occupy visible space, got {:?}",
+            viewer.rect.width > 10.0 && viewer.rect.height > 3.0 && viewer.rect.height < 4.2,
+            "the single wavetable viewer should occupy visible space while leaving explicit room for the oscillator tabs, got {:?}",
             viewer.rect
+        );
+        assert_eq!(
+            count_widget_type(&layout, "wavetable-viewer"),
+            1,
+            "only the selected oscillator viewer should be measured"
+        );
+
+        for (tab_name, debug_name) in [("Osc 1", "wt-osc-tab-1"), ("Osc 2", "wt-osc-tab-2")] {
+            let tab = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{tab_name} tab should render"));
+            assert!(
+                tab.rect.width > 5.0 && tab.rect.height > 0.5,
+                "{tab_name} tab should have visible geometry, got {:?}",
+                tab.rect
+            );
+        }
+        let tab_divider = find_layout_node_by_debug_name(&layout, "wt-osc-tabs-divider")
+            .expect("oscillator tabs divider");
+        assert!(
+            tab_divider.rect.width > 10.0 && tab_divider.rect.height > 0.0,
+            "oscillator tab divider should span the oscillator panel, got {:?}",
+            tab_divider.rect
+        );
+
+        let adsr_editor = find_layout_node_by_widget_type(&layout, "adsr-editor")
+            .expect("wavetable ADSR editor widget");
+        assert!(
+            adsr_editor.rect.width > viewer.rect.width * 1.6 && adsr_editor.rect.height > 6.0,
+            "Wavetable should reserve a full-height envelope slice roughly 1.75x wider than an oscillator plot, viewer={:?} adsr={:?}",
+            viewer.rect,
+            adsr_editor.rect
+        );
+        assert!(
+            adsr_editor.rect.row >= instrument_panel.rect.row
+                && adsr_editor.rect.row + adsr_editor.rect.height
+                    <= instrument_panel.rect.row + instrument_panel.rect.height,
+            "wide ADSR editor should remain inside the instrument panel, editor={:?} panel={:?}",
+            adsr_editor.rect,
+            instrument_panel.rect
+        );
+
+        let filter_curve = find_layout_node_by_widget_type(&layout, "response-curve-editor")
+            .expect("wavetable filter response curve");
+        assert!(
+            filter_curve.rect.width > 15.0 && filter_curve.rect.height > 4.5,
+            "filter response curve should own the upper filter surface, got {:?}",
+            filter_curve.rect
+        );
+        assert!(
+            filter_curve.props.contains_key("on-action"),
+            "filter response curve should be interactive"
         );
 
         for suffix in [
@@ -39032,13 +39276,10 @@ mod tests {
             "osc1_semi",
             "osc1_detune",
             "osc1_gain_db",
-            "osc2_on",
-            "osc2_set",
             "filter_mode",
             "cutoff",
             "resonance",
             "volume_db",
-            "vel_sens",
         ] {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
@@ -39056,6 +39297,83 @@ mod tests {
                 instrument_panel.rect
             );
         }
+        for suffix in ["cutoff", "resonance"] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("large {suffix} knob should render"));
+            assert!(
+                node.rect.height > 4.0,
+                "{suffix} should use the large knob layout below the curve, got {:?}",
+                node.rect
+            );
+        }
+        assert!(
+            find_stable_key_suffix(&layout, "vel_sens").is_none(),
+            "velocity sensitivity should not remain in the Wavetable UI"
+        );
+
+        assert!(
+            find_stable_key_suffix(&layout, "osc2_set").is_none(),
+            "unselected oscillator controls should not remain in the layout"
+        );
+        let osc2_tab = find_layout_node_by_debug_name(&layout, "wt-osc-tab-2").expect("Osc 2 tab");
+        let callback = osc2_tab
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("Osc 2 tab click callback");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Bool(false)])
+            .expect("select Osc 2");
+        editor.refresh_runtime_side_effects();
+        let osc2_layout = editor
+            .widget_layout()
+            .expect("wavetable layout after selecting Osc 2");
+        assert_finite_layout_tree(&osc2_layout);
+        assert_eq!(
+            count_widget_type(&osc2_layout, "wavetable-viewer"),
+            1,
+            "switching tabs should still measure one viewer"
+        );
+        assert_eq!(
+            count_widget_type(&osc2_layout, "toggle"),
+            1,
+            "Osc 2 on/off should use a toggle rather than an option dropdown"
+        );
+        let osc2_toggle =
+            find_layout_node_by_widget_type(&osc2_layout, "toggle").expect("Osc 2 on/off toggle");
+        assert!(
+            matches!(osc2_toggle.props.get("value"), Some(Value::Bool(_))),
+            "instrument 0/1 state should be normalized to a boolean before reaching the toggle; props={:?}",
+            osc2_toggle.props
+        );
+        assert!(
+            osc2_toggle.rect.width > 2.0 && osc2_toggle.rect.height > 0.5,
+            "Osc 2 toggle should have visible measured geometry, got {:?}",
+            osc2_toggle.rect
+        );
+        for suffix in [
+            "osc2_on",
+            "osc2_set",
+            "osc2_wave",
+            "osc2_warp",
+            "osc2_fold",
+            "osc2_semi",
+            "osc2_detune",
+            "osc2_gain_db",
+        ] {
+            let node = find_stable_key_suffix(&osc2_layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} should render after selecting Osc 2"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have visible geometry after selecting Osc 2, got {:?}",
+                node.rect
+            );
+        }
+        assert!(
+            find_stable_key_suffix(&osc2_layout, "osc1_set").is_none(),
+            "Osc 1 controls should leave the layout after selecting Osc 2"
+        );
     }
 
     #[test]
@@ -40537,7 +40855,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
+            vec![
+                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
+            ]
         );
     }
 

@@ -55,7 +55,7 @@
 (def ui-lego-panel-s (height section surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
-       :corner-radius 8 
+       :corner-radius 16
        :border-width 1
        :padding 0.18
        :on-click (ui-section-select-callback section)
@@ -264,7 +264,7 @@
             :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
-(def ui-lego-knob-s (section name title width accent decimals)
+(def ui-lego-knob-sized-s (section name title width height knob-size accent decimals)
   (let ((p (custom-ui-current-param name)))
     (if p
       (custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
@@ -293,11 +293,17 @@
             :plock-color-g (param-plock-color-g)
             :plock-color-b (param-plock-color-b)
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
-            :width width :height 3.12
+	    :width width :height height :knob-size knob-size
             :value-align :center
 	    :arc-color accent
             :on-change (custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-knob-s (section name title width accent decimals)
+  (ui-lego-knob-sized-s section name title width 3.12 3.12 accent decimals))
+
+(def ui-lego-big-knob-s (section name title width accent decimals)
+  (ui-lego-knob-sized-s section name title width 4.30 2.65 accent decimals))
 
 (def ui-lego-num (name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
@@ -341,18 +347,20 @@
               :on-change (custom-ui-param-change-callback-s section p)))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
-(def ui-lego-micro-num-s (section name title width decimals unit accent)
+(def ui-lego-micro-num-stage-s (section stage name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
       (custom-ui-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
-          (v-stack :width width :height 1.18 :gap 0.16 :align :start
-            (label title :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
+          (v-stack :width width :height 1.0 :gap 0.06 :align :start
+            (label title :font-size 7.4 :width width :height 0.68 :color :dim :bg :transparent)
             (number-picker :value (custom-ui-param-value p)
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 9.0
               :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+              :active (custom-ui-adsr-stage-active? section stage)
+              :active-color (ui-accent-cyan)
               :plock-active (if (custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (param-plock-color-r)
               :plock-color-g (param-plock-color-g)
@@ -361,6 +369,9 @@
               :width width :height 0.50
               :on-change (custom-ui-param-change-callback-s section p)))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+(def ui-lego-micro-num-s (section name title width decimals unit accent)
+  (ui-lego-micro-num-stage-s section false name title width decimals unit accent))
 
 (def ui-lego-matrix-s (section name title width height accent)
   (let ((p (custom-ui-current-tensor-param name)))
@@ -466,6 +477,29 @@
                     (+ (get p :min) (custom-ui-option-index options v)))))))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
+(def ui-lego-micro-toggle-s (section name width accent)
+  (let ((p (custom-ui-current-param name))
+        (scope (custom-ui-current-scope)))
+    (if p
+      (let ((on (> (reactive-value (custom-ui-param-value p)) 0.5)))
+        (custom-ui-param-mod-wrapper p
+          (str "custom-ui-lego-micro-toggle-mod-" (custom-ui-scope-name) "-" name)
+          (subtree :key (str "custom-ui-lego-micro-toggle-" (custom-ui-scope-name)
+                             "-" (if on 1 0) "-" name)
+            (box :debug-name (str "custom-ui-lego-micro-toggle-" name)
+                 :width width :height 1.18 :v-align :end
+              (toggle
+                :value on
+                :color accent
+                :off-color :instrument-control-bg
+                :knob-color :black
+                :off-knob-color :dim
+                :on-change (lambda (next-on)
+                  (do
+                    (custom-ui-select-section-in-scope scope section)
+                    (custom-ui-set-param-in-scope scope p (if next-on 1 0)))))))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
 (def ui-lego-micro-base-note-s (section width accent)
   (let ((p (custom-ui-current-base-note-param)))
     (if p
@@ -527,7 +561,7 @@
             :on-change (custom-ui-param-change-callback p))))
       (label "missing: base_note" :font-size 9 :color :red :bg :transparent))))
 
-(def ui-adsr-number (name title decimals unit)
+(def ui-adsr-number (stage name title decimals unit)
   (let ((p (custom-ui-current-param name)))
     (if p
       (custom-ui-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
@@ -540,6 +574,8 @@
               :noui true :font-size 10.5
               :text-align :center
               :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+              :active (custom-ui-adsr-stage-active? -1 stage)
+              :active-color (ui-accent-cyan)
               :plock-active (if (custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (param-plock-color-r)
               :plock-color-g (param-plock-color-g)
@@ -548,7 +584,7 @@
               :on-change (custom-ui-param-change-callback p)))))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
-(def ui-adsr-number-s (section name title decimals unit)
+(def ui-adsr-number-s (section stage name title decimals unit)
   (if name
     (let ((p (custom-ui-current-param name)))
       (if p
@@ -562,6 +598,8 @@
                 :noui true :font-size 10.5
                 :text-align :center
                 :text-color (custom-ui-param-plock-text-color p) :edit-color :yellow
+                :active (custom-ui-adsr-stage-active? section stage)
+                :active-color (ui-accent-cyan)
                 :plock-active (if (custom-ui-param-plock-active? p) 1 0)
                 :plock-color-r (param-plock-color-r)
                 :plock-color-g (param-plock-color-g)
@@ -586,16 +624,19 @@
        :border-width 1 :corner-radius 12 :padding 0.15
        :on-click (ui-section-select-callback section)
     (v-stack :width :fill :height :fill :gap 0.10
+      (box :width :fill :height 0.35 :h-align :start :v-align :center
+        (label title :font-size 8.5 :color :dim :bg :transparent))
       (adsr-editor
         :attack (ui-param-bound-value attack 5)
         :decay (ui-param-bound-value decay 120)
         :sustain (ui-param-bound-value sustain 0.7)
         :release (if release (ui-param-bound-value release 120) 0)
-        :width 22.0 :height 4.0
+        :width :fill :flex 1
         :background-color :instrument-control-bg
         :on-change (lambda (env)
           (do
             (custom-ui-select-section-in-scope scope section)
+            (custom-ui-set-active-adsr scope section (get env :active))
             (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
             (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
             (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
@@ -604,13 +645,10 @@
               false))))
       (box :width :fill :height 1.75 :padding 0.15
         (h-stack :width :fill :gap 0.20 :align :start
-          (ui-adsr-number-s section attack "atk" 0 "ms")
-          (ui-adsr-number-s section decay "dec" 0 "ms")
-          (ui-adsr-number-s section sustain "sus" 2 false)
-          (ui-adsr-number-s section release "rel" 0 "ms")))
-      (box :width :fill :height 0.35 :h-align :center :v-align :center
-        (label title :font-size 8.5 :color :dim :bg :transparent))
-      (box :width :fill :flex 1)))))
+          (ui-adsr-number-s section :attack attack "atk" 0 "ms")
+          (ui-adsr-number-s section :decay decay "dec" 0 "ms")
+          (ui-adsr-number-s section :sustain sustain "sus" 2 false)
+          (ui-adsr-number-s section :release release "rel" 0 "ms")))))))
 
 (def ui-adsr (title attack decay sustain release)
   (let ((scope (custom-ui-current-scope)))
@@ -618,28 +656,28 @@
        :background-color :instrument-control-bg
        :border-width 1 :corner-radius 12 :padding 0.15
     (v-stack :width :fill :height :fill :gap 0.10
+      (box :width :fill :height 0.35 :h-align :start :v-align :center
+        (label title :font-size 8.5 :color :dim :bg :transparent))
       (adsr-editor
         :attack (ui-param-bound-value attack 5)
         :decay (ui-param-bound-value decay 120)
         :sustain (ui-param-bound-value sustain 0.7)
         :release (ui-param-bound-value release 120)
-        :width 22.0 :height 4.0
+        :width :fill :flex 1
         :background-color :instrument-control-bg
         :on-change (lambda (env)
           (do
+            (custom-ui-set-active-adsr scope -1 (get env :active))
             (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
             (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
             (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
             (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
       (box :width :fill :height 1.75 :padding 0.15
         (h-stack :width :fill :gap 0.20 :align :start
-          (ui-adsr-number attack "atk" 0 "ms")
-          (ui-adsr-number decay "dec" 0 "ms")
-          (ui-adsr-number sustain "sus" 2 false)
-          (ui-adsr-number release "rel" 0 "ms")))
-      (box :width :fill :height 0.35 :h-align :center :v-align :center
-        (label title :font-size 8.5 :color :dim :bg :transparent))
-      (box :width :fill :flex 1)))))
+          (ui-adsr-number :attack attack "atk" 0 "ms")
+          (ui-adsr-number :decay decay "dec" 0 "ms")
+          (ui-adsr-number :sustain sustain "sus" 2 false)
+          (ui-adsr-number :release release "rel" 0 "ms")))))))
 
 (def ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a
                      section-b title-b attack-b decay-b sustain-b release-b)
@@ -650,35 +688,114 @@
 (def ui-detail-adsr-s (section title attack decay sustain release)
   (let ((scope (custom-ui-current-scope)))
     (ui-readout-panel-medium-s section
-      (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+      (v-stack :width :fill :height :fill :gap 0.08 :align :stretch
+        (box :width :fill :height 0.34 :h-align :start :v-align :center
+          (label title :font-size 7.8 :color :dim :bg :transparent))
         (adsr-editor
           :attack (ui-param-bound-value attack 5)
           :decay (ui-param-bound-value decay 120)
           :sustain (ui-param-bound-value sustain 0.7)
           :release (ui-param-bound-value release 120)
-          :width 13.2 :height :fill
+          :width :fill :height 2.08
           :background-color :instrument-control-bg
           :on-change (lambda (env)
             (do
               (custom-ui-select-section-in-scope scope section)
+              (custom-ui-set-active-adsr scope section (get env :active))
               (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
               (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
               (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
               (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
-        (v-stack :width 8.2 :height :fill :gap 0.10 :align :start
-          (ui-lego-badge-dark title 7.7 (ui-accent-blue))
-          (h-stack :gap 0.14 :align :start
-            (ui-lego-micro-num-s section attack "atk" 3.7 0 "ms" (ui-accent-blue))
-            (ui-lego-micro-num-s section decay "dec" 3.7 0 "ms" (ui-accent-blue)))
-          (h-stack :gap 0.14 :align :start
-            (ui-lego-micro-num-s section sustain "sus" 3.7 2 false (ui-accent-blue))
-            (ui-lego-micro-num-s section release "rel" 3.7 0 "ms" (ui-accent-blue))))))))
+        (h-stack :width :fill :height 1.0 :gap 0.24 :align :start
+          (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" (ui-accent-cyan))
+          (ui-lego-micro-num-stage-s section :decay decay "dec" 5.1 0 "ms" (ui-accent-cyan))
+          (ui-lego-micro-num-stage-s section :sustain sustain "sus" 5.1 2 false (ui-accent-cyan))
+          (ui-lego-micro-num-stage-s section :release release "rel" 5.1 0 "ms" (ui-accent-cyan)))))))
 
 (def ui-detail-adsr-switch-s (section-a title-a attack-a decay-a sustain-a release-a
                               section-b title-b attack-b decay-b sustain-b release-b)
   (if (= custom-ui-selected-section section-b)
     (ui-detail-adsr-s section-b title-b attack-b decay-b sustain-b release-b)
     (ui-detail-adsr-s section-a title-a attack-a decay-a sustain-a release-a)))
+
+;; Full-height envelope surface for instruments that dedicate a complete
+;; horizontal slice to envelope editing. The plot owns all space not reserved
+;; for the compact title and the single A/D/S/R readout row.
+(def ui-detail-adsr-divider (debug-name)
+  (box :width :fill :height 0.05
+       :background-color (rgba 1.0 1.0 1.0 0.14)
+       :debug-name debug-name))
+
+(def ui-detail-adsr-wide-content-s (section attack decay sustain release)
+  (let ((scope (custom-ui-current-scope)))
+    (v-stack :width :fill :height :fill :gap 0.0 :align :stretch
+      (adsr-editor
+        :attack (ui-param-bound-value attack 5)
+        :decay (ui-param-bound-value decay 120)
+        :sustain (ui-param-bound-value sustain 0.7)
+        :release (ui-param-bound-value release 120)
+        :width :fill :flex 1
+        :background-color :instrument-control-bg
+        :on-change (lambda (env)
+          (do
+            (custom-ui-select-section-in-scope scope section)
+            (custom-ui-set-active-adsr scope section (get env :active))
+            (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
+            (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
+            (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
+            (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+      (ui-detail-adsr-divider "adsr-controls-divider")
+      (box :width :fill :height 1.75 :h-align :center :v-align :center
+        (h-stack :gap 0.42 :align :start
+          (ui-adsr-number-s section :attack attack "atk" 0 "ms")
+          (ui-adsr-number-s section :decay decay "dec" 0 "ms")
+          (ui-adsr-number-s section :sustain sustain "sus" 2 false)
+          (ui-adsr-number-s section :release release "rel" 0 "ms"))))))
+
+(def ui-lego-underline-tab (title width selected accent on-click debug-name)
+  (v-stack :width width :height 1.02 :gap 0.0 :align :stretch
+    (box :width :fill :height 0.96 :h-align :center :v-align :center
+         :debug-name debug-name :on-click on-click
+      (label title :font-size 9.2
+        :color (if selected accent (rgba 0.72 0.66 0.55 1.0))
+        :bg :transparent))
+    (box :width :fill :height 0.06
+      :background-color (if selected accent :transparent))))
+
+(def ui-detail-adsr-wide-tab-s (section title width selected)
+  (ui-lego-underline-tab
+    title width selected (ui-accent-cyan)
+    (ui-section-select-callback section)
+    (str "adsr-tab-" title)))
+
+(def ui-detail-adsr-wide-s (width height section title attack decay sustain release)
+  (ui-lego-panel-width-s width height section (rgba 0.055 0.058 0.064 1.0)
+    (v-stack :width :fill :height :fill :gap 0.0 :align :stretch
+      (box :width :fill :height 1.02 :h-align :start :v-align :center
+        (label title :font-size 9.2 :color (ui-accent-cyan) :bg :transparent))
+      (ui-detail-adsr-divider "adsr-header-divider")
+      (box :width :fill :flex 1
+        (ui-detail-adsr-wide-content-s section attack decay sustain release)))))
+
+(def ui-detail-adsr-wide-switch-s
+  (width height
+   section-a title-a attack-a decay-a sustain-a release-a
+   section-b title-b attack-b decay-b sustain-b release-b)
+  (let ((show-b (= custom-ui-selected-section section-b))
+        (tab-width (/ (- width 1.0) 2.0)))
+    (box :width width :height height
+         :background-color (rgba 0.055 0.058 0.064 1.0)
+         :corner-radius 7 :border-width 1 :padding 0.18
+      (box :width :fill :height :fill :padding 0.04
+        (v-stack :width :fill :height :fill :gap 0.0 :align :stretch
+          (h-stack :width :fill :height 1.02 :gap 0.0 :align :stretch
+            (ui-detail-adsr-wide-tab-s section-a title-a tab-width (not show-b))
+            (ui-detail-adsr-wide-tab-s section-b title-b tab-width show-b))
+          (ui-detail-adsr-divider "adsr-tabs-divider")
+          (box :width :fill :flex 1
+            (if show-b
+              (ui-detail-adsr-wide-content-s section-b attack-b decay-b sustain-b release-b)
+              (ui-detail-adsr-wide-content-s section-a attack-a decay-a sustain-a release-a))))))))
 
 (def ui-adsr-compact-s (section title attack decay sustain release)
   (ui-detail-adsr-s section title attack decay sustain release))
@@ -722,28 +839,28 @@
        :background-color :instrument-control-bg
        :border-width 1 :corner-radius 10 :padding 0.1
     (v-stack :width :fill :height :fill :gap 0.08
+      (box :width :fill :height 0.3 :h-align :start :v-align :center
+        (label title :font-size 7.5 :color :dim :bg :transparent))
       (adsr-editor
         :attack (ui-param-bound-value attack 5)
         :decay (ui-param-bound-value decay 120)
         :sustain (ui-param-bound-value sustain 0.7)
         :release (ui-param-bound-value release 120)
-        :width 20.0 :height 4.0
+        :width :fill :flex 1
         :background-color :instrument-control-bg
         :on-change (lambda (env)
           (do
+            (custom-ui-set-active-adsr scope -1 (get env :active))
             (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
             (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
             (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
             (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
       (box :width :fill :height 1.45 :padding 0.1
         (h-stack :width :fill :gap 0.15 :align :start
-          (ui-adsr-number attack "atk" 0 "ms")
-          (ui-adsr-number decay "dec" 0 "ms")
-          (ui-adsr-number sustain "sus" 2 false)
-          (ui-adsr-number release "rel" 0 "ms")))
-      (box :width :fill :height 0.3 :h-align :center :v-align :center
-        (label title :font-size 7.5 :color :dim :bg :transparent))
-      (box :width :fill :flex 1)))))
+          (ui-adsr-number :attack attack "atk" 0 "ms")
+          (ui-adsr-number :decay decay "dec" 0 "ms")
+          (ui-adsr-number :sustain sustain "sus" 2 false)
+          (ui-adsr-number :release release "rel" 0 "ms")))))))
 
 (def ui-adsr-switch-c (section-a title-a attack-a decay-a sustain-a release-a
                        section-b title-b attack-b decay-b sustain-b release-b)
@@ -878,29 +995,30 @@
 ;; continuous surface (mode-driven center panels).
 (def ui-detail-adsr-body-x-s (section title accent attack decay sustain release)
   (let ((scope (custom-ui-current-scope)))
-      (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+      (v-stack :width :fill :height :fill :gap 0.08 :align :stretch
+        (box :width :fill :height 0.34 :h-align :start :v-align :center
+          (label title :font-size 7.8 :color accent :bg :transparent))
         (adsr-editor
           :attack (ui-param-bound-value attack 5)
           :decay (ui-param-bound-value decay 120)
           :sustain (ui-param-bound-value sustain 0.7)
           :release (ui-param-bound-value release 120)
-          :width 13.2 :height :fill
+          :width :fill :height 2.08
           :background-color :instrument-control-bg
+          :curve-color accent
           :on-change (lambda (env)
             (do
               (custom-ui-select-section-in-scope scope section)
+              (custom-ui-set-active-adsr scope section (get env :active))
               (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
               (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
               (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
               (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
-        (v-stack :width 8.2 :height :fill :gap 0.10 :align :start
-          (ui-lego-badge-dark title 7.7 accent)
-          (h-stack :gap 0.14 :align :start
-            (ui-lego-micro-num-s section attack "atk" 3.7 0 "ms" accent)
-            (ui-lego-micro-num-s section decay "dec" 3.7 0 "ms" accent))
-          (h-stack :gap 0.14 :align :start
-            (ui-lego-micro-num-s section sustain "sus" 3.7 2 false accent)
-            (ui-lego-micro-num-s section release "rel" 3.7 0 "ms" accent))))))
+        (h-stack :width :fill :height 1.0 :gap 0.24 :align :start
+          (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" accent)
+          (ui-lego-micro-num-stage-s section :decay decay "dec" 5.1 0 "ms" accent)
+          (ui-lego-micro-num-stage-s section :sustain sustain "sus" 5.1 2 false accent)
+          (ui-lego-micro-num-stage-s section :release release "rel" 5.1 0 "ms" accent)))))
 
 ;; Accent-tinted detail ADSR — like ui-detail-adsr-s but with a custom accent
 ;; so per-mode views keep their identity color.

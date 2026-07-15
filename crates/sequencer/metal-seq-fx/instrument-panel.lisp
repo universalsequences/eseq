@@ -411,17 +411,20 @@
                     :height 0.75
                     :debug-name "instrument-edit-button"
                     :font-size 10
-                    :border-color '(rgba 0.1 0.1 0.1 0.8)
+                    :border-color :transparent
                     :on-click |x y r|
                     (host-command "enter-edit-instrument"
                       (dict :name (if (get inst :name) (get inst :name) SEQ.sidebar-instrument-name)))
                     ))
-                (box :debug-name "instrument-preset-button" :padding 0.0 :width 4 :align :center
+                (box :debug-name "instrument-preset-button" :padding 0.0 :width 2 :align :center
                   (v-stack
                     (box :width 1 :height 0.1)
                     (fx-mini-save-icon
                       :on-click |x y r| (sbrowser-enter-preset-save)
-                      :active 0)))))
+                      :active 0))
+                  )
+                (box :width 0.5)
+                ))
             (fx-panel-body "instrument-content-box"
               (instrument-synth-panel-body inst)))
           :debug-name "instrument-panel"

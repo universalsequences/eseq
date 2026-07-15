@@ -1339,6 +1339,7 @@ fn stable_key_value(map: &HashMap<String, Rc<RefCell<Value>>>) -> Option<String>
 fn stable_widget_hash(
     source_buffer_id: Option<BufferId>,
     target: &EffectTarget,
+    parent_stable_id: Option<u64>,
     widget_type: &str,
     path: &[usize],
     key: Option<&str>,
@@ -1347,6 +1348,10 @@ fn stable_widget_hash(
     let mut hasher = DefaultHasher::new();
     source_buffer_id.hash(&mut hasher);
     target.hash(&mut hasher);
+    // Paths are local to an evaluated subtree. Namespace descendants by their
+    // parent so identically shaped keyed subtrees cannot assign the same stable
+    // identity to their focusable children.
+    parent_stable_id.hash(&mut hasher);
     widget_type.hash(&mut hasher);
     path.hash(&mut hasher);
     key.hash(&mut hasher);
@@ -1494,8 +1499,14 @@ fn annotate_widget_tree_stable_ids(
     };
 
     let key = prop_string_rc(map, STABLE_KEY_PROP).or_else(|| stable_key_value(map));
-    let stable_id =
-        stable_widget_hash(source_buffer_id, target, &widget_type, path, key.as_deref());
+    let stable_id = stable_widget_hash(
+        source_buffer_id,
+        target,
+        parent_stable_id,
+        &widget_type,
+        path,
+        key.as_deref(),
+    );
     let mut annotated = HashMap::new();
 
     for (name, child) in map {

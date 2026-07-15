@@ -1,6 +1,21 @@
 ;; Section selection and base panel primitives for generated custom UIs.
 (defstate custom-ui-selected-sections '())
+(defstate custom-ui-active-adsr false)
 (def custom-ui-selected-section 0)
+
+(def custom-ui-set-active-adsr (scope section active)
+  (set! custom-ui-active-adsr
+    (if active
+      (dict :scope (get scope :name) :section section :stage active)
+      false)))
+
+(def custom-ui-adsr-stage-active? (section stage)
+  (if custom-ui-active-adsr
+    (and
+      (= (get custom-ui-active-adsr :scope) (custom-ui-scope-name))
+      (= (get custom-ui-active-adsr :section) section)
+      (= (get custom-ui-active-adsr :stage) stage))
+    false))
 
 (def custom-ui-selected-section-for-scope (scope-name)
   (let ((entry

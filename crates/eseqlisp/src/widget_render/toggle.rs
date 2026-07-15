@@ -101,6 +101,10 @@ impl WidgetDefinition for ToggleWidget {
         &["toggle"]
     }
 
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["value"]
+    }
+
     fn measure(
         &self,
         _node: &Value,
@@ -198,6 +202,36 @@ mod tests {
     use super::*;
     use crate::theme;
     use crate::widget_render::CellBuffer;
+
+    #[test]
+    fn value_is_bindable_and_accepts_a_reactive_numeric_parameter() {
+        assert_eq!(TOGGLE_WIDGET.bindable_props(), &["value"]);
+        assert!(!TOGGLE_WIDGET.size_affecting_props().contains(&"value"));
+
+        crate::reactive::write_float_slot("TOGGLE_TEST", "osc2-on", 1.0);
+        let reactive_value = Value::ReactiveRef {
+            namespace: "TOGGLE_TEST".to_string(),
+            field: "osc2-on".to_string(),
+            index: None,
+            kind: crate::vm::BindingKind::Float,
+            slot: crate::reactive::reactive_float_slot("TOGGLE_TEST", "osc2-on"),
+        };
+        assert!(get_bool_prop(
+            &HashMap::from([("value".to_string(), reactive_value.clone())]),
+            "value",
+            false
+        ));
+
+        let widget = crate::widgets::build_widget(
+            "toggle",
+            vec![Value::Keyword("value".to_string()), reactive_value],
+        );
+
+        let Value::Map(map) = widget else {
+            panic!("expected toggle widget map");
+        };
+        assert!(!map.contains_key("__widget-diagnostic"));
+    }
 
     #[test]
     fn toggle_uses_theme_default_and_color_overrides() {

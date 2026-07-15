@@ -774,8 +774,17 @@ impl Editor {
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
         else {
+            if matches!(mouse.kind, MouseEventKind::Moved) {
+                widget_render::set_pointer_hover_widget(None);
+            }
             return false;
         };
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            widget_render::set_pointer_hover_widget(
+                self.widget_node_at_local(local_col, local_row)
+                    .map(|node| node.widget_id),
+            );
+        }
         // Overlay (dropdown menu, etc.) intercepts pointer events before normal
         // hit-test. Do not gate this on overlay_contains: overlay geometry is
         // visual/screen-space and may extend over widgets that should not see
