@@ -3,4 +3,4 @@
 
 (def capture-after-sync ()
   (set! scene-push-target 0)
-  (set! scene-push-value 0.62))
+  (set! scene-push-value 1.0))

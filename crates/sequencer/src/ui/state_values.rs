@@ -27116,6 +27116,21 @@ mod tests {
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let push_layout = editor.widget_layout().expect("scene push transport layout");
+        let strip = find_layout_node_by_debug_name(&push_layout, "transport-scene-strip")
+            .expect("scene strip growth container");
+        assert_finite_nonzero_rect(strip, "transport-scene-strip");
+        assert!(matches!(
+            strip.props.get("background"),
+            Some(Value::String(widget)) if widget == "transport-scene-strip-bg"
+        ));
+        assert!(matches!(
+            strip.props.get("push"),
+            Some(Value::Number(value)) if (*value - 0.5).abs() < 1.0e-6
+        ));
+        assert!(matches!(
+            strip.props.get("push-target"),
+            Some(Value::Number(value)) if (*value - 1.0).abs() < 1.0e-6
+        ));
         let push_pill = find_layout_node_by_stable_key(&push_layout, "transport-scene-pill-1")
             .expect("active scene push pill");
         assert_finite_nonzero_rect(push_pill, "transport-scene-pill-1");

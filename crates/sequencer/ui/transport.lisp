@@ -13,6 +13,35 @@
       (material :color (if active (rgba 0.00 0.35 0.82 1.0) (rgba 0.18 0.18 0.20 1.0))
         :shadow (shadow :color (rgba 0 0 0 0.4) :blur 0.08 :offset (vec2 0 0.03))))))
 
+;; Scene-strip variant: the targeted pill grows a rounded lobe out of the
+;; shared container as interpolation increases. At zero the lobe is contained
+;; entirely by the base, so the idle silhouette is identical to transport-btn-bg.
+(defwidget transport-scene-strip-bg
+  :width 1 :height 1
+  :paint-margin 1.3
+  :state (push push-target scene-count)
+  :shader
+  (let ((amount (clamp push 0.0 1.0))
+        (count (max scene-count 1.0))
+        ;; Layout geometry in cells: 0.2 outer padding, 2.5-wide scene pills,
+        ;; and 0.1 gaps. The trailing spacer/+/- controls account for 5.4 cells.
+        (total-cells (+ (* count 2.6) 5.8))
+        (target-center (+ 0.2 1.25 (* (clamp push-target 0.0 (- count 1.0)) 2.6)))
+        (target-x (* aspect (- (* 2.0 (/ target-center total-cells)) 1.0)))
+        (base (sdf/rounded-rect width height 0.7))
+        (growth (sdf/translate target-x 0.0
+          (sdf/rounded-rect
+            (mix 0.42 0.92 amount)
+            (mix 0.48 1.20 amount)
+            (mix 0.32 0.62 amount))))
+        (shape (if (< push-target 0.0)
+          base
+          (sdf/smooth-union (+ 0.001 (* 0.42 amount)) base growth))))
+    (sdf/layer
+      (sdf/fill shape
+        (material :color (rgba 0.18 0.18 0.20 1.0)
+          :shadow (shadow :color (rgba 0 0 0 0.4) :blur 0.08 :offset (vec2 0 0.03)))))))
+
 (defwidget transport-led-bg
   :width 1 :height 1
   :paint-margin 0.3
@@ -114,7 +143,18 @@
               (rgba 0 0 0 0)))))
       (if (> push-amount 0.001)
         (sdf/fill (sdf/rounded-rect width height 0.54)
-          (material :color (rgba 0.08 0.38 1.0 (* 0.82 (clamp push-amount 0.0 1.0)))))
+          (material
+            :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+              :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+            :color
+            (let ((amount (clamp push-amount 0.0 1.0))
+                  (lit (* amount (+ 0.04 (* 0.05 diffuse))))
+                  (shine (* amount 0.24 specular)))
+              (rgba
+                (+ 0.04 lit shine)
+                (+ 0.24 lit shine)
+                (+ 0.88 lit shine)
+                (* 0.88 amount)))))
         (rgba 0 0 0 0)))))
 
 (defwidget queued-scene-pill-bg
@@ -143,7 +183,18 @@
               (rgba shine shine shine 0)))))
       (if (> push-amount 0.001)
         (sdf/fill (sdf/rounded-rect width height 0.54)
-          (material :color (rgba 0.08 0.38 1.0 (* 0.62 (clamp push-amount 0.0 1.0)))))
+          (material
+            :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+              :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+            :color
+            (let ((amount (clamp push-amount 0.0 1.0))
+                  (lit (* amount (+ 0.04 (* 0.05 diffuse))))
+                  (shine (* amount 0.20 specular)))
+              (rgba
+                (+ 0.04 lit shine)
+                (+ 0.24 lit shine)
+                (+ 0.88 lit shine)
+                (* 0.72 amount)))))
         (rgba 0 0 0 0)))))
 
 
@@ -616,7 +667,13 @@
     ;; Pattern pills in their own subtree: current-pattern/num-patterns changes
     ;; (every scene switch) rerun just this bar, not the whole transport.
     (subtree :key "transport-pattern-pills"
-      (box :background "transport-btn-bg" :padding 0.2 :height 1.4
+      (box :background "transport-scene-strip-bg"
+        :key "transport-scene-strip"
+        :debug-name "transport-scene-strip"
+        :push scene-push-value
+        :push-target scene-push-target
+        :scene-count SEQ.num-patterns
+        :padding 0.2 :height 1.4
         (h-stack :gap 0.1 :align :center
           (each (range 0 SEQ.num-patterns) |i|
             (box :key (str "transport-scene-pill-" i)
