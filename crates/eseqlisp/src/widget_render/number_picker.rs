@@ -97,6 +97,7 @@ mod tests {
             NUMBER_PICKER_WIDGET.bindable_props(),
             &[
                 "value",
+                "active",
                 "plock-active",
                 "plock-color-r",
                 "plock-color-g",
@@ -107,6 +108,11 @@ mod tests {
             !NUMBER_PICKER_WIDGET
                 .size_affecting_props()
                 .contains(&"value")
+        );
+        assert!(
+            !NUMBER_PICKER_WIDGET
+                .size_affecting_props()
+                .contains(&"active")
         );
     }
 

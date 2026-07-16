@@ -208,13 +208,14 @@ mod tests {
         assert_eq!(TOGGLE_WIDGET.bindable_props(), &["value"]);
         assert!(!TOGGLE_WIDGET.size_affecting_props().contains(&"value"));
 
-        crate::reactive::write_float_slot("TOGGLE_TEST", "osc2-on", 1.0);
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        slots.write_float("TOGGLE_TEST", "osc2-on", 1.0);
         let reactive_value = Value::ReactiveRef {
             namespace: "TOGGLE_TEST".to_string(),
             field: "osc2-on".to_string(),
             index: None,
             kind: crate::vm::BindingKind::Float,
-            slot: crate::reactive::reactive_float_slot("TOGGLE_TEST", "osc2-on"),
+            slot: slots.slot("TOGGLE_TEST", "osc2-on"),
         };
         assert!(get_bool_prop(
             &HashMap::from([("value".to_string(), reactive_value.clone())]),

@@ -13,9 +13,9 @@ pub struct DgenLanguage {
     #[serde(default)]
     pub operators: Vec<DocOperator>,
     #[serde(default)]
-    pub attributes: Vec<DocAttribute>,
+    pub special_forms: Vec<DocSpecialForm>,
     #[serde(default)]
-    pub examples: Vec<DocExample>,
+    pub attributes: Vec<DocAttribute>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,15 +40,21 @@ pub struct DocAttribute {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct DocSpecialForm {
+    pub name: String,
+    pub summary: String,
+    #[serde(default)]
+    pub signatures: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DocExample {
     pub name: String,
     pub kind: String,
     pub path: String,
-    #[serde(default)]
     pub params: Vec<String>,
     pub output_count: usize,
     pub modulator_count: usize,
-    #[serde(default)]
     pub preview: String,
 }
 
@@ -79,12 +85,12 @@ impl DgenApiCatalog {
         &self.doc.language.operators
     }
 
-    pub fn attributes(&self) -> &[DocAttribute] {
-        &self.doc.language.attributes
+    pub fn special_forms(&self) -> &[DocSpecialForm] {
+        &self.doc.language.special_forms
     }
 
-    pub fn examples(&self) -> &[DocExample] {
-        &self.doc.language.examples
+    pub fn attributes(&self) -> &[DocAttribute] {
+        &self.doc.language.attributes
     }
 }
 
@@ -96,7 +102,7 @@ mod tests {
     fn loads_generated_catalog() {
         let catalog = DgenApiCatalog::load_default().expect("load dgen api catalog");
         assert!(!catalog.operators().is_empty());
+        assert!(!catalog.special_forms().is_empty());
         assert!(!catalog.attributes().is_empty());
-        assert!(!catalog.examples().is_empty());
     }
 }

@@ -289,9 +289,9 @@
               (box :height 0.3)
               (if (get inst :buffer)
                 (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                  (box :width 81 :height 5.05
+                  (box :width 81 :height 4.4
                     (waveform
-                      :height 4.25
+                      :height 3.6
                       :header-height 0.3
                       :ruler-font-size 8
                       :ruler-color :dim
@@ -315,7 +315,7 @@
                       :selection-end (sampler-selection-end-prop inst)
                       :time-ruler (dict :mode :seconds)
                       :on-action |event| (handle-sampler-waveform-action inst event (get inst :duration)))))
-                (box :width 70 :height 4.85 :h-align :center :v-align :center
+                (box :width 70 :height 4.2 :h-align :center :v-align :center
                   (label "No sample" :font-size 12 :color :dim :bg :transparent)))
               (sampler-param-pickers (get inst :synth) inst)))
           (sampler-param-knobs (get inst :synth) inst))))

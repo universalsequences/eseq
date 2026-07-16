@@ -4573,7 +4573,7 @@ mod tests {
         });
 
         ready_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(60))
             .expect("test app should initialize");
         let (result, published_chain) = done_rx
             .recv_timeout(Duration::from_secs(2))

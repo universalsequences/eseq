@@ -2305,6 +2305,10 @@ mod live_keyboard_tests {
             )
             .expect("install visible sequencer layout");
         editor.refresh_runtime_side_effects();
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*transport*"),
+            "transport tile should be visible"
+        );
         assert_eq!(
             editor.active_buffer().id,
             transport_id,

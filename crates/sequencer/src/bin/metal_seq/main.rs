@@ -4138,10 +4138,11 @@ mod tests {
             (2, "pitch"),
             (3, "velocity"),
             (4, "trigger"),
-            (5, "mod1"),
-            (6, "mod2"),
-            (7, "mod3"),
-            (8, "mod4"),
+            (5, "clock"),
+            (6, "mod1"),
+            (7, "mod2"),
+            (8, "mod3"),
+            (9, "mod4"),
         ] {
             assert!(
                 source.contains(&format!("(def {name} (in {idx} @name {name}")),
@@ -4152,7 +4153,7 @@ mod tests {
             assert!(
                 source.contains(&format!(
                     "(def {name} (in {} @name {name} @modulator {idx}))",
-                    idx + 4
+                    idx + 5
                 )),
                 "starter source should mark {name} as modulator {idx}"
             );

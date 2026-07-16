@@ -740,6 +740,7 @@ mod tests {
 
     #[test]
     fn constructor_accepts_reactive_value_binding() {
+        let slots = crate::reactive::ReactiveBindingStore::default();
         let widget = crate::widgets::build_widget(
             "matrix",
             vec![
@@ -749,7 +750,7 @@ mod tests {
                     field: "weight".to_string(),
                     index: None,
                     kind: crate::vm::BindingKind::Float,
-                    slot: crate::reactive::reactive_float_slot("APP", "weight"),
+                    slot: slots.slot("APP", "weight"),
                 },
             ],
         );

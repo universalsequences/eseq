@@ -1792,7 +1792,12 @@ fn build_persistence_case(
     path: &std::path::Path,
 ) -> (LayoutNode, PatcherInteractionState, PersistenceExpectations) {
     fs::write(path, generated_persistence_source(seed)).unwrap();
-    let node = patcher_test_node(path);
+    let library = temp_defmacro_library(&format!("persistence-seed-{seed}"), &[]);
+    let mut node = patcher_test_node(path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
     let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
     let mode = seed % 8;
     let mut state = PatcherInteractionState::default();

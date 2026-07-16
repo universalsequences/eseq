@@ -4886,9 +4886,11 @@ fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
         }
     }
     editor.set_text_measurer(Box::new(TestTextMeasurer), 10.0, 20.0);
+    editor.set_text_cell_dimensions(10.0, 20.0, 10.0, 20.0);
 
     let tile_id = editor.active_tile;
     if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.show_border = true;
         leaf.border_width_px = 2.0;
     }
     editor.cached_tile_rects = vec![(
@@ -4900,9 +4902,8 @@ fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
             height: 8.0,
         },
     )];
-
     let precise_col: f32 = 3.25 + 0.2 + 2.9;
-    let precise_row: f32 = 10.5 + 0.2 + 0.9;
+    let precise_row: f32 = 10.5 + 0.1 + 0.9;
     editor.handle_tiled_mouse_precise(
         mouse_event(
             MouseEventKind::Down(MouseButton::Left),

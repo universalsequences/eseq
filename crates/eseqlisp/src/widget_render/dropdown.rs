@@ -1216,8 +1216,9 @@ mod tests {
 
     #[test]
     fn selected_label_can_follow_reactive_index_value() {
-        let slot = crate::reactive::reactive_float_slot("TEST_DROPDOWN", "wave");
-        crate::reactive::write_float_slot("TEST_DROPDOWN", "wave", 1.0);
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let slot = slots.slot("TEST_DROPDOWN", "wave");
+        slots.write_float("TEST_DROPDOWN", "wave", 1.0);
 
         let mut props = HashMap::new();
         props.insert("options".to_string(), string_list(&["saw", "pulse", "tri"]));
@@ -1233,7 +1234,7 @@ mod tests {
         );
 
         assert_eq!(get_selected(&props), "pulse");
-        crate::reactive::write_float_slot("TEST_DROPDOWN", "wave", 2.0);
+        slots.write_float("TEST_DROPDOWN", "wave", 2.0);
         assert_eq!(get_selected(&props), "tri");
     }
 
@@ -1255,7 +1256,8 @@ mod tests {
 
     #[test]
     fn value_index_accepts_reactive_binding_at_widget_construction() {
-        let slot = crate::reactive::reactive_float_slot("TEST_DROPDOWN", "wave_construct");
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let slot = slots.slot("TEST_DROPDOWN", "wave_construct");
         let widget = crate::widgets::build_widget(
             "dropdown",
             vec![

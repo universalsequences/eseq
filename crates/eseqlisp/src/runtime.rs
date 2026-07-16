@@ -1156,6 +1156,7 @@ impl Runtime {
         register_core_natives(&mut vm);
         crate::vm::register_math_natives(&mut vm);
         register_widget_natives(&mut vm);
+        let reactive_registry = ReactiveRegistry::with_float_slots(vm.reactive_float_slots.clone());
         let mut runtime = Self {
             vm,
             shared,
@@ -1164,7 +1165,7 @@ impl Runtime {
             symbol_revision: 0,
             cached_completion_symbols: None,
             cached_completion_metadata: None,
-            reactive_registry: ReactiveRegistry::new(),
+            reactive_registry,
             #[cfg(test)]
             rendered_layouts: Vec::new(),
             current_layout: None,
@@ -1448,6 +1449,10 @@ impl Runtime {
         }
 
         runtime
+    }
+
+    pub fn reactive_binding_store(&self) -> crate::reactive::ReactiveBindingStore {
+        self.vm.reactive_float_slots.clone()
     }
 
     pub fn set_theme_sync_enabled(&mut self, enabled: bool) {

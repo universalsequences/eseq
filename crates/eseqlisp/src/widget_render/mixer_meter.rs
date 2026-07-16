@@ -234,7 +234,8 @@ mod tests {
 
     #[test]
     fn metal_primitives_resolve_reactive_ref_levels_at_draw_time() {
-        let mut registry = crate::reactive::ReactiveRegistry::new();
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let mut registry = crate::reactive::ReactiveRegistry::with_float_slots(slots.clone());
         registry.register("APP", vec![("peak", Value::Number(0.0))], true);
 
         let rect = Rect {
@@ -251,7 +252,7 @@ mod tests {
                 field: "peak".to_string(),
                 index: None,
                 kind: crate::vm::BindingKind::Float,
-                slot: crate::reactive::reactive_float_slot("APP", "peak"),
+                slot: slots.slot("APP", "peak"),
             },
         );
         let node = LayoutNode {

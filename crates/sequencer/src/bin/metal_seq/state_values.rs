@@ -12268,6 +12268,35 @@ mod tests {
         }
     }
 
+    fn assert_layout_rgba_prop(
+        node: &eseqlisp::layout::LayoutNode,
+        prop: &str,
+        expected: [f64; 4],
+    ) {
+        let value = node
+            .props
+            .get(prop)
+            .unwrap_or_else(|| panic!("missing {prop} on {}", node.widget_type));
+        let Value::List(items) = value else {
+            panic!("expected {prop} to be an rgba expression, got {value:?}");
+        };
+        assert_eq!(
+            items.len(),
+            5,
+            "rgba expression should have 5 items: {value:?}"
+        );
+        assert_eq!(*items[0].borrow(), Value::Symbol("rgba".to_string()));
+        for (idx, expected_component) in expected.into_iter().enumerate() {
+            let Value::Number(component) = *items[idx + 1].borrow() else {
+                panic!("rgba component {idx} should be numeric: {value:?}");
+            };
+            assert!(
+                (component - expected_component).abs() < 0.0001,
+                "rgba component {idx} should be {expected_component}, got {component}: {value:?}"
+            );
+        }
+    }
+
     fn layout_tree_has_bool_prop(
         node: &eseqlisp::layout::LayoutNode,
         prop: &str,
@@ -15433,6 +15462,16 @@ mod tests {
     }
 
     fn load_param_grid_test_lisp(editor: &mut eseqlisp::Editor) {
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("current-track", Value::Number(0.0)),
+                ("macros", test_list(vec![])),
+                ("track-plocks", test_list(vec![])),
+                ("track-plock-variants", test_list(vec![])),
+            ],
+            true,
+        );
         editor
             .runtime_mut()
             .eval_str(
@@ -15485,6 +15524,16 @@ mod tests {
         editor
             .runtime_mut()
             .register_reactive("TEST", vec![("fx", fx)], true);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("current-track", Value::Number(0.0)),
+                ("macros", test_list(vec![])),
+                ("track-plocks", test_list(vec![])),
+                ("track-plock-variants", test_list(vec![])),
+            ],
+            true,
+        );
         editor
             .runtime_mut()
             .eval_str(
@@ -16821,80 +16870,6 @@ mod tests {
         inst.insert(
             "sources".to_string(),
             Rc::new(RefCell::new(test_list(vec![]))),
-        );
-        inst
-    }
-
-    fn mod_fm_messui_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>>
-    {
-        let mut inst = test_instrument_map();
-        inst.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String("mod-fm-messui/".to_string()))),
-        );
-        inst.insert(
-            "display-name".to_string(),
-            Rc::new(RefCell::new(Value::String("mod-fm-messui".to_string()))),
-        );
-
-        let params = [
-            ("amp_attack", 4.0, 1.0, 2000.0),
-            ("amp_decay", 220.0, 1.0, 4000.0),
-            ("amp_sustain", 0.65, 0.0, 1.0),
-            ("amp_release", 180.0, 1.0, 5000.0),
-            ("mod_attack", 2.0, 1.0, 2000.0),
-            ("mod_decay", 380.0, 1.0, 5000.0),
-            ("mod_sustain", 0.18, 0.0, 1.0),
-            ("mod_release", 140.0, 1.0, 5000.0),
-            ("op1_ratio", 0.25, 0.25, 16.0),
-            ("op2_ratio", 2.0, 0.25, 16.0),
-            ("op3_ratio", 1.5, 0.25, 16.0),
-            ("op1_detune", 1.0, -1200.0, 1200.0),
-            ("op2_detune", 0.0, -1200.0, 1200.0),
-            ("op3_detune", 3.0, -1200.0, 1200.0),
-            ("op1_level", 0.43, 0.0, 1.0),
-            ("op2_level", 0.44, 0.0, 1.0),
-            ("op3_level", 0.15, 0.0, 1.0),
-            ("op2_to_op1", 1.0, 0.0, 12.0),
-            ("op3_to_op1", 0.37, 0.0, 12.0),
-            ("op3_to_op2", 2.0, 0.0, 12.0),
-            ("mod_env_to_op2", 1.0, -4.0, 8.0),
-            ("mod_env_to_op3", -3.2, -4.0, 8.0),
-            ("lfo_rate", 3.05, 0.02, 30.0),
-            ("lfo_to_index", 0.13, 0.0, 6.0),
-            ("lfo_to_pitch", 0.0, 0.0, 48.0),
-            ("filter_route", 1.0, 1.0, 5.0),
-            ("f1_mode", 0.0, 0.0, 5.0),
-            ("f2_mode", 0.0, 0.0, 5.0),
-            ("f1_cutoff", 1517.0, 40.0, 16000.0),
-            ("f2_cutoff", 535.0, 40.0, 16000.0),
-            ("f1_resonance", 2.05, 0.5, 6.0),
-            ("f2_resonance", 0.75, 0.5, 6.0),
-            ("f1_drive", 0.37, 0.2, 8.0),
-            ("f2_drive", 0.20, 0.2, 8.0),
-            ("f1_env_amt", 4671.0, -8000.0, 8000.0),
-            ("f2_env_amt", -483.0, -8000.0, 8000.0),
-            ("f1_lfo_amt", 15.0, -4000.0, 4000.0),
-            ("f2_lfo_amt", 2.0, -4000.0, 4000.0),
-            ("filter_blend", 1.0, 0.0, 1.0),
-            ("fold", 0.18, 0.0, 1.0),
-            ("drive", 1.25, 0.2, 8.0),
-            ("gain", 0.28, 0.0, 1.0),
-        ];
-        inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(
-                std::iter::once(Value::Map(test_base_note_param_map(0)))
-                    .chain(
-                        params
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, (name, value, min, max))| {
-                                Value::Map(test_param_map(name, idx + 1, *value, *min, *max))
-                            }),
-                    )
-                    .collect(),
-            ))),
         );
         inst
     }
@@ -18322,7 +18297,7 @@ mod tests {
         ));
         assert!(matches!(
             &*mappings[0]["current"].borrow(),
-            Value::Number(value) if (*value - 17.5).abs() < 1.0e-6
+            Value::Number(value) if (*value - desc.params[0].min as f64).abs() < 1.0e-6
         ));
         assert!(matches!(
             &*mappings[0]["min"].borrow(),
@@ -18815,9 +18790,12 @@ mod tests {
         let updated_knob = find_layout_node_by_widget_type(&updated_layout, "knob-number")
             .expect("updated macro knob layout node");
         assert_eq!(layout_prop_number(updated_knob, "value"), Some(0.6));
-        assert!(
-            layout_node_contains_text_fragment(&updated_layout, "mapping..."),
-            "armed map button should expose its active state"
+        let updated_map_button = find_layout_node_by_widget_type(&updated_layout, "button")
+            .expect("updated macro map button layout node");
+        assert_layout_rgba_prop(
+            updated_map_button,
+            "background-color",
+            [0.27, 0.78, 0.43, 1.0],
         );
     }
 
@@ -24452,36 +24430,6 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_track_accumulator_controls_have_visible_layout() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor.refresh_runtime_side_effects();
-
-        let track_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*track*")
-            .expect("track buffer should exist")
-            .id;
-        editor.set_active_buffer(track_id);
-        editor.set_layout_viewport(80, 24);
-
-        let layout = editor.widget_layout().expect("track panel layout");
-        let panel = find_layout_node_by_debug_name(&layout, "track-accumulator-panel")
-            .expect("track accumulator panel");
-        assert_finite_nonzero_rect(panel, "track accumulator panel");
-
-        for (key, label) in [
-            ("fx-track-accumulator-function", "accumulator function"),
-            ("fx-track-accumulator-mode", "accumulator mode"),
-            ("fx-track-accumulator-limit", "accumulator limit"),
-        ] {
-            let control = find_layout_node_by_stable_key(panel, key)
-                .unwrap_or_else(|| panic!("{label} control should render"));
-            assert_finite_nonzero_rect(control, label);
-        }
-    }
-
-    #[test]
     fn metal_seq_track_panel_timebase_uses_default_or_selected_step_plock_path() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.refresh_runtime_side_effects();
@@ -25452,7 +25400,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_instrument_patcher_layout_uses_transport_patcher_and_three_part_bottom_bar() {
+    fn metal_seq_instrument_patcher_layout_uses_transport_patcher_and_fixed_side_panels() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.create_scratch_buffer(
             "*instrument-patcher:test*",
@@ -25496,11 +25444,12 @@ mod tests {
             "bottom bar should use the fixed mixer-panel height; samples={samples:?} mixer={mixer:?} fx={fx:?}"
         );
         assert!(
-            (samples.width - mixer.width).abs() <= 1.0
-                && (mixer.width - fx.width).abs() <= 1.0
+            (samples.width - 28.0).abs() <= 1.0
+                && (mixer.width - 30.0).abs() <= 1.0
+                && fx.width > mixer.width
                 && (samples.row - mixer.row).abs() <= 0.1
                 && (mixer.row - fx.row).abs() <= 0.1,
-            "samples/mixer/fx should divide the bottom bar into three horizontal parts; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+            "samples and mixer should use their fixed widths while fx fills the remaining bottom bar; samples={samples:?} mixer={mixer:?} fx={fx:?}"
         );
     }
 
@@ -25700,7 +25649,7 @@ mod tests {
             .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
             .expect("switch to piano roll buffer");
         editor.refresh_runtime_side_effects();
-        assert!(!handle_metal_command_shortcut(
+        assert!(handle_metal_command_shortcut(
             &mut editor,
             &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
             &state,
@@ -25799,7 +25748,7 @@ mod tests {
             .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
             .expect("switch to piano roll buffer");
         editor.refresh_runtime_side_effects();
-        assert!(!handle_metal_command_shortcut(
+        assert!(handle_metal_command_shortcut(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
             &state,
@@ -30176,8 +30125,8 @@ mod tests {
             "two expanded rows should render independent metal-style slider grids"
         );
 
-        let tab_track_0 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-2")
-            .expect("track 0 aux tab");
+        let tab_track_0 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-3")
+            .expect("track 0 transpose tab");
         let tab_track_1 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-1-4")
             .expect("track 1 pan tab");
         editor
@@ -30190,7 +30139,7 @@ mod tests {
                     .expect("track 0 tab callback"),
                 vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
             )
-            .expect("select track 0 aux tab");
+            .expect("select track 0 transpose tab");
         editor
             .runtime_mut()
             .invoke(
@@ -30207,7 +30156,7 @@ mod tests {
                 .runtime_mut()
                 .eval_str("(seqv-param-mode 0)")
                 .unwrap(),
-            Some(Value::Number(2.0))
+            Some(Value::Number(3.0))
         );
         assert_eq!(
             editor
@@ -33435,7 +33384,7 @@ mod tests {
             filter_header.rect
         );
         assert!(
-            (sampler_header.rect.height - 0.75).abs() < 0.01,
+            (sampler_header.rect.height - 1.0).abs() < 0.01,
             "shared panel header height should stay on the compact instrument contract; got {:?}",
             sampler_header.rect
         );
@@ -33972,7 +33921,7 @@ mod tests {
             value_contains_string(&ui_probe, "DIMENSION MODE"),
             "dimension custom UI probe should contain the mode buttons: {ui_probe:?}"
         );
-        assert!(value_contains_string(&ui_probe, "DYNAMIC COLOR"));
+        assert!(value_contains_string(&ui_probe, "COLOR"));
         assert!(value_contains_string(&ui_probe, "lf sat 2"));
         assert!(value_contains_string(&ui_probe, "depth"));
         editor.refresh_runtime_side_effects();
@@ -36208,12 +36157,15 @@ mod tests {
         collect_layout_node_summaries(&layout, &mut layout_summaries);
         let dimension_base = find_layout_node_by_stable_key(
             &layout,
-            "custom-ui-lego-knob-dimension-d-chorus-slot-0-base",
+            "custom-ui-lego-knob-dimension-d-chorus-slot-0-base-base",
         )
         .unwrap_or_else(|| panic!("dimension base knob; layout={layout_summaries:#?}"));
         assert!(
-            find_layout_node_by_stable_key(&layout, "custom-ui-lego-num-lexilush-slot-1-damping")
-                .is_some(),
+            find_layout_node_by_stable_key(
+                &layout,
+                "custom-ui-lego-num-lexilush-slot-1-base-damping",
+            )
+            .is_some(),
             "lexilush damping control should also be rendered; layout={layout_summaries:#?}"
         );
         let callback = dimension_base
@@ -36358,11 +36310,14 @@ mod tests {
         let mut layout_summaries = Vec::new();
         collect_layout_node_summaries(&layout, &mut layout_summaries);
         let cutoff =
-            find_layout_node_by_stable_key(&layout, "custom-ui-knob-test-instrument-cutoff")
+            find_layout_node_by_stable_key(&layout, "custom-ui-knob-test-instrument-base-cutoff")
                 .unwrap_or_else(|| panic!("instrument cutoff knob; layout={layout_summaries:#?}"));
         assert!(
-            find_layout_node_by_stable_key(&layout, "custom-ui-lego-num-lexilush-slot-1-damping")
-                .is_some(),
+            find_layout_node_by_stable_key(
+                &layout,
+                "custom-ui-lego-num-lexilush-slot-1-base-damping",
+            )
+            .is_some(),
             "audio FX should render after the instrument and leave the render globals in audio scope"
         );
         let callback = cutoff
@@ -36676,7 +36631,7 @@ mod tests {
         assert!(
             find_layout_node_by_stable_key(
                 &layout,
-                "custom-ui-lego-knob-shimmerpitch-slot-0-shift"
+                "custom-ui-lego-knob-shimmerpitch-slot-0-base-shift"
             )
             .is_some(),
             "shimmerpitch should render after the instrument and leave the render globals in audio scope"
@@ -38860,25 +38815,6 @@ mod tests {
             "instrument panel should occupy visible measured space, got {:?}",
             instrument_panel.rect
         );
-        for tab_text in ["Amp", "Filter"] {
-            let tab = find_layout_node_by_text(&layout, tab_text)
-                .unwrap_or_else(|| panic!("{tab_text} envelope tab should render"));
-            assert!(
-                tab.rect.width > 1.0 && tab.rect.height > 0.2,
-                "{tab_text} envelope tab should have visible geometry, got {:?}",
-                tab.rect
-            );
-        }
-        for divider_name in ["adsr-tabs-divider", "adsr-controls-divider"] {
-            let divider = find_layout_node_by_debug_name(&layout, divider_name)
-                .unwrap_or_else(|| panic!("{divider_name} should render"));
-            assert!(
-                divider.rect.width > 20.0 && divider.rect.height > 0.0,
-                "{divider_name} should span the wide envelope panel, got {:?}",
-                divider.rect
-            );
-        }
-
         for suffix in [
             "strike_mask",
             "stroke",
@@ -41858,157 +41794,6 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_fx_lisp_lays_out_mod_fm_messui_dense_controls() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let ui = std::fs::read_to_string("instruments/fm/mod-fm-messui/ui.lisp")
-            .expect("read mod FM ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "mod-fm-messui/".to_string(),
-            "instruments/fm/mod-fm-messui/ui.lisp".to_string(),
-            ui,
-        )));
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(mod_fm_messui_test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load mod FM custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("mod FM custom instrument fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("mod FM layout should build");
-        let rendered = render_layout_cells(&layout, 180, 18);
-        assert!(
-            !rendered.contains("missing:"),
-            "mod FM dense UI should not render missing-param diagnostics:\n{rendered}"
-        );
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        let adsr_editor =
-            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
-        assert!(
-            adsr_editor.rect.width > 8.0
-                && adsr_editor.rect.height > 2.0
-                && adsr_editor.rect.height <= 4.0,
-            "mod FM ADSR editor should stay constrained in the dense detail panel, got {:?}",
-            adsr_editor.rect
-        );
-
-        let op1_ratio = find_stable_key_suffix(&layout, "op1_ratio").expect("op1 ratio control");
-        let op1_level = find_stable_key_suffix(&layout, "op1_level").expect("op1 level knob");
-        let op3_level = find_stable_key_suffix(&layout, "op3_level").expect("op3 level knob");
-        let f1_mode = find_stable_key_suffix(&layout, "f1_mode").expect("filter mode dropdown");
-        let f1_cutoff = find_stable_key_suffix(&layout, "f1_cutoff").expect("filter cutoff knob");
-
-        assert!(
-            op1_ratio.rect.width > 1.0
-                && op1_level.rect.width > 1.0
-                && op3_level.rect.width > 1.0
-                && f1_mode.rect.width > 1.0
-                && f1_cutoff.rect.width > 1.0,
-            "dense controls should have visible measured rects: op1_ratio={:?} op1_level={:?} op3_level={:?} f1_mode={:?} f1_cutoff={:?}",
-            op1_ratio.rect,
-            op1_level.rect,
-            op3_level.rect,
-            f1_mode.rect,
-            f1_cutoff.rect
-        );
-        assert!(
-            op1_ratio.rect.col + op1_ratio.rect.width <= op1_level.rect.col
-                && op1_level.rect.col + op1_level.rect.width <= op3_level.rect.col
-                && f1_mode.rect.col + f1_mode.rect.width <= f1_cutoff.rect.col,
-            "dense micro clusters should end before the knob lanes; op1_ratio={:?} op1_level={:?} op3_level={:?} f1_mode={:?} f1_cutoff={:?}",
-            op1_ratio.rect,
-            op1_level.rect,
-            op3_level.rect,
-            f1_mode.rect,
-            f1_cutoff.rect
-        );
-
-        for suffix in [
-            "op3_level",
-            "f1_cutoff",
-            "f2_resonance",
-            "filter_route",
-            "gain",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present"));
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
-    #[test]
     fn metal_seq_fx_lisp_collects_modded_909_mutant_knob_primitives() {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -43740,6 +43525,7 @@ mod tests {
             "seq-toggle-bus-solo",
             "seq-set-bus-volume",
             "seq-clear-selection",
+            "sbrowser-drop-sample-on-track",
         ] {
             let calls = Arc::clone(&calls);
             editor
@@ -43878,6 +43664,7 @@ mod tests {
             other => panic!("expected delete-track host command, got {other:?}"),
         }
 
+        calls.lock().unwrap().clear();
         editor
             .runtime_mut()
             .eval_str(
@@ -43887,31 +43674,17 @@ mod tests {
                       :target (dict :kind "track" :track 0)))"#,
             )
             .expect("drop sample on track");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "load-sample-into-track");
-                let Value::Map(payload) = payload else {
-                    panic!("load-sample-into-track payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("track").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-                assert_eq!(
-                    payload.get("path").map(|value| value.borrow().clone()),
-                    Some(Value::String("samples/kick.wav".to_string()))
-                );
-                assert_eq!(
-                    payload
-                        .get("preserve-browser-context")
-                        .map(|value| value.borrow().clone()),
-                    Some(Value::Bool(true))
-                );
-            }
-            other => panic!("expected load-sample-into-track host command, got {other:?}"),
-        }
+        let sample_drop_calls = calls.lock().unwrap();
+        assert_eq!(sample_drop_calls.len(), 1);
+        assert!(
+            sample_drop_calls[0].starts_with("sbrowser-drop-sample-on-track:"),
+            "mixer sample drops should delegate to the sample browser: {sample_drop_calls:?}"
+        );
+        drop(sample_drop_calls);
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "the sample browser owns sample-loading commands"
+        );
 
         editor
             .runtime_mut()

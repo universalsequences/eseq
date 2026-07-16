@@ -27,6 +27,7 @@ struct MetalEmitter {
     scopes: Vec<HashMap<String, String>>,
     type_scopes: Vec<HashMap<String, &'static str>>,
     uniform_symbols: HashMap<String, String>,
+    theme: theme::Theme,
     current_region_id: Option<usize>,
     next_region_id: usize,
 }
@@ -55,12 +56,17 @@ struct LightingSpec<'a> {
 
 impl MetalEmitter {
     fn new(uniform_symbols: HashMap<String, String>) -> Self {
+        Self::with_theme(uniform_symbols, theme::current())
+    }
+
+    fn with_theme(uniform_symbols: HashMap<String, String>, theme: theme::Theme) -> Self {
         Self {
             next_var: 0,
             statements: Vec::new(),
             scopes: Vec::new(),
             type_scopes: Vec::new(),
             uniform_symbols,
+            theme,
             current_region_id: None,
             next_region_id: 0,
         }
@@ -160,7 +166,7 @@ impl MetalEmitter {
             Expression::Symbol(name) => Ok(self.resolve_symbol(name)),
 
             Expression::Keyword(name) => {
-                let color = theme::named_color(name)
+                let color = theme::named_color_in(&self.theme, name)
                     .ok_or_else(|| CodegenError::UnknownThemeColor(name.clone()))?;
                 Ok(format!(
                     "float4({}, {}, {}, {})",
@@ -1275,7 +1281,14 @@ pub fn compile_sdf_to_metal_with_state(
 /// Compile only the SDF expression (no shader wrapper). Useful for testing
 /// and for Milestone 2 where sdf/layer composes multiple SDF expressions.
 pub fn compile_sdf_expr(expr: &Expression) -> Result<(Vec<String>, String), CodegenError> {
-    let mut emitter = MetalEmitter::new(HashMap::new());
+    compile_sdf_expr_with_theme(expr, theme::current())
+}
+
+fn compile_sdf_expr_with_theme(
+    expr: &Expression,
+    theme: theme::Theme,
+) -> Result<(Vec<String>, String), CodegenError> {
+    let mut emitter = MetalEmitter::with_theme(HashMap::new(), theme);
     let result = emitter.emit_expr(expr)?;
     Ok((emitter.statements, result))
 }
@@ -1556,13 +1569,16 @@ mod tests {
 
     #[test]
     fn sdf_fill_legacy_color_is_material_sugar() {
-        let legacy = compile_sdf_expr(&parse_one_expr(
-            "(sdf/fill (- (length (vec2 x y)) 0.5) :accent)",
-        ))
+        let theme = theme::current();
+        let legacy = compile_sdf_expr_with_theme(
+            &parse_one_expr("(sdf/fill (- (length (vec2 x y)) 0.5) :accent)"),
+            theme,
+        )
         .unwrap();
-        let material = compile_sdf_expr(&parse_one_expr(
-            "(sdf/fill (- (length (vec2 x y)) 0.5) (material :color :accent))",
-        ))
+        let material = compile_sdf_expr_with_theme(
+            &parse_one_expr("(sdf/fill (- (length (vec2 x y)) 0.5) (material :color :accent))"),
+            theme,
+        )
         .unwrap();
         assert_eq!(legacy.0, material.0);
         assert_eq!(legacy.1, material.1);

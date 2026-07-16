@@ -1603,6 +1603,7 @@ pub struct VM {
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
     pub writable_reactive_namespaces: HashSet<String>,
+    pub(crate) reactive_float_slots: crate::reactive::ReactiveBindingStore,
     pending_reactive_sets: Vec<(String, String, Value)>,
     pub derived_bindings: HashMap<String, NodeId>,
     pub state_bindings: HashMap<String, NodeId>,
@@ -1777,9 +1778,11 @@ pub fn register_core_natives(vm: &mut VM) {
         }
         let value = value.clone();
         match &value {
-            Value::Number(number) => crate::reactive::write_float_slot(namespace, field, *number),
-            Value::Bool(true) => crate::reactive::write_float_slot(namespace, field, 1.0),
-            Value::Bool(false) => crate::reactive::write_float_slot(namespace, field, 0.0),
+            Value::Number(number) => vm
+                .reactive_float_slots
+                .write_float(namespace, field, *number),
+            Value::Bool(true) => vm.reactive_float_slots.write_float(namespace, field, 1.0),
+            Value::Bool(false) => vm.reactive_float_slots.write_float(namespace, field, 0.0),
             _ => {}
         }
         vm.update_reactive_global(namespace, field, value.clone());
@@ -1790,20 +1793,20 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::Bool(true)
     });
 
-    vm.register_native("bind", |args| {
+    vm.register_native_with_vm("bind", |args, vm| {
         let (Some(Value::String(namespace)), Some(Value::String(field))) =
             (args.first(), args.get(1))
         else {
             return Value::Nil;
         };
-        reactive_float_ref(namespace, field)
+        reactive_float_ref(&vm.reactive_float_slots, namespace, field)
     });
 
-    vm.register_native("bind-seq", |args| {
+    vm.register_native_with_vm("bind-seq", |args, vm| {
         let Some(Value::String(field)) = args.first() else {
             return Value::Nil;
         };
-        reactive_float_ref("SEQ", field)
+        reactive_float_ref(&vm.reactive_float_slots, "SEQ", field)
     });
 
     vm.register_native_with_vm("reactive-value", |args, vm| {
@@ -1829,7 +1832,7 @@ pub fn register_core_natives(vm: &mut VM) {
         }
     });
 
-    vm.register_native("bind-nth", |args| {
+    vm.register_native_with_vm("bind-nth", |args, vm| {
         let (
             Some(Value::String(namespace)),
             Some(Value::String(field)),
@@ -1841,10 +1844,10 @@ pub fn register_core_natives(vm: &mut VM) {
         let Some(index) = binding_index(*index) else {
             return Value::Nil;
         };
-        reactive_indexed_float_ref(namespace, field, index)
+        reactive_indexed_float_ref(&vm.reactive_float_slots, namespace, field, index)
     });
 
-    vm.register_native("bind-seq-nth", |args| {
+    vm.register_native_with_vm("bind-seq-nth", |args, vm| {
         let (Some(Value::String(field)), Some(Value::Number(index))) = (args.first(), args.get(1))
         else {
             return Value::Nil;
@@ -1852,7 +1855,7 @@ pub fn register_core_natives(vm: &mut VM) {
         let Some(index) = binding_index(*index) else {
             return Value::Nil;
         };
-        reactive_indexed_float_ref("SEQ", field, index)
+        reactive_indexed_float_ref(&vm.reactive_float_slots, "SEQ", field, index)
     });
 
     vm.register_native_with_vm("subtree-owner", |args, vm| {
@@ -2285,23 +2288,32 @@ pub fn register_core_natives(vm: &mut VM) {
     });
 }
 
-fn reactive_float_ref(namespace: &str, field: &str) -> Value {
+fn reactive_float_ref(
+    slots: &crate::reactive::ReactiveBindingStore,
+    namespace: &str,
+    field: &str,
+) -> Value {
     Value::ReactiveRef {
         namespace: namespace.to_string(),
         field: field.to_string(),
         index: None,
         kind: BindingKind::Float,
-        slot: crate::reactive::reactive_float_slot(namespace, field),
+        slot: slots.slot(namespace, field),
     }
 }
 
-fn reactive_indexed_float_ref(namespace: &str, field: &str, index: usize) -> Value {
+fn reactive_indexed_float_ref(
+    slots: &crate::reactive::ReactiveBindingStore,
+    namespace: &str,
+    field: &str,
+    index: usize,
+) -> Value {
     Value::ReactiveRef {
         namespace: namespace.to_string(),
         field: field.to_string(),
         index: Some(index),
         kind: BindingKind::Float,
-        slot: crate::reactive::reactive_indexed_float_slot(namespace, field, index),
+        slot: slots.indexed_slot(namespace, field, index),
     }
 }
 
@@ -2934,6 +2946,7 @@ impl VM {
             tracking_stack: Vec::new(),
             reactive_namespaces: HashSet::new(),
             writable_reactive_namespaces: HashSet::new(),
+            reactive_float_slots: crate::reactive::ReactiveBindingStore::default(),
             pending_reactive_sets: Vec::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
@@ -5108,6 +5121,8 @@ impl VM {
                         return Err(VMError::ReadonlyReactive(namespace));
                     }
                     let new_value = value.borrow().clone();
+                    self.reactive_float_slots
+                        .store_value(&namespace, &field, &new_value);
                     self.update_reactive_global(&namespace, &field, new_value.clone());
                     let source_id = self.get_or_create_source_node(&namespace, &field);
                     self.mark_source_dependents_dirty(source_id, new_value);

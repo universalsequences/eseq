@@ -122,20 +122,21 @@
       :bg :transparent)))
 
 (def instrument-header-tab-button (text active width click)
-     (v-stack (box :height 0.1)
-  (button text
-	  :width (* 1.5 width)
-    :height 3.2
-    :padding 0.05
-    :font-size 11
-    :shape :tab
-    :active (if active 1 0)
-    :background-color :transparent
-    :active-background-color :black
-    :color :dim
-    :active-color :white
-    :border-color :transparent
-    :on-click click)))
+  (v-stack :height 0.9 :gap 0
+    (box :height 0.1)
+    (button text
+      :width (* 1.5 width)
+      :height 0.8
+      :padding 0.05
+      :font-size 11
+      :shape :tab
+      :active (if active 1 0)
+      :background-color :transparent
+      :active-background-color :black
+      :color :dim
+      :active-color :white
+      :border-color :transparent
+      :on-click click)))
 
 (def instrument-synth-button ()
   (instrument-header-tab-button "synth" (and (= instrument-panel-tab 0) (not instrument-mods-open)) 4.5

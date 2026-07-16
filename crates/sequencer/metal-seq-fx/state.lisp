@@ -32,7 +32,7 @@
 
 ;; Matches a standard built-in FX panel with four parameter rows.
 (def fx-fixed-panel-height 10.8)
-(def fx-panel-header-height 0.75)
+(def fx-panel-header-height 1.0)
 (def fx-panel-body-padding 0.25)
 (def fx-panel-body-top-spacer-height 0.16)
 (def fx-panel-body-content-height 

@@ -341,6 +341,18 @@ fn toggle_master_recording_capture(
     master_recording: &AtomicBool,
     master_recorder: &sequencer::recorder::MasterRecorder,
 ) -> Result<(bool, String), String> {
+    toggle_master_recording_capture_in(
+        master_recording,
+        master_recorder,
+        std::path::Path::new("recordings"),
+    )
+}
+
+fn toggle_master_recording_capture_in(
+    master_recording: &AtomicBool,
+    master_recorder: &sequencer::recorder::MasterRecorder,
+    recordings_dir: &std::path::Path,
+) -> Result<(bool, String), String> {
     if master_recording.load(Ordering::Acquire) {
         let take = match master_recorder.stop() {
             Ok(take) => take,
@@ -351,9 +363,7 @@ fn toggle_master_recording_capture(
         };
         master_recording.store(false, Ordering::Release);
 
-        let path = sequencer::recorder::resolve_recording_path(
-            &sequencer::recorder::default_recording_name(),
-        );
+        let path = recordings_dir.join(sequencer::recorder::default_recording_name());
         sequencer::recorder::save_recording_wav(&path, &take)
             .map_err(|error| format!("Failed to save master recording: {error}"))?;
         Ok((
@@ -1989,7 +1999,7 @@ pub(crate) fn init_runtime(
                     "seq-set-process-inlet: unsupported literal {}",
                     eseqlisp::vm::format_lisp_value(other)
                 )
-                .into())
+                .into());
             }
         };
         let updated = st.set_track_process_inlet_value(
@@ -2178,7 +2188,7 @@ pub(crate) fn init_runtime(
                     "seq-set-process-trace: expected bool-ish value, got {}",
                     eseqlisp::vm::format_lisp_value(other)
                 )
-                .into())
+                .into());
             }
         };
         st.set_process_trace_enabled(enabled);
@@ -2679,6 +2689,7 @@ pub(crate) fn init_runtime(
     let descs = effect_descriptors.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
+    let reactive_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-set-effect-param-pair", move |args, _ctx| {
         let (
             Some(Value::Number(slot)),
@@ -2747,7 +2758,7 @@ pub(crate) fn init_runtime(
                 .and_then(|d| d.params.get(param_idx))
                 .map(|p| p.name.as_str())
             {
-                eseqlisp::reactive::write_float_slot(
+                reactive_bindings.write_float(
                     "SEQ",
                     &track_effect_param_value_field(track, slot_idx, param_idx, name),
                     clamped as f64,
@@ -2779,6 +2790,7 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let descs = effect_descriptors.clone();
+    let reactive_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-set-effect-param-pair-live", move |args, _ctx| {
         let (
             Some(Value::Number(slot)),
@@ -2850,7 +2862,7 @@ pub(crate) fn init_runtime(
                 .and_then(|d| d.params.get(param_idx))
                 .map(|p| p.name.as_str())
             {
-                eseqlisp::reactive::write_float_slot(
+                reactive_bindings.write_float(
                     "SEQ",
                     &track_effect_param_value_field(track, slot_idx, param_idx, name),
                     clamped as f64,
@@ -3436,7 +3448,7 @@ pub(crate) fn init_runtime(
                         return Err(
                             "seq-set-track-param: :global-transpose expects a bool or number"
                                 .into(),
-                        )
+                        );
                     }
                 };
                 tp.set_global_transpose(enabled);
@@ -5121,7 +5133,6 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::MutexGuard;
 
     fn map_bool(value: &Value, key: &str) -> bool {
         let Value::Map(map) = value else {
@@ -5153,21 +5164,12 @@ mod tests {
         }
     }
 
-    static CWD_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-
-    struct TempCwdGuard {
-        original: std::path::PathBuf,
+    struct TempDirGuard {
         path: std::path::PathBuf,
-        _guard: MutexGuard<'static, ()>,
     }
 
-    impl TempCwdGuard {
-        fn enter(name: &str) -> Self {
-            let guard = CWD_TEST_LOCK
-                .get_or_init(|| std::sync::Mutex::new(()))
-                .lock()
-                .expect("lock cwd test guard");
-            let original = std::env::current_dir().expect("read current dir");
+    impl TempDirGuard {
+        fn create(name: &str) -> Self {
             let unique = format!(
                 "{}-{}-{}",
                 name,
@@ -5178,13 +5180,8 @@ mod tests {
                     .as_nanos()
             );
             let path = std::env::temp_dir().join(unique);
-            std::fs::create_dir_all(&path).expect("create temp cwd");
-            std::env::set_current_dir(&path).expect("enter temp cwd");
-            Self {
-                original,
-                path,
-                _guard: guard,
-            }
+            std::fs::create_dir_all(&path).expect("create temp directory");
+            Self { path }
         }
     }
 
@@ -5255,9 +5252,8 @@ mod tests {
         assert!(err.contains("mode"), "unexpected error: {err}");
     }
 
-    impl Drop for TempCwdGuard {
+    impl Drop for TempDirGuard {
         fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.original);
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -5277,12 +5273,13 @@ mod tests {
 
     #[test]
     fn master_recording_toggle_starts_saves_wav_and_reports_empty_take() {
-        let cwd = TempCwdGuard::enter("metal-master-recording-toggle");
+        let recordings = TempDirGuard::create("metal-master-recording-toggle");
         let recorder = sequencer::recorder::MasterRecorder::new(44_100, 2);
         let master_recording = AtomicBool::new(false);
 
         let (active, status) =
-            toggle_master_recording_capture(&master_recording, &recorder).expect("start capture");
+            toggle_master_recording_capture_in(&master_recording, &recorder, &recordings.path)
+                .expect("start capture");
         assert!(active, "start should return active");
         assert!(
             status.contains("started"),
@@ -5293,17 +5290,17 @@ mod tests {
 
         recorder.capture(&[0.25, -0.25, 0.5, -0.5]);
         let (active, status) =
-            toggle_master_recording_capture(&master_recording, &recorder).expect("stop capture");
+            toggle_master_recording_capture_in(&master_recording, &recorder, &recordings.path)
+                .expect("stop capture");
         assert!(!active, "stop should return inactive");
         assert!(
-            status.contains("Saved master recording to recordings/recording-"),
-            "stop status should include saved recordings path: {status}"
+            status.contains(&recordings.path.to_string_lossy().into_owned()),
+            "stop status should include the configured recordings path: {status}"
         );
         assert!(!master_recording.load(Ordering::Acquire));
         assert!(!recorder.is_active());
 
-        let recordings_dir = cwd.path.join("recordings");
-        let saved = wav_files(&recordings_dir);
+        let saved = wav_files(&recordings.path);
         assert_eq!(saved.len(), 1, "expected one saved WAV in recordings/");
         assert!(
             std::fs::metadata(&saved[0])
@@ -5313,11 +5310,13 @@ mod tests {
             "saved WAV should contain audio samples"
         );
 
-        let (active, _) = toggle_master_recording_capture(&master_recording, &recorder)
-            .expect("start empty take");
+        let (active, _) =
+            toggle_master_recording_capture_in(&master_recording, &recorder, &recordings.path)
+                .expect("start empty take");
         assert!(active);
-        let error = toggle_master_recording_capture(&master_recording, &recorder)
-            .expect_err("empty take should fail instead of writing");
+        let error =
+            toggle_master_recording_capture_in(&master_recording, &recorder, &recordings.path)
+                .expect_err("empty take should fail instead of writing");
         assert!(
             error.contains("Recording is empty"),
             "empty-take error should be explicit: {error}"
@@ -5325,7 +5324,7 @@ mod tests {
         assert!(!master_recording.load(Ordering::Acquire));
         assert!(!recorder.is_active());
         assert_eq!(
-            wav_files(&recordings_dir),
+            wav_files(&recordings.path),
             saved,
             "empty recording should not create another WAV"
         );

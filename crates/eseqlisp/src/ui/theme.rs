@@ -198,8 +198,12 @@ macro_rules! theme_slots {
         }
 
         pub fn named_color(name: &str) -> Option<Color> {
-            let normalized = normalize_name(name);
             let theme = current();
+            named_color_in(&theme, name)
+        }
+
+        pub fn named_color_in(theme: &Theme, name: &str) -> Option<Color> {
+            let normalized = normalize_name(name);
             match normalized.as_str() {
                 "primary" => Some(theme.accent),
                 "secondary" => Some(theme.red),

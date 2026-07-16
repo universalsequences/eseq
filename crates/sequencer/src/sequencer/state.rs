@@ -7831,10 +7831,7 @@ mod tests {
             state.pattern.swing_resolution_plocks[0].get(5),
             Some(SwingResolution::Eighth)
         );
-        assert_eq!(
-            state.pattern.step_data[0].get(5, StepParam::Velocity),
-            0.77
-        );
+        assert_eq!(state.pattern.step_data[0].get(5, StepParam::Velocity), 0.77);
 
         assert!(state.clear_variant_locks_for_steps(0, &[5]));
         assert_eq!(state.pattern.timebase_plocks[0].get(5), None);
@@ -10394,15 +10391,15 @@ mod tests {
     }
 
     #[test]
-    fn project_process_chain_slot_edits_reach_the_shared_slot_from_any_track() {
+    fn project_process_chain_slot_edits_share_structure_and_fork_track_lanes() {
         let state = make_state_with_tracks(2);
         let mut project_chain = sample_process_chain();
         project_chain.slots[0].project_layer = true;
         let instance_id = project_chain.slots[0].instance_id;
         assert!(state.set_project_process_chain(project_chain));
 
-        // Track-scoped mutators fall back to the shared project slot when the
-        // instance is not in that track's own chain (edit-from-any-track).
+        // Structural track-scoped mutators fall back to the shared project slot
+        // when the instance is not in that track's own chain.
         assert!(state.set_track_process_slot_enabled(1, instance_id, false));
         assert!(!state.project_process_chain().slots[0].enabled);
         assert!(state.set_track_process_slot_enabled(0, instance_id, true));
@@ -10414,13 +10411,36 @@ mod tests {
                 .lanes
                 .get("amount")
                 .map(|lane| lane.values.clone()),
-            Some(vec![0.0, 1.0, 7.0])
+            Some(vec![0.0, 1.0])
         );
+        assert_eq!(
+            state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values,
+            vec![0.0, 1.0]
+        );
+        assert_eq!(
+            state.composed_track_process_chain(1).unwrap().slots[0].lanes["amount"].values,
+            vec![0.0, 1.0, 7.0]
+        );
+        assert!(state.has_project_process_lane_override(1, instance_id, "amount"));
 
-        // Instance-wide mutators (lane! / handle knob writes) reach it too.
+        // Instance-wide mutators update the live project template without
+        // overwriting a track's explicit lane override.
         assert_eq!(
             state.set_process_lane_values(instance_id, "amount", vec![0.0, 3.0]),
             1
+        );
+        assert_eq!(
+            state.composed_track_process_chain(0).unwrap().slots[0].lanes["amount"].values,
+            vec![0.0, 3.0]
+        );
+        assert_eq!(
+            state.composed_track_process_chain(1).unwrap().slots[0].lanes["amount"].values,
+            vec![0.0, 1.0, 7.0]
+        );
+        assert!(state.clear_project_process_lane_override(1, instance_id, "amount"));
+        assert_eq!(
+            state.composed_track_process_chain(1).unwrap().slots[0].lanes["amount"].values,
+            vec![0.0, 3.0]
         );
         assert_eq!(state.process_instance_attachment_count(instance_id), 1);
 

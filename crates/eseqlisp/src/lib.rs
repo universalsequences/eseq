@@ -1689,6 +1689,37 @@ mod tests {
     }
 
     #[test]
+    fn reactive_float_bindings_are_isolated_per_runtime() {
+        let mut first = Runtime::new();
+        first.register_reactive("APP", vec![("level", Value::Number(0.0))], true);
+        first
+            .eval_str(r#"(def level-ref (bind "APP" "level"))"#)
+            .expect("bind first runtime level");
+
+        let mut second = Runtime::new();
+        second.register_reactive("APP", vec![("level", Value::Number(0.0))], true);
+        second
+            .eval_str(r#"(def level-ref (bind "APP" "level"))"#)
+            .expect("bind second runtime level");
+
+        first
+            .eval_str(r#"(reactive-set "APP" "level" 0.25)"#)
+            .expect("set first runtime level");
+        second
+            .eval_str(r#"(reactive-set "APP" "level" 0.75)"#)
+            .expect("set second runtime level");
+
+        assert_eq!(
+            first.eval_str("(reactive-value level-ref)").unwrap(),
+            Some(Value::Number(0.25))
+        );
+        assert_eq!(
+            second.eval_str("(reactive-value level-ref)").unwrap(),
+            Some(Value::Number(0.75))
+        );
+    }
+
+    #[test]
     fn box_accepts_selected_and_muted_reactive_bindings() {
         let mut runtime = Runtime::new();
         runtime.register_reactive(

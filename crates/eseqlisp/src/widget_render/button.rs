@@ -935,8 +935,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn button_metal_resolves_reactive_active_colors_at_draw_time() {
-        let slot = crate::reactive::reactive_float_slot("BUTTON_TEST", "active");
-        crate::reactive::write_float_slot("BUTTON_TEST", "active", 0.0);
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let slot = slots.slot("BUTTON_TEST", "active");
+        slots.write_float("BUTTON_TEST", "active", 0.0);
         let node = test_button_node(HashMap::from([
             ("text".to_string(), Value::String("Loop".to_string())),
             (
@@ -978,7 +979,7 @@ mod tests {
             .expect("button background");
         assert_eq!(inactive_bg, [0.1, 0.2, 0.3, 1.0]);
 
-        crate::reactive::write_float_slot("BUTTON_TEST", "active", 1.0);
+        slots.write_float("BUTTON_TEST", "active", 1.0);
         let active_prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
         let active_bg = active_prims
             .iter()
