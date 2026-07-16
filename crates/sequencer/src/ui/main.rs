@@ -67,8 +67,8 @@ use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
     CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
-    MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
-    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
+    MAX_STEPS, MidiFxPosition, PatternId, RackSlotParam, SYNC_RESOLUTIONS, SequencerState,
+    StepParam, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
 };
 use sequencer::tui;
 use std::sync::atomic::AtomicBool;
@@ -3879,14 +3879,14 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
+        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP, Runtime, StepParam, Value,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         resolve_instrument_swap_target_index, restore_instrument_patcher_layout_source,
         should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
         show_instrument_patcher_source_layout_source, track_meter_bindings_visible,
-        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
-        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -5204,7 +5204,7 @@ mod tests {
                     time_seconds: 0.0,
                     focused_widget_id: sequencer_frame.frame.focused_widget_id,
                     focused_branch: false,
-                    tile_content_rows: 70.0,
+                    overlay_viewport_bottom: 70.0,
                     scroll_top: sequencer_frame.frame.widget_scroll_top
                         + sequencer_frame.frame.text_scroll_top as f32,
                     scroll_left: sequencer_frame.frame.widget_layout_scroll_left,
@@ -5885,6 +5885,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cached_peak_r_level = 0.0f64;
     let mut cached_track_peak_levels = vec![0.0; track_names.len()];
     let mut cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+    let mut prev_queued_transport_scene: Option<usize> = None;
     let (mut cached_modulator_phases, mut cached_modulator_levels) =
         read_modulator_display_values(app.graph.lg, &app);
     let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
@@ -5902,6 +5903,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ui_loop_stats = UiLoopStats::new();
 
     loop {
+        for result in app.drain_due_pattern_launches() {
+            match result {
+                Ok(outcome) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Applied quantized pattern launch {}",
+                    outcome.token.unwrap_or_default()
+                ))),
+                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                    "Quantized pattern launch failed: {error:?}"
+                ))),
+            }
+        }
+        let queued_transport_scene = state
+            .quantized_launches()
+            .pending_target(sequencer::quantized_launch::QuantizedLaunchOwner::Transport)
+            .map(|target| match target {
+                sequencer::quantized_launch::PatternLaunchTarget::Scene { scene }
+                | sequencer::quantized_launch::PatternLaunchTarget::SceneTracks { scene, .. } => {
+                    scene
+                }
+            });
+        if queued_transport_scene != prev_queued_transport_scene {
+            let rt = editor.runtime_mut();
+            rt.set_reactive(
+                "SEQ",
+                "queued-scene",
+                Value::Number(
+                    queued_transport_scene
+                        .map(|scene| scene as f64)
+                        .unwrap_or(-1.0),
+                ),
+            );
+            rt.run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            if editor_has_visible_buffer(&editor, "*transport*") {
+                editor.refresh_visible_layouts_for_buffer_named("*transport*");
+            }
+            editor.mark_needs_redraw();
+            prev_queued_transport_scene = queued_transport_scene;
+        }
         let sample_browser_ready = { sample_browser.borrow_mut().poll_ready() };
         match sample_browser_ready {
             Ok(true) => {
@@ -6373,6 +6413,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     MacroHostCommandOutcome::NotMacro => {}
                 }
                 match name.as_str() {
+                    "set-scene-launch-quantize" => {
+                        let Value::String(label) = payload else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "Scene launch quantization selection was invalid".to_string(),
+                            ));
+                            continue;
+                        };
+                        let Some(quantize) =
+                            sequencer::quantized_launch::LaunchQuantize::from_transport_label(
+                                &label,
+                            )
+                        else {
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Unknown scene launch quantization: {label}"
+                            )));
+                            continue;
+                        };
+                        editor.runtime_mut().set_reactive(
+                            "SEQ",
+                            "scene-launch-quantize",
+                            Value::String(quantize.transport_label().to_string()),
+                        );
+                        editor.runtime_mut().run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.mark_needs_redraw();
+                    }
                     "reveal-sequencer-track" => {
                         if let Some(track) = extract_usize_from_payload(&payload, "track") {
                             if track < app.tracks.len() {
@@ -13320,10 +13386,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 _ => None,
                             });
                             if let Some(idx) = idx {
-                                let mut switch_bus_elapsed = Duration::ZERO;
+                                let quantize_label =
+                                    extract_string_from_payload(&payload, "quantize")
+                                        .unwrap_or_else(|| "off".to_string());
+                                let Some(quantize) = sequencer::quantized_launch::LaunchQuantize::from_transport_label(&quantize_label) else {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Unknown scene launch quantization: {quantize_label}"
+                                    )));
+                                    continue;
+                                };
+                                if quantize != sequencer::quantized_launch::LaunchQuantize::Off {
+                                    match state.schedule_quantized_pattern_launch(
+                                        sequencer::quantized_launch::PatternLaunchTarget::Scene {
+                                            scene: idx,
+                                        },
+                                        quantize,
+                                        sequencer::quantized_launch::QuantizedLaunchOwner::Transport,
+                                    ) {
+                                        Ok(token) => editor.handle_host_event(HostEvent::Status(
+                                            format!(
+                                                "Queued scene {} at {} (launch {})",
+                                                idx + 1,
+                                                quantize.transport_label(),
+                                                token
+                                            ),
+                                        )),
+                                        Err(error) => editor.handle_host_event(HostEvent::Error(
+                                            format!("Could not queue scene launch: {error:?}"),
+                                        )),
+                                    }
+                                    continue;
+                                }
+                                let switch_bus_elapsed = Duration::ZERO;
                                 let state_switch_elapsed;
-                                let mut apply_samples_elapsed = Duration::ZERO;
-                                let mut restored_defaults_elapsed = Duration::ZERO;
+                                let apply_samples_elapsed = Duration::ZERO;
+                                let restored_defaults_elapsed = Duration::ZERO;
                                 let mut sync_names_pattern_elapsed = Duration::ZERO;
                                 let mut sync_current_steps_elapsed = Duration::ZERO;
                                 let mut sync_sequencer_elapsed = Duration::ZERO;
@@ -13341,42 +13438,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let mut sync_plocks_sidebar_elapsed = Duration::ZERO;
                                 let mut reactive_elapsed = Duration::ZERO;
                                 let mut side_effects_elapsed = Duration::ZERO;
-                                let num_tracks = app.tracks.len();
-                                let current_pattern = app.state.current_scene_index();
-                                let num_patterns = app.state.scene_count();
-                                if idx != current_pattern && idx < num_patterns {
-                                    let started = Instant::now();
-                                    app.switch_bus_pattern(idx);
-                                    switch_bus_elapsed = started.elapsed();
-                                }
                                 let started = Instant::now();
-                                let switched = app.state.switch_pattern(
-                                    idx,
-                                    num_tracks,
-                                    &app.graph.track_buffer_ids,
-                                    &app.graph.track_sample_rates,
-                                    &app.tracks,
-                                    &app.graph.track_instrument_types,
+                                let switched = app.apply_manual_pattern_launch(
+                                    &sequencer::quantized_launch::PatternLaunchTarget::Scene {
+                                        scene: idx,
+                                    },
                                 );
                                 state_switch_elapsed = started.elapsed();
-                                let pattern_changed = switched.is_some();
-                                if let Some(sample_ids) = switched {
-                                    let started = Instant::now();
-                                    app.graph_controller().apply_sample_ids(&sample_ids);
-                                    if let Err(error) = app
-                                        .graph_controller()
-                                        .sync_track_instrument_run_modes_from_live_state()
-                                    {
-                                        app.editor.status_message = Some((
-                                            format!("Pattern switch failed: {error}"),
-                                            Instant::now(),
-                                        ));
-                                    }
-                                    app.graph_controller().sync_current_pattern_mod_routes();
-                                    apply_samples_elapsed = started.elapsed();
-                                    let started = Instant::now();
-                                    app.push_all_restored_defaults();
-                                    restored_defaults_elapsed = started.elapsed();
+                                let pattern_changed = switched.is_ok();
+                                if switched.is_ok() {
                                     let ct = current_track.load(Ordering::Relaxed);
                                     let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
                                     let sequencer_visible =

@@ -771,24 +771,10 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> bool {
-        let Some((local_col, local_row)) =
-            hit::to_local(precise_col, precise_row, content_col, content_row)
-        else {
-            if matches!(mouse.kind, MouseEventKind::Moved) {
-                widget_render::set_pointer_hover_widget(None);
-            }
-            return false;
-        };
-        if matches!(mouse.kind, MouseEventKind::Moved) {
-            widget_render::set_pointer_hover_widget(
-                self.widget_node_at_local(local_col, local_row)
-                    .map(|node| node.widget_id),
-            );
-        }
         // Overlay (dropdown menu, etc.) intercepts pointer events before normal
-        // hit-test. Do not gate this on overlay_contains: overlay geometry is
-        // visual/screen-space and may extend over widgets that should not see
-        // the same click sequence.
+        // hit-test. Compute its tile-local position directly: a frame-level
+        // overlay may legitimately extend above or left of its originating
+        // tile, where the normal content-area conversion rejects the point.
         if widget_render::overlay_widget_id().is_some()
             && matches!(
                 mouse.kind,
@@ -797,6 +783,8 @@ impl Editor {
                     | MouseEventKind::Up(MouseButton::Left)
             )
         {
+            let local_col = precise_col - content_col as f32;
+            let local_row = precise_row - content_row as f32;
             if let Some(overlay_id) = widget_render::overlay_widget_id() {
                 let Some(layout) = self.runtime.current_layout.clone() else {
                     widget_render::dropdown::close_dropdown(overlay_id);
@@ -830,6 +818,21 @@ impl Editor {
                 widget_render::clear_overlay();
                 self.mark_needs_redraw();
             }
+        }
+
+        let Some((local_col, local_row)) =
+            hit::to_local(precise_col, precise_row, content_col, content_row)
+        else {
+            if matches!(mouse.kind, MouseEventKind::Moved) {
+                widget_render::set_pointer_hover_widget(None);
+            }
+            return false;
+        };
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            widget_render::set_pointer_hover_widget(
+                self.widget_node_at_local(local_col, local_row)
+                    .map(|node| node.widget_id),
+            );
         }
 
         let gen_before = widget_render::widget_state_generation();

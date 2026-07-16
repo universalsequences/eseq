@@ -21,6 +21,7 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScali
 use crate::lisp_host::{
     dylib_cache::DylibCacheManager, DGenManifest, DylibLease, LoadedDGenLib, ScratchControlRuntime,
 };
+use crate::quantized_launch::{DuePatternLaunch, PatternLaunchTarget};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
     BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
@@ -832,7 +833,129 @@ pub struct App {
     pub pending_recording_take: Option<RecordingTake>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternLaunchOutcome {
+    pub token: Option<crate::quantized_launch::QuantizedLaunchToken>,
+    pub target: PatternLaunchTarget,
+    /// Non-transactional graph repair failures are reported without hiding
+    /// the fact that project state was successfully launched.
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternLaunchError {
+    SceneOutOfRange { scene: usize },
+    EmptyTrackMask,
+    TrackOutOfRange { track: usize },
+    MissingSceneCell { scene: usize, track: usize },
+}
+
 impl App {
+    pub fn apply_pattern_launch(
+        &mut self,
+        target: &PatternLaunchTarget,
+    ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
+        let num_tracks = self.tracks.len();
+        let scene = match target {
+            PatternLaunchTarget::Scene { scene }
+            | PatternLaunchTarget::SceneTracks { scene, .. } => *scene,
+        };
+        if scene >= self.state.scene_count() {
+            return Err(PatternLaunchError::SceneOutOfRange { scene });
+        }
+
+        let sample_ids = match target {
+            PatternLaunchTarget::Scene { scene } => {
+                if *scene != self.state.current_scene_index() {
+                    self.switch_bus_pattern(*scene);
+                }
+                self.state
+                    .launch_scene(
+                        *scene,
+                        num_tracks,
+                        &self.graph.track_buffer_ids,
+                        &self.graph.track_sample_rates,
+                        &self.tracks,
+                        &self.graph.track_instrument_types,
+                    )
+                    .ok_or(PatternLaunchError::SceneOutOfRange { scene: *scene })?
+            }
+            PatternLaunchTarget::SceneTracks { scene, tracks } => {
+                if tracks.is_empty() {
+                    return Err(PatternLaunchError::EmptyTrackMask);
+                }
+                if let Some(track) = tracks.iter().copied().find(|track| *track >= num_tracks) {
+                    return Err(PatternLaunchError::TrackOutOfRange { track });
+                }
+                if let Some(track) = tracks
+                    .iter()
+                    .copied()
+                    .find(|track| self.state.scene_track_pattern_id(*scene, *track).is_none())
+                {
+                    return Err(PatternLaunchError::MissingSceneCell {
+                        scene: *scene,
+                        track,
+                    });
+                }
+                if !self.state.launch_scene_tracks(
+                    *scene,
+                    tracks,
+                    num_tracks,
+                    &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
+                    &self.tracks,
+                    &self.graph.track_instrument_types,
+                ) {
+                    return Err(PatternLaunchError::MissingSceneCell {
+                        scene: *scene,
+                        track: tracks[0],
+                    });
+                }
+                self.state.effective_pattern_sample_ids(num_tracks)
+            }
+        };
+
+        self.graph_controller().apply_sample_ids(&sample_ids);
+        let mut warnings = Vec::new();
+        if let Err(error) = self
+            .graph_controller()
+            .sync_track_instrument_run_modes_from_live_state()
+        {
+            warnings.push(error);
+        }
+        if matches!(target, PatternLaunchTarget::Scene { .. }) {
+            self.graph_controller().sync_current_pattern_mod_routes();
+        }
+        self.push_all_restored_defaults();
+        Ok(PatternLaunchOutcome {
+            token: None,
+            target: target.clone(),
+            warnings,
+        })
+    }
+
+    pub fn apply_manual_pattern_launch(
+        &mut self,
+        target: &PatternLaunchTarget,
+    ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
+        let _ = self.state.quantized_launches().cancel_all();
+        self.apply_pattern_launch(target)
+    }
+
+    pub fn drain_due_pattern_launches(
+        &mut self,
+    ) -> Vec<Result<PatternLaunchOutcome, PatternLaunchError>> {
+        let due = self.state.quantized_launches().drain_valid_due();
+        due.into_iter()
+            .map(|DuePatternLaunch { token, target }| {
+                self.apply_pattern_launch(&target).map(|mut outcome| {
+                    outcome.token = Some(token);
+                    outcome
+                })
+            })
+            .collect()
+    }
+
     pub fn next_track_color(&self) -> TrackColor {
         TrackColor::next_for_existing(&self.track_colors)
     }

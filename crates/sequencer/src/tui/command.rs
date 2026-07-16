@@ -796,6 +796,7 @@ mod tests {
     use crate::neural::ParamNodeId;
     use crate::plock_variants::PlockVariantKey;
     use crate::process::ParamTarget;
+    use crate::quantized_launch::PatternLaunchTarget;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType, RackRouting,
@@ -1667,6 +1668,51 @@ mod tests {
         app.push_all_restored_defaults();
         assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.3));
         assert!(app.macro_engine.macro_definition(id).unwrap().mappings[0].suspended);
+    }
+
+    #[test]
+    fn full_scene_application_seam_reasserts_macro_effective_defaults() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc.clone());
+        let id = app
+            .macro_engine
+            .create_macro("scene launch push", MacroKind::Mapped)
+            .expect("macro id");
+        app.macro_engine
+            .add_mapping(
+                id,
+                MacroMapping::new_resolved(
+                    0,
+                    ParamTarget::EffectParam {
+                        slot: 0,
+                        effect: desc.name.clone(),
+                        param: desc.params[0].name.clone(),
+                        param_id: None,
+                    },
+                    Some(0),
+                    0.2,
+                    0.8,
+                    MacroCurve::Linear,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        app.set_macro_value(id, 1.0);
+
+        app.state.clone_pattern(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        );
+        let outcome = app
+            .apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 })
+            .expect("saved scene should launch through the shared seam");
+
+        assert!(outcome.warnings.is_empty());
+        assert_eq!(app.effective_slot_param_value(0, 0, 0), Some(0.8));
+        assert!(!app.macro_engine.macro_definition(id).unwrap().mappings[0].suspended);
     }
 
     #[test]

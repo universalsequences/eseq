@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::effects::BUILTIN_SLOT_COUNT;
 use crate::lisp_host;
+use crate::quantized_launch::PatternLaunchTarget;
 use crate::sequencer::{KeyboardTrigger, StepParam, STEPS_PER_PAGE};
 
 use super::browser::BrowserNode;
@@ -21,6 +22,14 @@ use super::{
 
 impl App {
     pub fn handle_input(&mut self) -> std::io::Result<()> {
+        for result in self.drain_due_pattern_launches() {
+            if let Err(error) = result {
+                self.editor.status_message = Some((
+                    format!("Quantized pattern launch failed: {error:?}"),
+                    Instant::now(),
+                ));
+            }
+        }
         self.tick_control_hooks();
         self.poll_agent_request();
 
@@ -810,27 +819,15 @@ impl App {
                             self.ui.pattern_page += 1;
                         }
                         PatternBtn::Pattern(idx) => {
-                            let num_tracks = self.tracks.len();
-                            if let Some(sample_ids) = self.state.switch_pattern(
-                                *idx,
-                                num_tracks,
-                                &self.graph.track_buffer_ids,
-                                &self.graph.track_sample_rates,
-                                &self.tracks,
-                                &self.graph.track_instrument_types,
-                            ) {
-                                self.graph_controller().apply_sample_ids(&sample_ids);
-                                if let Err(error) = self
-                                    .graph_controller()
-                                    .sync_track_instrument_run_modes_from_live_state()
-                                {
-                                    self.editor.status_message = Some((
-                                        format!("Pattern switch failed: {error}"),
-                                        Instant::now(),
-                                    ));
-                                }
-                                self.graph_controller().sync_current_pattern_mod_routes();
-                                self.push_all_restored_defaults();
+                            if let Err(error) =
+                                self.apply_manual_pattern_launch(&PatternLaunchTarget::Scene {
+                                    scene: *idx,
+                                })
+                            {
+                                self.editor.status_message = Some((
+                                    format!("Pattern switch failed: {error:?}"),
+                                    Instant::now(),
+                                ));
                             }
                             self.clamp_cursor_to_steps();
                         }
@@ -1864,18 +1861,9 @@ impl App {
                         let num_patterns = self.state.scene_count();
                         let idx = n - 1;
                         if idx < num_patterns {
-                            if let Some(sample_ids) = self.state.switch_pattern(
-                                idx,
-                                num_tracks,
-                                &self.graph.track_buffer_ids,
-                                &self.graph.track_sample_rates,
-                                &self.tracks,
-                                &self.graph.track_instrument_types,
-                            ) {
-                                self.graph_controller().apply_sample_ids(&sample_ids);
-                                self.graph_controller().sync_current_pattern_mod_routes();
-                                self.push_all_restored_defaults();
-                            }
+                            let _ = self.apply_manual_pattern_launch(&PatternLaunchTarget::Scene {
+                                scene: idx,
+                            });
                             self.clamp_cursor_to_steps();
                         }
                     }

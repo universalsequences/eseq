@@ -1403,6 +1403,35 @@ impl ProjectScenes {
         Some(data)
     }
 
+    /// Resolve every selected cell before changing any override. This keeps a
+    /// masked scene launch atomic when a scene contains a stale or empty cell.
+    pub fn launch_scene_tracks(
+        &mut self,
+        scene: usize,
+        tracks: &[usize],
+    ) -> Option<Vec<(usize, TrackPatternData)>> {
+        let scene = self.scenes.get(scene)?;
+        let resolved = tracks
+            .iter()
+            .copied()
+            .map(|track| {
+                let id = scene.cells.get(track).copied().flatten()?;
+                let data = self.track_pools.get(track)?.get(id)?.clone();
+                Some((track, id, data))
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        for (track, id, _) in &resolved {
+            *self.track_overrides.get_mut(*track)? = Some(*id);
+        }
+        Some(
+            resolved
+                .into_iter()
+                .map(|(track, _, data)| (track, data))
+                .collect(),
+        )
+    }
+
     pub fn track_pattern_cells(&self, track: usize) -> Vec<TrackPatternCellView> {
         let Some(pool) = self.track_pools.get(track) else {
             return Vec::new();
@@ -2849,6 +2878,7 @@ pub struct SequencerState {
     process_trace_enabled: AtomicBool,
     pending_accumulator_reset_all: AtomicBool,
     pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
+    quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3142,6 +3172,7 @@ impl SequencerState {
             ),
             pending_accumulator_reset_all: AtomicBool::new(false),
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
+            quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
         };
         state.publish_scheduler_snapshot();
         state
@@ -3149,6 +3180,28 @@ impl SequencerState {
 
     pub fn active_track_count(&self) -> usize {
         self.transport.num_tracks.load(Ordering::Acquire) as usize
+    }
+
+    pub fn quantized_launches(&self) -> &crate::quantized_launch::QuantizedLaunchMailbox {
+        &self.quantized_launches
+    }
+
+    pub fn schedule_quantized_pattern_launch(
+        &self,
+        target: crate::quantized_launch::PatternLaunchTarget,
+        quantize: crate::quantized_launch::LaunchQuantize,
+        owner: crate::quantized_launch::QuantizedLaunchOwner,
+    ) -> Result<
+        crate::quantized_launch::QuantizedLaunchToken,
+        crate::quantized_launch::QuantizedLaunchSubmitError,
+    > {
+        self.quantized_launches.schedule(
+            target,
+            quantize,
+            owner,
+            self.scene_count(),
+            self.active_track_count(),
+        )
     }
 
     pub fn is_scene_silenced(&self, track: usize) -> bool {
@@ -3188,6 +3241,7 @@ impl SequencerState {
     }
 
     pub fn replace_pattern_repository(&self, snapshots: Vec<PatternSnapshot>, current_idx: usize) {
+        let _ = self.quantized_launches.cancel_all();
         let len = snapshots.len().max(1);
         {
             let mut scenes = self.pattern.scenes.lock().unwrap();
@@ -6243,6 +6297,63 @@ impl SequencerState {
         true
     }
 
+    pub fn launch_scene_tracks(
+        &self,
+        scene: usize,
+        tracks: &[usize],
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> bool {
+        if tracks.is_empty() || tracks.iter().any(|track| *track >= num_tracks) {
+            return false;
+        }
+        let current_snapshot = self.capture_current_pattern_snapshot(
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
+        let launched = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            if scene >= scenes.scene_count() {
+                return false;
+            }
+            // Validate the target before saving the current live state. Saving
+            // is a mutation too, and a rejected launch must be side-effect free.
+            if tracks.iter().any(|track| {
+                scenes
+                    .scenes
+                    .get(scene)
+                    .and_then(|scene| scene.cells.get(*track))
+                    .copied()
+                    .flatten()
+                    .and_then(|id| scenes.track_pools.get(*track)?.get(id))
+                    .is_none()
+            }) {
+                return false;
+            }
+            let current_scene = self.current_scene_index();
+            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+                return false;
+            }
+            scenes.launch_scene_tracks(scene, tracks)
+        };
+        let Some(launched) = launched else {
+            return false;
+        };
+        for (track, data) in launched {
+            data.restore_to(self, track);
+            self.set_scene_silenced(track, false);
+        }
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        true
+    }
+
     pub fn fork_current_track_pattern(
         &self,
         track: usize,
@@ -6569,6 +6680,7 @@ impl SequencerState {
     /// Reorder scenes while keeping the currently playing scene active and
     /// leaving all per-track pattern pools untouched.
     pub fn reorder_scene(&self, source: usize, target: usize) -> Option<usize> {
+        let _ = self.quantized_launches.cancel_all();
         let current_scene = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             scenes.reorder_scene(source, target)?
@@ -6587,6 +6699,7 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> Option<Vec<(i32, String, u32)>> {
+        let _ = self.quantized_launches.cancel_all();
         let sample_ids = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             if scenes.scene_count() <= 1 {
@@ -10612,6 +10725,46 @@ mod tests {
         assert!(
             !state.pattern.patterns[0].is_active(3),
             "scene launch should clear the per-track override"
+        );
+    }
+
+    #[test]
+    fn masked_scene_launch_validates_first_and_updates_only_selected_tracks() {
+        let state = make_state_with_tracks(2);
+        let first = PatternSnapshot::new_default(2, &[]);
+        let mut second = snapshot_with_active_step(2, 0, 3);
+        second.track_bits[1][5 / 64] |= 1u64 << (5 % 64);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        assert!(state.launch_scene_tracks(
+            1,
+            &[1],
+            2,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+        assert!(!state.pattern.patterns[0].is_active(3));
+        assert!(state.pattern.patterns[1].is_active(5));
+        assert_eq!(state.current_scene_index(), 0);
+
+        let before_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
+        assert!(!state.launch_scene_tracks(
+            1,
+            &[2],
+            2,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+        assert_eq!(
+            state.transport.pattern_epoch.load(Ordering::Relaxed),
+            before_epoch,
+            "a rejected mask must not partially mutate or publish"
         );
     }
 

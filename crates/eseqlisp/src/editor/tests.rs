@@ -2750,12 +2750,14 @@ fn typing_exact_special_form_keeps_completion_popup_open() {
 
     assert_eq!(editor.active_buffer().text(), "(def");
     assert!(editor.completion_state().is_some());
-    assert!(editor
-        .completion_state()
-        .unwrap()
-        .items
-        .iter()
-        .any(|item| item.label == "def"));
+    assert!(
+        editor
+            .completion_state()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.label == "def")
+    );
 }
 
 #[test]
@@ -5954,7 +5956,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         time_seconds: 0.0,
         focused_widget_id: None,
         focused_branch: false,
-        tile_content_rows: 16.0,
+        overlay_viewport_bottom: 16.0,
         scroll_top: 0.0,
         scroll_left: 0.0,
         inherited_hover: false,
@@ -7286,6 +7288,181 @@ fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
         Value::Bool(false),
         "tab clicks must not dispatch to buffer widgets underneath"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dropdown_overlay_captures_move_and_mouse_up_without_selecting_the_tile_below() {
+    fn find_widget<'a>(
+        node: &'a crate::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def underlay-clicked (state false))
+            (effect-buffer "*transport*"
+              (dropdown
+                :width 6
+                :height 1
+                :options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar")
+                :value "off"
+                :on-change (lambda (value) (host-command "overlay-selected" value))))
+            (effect-buffer "*sequencer*"
+              (button "underlay"
+                :width 60
+                :height 20
+                :on-click (lambda (event) (set! underlay-clicked true))))
+            (set-layout
+              (list :rows :gap 0
+                0.1 (list :buf "*transport*" :hide-status true)
+                0.9 (list :buf "*sequencer*" :hide-status true)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    let transport_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*transport*")
+        .unwrap();
+    let sequencer_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*sequencer*")
+        .unwrap();
+    let transport_tile = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(transport_idx)
+        .unwrap()
+        .id;
+    let sequencer_tile = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(sequencer_idx)
+        .unwrap()
+        .id;
+    let (transport_col, transport_row, _, transport_height) = editor
+        .tile_content_area(transport_tile, 0)
+        .expect("transport content area");
+    let transport_layout = editor
+        .tile_root
+        .find_leaf(transport_tile)
+        .and_then(|leaf| leaf.cached_layout.clone())
+        .expect("transport layout");
+    let dropdown = find_widget(&transport_layout, "dropdown")
+        .expect("transport dropdown")
+        .clone();
+
+    let trigger_col = transport_col as f32 + dropdown.rect.col + dropdown.rect.width * 0.5;
+    let trigger_row = transport_row as f32 + dropdown.rect.row + dropdown.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, trigger_col.floor() as u16, trigger_row.floor() as u16),
+            trigger_col,
+            trigger_row,
+            0,
+        );
+    }
+
+    assert_eq!(editor.active_tile, transport_tile);
+    let _ = crate::widget_render::collect_metal_primitives(
+        &transport_layout,
+        crate::widget_render::WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 600.0,
+            vp_h: 400.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 20.0 - transport_row as f32,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        0.0,
+        transport_height,
+    );
+    let menu = crate::widget_render::get_overlay_rect().expect("open dropdown overlay");
+    // Select 1/8 (third row). This point is below the two-row transport tile.
+    let item_col = transport_col as f32 + menu.col + menu.width * 0.5;
+    let item_row = transport_row as f32 + menu.row + 0.3 + 2.0 * 1.4 + 0.7;
+    assert!(
+        item_row >= editor.tile_rect(sequencer_tile).unwrap().row,
+        "test click must visibly overlap the sequencer tile"
+    );
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            item_col.floor() as u16,
+            item_row.floor() as u16,
+        ),
+        item_col,
+        item_row,
+        0,
+    );
+    let commands = editor.drain_host_commands();
+    assert!(
+        matches!(
+            commands.as_slice(),
+            [HostCommand::Custom { name, payload: Value::String(value) }]
+                if name == "overlay-selected" && value == "1/8"
+        ),
+        "menu={menu:?}, item=({item_col}, {item_row}), commands={commands:?}"
+    );
+    assert_eq!(editor.active_tile, transport_tile);
+    // AppKit commonly emits a move between the item mouse-down and the
+    // matching mouse-up. That move must not release overlay pointer capture.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Moved,
+            item_col.floor() as u16,
+            item_row.floor() as u16,
+        ),
+        item_col,
+        item_row,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            item_col.floor() as u16,
+            item_row.floor() as u16,
+        ),
+        item_col,
+        item_row,
+        0,
+    );
+
+    assert_eq!(editor.active_tile, transport_tile);
+    assert_eq!(
+        editor
+            .runtime
+            .eval_str("underlay-clicked")
+            .unwrap()
+            .unwrap(),
+        Value::Bool(false),
+        "the same click must not reach the buffer beneath the menu"
+    );
+    crate::widget_render::clear_overlay();
 }
 
 #[test]
@@ -10584,10 +10761,12 @@ fn inline_widget_snapshot_sync_preserves_code_and_inline_layout() {
     let mut expected = source.to_string();
     expected.insert_str(source.find("12").unwrap(), "        ");
     assert_eq!(rendered_source.trim_end(), expected);
-    assert!(frame.widget_layout.as_ref().is_some_and(|layout| layout
-        .children
-        .iter()
-        .any(|node| node.widget_type == "hslider")));
+    assert!(frame.widget_layout.as_ref().is_some_and(|layout| {
+        layout
+            .children
+            .iter()
+            .any(|node| node.widget_type == "hslider")
+    }));
 }
 
 #[test]

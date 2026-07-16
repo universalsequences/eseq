@@ -56,7 +56,7 @@ impl CaptureArgs {
                     return Err(format!(
                         "unknown capture argument {other}\n{}",
                         Self::usage()
-                    ))
+                    ));
                 }
             }
         }
@@ -184,7 +184,9 @@ fn parse_capture_source(source: &str) -> Result<ParsedCaptureScript, String> {
         [] => return Err("missing top-level (capture-project ...) form".to_string()),
         [form] => *form,
         _ => {
-            return Err("capture scripts must contain exactly one capture-project form".to_string())
+            return Err(
+                "capture scripts must contain exactly one capture-project form".to_string(),
+            );
         }
     };
     let project = parse_capture_project(&project_form.to_legacy())?;
@@ -683,10 +685,10 @@ mod tests {
             parse_capture_source("(capture-project (track :sampler :samples (\"kick.wav\")))")
                 .is_err()
         );
-        assert!(parse_capture_source(
-            "(capture-project (track :layer-rack :samples (\"kick.wav\")))"
-        )
-        .is_ok());
+        assert!(
+            parse_capture_source("(capture-project (track :layer-rack :samples (\"kick.wav\")))")
+                .is_ok()
+        );
     }
 
     #[test]

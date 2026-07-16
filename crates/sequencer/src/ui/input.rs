@@ -1,7 +1,7 @@
 use super::*;
 use eseqlisp::widget_render::number_picker::{
-    clear_number_picker_edit_state, handle_number_picker_edit_key_for_widget,
-    number_picker_edit_state, NumberPickerEditOutcome,
+    NumberPickerEditOutcome, clear_number_picker_edit_state,
+    handle_number_picker_edit_key_for_widget, number_picker_edit_state,
 };
 
 #[derive(Clone, Debug)]
@@ -287,10 +287,7 @@ fn pattern_length_shortcut(key: &crossterm::event::KeyEvent) -> Option<PatternLe
     }
 
     match key.code {
-        KeyCode::Char('+') => Some(PatternLengthShortcut::Double),
-        KeyCode::Char('=') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            Some(PatternLengthShortcut::Double)
-        }
+        KeyCode::Char('+') | KeyCode::Char('=') => Some(PatternLengthShortcut::Double),
         KeyCode::Char('-') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
             Some(PatternLengthShortcut::Halve)
         }
@@ -1461,19 +1458,20 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
+        ExpandedStepProjectionRegistry, ExpandedStepViewport, HeldKeyboardNote,
+        PROCESS_LANE_MODE_OFFSET, SoftStepParamEdit, build_selection_value,
+        current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
-        held_note_for_key, note_from_key, ExpandedStepProjectionRegistry, ExpandedStepViewport,
-        HeldKeyboardNote, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
+        held_note_for_key, note_from_key,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+    use eseqlisp::HostCommand;
     use eseqlisp::editor::ViewMode;
     use eseqlisp::mode::BufferMode;
     use eseqlisp::vm::Value;
     use eseqlisp::widget_render::WidgetKeyEvent;
-    use eseqlisp::HostCommand;
     use eseqlisp::{Editor, EditorConfig, Runtime};
     use sequencer::sequencer::{SequencerState, StepParam, StepSnapshot};
     use std::cell::RefCell;
@@ -2637,7 +2635,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn control_plus_and_minus_use_track_pattern_length_actions() {
+    fn command_or_control_plus_key_and_minus_use_track_pattern_length_actions() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         editor
@@ -2661,6 +2659,26 @@ mod live_keyboard_tests {
         assert!(handle_metal_command_shortcut(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('+'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("double".to_string()))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set! pattern-length-action "")"#)
+            .expect("reset action");
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('='), KeyModifiers::SUPER),
             &state,
             &current_track,
             &selected_steps,

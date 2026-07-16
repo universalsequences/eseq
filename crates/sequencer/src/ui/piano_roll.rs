@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use eseqlisp::vm::Value;
 use eseqlisp::Runtime;
+use eseqlisp::vm::Value;
 
-use sequencer::sequencer::{SequencerState, StepParam, MAX_STEPS};
+use sequencer::sequencer::{MAX_STEPS, SequencerState, StepParam};
 
 use super::values::{list_value, map_value};
 

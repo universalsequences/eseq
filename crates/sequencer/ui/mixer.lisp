@@ -920,7 +920,12 @@
       :on-drop (lambda (event) (mixer-v2-drop-effect-on-bus event))
       :on-click (lambda (event) (mixer-v2-select-bus i))
       (v-stack :gap 0.25
-        (box :height 2.6)
+        (box :height 1.55)
+        ;; Mix/Main is the graph output and has no external modulation inputs.
+        ;; Every other bus has the same four backend inputs used by group buses.
+        (if (= (nth SEQ.bus-names i) "Mix")
+          (box :height 0.8 :width :fill :bg :transparent)
+          )
         (h-stack :gap 0.45 :align :center
           (box :width 3.0 :height 3.6)
           (mixer-v2-bus-meter-control i))
@@ -937,9 +942,14 @@
             :color (if (nth SEQ.bus-solos i) :black :dim)
             :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-solo i))))
           (box :width 2.1 :height 1.0))
+        (if (not (= (nth SEQ.bus-names i) "Mix"))
+          (mixer-v2-bus-mod-port-row (nth SEQ.bus-ids i))
+          )
+        
         (button (mixer-v2-bus-label i)
           :width :fill :height 1.0 :padding 0 :font-size 10
           :background-color :mixer-label-bg
+          :border-color :transparent
           :color :white
           :on-click (lambda (event) (mixer-v2-select-bus i)))))))
 

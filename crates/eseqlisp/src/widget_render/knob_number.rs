@@ -160,7 +160,7 @@ mod tests {
             time_seconds: 0.0,
             focused_widget_id: None,
             focused_branch: false,
-            tile_content_rows: 36.0,
+            overlay_viewport_bottom: 36.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
             inherited_hover: false,

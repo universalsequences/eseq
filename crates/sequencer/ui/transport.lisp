@@ -96,10 +96,10 @@
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.54)
-      (material 
+      (material
         :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
           :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
-        :color 
+        :color
         (if (> active 0)
           (let ((base (rgba 0.00 0.01 0.42 1.0))
                 (lit (+ 0.06 (* 0.03 diffuse)))
@@ -112,6 +112,29 @@
               (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
             (rgba 0 0 0 0)))))))
 
+(defwidget queued-scene-pill-bg
+  :width 1 :height 1
+  :paint-margin 0.3
+  :animates true
+  :shader
+  (let ((pulse (+ 0.5 (* 0.5 (cos (* itime 5.4)))))
+        (base (rgba
+          (+ 0.01 (* 0.04 pulse))
+          (+ 0.03 (* 0.10 pulse))
+          (+ 0.38 (* 0.30 pulse))
+          1.0)))
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect width height 0.54)
+        (material
+          :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+            :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+          :color
+          (let ((lit (+ 0.05 (* 0.04 diffuse)))
+                (shine (* (+ 0.12 (* 0.16 pulse)) specular)))
+            (+ base
+              (rgba lit lit lit 1)
+              (rgba shine shine shine 0))))))))
+
 
 (defwidget pattern-pill-btn-bg
  :width 1 :height 1
@@ -120,10 +143,10 @@
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height height)
-      (material 
+      (material
         :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
           :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
-        :color 
+        :color
         (if (> active 0)
           (let ((base (rgba 0.00 0.01 0.02 1.0))
                 (lit (+ 0.06 (* 0.03 diffuse)))
@@ -162,7 +185,7 @@
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
         (material :color bg-col))
-      
+
       (sdf/fill
         (sdf/translate 0.0 -0.60
           (sdf/rounded-rect 0.42 0.32 0.12))
@@ -379,8 +402,14 @@
       (sdf/fill (sdf/circle 0.4)
         (material :color fg-col)))))
 
+(def scene-launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
+
+(def seq-set-scene-launch-quantize (value)
+  (host-command "set-scene-launch-quantize" value))
+
 (def seq-switch-pattern (idx)
-  (host-command "switch-pattern" (dict :idx idx)))
+  (host-command "switch-pattern"
+    (dict :idx idx :quantize (or SEQ.scene-launch-quantize "off"))))
 
 (def seq-clone-pattern ()
   (host-command "clone-pattern" (dict)))
@@ -435,26 +464,26 @@
         :on-click |x y r| (seq-toggle-fx-panel)
         :style transport-icon-style
         :active (if lower-panel-visible 1 0)))
-    
+
     (subtree :key "transport-save-button"
       (save-icon
         :on-click |x y r| (sbrowser-open-project-save)
         :style transport-icon-style
         :active (if (sbrowser-project-save-mode?) 1 0)))
-    
+
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
-        (box :width 2.5 
+        (box :width 2.5
           :on-click |x y r| (if SEQ.playing (seq-toggle-play) nil)
           (rw-icon))
-        (box :width 2.5 
+        (box :width 2.5
           :on-click |x y r| (if SEQ.playing (seq-toggle-play) nil)
           (stop-icon))
-        (box :width 2.5 
+        (box :width 2.5
           :on-click |x y r| (seq-toggle-play)
           (play-icon :active (if SEQ.playing 1 0)))
-        (box :width 2.5 
+        (box :width 2.5
           :on-click |x y r| (seq-toggle-record)
           (rec-icon :active (if SEQ.recording 1 0)))
         (subtree :key "transport-master-record-button"
@@ -470,9 +499,9 @@
                 :color (if SEQ.master-recording :white :gray)
                 :hover-color :white
                 :bg :transparent))))))
-    
+
     ;; Single continuous LED panel
-    (box :background "transport-led-bg" :height 1.4 :width 41
+    (box :background "transport-led-bg" :height 1.4 :width 49
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
@@ -486,28 +515,39 @@
               :font-size 15
               :text-color (rgba 0.85 0.85 0.85 1)
               :on-change (lambda (v) (seq-set-bpm v))
-              :width 7 :height 1.2)))
+              :width 7 :height 1.2)
+            (subtree :key "transport-scene-launch-quantize"
+              (dropdown
+                :bg-color '(rgba 0.1 0.1 0.1 0.3) ;:instrument-control-bg
+                :border-color '(rgba 0.4 0.4 0.4 1)
+                :badge-color :transparent
+                :key "transport-scene-launch-quantize-dropdown"
+                :debug-name "transport-scene-launch-quantize"
+                :value (or SEQ.scene-launch-quantize "off")
+                :options scene-launch-quantize-options
+                :on-change seq-set-scene-launch-quantize
+                :width 7.2 :height 1.15 :font-size 9))))
         (v-stack :gap 0.08 :padding 0.05
           (label "L"
             :font-size 5 :width 0.9
             :color '(rgba 0.63 0.88 0.41 1)
-            :bg :transparent)         
-          
+            :bg :transparent)
+
           (label "R"
             :font-size 5 :width 0.9
             :color '(rgba 0.63 0.88 0.41 1)
             :bg :transparent)          )
-        
-        
+
+
         (v-stack :gap 0.08 :padding 0.05
-          (h-stack :gap 0.25 
-            
+          (h-stack :gap 0.25
+
             (v-stack
               (box :height 0.2)
               (subtree :key "master-meter-l"
                 (transport-master-meter :level (bind-seq "master-peak-l")))))
           (h-stack :gap 0.25 :align :center
-            
+
             (v-stack (box :height 0.1)
               (subtree :key "master-meter-r"
                 (transport-master-meter :level (bind-seq "master-peak-r"))))))
@@ -523,48 +563,52 @@
               :font-size 12 :width 4.5 :height 1
               :color :gray
               :bg :transparent)))))
-    
+
     ;; Pattern pills in their own subtree: current-pattern/num-patterns changes
     ;; (every scene switch) rerun just this bar, not the whole transport.
     (subtree :key "transport-pattern-pills"
       (box :background "transport-btn-bg" :padding 0.2 :height 1.4
-      (h-stack :gap 0.1 :align :center
-        (each (range 0 SEQ.num-patterns) |i|
-          (box :key (str "transport-scene-pill-" i)
-            :width 2.5 :height 1.1
-            :background "pattern-pill-bg"
-            :active (if (= i SEQ.current-pattern) 1 0)
+        (h-stack :gap 0.1 :align :center
+          (each (range 0 SEQ.num-patterns) |i|
+            (box :key (str "transport-scene-pill-" i)
+              :width 2.5 :height 1.1
+              :background (if (= i SEQ.queued-scene)
+                "queued-scene-pill-bg"
+                "pattern-pill-bg")
+              :active (if (= i SEQ.current-pattern) 1 0)
+              :style pattern-control-style
+              :drag-type "transport-scene"
+              :drag-payload (dict :scene i)
+              :drop-types (list "transport-scene")
+              :drop-meta (dict :scene i)
+              :drop-hover-border-color :mixer-strip-selected-border
+              :on-drop seq-reorder-scene-drop
+              :on-click |x y r| (seq-switch-pattern i)
+              (v-stack :align :center
+                (label (fmt " {} " (+ i 1))
+                  :font-size 11
+                  :color (if (or (= i SEQ.current-pattern) (= i SEQ.queued-scene))
+                    :white
+                    :gray)
+                  :hover-color :white
+                  :bg :transparent))))
+          (label "" :width 0.2 :bg :transparent)
+          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
             :style pattern-control-style
-            :drag-type "transport-scene"
-            :drag-payload (dict :scene i)
-            :drop-types (list "transport-scene")
-            :drop-meta (dict :scene i)
-            :drop-hover-border-color :mixer-strip-selected-border
-            :on-drop seq-reorder-scene-drop
-            :on-click |x y r| (seq-switch-pattern i)
+            :on-click |x y r| (seq-clone-pattern)
             (v-stack :align :center
-              (label (fmt " {} " (+ i 1))
-                :font-size 11
-                :color (if (= i SEQ.current-pattern) :white :gray)
-                :hover-color :white
-                :bg :transparent))))
-        (label "" :width 0.2 :bg :transparent)
-        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-          :style pattern-control-style
-          :on-click |x y r| (seq-clone-pattern)
-          (v-stack :align :center
-            (label "+"
-              :font-size 12
-              
-              :color :white
-              :bg :transparent)))
-        
-        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-          :style (if (> SEQ.num-patterns 1) pattern-control-style nil)
-          :on-click |x y r| (if (> SEQ.num-patterns 1) (seq-delete-pattern) nil)
-          (v-stack :align :center
-            (label "-"
-              :font-size 12
+              (label "+"
+                :font-size 12
 
-              :color (if (> SEQ.num-patterns 1) :white :dark-gray)
-              :bg :transparent))))))))
+                :color :white
+                :bg :transparent)))
+
+          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+            :style (if (> SEQ.num-patterns 1) pattern-control-style nil)
+            :on-click |x y r| (if (> SEQ.num-patterns 1) (seq-delete-pattern) nil)
+            (v-stack :align :center
+              (label "-"
+                :font-size 12
+
+                :color (if (> SEQ.num-patterns 1) :white :dark-gray)
+                :bg :transparent))))))))

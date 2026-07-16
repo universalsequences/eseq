@@ -193,6 +193,11 @@ const BASE_LENS: [usize; NBUFS] = [
 const FREEVERB_FS: f32 = 44_100.0;
 const MOD_SCALE_RATIO: f32 = DATTORRO_FS / FREEVERB_FS;
 
+/// Size changes alter every tank delay, so retain a short interpolation glide
+/// while keeping host modulation responsive. At 40 Hz the one-pole time
+/// constant is about 4 ms (versus about 53 ms at the previous 3 Hz cutoff).
+const SIZE_SMOOTH_CUTOFF_HZ: f32 = 40.0;
+
 /// Per-allpass LFO rate detune factors × mod rate (mod mode).
 const M_AP_RATES: [f32; 4] = [0.71, 0.93, 1.17, 1.39];
 
@@ -535,7 +540,7 @@ unsafe extern "C" fn multiverb_process(
 
     // ── Derived (per block) ──
     let target_predelay = (predelay_ms * 0.001 * fs).max(1.0);
-    let scale_coef = one_pole_coef(3.0, fs); // ~50 ms glide; sweeps pitch-smear
+    let scale_coef = one_pole_coef(SIZE_SMOOTH_CUTOFF_HZ, fs);
     let predelay_coef = one_pole_coef(8.0, fs);
 
     // Diffusion drives the tank allpasses, not just the input diffusers —
@@ -1302,6 +1307,27 @@ mod tests {
         let (out_l, out_r) = process(&mut state, &mut in_l, &mut in_r);
         assert_eq!(out_l, in_l);
         assert_eq!(out_r, in_r);
+    }
+
+    #[test]
+    fn size_smoothing_tracks_modulation_within_twenty_milliseconds() {
+        let fs = 44_100;
+        let mut state = init_state(fs);
+        state[ST_SIZE] = 1.0;
+
+        let frame_count = fs as usize / 50;
+        let mut in_l = vec![0.0; frame_count];
+        let mut in_r = vec![0.0; frame_count];
+        let _ = process(&mut state, &mut in_l, &mut in_r);
+
+        let target = (fs as f32 / DATTORRO_FS) * tank_size_scale(1.0);
+        let initial = fs as f32 / DATTORRO_FS;
+        let progress = (state[ST_SM_SCALE] - initial) / (target - initial);
+        assert!(
+            progress >= 0.99,
+            "size smoother reached only {:.1}% of its target after 20 ms",
+            progress * 100.0
+        );
     }
 
     #[test]

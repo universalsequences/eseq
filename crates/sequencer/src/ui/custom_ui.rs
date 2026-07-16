@@ -748,9 +748,9 @@ fn reload_custom_ui_source(editor: &mut Editor, path: &str, source: &str, label:
 #[cfg(test)]
 mod tests {
     use super::{
-        build_custom_audio_fx_ui_source_with_overlay,
+        GENERATED_INSTRUMENT_UI_PATH, build_custom_audio_fx_ui_source_with_overlay,
         build_custom_instrument_ui_source_with_overlay, instrument_ui_dispatch_aliases,
-        reload_custom_ui_source, GENERATED_INSTRUMENT_UI_PATH,
+        reload_custom_ui_source,
     };
     use eseqlisp::vm::Value;
     use std::collections::BTreeMap;

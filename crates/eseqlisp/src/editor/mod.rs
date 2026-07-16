@@ -1903,7 +1903,8 @@ impl Editor {
         if crate::widget_render::overlay_widget_id().is_some()
             && matches!(
                 mouse.kind,
-                MouseEventKind::Down(MouseButton::Left)
+                MouseEventKind::Moved
+                    | MouseEventKind::Down(MouseButton::Left)
                     | MouseEventKind::Drag(MouseButton::Left)
                     | MouseEventKind::Up(MouseButton::Left)
             )
@@ -1947,11 +1948,12 @@ impl Editor {
             }
             if matches!(
                 mouse.kind,
-                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                MouseEventKind::Moved
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
             ) {
                 return;
             }
-            self.suppress_mouse_until_left_up = false;
         }
 
         if self.handle_tile_resize_drag(mouse, precise_col, precise_row) {
@@ -5948,13 +5950,9 @@ impl Editor {
             MouseEventKind::Moved => {
                 // Update dropdown hover when overlay is open
                 if let Some(overlay_id) = crate::widget_render::overlay_widget_id() {
-                    if let Some((local_col, local_row)) =
-                        crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)
-                    {
-                        let _local_col = local_col;
-                        if crate::widget_render::dropdown::hover_overlay(overlay_id, local_row) {
-                            self.mark_needs_redraw();
-                        }
+                    let local_row = precise_row - content_row as f32;
+                    if crate::widget_render::dropdown::hover_overlay(overlay_id, local_row) {
+                        self.mark_needs_redraw();
                     }
                 }
                 if widgets_visible {

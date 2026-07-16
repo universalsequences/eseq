@@ -705,6 +705,11 @@ never the diff.
 
 ### 8.4 Pattern steal
 
+Prerequisite: implement `docs/QUANTIZED_SCENE_LAUNCH_FOUNDATION_SPEC.md`. The
+repository does not currently have the scheduler-owned pending-scene seam that
+an earlier revision of this section assumed; `process_runtime.clear_scene_pending`
+only clears process-runtime events and must not be used as launch scheduling.
+
 - Engage: schedule a quantized launch of the target scene's patterns for the
   masked tracks (all tracks = the existing `"switch-pattern"` machinery,
   `main.rs:12531`; subset = per-track launch path, `"launch-track-pattern"`,

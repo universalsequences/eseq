@@ -440,9 +440,14 @@ pub struct WidgetViewport {
     pub time_seconds: f32,
     pub focused_widget_id: Option<u64>,
     pub focused_branch: bool,
-    /// Tile content area height in rows (excludes status bar).
-    /// Used by overlays (dropdowns) to clamp to the visible tile region.
-    pub tile_content_rows: f32,
+    /// Bottom edge of the frame-level overlay viewport, expressed in the
+    /// widget tree's post-scroll, tile-local row coordinates. The matching
+    /// top edge is derived from the full frame height.
+    ///
+    /// Keeping this coordinate in the viewport makes overlay geometry
+    /// independent of the tile's clip rect while ordinary widget primitives
+    /// remain clipped to their tile.
+    pub overlay_viewport_bottom: f32,
     /// Total vertical scroll already applied before tile-position offset.
     /// This includes tile-level widget scroll and any ancestor scroll widgets.
     pub scroll_top: f32,
@@ -1000,10 +1005,15 @@ pub fn layout_wants_animation_frames(node: &LayoutNode) -> bool {
 }
 
 fn node_uses_animated_sdf_material(node: &LayoutNode) -> bool {
-    let Some(Value::String(shader_type)) = node.props.get(sdf_widget::SHADER_TYPE_PROP) else {
-        return false;
-    };
-    sdf_widget::sdf_widget_def(shader_type).is_some_and(|definition| definition.animates)
+    [sdf_widget::SHADER_TYPE_PROP, "background"]
+        .into_iter()
+        .filter_map(|prop| match node.props.get(prop) {
+            Some(Value::String(shader_type)) => Some(shader_type),
+            _ => None,
+        })
+        .any(|shader_type| {
+            sdf_widget::sdf_widget_def(shader_type).is_some_and(|definition| definition.animates)
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -1090,7 +1100,7 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     viewport.vp_h.to_bits().hash(&mut hasher);
     viewport.focused_widget_id.hash(&mut hasher);
     viewport.focused_branch.hash(&mut hasher);
-    viewport.tile_content_rows.to_bits().hash(&mut hasher);
+    viewport.overlay_viewport_bottom.to_bits().hash(&mut hasher);
     viewport.scroll_top.to_bits().hash(&mut hasher);
     viewport.scroll_left.to_bits().hash(&mut hasher);
     hash_props(&node.props, &mut hasher);
@@ -2674,7 +2684,7 @@ mod tests {
             time_seconds: 0.0,
             focused_widget_id: None,
             focused_branch: false,
-            tile_content_rows: 24.0,
+            overlay_viewport_bottom: 24.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
             inherited_hover: false,
@@ -3335,6 +3345,44 @@ mod tests {
             props: HashMap::from([(
                 sdf_widget::SHADER_TYPE_PROP.to_string(),
                 Value::String("test-animated-material".to_string()),
+            )]),
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        assert!(layout_wants_animation_frames(&node));
+    }
+
+    #[test]
+    fn animated_sdf_box_background_requests_animation_frames() {
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "test-animated-background".to_string(),
+            shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0),
+            state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: true,
+        });
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "box".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 8.0,
+                height: 1.0,
+            },
+            props: HashMap::from([(
+                "background".to_string(),
+                Value::String("test-animated-background".to_string()),
             )]),
             children: Vec::new(),
             focusable: false,

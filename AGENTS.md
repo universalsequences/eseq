@@ -1,5 +1,41 @@
 # AGENTS.md
 
+## Test selection and runtime policy
+
+Use the narrowest test target that validates the behavior changed. Do not run a
+full package or workspace test suite as a default validation or finishing step.
+
+For a unit test in a library, select both the library target and the exact test:
+
+```sh
+cargo test -p <package> --lib <fully-qualified-test-name> -- --exact
+```
+
+For an integration test, select the integration-test binary and the exact test:
+
+```sh
+cargo test -p <package> --test <test-target> <test-name> -- --exact
+```
+
+Do not run any of the following unless the user explicitly requests exhaustive
+testing, or the change is genuinely cross-cutting and no narrower validation
+exists:
+
+```sh
+cargo test
+cargo test --workspace
+cargo test -p sequencer
+```
+
+Before starting an exhaustive suite, tell the user which suite will run and why.
+Full package and workspace suites should normally be left to CI. Do not infer
+that a full suite is required merely because a change touches the `sequencer`
+package or because the task asks you to "run tests."
+
+If a targeted test runs for more than three minutes without producing progress,
+stop it and investigate the delay. Report the command and the phase that stalled
+if the cause cannot be resolved. Do not respond by running a broader suite.
+
 ## Instrument testing
 
 Use `instrument_probe` when changing DGenLisp instruments, wavetable/tensor loading, or host-side instrument initialization. It exercises the same host compile/load/init path as the app and gives quick signal checks without launching the UI.
@@ -20,7 +56,9 @@ For saved instrument names, the probe resolves local assets from the saved instr
 When changing scheduler trigger routing, MIDI FX routing, graph-mode `def-sequencer` playback, or pattern-parameter application for neural/graph generated events, use the deterministic scheduler lookahead harness instead of loading a whole project or relying only on UI/audio behavior. The harness drives the extracted production scheduler lookahead pass directly, without instruments, DSP, project load, or UI:
 
 ```sh
-cargo test -p sequencer scheduler::tests::scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx -- --nocapture
+cargo test -p sequencer --lib \
+  scheduler::tests::scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx \
+  -- --exact --nocapture
 ```
 
 This test covers the important route:
@@ -32,7 +70,9 @@ step seed -> Lisp graph sequencer -> target track MIDI FX -> routed target event
 If scheduler-side Lisp/project scratch runtime loading changes, also run:
 
 ```sh
-cargo test -p sequencer scheduler::tests::scheduler_runtime_keeps_builtin_midi_fx_when_project_scratch_fails -- --nocapture
+cargo test -p sequencer --lib \
+  scheduler::tests::scheduler_runtime_keeps_builtin_midi_fx_when_project_scratch_fails \
+  -- --exact --nocapture
 ```
 
 That regression protects the case where project scratch source, such as a graph sequencer demo, fails in the scheduler VM but builtin MIDI FX like `arp` and `trigger-to-track` must remain registered.

@@ -5725,6 +5725,7 @@ struct SchedulerLookaheadState {
     graph_runtimes: Vec<crate::graph::GraphRuntime>,
     debug_graph_drive_chunks: u32,
     debug_accum_invocations: u64,
+    quantized_launches: crate::quantized_launch::PendingQuantizedLaunches,
 }
 
 impl SchedulerLookaheadState {
@@ -5742,6 +5743,7 @@ impl SchedulerLookaheadState {
             graph_runtimes: Vec::new(),
             debug_graph_drive_chunks: 0,
             debug_accum_invocations: 0,
+            quantized_launches: crate::quantized_launch::PendingQuantizedLaunches::default(),
         }
     }
 }
@@ -7424,6 +7426,11 @@ pub fn spawn_scheduler_thread(
                 let scheduled_ahead_beats =
                     scheduled_until_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
                 let rendered_total_beats = (lookahead_state.clock.total_beats - scheduled_ahead_beats).max(0.0);
+                state.quantized_launches().process_scheduler(
+                    &mut lookahead_state.quantized_launches,
+                    rendered_total_beats,
+                    playing,
+                );
                 if !playing {
                     let live_active = schedule_live_midi_fx(
                         scratch_runtime.as_mut(),

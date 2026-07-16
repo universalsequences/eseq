@@ -19570,9 +19570,10 @@ mod tests {
 
         let app = test_app_with_rack_panel();
         app.state.update_live_rack_slot(0, 0, |slot| {
-            assert!(slot
-                .param_plocks
-                .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25));
+            assert!(
+                slot.param_plocks
+                    .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25)
+            );
             slot.instrument_slot.defaults[8] = 44_100.0;
             assert!(slot.instrument_slot.set_plock(3, 8, 22_050.0));
         });
@@ -21532,6 +21533,8 @@ mod tests {
                 ("master-recording", Value::Bool(false)),
                 ("transport-playhead", Value::Number(0.0)),
                 ("bpm", Value::Number(120.0)),
+                ("scene-launch-quantize", Value::String("off".to_string())),
+                ("queued-scene", Value::Number(-1.0)),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
@@ -24332,9 +24335,12 @@ mod tests {
                 continue;
             };
             match items.as_slice() {
-                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
-                    if form == "def" && name == "script-buffer-name" =>
-                {
+                [
+                    Expression::Symbol(form),
+                    Expression::Symbol(name),
+                    Expression::String(value),
+                    ..,
+                ] if form == "def" && name == "script-buffer-name" => {
                     script_buffer_name = Some(value.clone());
                 }
                 [Expression::Symbol(form), Expression::String(target), ..]
@@ -26912,6 +26918,27 @@ mod tests {
             assert!(pill.props.contains_key("on-drop"));
         }
 
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "queued-scene", Value::Number(1.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let queued_layout = editor.widget_layout().expect("queued transport layout");
+        let queued_pill = find_layout_node_by_stable_key(&queued_layout, "transport-scene-pill-1")
+            .expect("queued scene pill");
+        assert!(
+            matches!(
+                queued_pill.props.get("background"),
+                Some(Value::String(shader)) if shader == "queued-scene-pill-bg"
+            ),
+            "queued pill props: {:?}",
+            queued_pill.props
+        );
+        assert!(
+            eseqlisp::widget_render::layout_wants_animation_frames(queued_pill),
+            "queued scene pill must request animation frames"
+        );
+
         let _ = editor.drain_host_commands();
         editor
             .runtime_mut()
@@ -26928,6 +26955,86 @@ mod tests {
                 assert_eq!(extract_usize_from_payload(payload, "target"), Some(2));
             }
             other => panic!("expected reorder-scene host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_transport_scene_quantize_dropdown_is_visible_and_routes_launch_mode() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        let dropdown = find_layout_node_by_debug_name(&layout, "transport-scene-launch-quantize")
+            .expect("scene launch quantize dropdown");
+        assert_finite_nonzero_rect(dropdown, "scene launch quantize dropdown");
+        assert!(
+            dropdown.rect.col >= layout.rect.col
+                && dropdown.rect.row >= layout.rect.row
+                && dropdown.rect.col + dropdown.rect.width <= layout.rect.col + layout.rect.width
+                && dropdown.rect.row + dropdown.rect.height <= layout.rect.row + layout.rect.height,
+            "scene launch quantize dropdown should remain inside transport: dropdown={:?} panel={:?}",
+            dropdown.rect,
+            layout.rect
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("SEQ.scene-launch-quantize")
+                .unwrap(),
+            Some(Value::String("off".to_string()))
+        );
+
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seq-set-scene-launch-quantize "1/8")"#)
+            .expect("choose scene launch quantization");
+        let selection_commands = editor.drain_host_commands();
+        assert_eq!(selection_commands.len(), 1);
+        match &selection_commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-scene-launch-quantize");
+                assert_eq!(payload, &Value::String("1/8".to_string()));
+            }
+            other => panic!("expected scene quantize selection command, got {other:?}"),
+        }
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "scene-launch-quantize",
+            Value::String("1/8".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let updated_layout = editor.widget_layout().expect("updated transport layout");
+        let updated_dropdown =
+            find_layout_node_by_debug_name(&updated_layout, "transport-scene-launch-quantize")
+                .expect("updated scene launch quantize dropdown");
+        assert!(matches!(
+            updated_dropdown.props.get("value"),
+            Some(Value::String(value)) if value == "1/8"
+        ));
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-switch-pattern 2)")
+            .expect("queue quantized scene launch");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "switch-pattern");
+                assert_eq!(extract_usize_from_payload(payload, "idx"), Some(2));
+                assert_eq!(
+                    extract_string_from_payload(payload, "quantize").as_deref(),
+                    Some("1/8")
+                );
+            }
+            other => panic!("expected switch-pattern host command, got {other:?}"),
         }
     }
 
@@ -35104,7 +35211,11 @@ mod tests {
                 panic!("unexpected Multiverb factory command {name:?}");
             }
         }
-        assert_eq!(writes.len(), 30, "Xtal Wash should reset all modulation depths, set 13 base controls, and assign one modulation depth");
+        assert_eq!(
+            writes.len(),
+            30,
+            "Xtal Wash should reset all modulation depths, set 13 base controls, and assign one modulation depth"
+        );
         let depth_start = 14
             + sequencer::voice_modulator::SLOT_COUNT
                 * sequencer::voice_modulator::PARAM_SLOT_STRIDE;
@@ -37566,7 +37677,7 @@ mod tests {
                 time_seconds: 0.0,
                 focused_widget_id: None,
                 focused_branch: false,
-                tile_content_rows: 18.0,
+                overlay_viewport_bottom: 18.0,
                 scroll_top: 0.0,
                 scroll_left: 0.0,
                 inherited_hover: false,
@@ -42311,7 +42422,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
+            vec![
+                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
+            ]
         );
     }
 
@@ -42727,7 +42840,7 @@ mod tests {
                 time_seconds: 0.0,
                 focused_widget_id: None,
                 focused_branch: false,
-                tile_content_rows: 18.0,
+                overlay_viewport_bottom: 18.0,
                 scroll_top: 0.0,
                 scroll_left: 0.0,
                 inherited_hover: false,
@@ -44860,6 +44973,20 @@ mod tests {
         };
         assert_eq!(group_sources.len(), 1);
         assert_eq!(*group_sources[0].borrow(), Value::Number(0.0));
+        for input in 0..4 {
+            let bus_input = find_bus_mod_input(&layout, 1.0, input as f64)
+                .unwrap_or_else(|| panic!("Bus A Ext{} mod in port", input + 1));
+            assert!(
+                bus_input.rect.width > 0.0 && bus_input.rect.height > 0.0,
+                "Bus A Ext{} mod input should have a finite visible rect: {:?}",
+                input + 1,
+                bus_input.rect
+            );
+        }
+        assert!(
+            find_bus_mod_input(&layout, 0.0, 0.0).is_none(),
+            "Main must not expose modulation inputs because Mix has no backing mod-input nodes"
+        );
         assert!(
             mod_out.rect.width > 0.0
                 && mod_out.rect.height > 0.0
@@ -45212,7 +45339,7 @@ mod tests {
                 time_seconds: 0.0,
                 focused_widget_id: None,
                 focused_branch: false,
-                tile_content_rows: 30.0,
+                overlay_viewport_bottom: 30.0,
                 scroll_top: 0.0,
                 scroll_left: 0.0,
                 inherited_hover: false,

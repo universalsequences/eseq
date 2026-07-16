@@ -62,6 +62,7 @@ pub mod paths;
 pub mod plock_variants;
 pub mod process;
 pub mod project;
+pub mod quantized_launch;
 pub mod recorder;
 pub mod sample_db;
 pub mod sample_import;

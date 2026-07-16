@@ -351,31 +351,37 @@ struct MenuGeometry {
     max_scroll: f32,
 }
 
-/// Compute menu placement relative to trigger, clamping to viewport.
+/// Compute menu placement relative to trigger, clamping to the frame-level
+/// overlay viewport.
 /// When the menu doesn't fit below or above, it extends to fill the full
 /// viewport height (covering the trigger), matching native macOS behavior.
 fn compute_menu_geometry(
     trigger_row: f32,
     trigger_height: f32,
     option_count: usize,
-    viewport_rows: f32,
+    viewport_top: f32,
+    viewport_bottom: f32,
 ) -> MenuGeometry {
     let content_height = option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
     let gap = 0.15;
-    // Reserve space for the border so it isn't clipped by the tile scissor
+    // Reserve space for the border so it isn't clipped by the frame edge.
     let border_inset = 0.1;
     let below_top = trigger_row + trigger_height + gap;
 
-    let (menu_top, visible_height) = if below_top + content_height + border_inset <= viewport_rows {
+    let (menu_top, visible_height) = if below_top + content_height + border_inset <= viewport_bottom
+    {
         // Fits below trigger
         (below_top, content_height)
-    } else if trigger_row - content_height - gap >= border_inset {
+    } else if trigger_row - content_height - gap >= viewport_top + border_inset {
         // Fits above trigger
         (trigger_row - content_height - gap, content_height)
     } else {
         // Doesn't fit either way — fill viewport minus border insets
-        let h = (viewport_rows - border_inset * 2.0).min(content_height);
-        (border_inset, h)
+        let viewport_height = (viewport_bottom - viewport_top).max(0.0);
+        let h = (viewport_height - border_inset * 2.0)
+            .max(0.0)
+            .min(content_height);
+        (viewport_top + border_inset, h)
     };
 
     let max_scroll = (content_height - visible_height).max(0.0);
@@ -882,10 +888,17 @@ impl WidgetDefinition for DropdownWidget {
         if state.open && !options.is_empty() {
             let screen_col = node.rect.col - viewport.scroll_left;
             let screen_row = node.rect.row - viewport.scroll_top;
-            let viewport_rows = viewport.tile_content_rows;
+            let viewport_rows = viewport.vp_h / viewport.cell_h.max(1.0);
+            let viewport_bottom = viewport.overlay_viewport_bottom;
+            let viewport_top = viewport_bottom - viewport_rows;
 
-            let geo =
-                compute_menu_geometry(screen_row, node.rect.height, options.len(), viewport_rows);
+            let geo = compute_menu_geometry(
+                screen_row,
+                node.rect.height,
+                options.len(),
+                viewport_top,
+                viewport_bottom,
+            );
 
             // Persist geometry so key_event/scroll can operate correctly
             state.visible_height = geo.visible_height;
@@ -1252,6 +1265,107 @@ mod tests {
     fn truncation_does_not_spend_width_on_ellipsis() {
         assert_eq!(truncate_text_to_width("-1oct", 2.0, 10.0), "-1o");
         assert!(!truncate_text_to_width("-1oct", 2.0, 10.0).contains('…'));
+    }
+
+    #[test]
+    fn menu_geometry_uses_space_below_short_originating_tile() {
+        // The trigger lives in a two-row transport tile, but the frame-level
+        // overlay viewport continues for another eighteen rows.
+        let geometry = compute_menu_geometry(0.25, 1.0, 5, 0.0, 20.0);
+
+        assert_eq!(geometry.visible_height, geometry.content_height);
+        assert!(geometry.menu_top > 1.0);
+        assert!(geometry.menu_top + geometry.visible_height > 2.0);
+        assert!(geometry.menu_top + geometry.visible_height <= 20.0);
+    }
+
+    #[test]
+    fn menu_geometry_can_open_above_its_originating_tile() {
+        // Negative local rows represent frame space above a lower tile.
+        let geometry = compute_menu_geometry(1.0, 1.0, 5, -12.0, 8.0);
+
+        assert_eq!(geometry.visible_height, geometry.content_height);
+        assert!(geometry.menu_top < 0.0);
+        assert!(geometry.menu_top >= -12.0);
+    }
+
+    #[test]
+    fn oversized_menu_scrolls_within_the_frame_overlay_viewport() {
+        let geometry = compute_menu_geometry(2.0, 1.0, 100, -3.0, 7.0);
+
+        assert!(geometry.visible_height <= 10.0);
+        assert_eq!(geometry.menu_top, -2.9);
+        assert!(geometry.max_scroll > 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_menu_emits_a_finite_overlay_beyond_a_short_tile() {
+        let widget_id = 91_337;
+        let mut props = HashMap::new();
+        props.insert(
+            "options".to_string(),
+            string_list(&["off", "1/16", "1/8", "1/4", "1/2", "1 bar"]),
+        );
+        props.insert("value".to_string(), Value::String("off".to_string()));
+        let node = LayoutNode {
+            widget_id,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "dropdown".to_string(),
+            rect: Rect {
+                row: 0.25,
+                col: 8.0,
+                width: 6.0,
+                height: 1.0,
+            },
+            props,
+            children: Vec::new(),
+            focusable: true,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 800.0,
+            vp_h: 400.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 20.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+
+        super::super::clear_overlay();
+        set_state(widget_id, DropdownState::default());
+        let outcome = DROPDOWN_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            node.rect.col,
+            node.rect.row,
+            None,
+            None,
+            KeyModifiers::NONE,
+            viewport.cell_w,
+            viewport.cell_h,
+        );
+        assert!(matches!(outcome, MouseEventOutcome::Consume));
+
+        let (_tile_primitives, overlay_primitives) =
+            crate::widget_render::collect_metal_primitives(&node, viewport, 0.0, 2);
+        let overlay_rect =
+            super::super::get_overlay_rect().expect("open dropdown should register hit bounds");
+
+        assert!(!overlay_primitives.is_empty());
+        assert!(overlay_rect.width.is_finite() && overlay_rect.width > 0.0);
+        assert!(overlay_rect.height.is_finite() && overlay_rect.height > 0.0);
+        assert!(overlay_rect.row + overlay_rect.height > 2.0);
+
+        set_state(widget_id, DropdownState::default());
+        super::super::clear_overlay();
     }
 
     #[test]
