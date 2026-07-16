@@ -5,10 +5,10 @@ use cpal::Stream;
 
 use crate::audio;
 use crate::audiograph::{self, LiveGraphPtr};
+use crate::effects::reverb;
 use crate::recorder::MasterRecorder;
-use crate::reverb;
 use crate::sequencer::{BusId, KeyboardTrigger, SequencerState};
-use crate::ui::{AudioBuses, BusGateRuntimeState, BusNodeIds};
+use crate::tui::{AudioBuses, BusGateRuntimeState, BusNodeIds};
 
 const INITIAL_GRAPH_CAPACITY: i32 = 256;
 
@@ -163,8 +163,8 @@ fn init_engine_parts(
     let mix_merge_id = unsafe {
         audiograph::add_node(
             lg,
-            crate::stereo_panner::stereo_panner_vtable(),
-            crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+            crate::effects::stereo_panner::stereo_panner_vtable(),
+            crate::effects::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
             mix_merge_name.as_ptr(),
             2,
             2,
@@ -175,8 +175,8 @@ fn init_engine_parts(
     let mix_volume_id = unsafe {
         audiograph::add_node(
             lg,
-            crate::stereo_panner::stereo_panner_vtable(),
-            crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+            crate::effects::stereo_panner::stereo_panner_vtable(),
+            crate::effects::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
             mix_volume_name.as_ptr(),
             2,
             2,
@@ -187,8 +187,8 @@ fn init_engine_parts(
     let mix_gate_id = unsafe {
         audiograph::add_node(
             lg,
-            crate::stereo_panner::stereo_panner_vtable(),
-            crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+            crate::effects::stereo_panner::stereo_panner_vtable(),
+            crate::effects::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
             mix_gate_name.as_ptr(),
             2,
             2,
@@ -254,8 +254,9 @@ fn init_engine_parts(
         let merge_id = unsafe {
             audiograph::add_node(
                 lg,
-                crate::stereo_panner::stereo_panner_vtable(),
-                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                crate::effects::stereo_panner::stereo_panner_vtable(),
+                crate::effects::stereo_panner::STEREO_PANNER_STATE_SIZE
+                    * std::mem::size_of::<f32>(),
                 merge_name.as_ptr(),
                 2,
                 2,
@@ -266,8 +267,9 @@ fn init_engine_parts(
         let volume_id = unsafe {
             audiograph::add_node(
                 lg,
-                crate::stereo_panner::stereo_panner_vtable(),
-                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                crate::effects::stereo_panner::stereo_panner_vtable(),
+                crate::effects::stereo_panner::STEREO_PANNER_STATE_SIZE
+                    * std::mem::size_of::<f32>(),
                 volume_name.as_ptr(),
                 2,
                 2,
@@ -278,8 +280,9 @@ fn init_engine_parts(
         let gate_id = unsafe {
             audiograph::add_node(
                 lg,
-                crate::stereo_panner::stereo_panner_vtable(),
-                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                crate::effects::stereo_panner::stereo_panner_vtable(),
+                crate::effects::stereo_panner::STEREO_PANNER_STATE_SIZE
+                    * std::mem::size_of::<f32>(),
                 gate_name.as_ptr(),
                 2,
                 2,
@@ -333,7 +336,7 @@ fn init_engine_parts(
                 id: nodes.id,
                 gate_id: nodes.gate_id,
                 sequence: crate::sequencer::BusGateSequence::default(),
-                effect_slots: crate::ui::BusChannelState::default_effect_slots(),
+                effect_slots: crate::tui::BusChannelState::default_effect_slots(),
             })
             .collect(),
     ));

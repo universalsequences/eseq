@@ -2,7 +2,7 @@
 
 ## Goal
 
-Modularize `src/bin/metal_seq.rs` without behavior changes by extracting four low-risk modules first:
+Modularize `src/ui/main.rs` without behavior changes by extracting four low-risk modules first:
 
 - `piano_roll.rs`
 - `values.rs`
@@ -14,7 +14,7 @@ This first increment should shrink the binary file while leaving the event loop,
 ## Target Layout
 
 ```text
-src/bin/metal_seq/
+src/ui/
   main.rs
   values.rs
   piano_roll.rs
@@ -31,20 +31,20 @@ mod piano_roll;
 mod values;
 ```
 
-Cargo supports `src/bin/metal_seq/main.rs` as the same `metal_seq` binary.
+Cargo supports `src/ui/main.rs` as the same `metal_seq` binary.
 
 ## Phase 0: Mechanical Move
 
 Move:
 
 ```text
-src/bin/metal_seq.rs
+src/ui/main.rs
 ```
 
 to:
 
 ```text
-src/bin/metal_seq/main.rs
+src/ui/main.rs
 ```
 
 No logic changes.

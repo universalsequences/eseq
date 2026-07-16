@@ -25,7 +25,7 @@ rack = `Broadcast` policy, drum rack = `ByPitch` policy. Future policies
 
 The audio-summing and mixer plumbing already supports this. Today every
 instrument feeds a **shared per-track sum bus**, built once in
-`create_track_shell` (`crates/sequencer/src/ui/graph.rs`):
+`create_track_shell` (`crates/sequencer/src/ttui/graph.rs`):
 
 ```
 voice_sum_id (L) ─┐
@@ -70,7 +70,7 @@ What does *not* exist yet, and is the actual work:
   `to/from` integer flag helpers. `MAX_TRACKS = 64`, `MAX_VOICES = 12`,
   `EXT_MOD_INPUT_COUNT = 4`.
 
-### Runtime audio nodes (`crates/sequencer/src/ui/mod.rs` + `ui/graph.rs`)
+### Runtime audio nodes (`crates/sequencer/src/tui/mod.rs` + `tui/graph.rs`)
 - `app.graph.n: Vec<TrackNodeIds>`, one per track. `TrackNodeIds`:
   `sampler_ids`, `sampler_gatepitch_ids`, `sampler_modulator_ids`,
   `voice_sum_id`, `voice_sum_r_id`, `pan_id`, `filter_id`, `delay_id`,
@@ -169,7 +169,7 @@ sound at `base_note_offset`) — configurable per slot.
   group *g* (classic closed-hat chokes open-hat). Implement as a pre-trigger
   pass in the dispatch step that issues gate-off to the chokee voices.
 
-## 5. Audio graph construction (`ui/graph.rs`)
+## 5. Audio graph construction (`tui/graph.rs`)
 
 New builder `add_rack_track(policy) -> usize` and
 `add_slot_to_rack(track, slot_spec)`:
@@ -235,7 +235,7 @@ to match a 4×4 drum grid, configurable) and per-slot voice caps as in §4.3.
 
 ## 8. UI
 
-Two views over the same container (`crates/sequencer/src/ui/…`, custom widgets
+Two views over the same container (`crates/sequencer/src/tui/…`, custom widgets
 under `bin/metal_seq`). Use the `each`-based widget generation convention (see
 memory: *Lisp UI: each vs map*, *Graph reactive bindings*) — never `map`.
 
@@ -296,7 +296,7 @@ Tasks are ordered so each lands compiling + tested before the next.
 - *Checkpoint:* existing resolver tests pass unchanged (single track = slot 0);
   add one test resolving params for slot 1 of a 2-slot rack.
 
-**T3 — Audio graph: per-slot sub-mixer + multi-instrument build** (`ui/graph.rs`)
+**T3 — Audio graph: per-slot sub-mixer + multi-instrument build** (`tui/graph.rs`)
 - Extend `TrackNodeIds` (`ui/mod.rs`) with `slots: Vec<RackSlotNodeIds>`;
   `RackSlotNodeIds { sampler_pool_id, engine_id, slot_sum_l, slot_sum_r,
   slot_pan_id, ... }`. Keep flat fields for `Single` tracks.
@@ -364,7 +364,7 @@ nesting a rack inside a rack slot.
 - Voice-budget test: per-slot `max_poly` enforced; slot count and per-slot caps
   keep graph size bounded.
 
-## 11. Open questions
+## 11. Open questions (original)
 
 1. Pick the concrete per-slot `max_polyphony` clamp and default values for
    broadcast racks vs drum racks. Drum rack pads should default low; instrument
@@ -375,3 +375,297 @@ nesting a rack inside a rack slot.
 3. Per-slot FX chains in Phase 1 or defer to Phase 3? (Defer — slots get
    gain/pan/mute/solo only at first; the track FX chain is shared.)
 4. Drum-rack pads: fixed grid size or growable? (Start fixed 16, revisit.)
+
+---
+
+## Amendment A — Per-Slot FX Chains & Rack Sounds
+
+Status: draft / design
+Author: design pass, 2026-07-15
+Supersedes: original open question 3 (per-slot FX was deferred to Phase 3;
+this amendment promotes it and specifies it).
+
+### A1. Goal
+
+Give every rack slot its own FX chain, Ableton-style:
+
+```
+slot voices ─> slot_sum_l/r ─> slot_pan ─> [slot FX chain] ─┬─> voice_sum_id (L)
+                                                            └─> voice_sum_r_id (R)
+              (track then applies its own shared FX chain to the sum, as today)
+```
+
+The driving product goal is a **"Sounds" tab**: ready-made instrument-rack
+presets that bundle instrument(s) + effects. Loading a Sound swaps the rack on
+the track and leaves the *track-level* FX chain untouched — the effects that
+make the sound live inside the rack's slots, so presets never nuke a user's
+track processing. This requires three things that don't exist yet, in
+dependency order:
+
+1. Per-slot FX chains (A4–A6).
+2. "Convert track → rack" — fold an existing track's instrument + custom FX
+   into a one-slot rack (A7).
+3. A rack **Sound preset** format + browser tab (A8).
+
+### A2. Current state (what this builds on)
+
+- Rack container (Phase 1/2) is **built**: `RackSlotMixer`
+  (`tui/graph.rs:155`) gives each slot `slot_sum_l/r → slot_pan`, with
+  `slot_pan` port 0/1 feeding the track's `voice_sum_id`/`voice_sum_r_id`
+  mono sums (`tui/graph.rs:4570`). The per-slot FX chain inserts exactly in
+  that pan→sum gap.
+- Effect chains are **uniform inserts**: `BUILTIN_SLOT_COUNT = 0`
+  (`effects.rs:19`) — builtins (OTT, Roar, Space Echo, …) are ordinary chain
+  slots. Once a slot can host a chain, it hosts every effect.
+- The low-level insert API is **already host-agnostic**:
+  `add_effect_to_chain_at` (`lisp_host.rs:1422`) takes arbitrary
+  predecessor/successor node ids + a registry `slot_id`;
+  `connect_custom_effect_gap` (`tui/graph.rs:3206`) handles mono/stereo
+  adaptation.
+- **Buses are the precedent for a second chain host**: bus chains key the
+  dgenlisp process registry as
+  `slot_id = (MAX_TRACKS + bus_idx) * MAX_CUSTOM_FX + offset`
+  (`effects.rs:4321`), `REGISTRY_SIZE = (MAX_TRACKS + MAX_BUS_FX_CHAINS) *
+  MAX_CUSTOM_FX` (`lisp_host.rs:89`).
+- But buses were added by **duplication, not generalization**: parallel
+  `add_builtin_effect_sync` / `add_bus_effect_sync`, `move_effect_slot_sync`
+  / `move_bus_effect_slot_sync`, `delete_custom_effect_slot` /
+  `delete_bus_effect_slot`, separate lease vectors
+  (`track_effect_leases` / `bus_effect_leases`, `ui/mod.rs:408`), separate
+  predecessor/successor finders. A third literal copy is the main thing this
+  amendment refuses to do.
+
+### A3. Locked decisions
+
+1. **Generalize before adding the third host.** Introduce an `FxChainHost`
+   seam (A4) and port track + bus chains onto it first. No third copy of the
+   chain machinery.
+2. **Registry rows are leased, not statically allocated.** A bounded pool of
+   `MAX_RACK_FX_CHAINS` registry chain rows is assigned dynamically to
+   `(track, slot)` pairs when a slot first receives an effect (A5). Naive
+   static allocation (64 tracks × 16 slots × 8 fx = 8192 rows) is rejected.
+3. **v1 scope is edit + persist, not modulate.** Slot-FX params are editable
+   and saved/loaded. P-locks on slot-FX params, macro mapping into slot FX,
+   and sidechain taps *into* slot effects are all deferred (A9).
+4. **Serialization is additive.** `ProjectRackSlotPattern` gains
+   `effect_slots: Vec<ProjectEffectSlot>` with `#[serde(default)]`. No
+   migration needed; no rack projects/presets exist in the wild yet, so this
+   window is the cheapest it will ever be.
+5. **Sound presets are instrument-rack presets.** The Sounds tab loads racks;
+   loading replaces the rack (slots + slot FX + slot mix), never the
+   track-level FX chain, sends, or routing.
+6. **Rack macros are rack-scoped, not project-global.** (Locked 2026-07-15,
+   ahead of implementation.) A future rack macro bank (Ableton-style 6–8
+   knobs, the rack's public surface when collapsed) uses **rack-relative
+   addressing** (slot index + param within the rack) and **serializes inside
+   the rack blob / rack preset** — never as project-global
+   `MacroMapping { track, target }` entries pointing into a rack, which break
+   the moment a rack preset is loaded elsewhere or swapped between tracks.
+   This is what makes a Sounds-tab entry ("closed rack + 6 knobs") portable.
+7. **One override mechanism, two scopes.** Rack macros ride the same
+   engine live-override layer and effective-value send path as project
+   macros (`MACRO_MAPPING_SPEC.md` Phase 1) — a rack-local mapping table
+   consulted in the same seam, not a parallel system. A rack macro is itself
+   a param once it exists, so project macros can map onto rack macros
+   (macro-of-macros) with zero extra machinery.
+
+### A4. Phase R1 — `FxChainHost` generalization (refactor, no new features)
+
+Define one description of "a place a chain lives":
+
+```
+struct FxChainHost {
+    registry_base: usize,          // first slot_id row; chain occupies
+                                   // registry_base .. +MAX_CUSTOM_FX
+    predecessor_id: i32,           // stereo node feeding the chain
+    successor: ChainSuccessor,     // where the chain output lands
+    // + accessors for: chain storage (Vec<EffectSlotState>),
+    //   effect_descriptors row, lease row, display label
+}
+
+enum ChainSuccessor {
+    StereoNode(i32),               // track: delay_id; bus: bus tail
+    MonoPair { l: i32, r: i32 },   // rack slot: voice_sum_id / voice_sum_r_id
+}
+```
+
+- Port the track chain and bus chain onto `FxChainHost`: one implementation
+  each of add / move / delete / param-push / predecessor-successor search,
+  parameterized by host. The 16 bus-specific functions in `ui/effects.rs`
+  collapse into the shared impl.
+- `connect_custom_effect_gap` grows a `ChainSuccessor::MonoPair` arm: last
+  effect out ch0 → `l`, ch1 → `r` (mono effect out fans to both).
+- Lease storage unifies to one keyed map or a per-host row, replacing the
+  `track_effect_leases` / `bus_effect_leases` pair.
+- *Checkpoint:* zero behavior change. Existing track-FX and bus-FX tests pass
+  unchanged; a save→load round-trip of a project with track + bus effects is
+  bit-identical.
+
+### A5. Phase R2 — rack-slot chains (engine)
+
+**Registry region + leasing.** Extend the registry:
+
+```
+REGISTRY_SIZE = (MAX_TRACKS + MAX_BUS_FX_CHAINS + MAX_RACK_FX_CHAINS) * MAX_CUSTOM_FX
+MAX_RACK_FX_CHAINS = 64        // pooled chains, not per-(track,slot)
+```
+
+A `RackChainLeases` table maps `(track, slot) → chain_idx` on first effect
+add. Adding an effect when the pool is exhausted returns a user-visible error
+("too many rack FX chains in project").
+
+**Release-on-empty + reuse safety (resolves old open question A10.2).**
+Graph edits are enqueued and drained by the audio loop (FIFO, bounded per
+block), with no commit notification. Registry fn-pointer stores
+(`DGEN_PROCESS_FNS`, `lisp_host.rs:90`) bypass that queue: the audio thread
+re-loads the row every block and passthroughs on 0 (`lisp_host.rs:188`). So
+clearing a row early is always benign; the only dangerous interleaving is
+storing a *new* fn pointer into a row while a stale node that reads it may
+still be alive (new fn transmuted against an old, differently-sized state
+buffer → OOB). Leases therefore have three states:
+
+- **Active → Draining** (last effect deleted / slot deleted): in UI-thread
+  program order, store 0 into the row's fn pointers, enqueue the
+  disconnect/delete edits, release the `(track, slot)` map entry (UI-only
+  bookkeeping). The row's `DylibLease` stays with the Draining entry — the
+  audio thread may be mid-call into the dylib this block, so the dylib must
+  outlive the node, not the chain slot.
+- **Draining → Free**: lazily, upon observing
+  `graph_edit_queue_available() == capacity` (queue fully drained ⇒ all
+  earlier edits applied ⇒ stale nodes gone). Checked opportunistically at the
+  next effect add and on the UI tick; never blocks.
+- **Allocation**: Free rows only, FIFO. Draining rows are never handed out.
+  Exhaustion requires churning dozens of chains within a few audio blocks.
+
+The per-block edit budget only delays the queue-empty observation (later
+reclamation), never correctness — FIFO order is preserved.
+
+**Pre-existing hazard fixed in R1:** `remove_effect_from_chain`
+(`lisp_host.rs:1308`) deletes the node but never clears its registry row, so
+today's delete-then-re-add at the same `(track, offset)` briefly exposes the
+same stale-node/new-fn race (unhit in practice because reuse is user-paced).
+The clear-row-at-delete discipline above lands in the R1 `FxChainHost`
+refactor so tracks and buses inherit it too.
+
+**Host wiring.** For a leased slot chain:
+
+```
+FxChainHost {
+    registry_base: (MAX_TRACKS + MAX_BUS_FX_CHAINS + chain_idx) * MAX_CUSTOM_FX,
+    predecessor_id: slots[slot].slot_pan_id,
+    successor: MonoPair { l: voice_sum_id, r: voice_sum_r_id },
+}
+```
+
+`RackSlotNodeIds` (`ui/mod.rs:607`) is unchanged — chain node ids live in the
+chain storage, as they do for tracks.
+
+**State + snapshot.** Slot chains get `Vec<EffectSlotState>` storage parallel
+to the slot (inside the rack-slot state, not a new top-level parallel vec).
+The audio-thread snapshot restore path (`sequencer/state.rs` effect-slot
+restore) walks slot chains the same way it walks track chains, keyed by the
+leased `chain_idx`.
+
+**Lifecycle.**
+- Slot delete / rack track delete: free all chain nodes, release the lease,
+  drop dylib leases. Extend the `delete_track_shell` path and slot-removal
+  path; `debug_assert_track_vectors_aligned` still holds.
+- Slot reorder: chains move with their slot (lease map keys update; no node
+  surgery).
+- Hot-reload of a custom effect (`hot_reload_instrument`-adjacent path for
+  fx) must find instances in slot chains too — falls out of A4 if reload
+  iterates hosts, verify explicitly.
+
+**Serialization.** `ProjectRackSlotPattern` (+`ProjectRackSlot` if distinct)
+gains `#[serde(default)] effect_slots: Vec<ProjectEffectSlot>`; project load
+builds slot chains through the same host API. Round-trip + legacy-load tests
+alongside the existing rack tests in `project.rs`.
+
+*Checkpoints:*
+- Headless test: 2-slot rack, OTT on slot 0, custom dgenlisp fx on slot 1;
+  assert wiring `slot_pan → fx → voice_sum_l/r`, both slots audible, slot 1
+  chain removable without touching slot 0.
+- Lease test: add/remove effects across slots recycles pool rows; exhaustion
+  errors cleanly.
+- Save → load → delete rack: no leaked nodes, no leaked leases.
+
+### A6. Phase R3 — UI: slot chain view
+
+- In the rack chain list, each slot row gains an FX section: the existing
+  track FX-chain panel component, scoped to the slot's `FxChainHost` (add /
+  reorder / delete / bypass, param panel for the selected effect).
+- Same effect browser/picker as track chains (builtins + custom dgenlisp fx).
+- Build children with `each` (owner metadata), never `map` (see memory:
+  *Lisp UI: each vs map*).
+- Show per-slot chain cost next to the existing per-slot poly/cost summary.
+- *Checkpoint:* `mk_ui` layout test; manual audition — layered 2-slot rack,
+  different reverb per slot, track-level FX still applied to the sum.
+
+### A7. Phase R4a — Convert track → rack
+
+Command on any `Sampler`/`Custom` track: **"Group to Instrument Rack"**.
+
+1. Serialize the track's instrument (type, sample/instrument name, params,
+   graph overrides, neural net) and its custom FX chain to the project-side
+   structures (reuse the save path — no live node surgery).
+2. Rebuild the track as a `Rack { Broadcast }` with one slot from that
+   serialized instrument; load the serialized FX into the **slot's** chain.
+3. Track-level chain ends empty (Ableton semantics: devices move into the
+   rack). Keep sends/bus routing/track params untouched. Undo restores the
+   flat track.
+4. *Checkpoint:* convert a playing custom track with 2 effects → identical
+   audio output before/after (offline render compare via the audition
+   harness), then "add layer" works on the result.
+
+### A8. Phase R4b — Sound presets + Sounds tab
+
+- **Format:** a `.sound` preset = serialized rack (routing, slots incl. per-
+  slot FX chains, slot mix, per-slot instrument params) + display metadata
+  (name, tags, author). It is exactly `ProjectTrack::Rack`'s payload lifted
+  out of a project — one serializer, shared with save/load.
+- **Save:** "Save rack as Sound" from the rack header. A flat (non-rack)
+  track offers "Save as Sound" via auto-convert (A7) on a temp copy.
+- **Load/swap:** dropping a Sound on a track swaps the instrument container
+  only — same rebind seam as instrument swap (see
+  `docs/instrument-swap-spec.md`): rack slots + slot FX replaced, track FX /
+  sends / pattern data preserved. Loading onto a flat track converts it to a
+  rack.
+- **Browser:** "Sounds" tab in the sidebar tab rail (see
+  `docs/browser-tab-rail-spec.md`), flattened tree like builtins; drag-to-
+  track + click-to-audition consistent with the instrument browser's
+  keep-open audition behavior.
+- *Checkpoint:* save a 2-slot rack w/ slot FX as a Sound; load it onto (a) a
+  blank track, (b) a track with track-level FX — track FX survives in case
+  (b); audition harness confirms the Sound reproduces the original render.
+
+### A9. Deferred (explicitly out of scope for A5–A8)
+
+- P-locks on slot-FX params (needs `(track, slot, fx_slot)` plock keys).
+  **Priority follow-up, not a nice-to-have**: p-locks are the defining
+  feature of this sequencer, and once rack macro banks exist (A3 #6/#7),
+  p-locking a rack macro is the single highest-leverage version — one plock
+  lane sweeping a whole curated sound. Design plock keys so a rack macro is
+  addressable as a plock target from day one.
+- Rack macro banks (design locked in A3 #6/#7; implement when the Sounds
+  tab makes the collapsed-rack surface real product UI).
+- Macro mapping into slot FX (`ParamTarget::RackSlotParam` exists; add a
+  `RackSlotEffectParam` variant when needed — cheap after A4/A5).
+- Sidechain routing *into* slot effects (`refresh_effect_sidechain_labels`
+  is track-keyed; needs a "Track N / Slot M / FX" naming scheme).
+- Per-slot sends; nested racks; drum-rack per-pad return chains.
+
+### A10. Open questions
+
+1. `MAX_RACK_FX_CHAINS` value: 64 pooled chains ≈ plenty for real projects,
+   but drum racks with per-pad FX could burn 16 per track — start 64, make it
+   a single const, revisit with telemetry from real projects.
+2. ~~Should an *empty* slot chain hold its lease?~~ **Resolved: release on
+   empty**, via the three-state (Active/Draining/Free) lease design in A5 —
+   clearing registry rows is always safe, and reuse is gated on a lazy
+   queue-drained observation rather than any commit notification.
+3. Sound preset location: instrument-style directory
+   (`crates/sequencer/instruments/…`) vs a user-level sounds dir? Sounds tab
+   likely wants both (factory + user), mirroring the sample DB split.
+4. Does "Group to Instrument Rack" also move *builtin* mixer stages (filter/
+   delay in `TrackShell`) into the slot chain, or only chain inserts? (Start:
+   chain inserts only; the shell stages are per-track mixer furniture.)

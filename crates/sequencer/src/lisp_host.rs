@@ -16339,7 +16339,7 @@ mod tests {
             .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-8x8-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-8x8-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph 8x8 demo script");
@@ -16825,7 +16825,7 @@ mod tests {
             .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-8x8-reset-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-8x8-reset-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph 8x8 reset demo script");
@@ -17260,7 +17260,7 @@ mod tests {
             .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-variable-reset-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-variable-reset-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph variable reset demo script");
@@ -17561,7 +17561,7 @@ mod tests {
             .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-markov-8x8-demo.lisp",
+            "{}/scripts/sequencers/graph-markov-8x8-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read markov 8x8 demo script");
@@ -17730,7 +17730,7 @@ mod tests {
             .expect("install sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-16-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-16-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph 16 demo script");
@@ -17983,7 +17983,7 @@ mod tests {
             .expect("install sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-16-cycle-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-16-cycle-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph 16 cycle demo script");
@@ -18223,7 +18223,7 @@ mod tests {
             r#"
             (def seq-register-step-sequencer-tab (label buffer) nil)
             (def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
-            (load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")
+            (load "crates/sequencer/scripts/sequencers/graph-neural-8x8-demo.lisp")
             "#,
             Vec::new(),
         );
@@ -19866,7 +19866,7 @@ mod tests {
     fn neural_lisp_track_router_script_is_idempotent_and_routes_tracks() {
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -19955,7 +19955,7 @@ mod tests {
     fn neural_lisp_track_router_route_dropdown_supports_track_16() {
         let (state, mut runtime) = neural_test_runtime(16);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -20004,7 +20004,7 @@ mod tests {
     fn neural_lisp_track_router_reuses_existing_named_network() {
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -20060,7 +20060,7 @@ mod tests {
     fn neural_lisp_track_router_reactive_refresh_loads_model_state() {
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -20223,7 +20223,7 @@ mod tests {
 
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -22710,7 +22710,7 @@ mod tests {
             Arc::clone(&state),
             Arc::clone(&ui_epoch),
         );
-        let source = include_str!("../scripts/inline-code-widgets-demo.lisp");
+        let source = include_str!("../scripts/ui/inline-code-widgets-demo.lisp");
 
         runtime
             .eval_str(source)
@@ -22763,7 +22763,7 @@ mod tests {
         );
 
         let script_path = format!(
-            "{}/scripts/process-chain-demo.lisp",
+            "{}/scripts/processes/process-chain-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read process chain demo script");
@@ -22856,7 +22856,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-transpose-wander-demo.lisp",
+            "{}/scripts/processes/process-transpose-wander-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -22922,7 +22922,7 @@ mod tests {
         );
 
         let script_path = format!(
-            "{}/scripts/process-transpose-wander-demo.lisp",
+            "{}/scripts/processes/process-transpose-wander-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -23905,7 +23905,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-phase3a-ports-demo.lisp",
+            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
@@ -23969,7 +23969,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-phase3b-mappable-demo.lisp",
+            "{}/scripts/processes/process-phase3b-mappable-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3B mappable demo");
@@ -24040,7 +24040,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-phase4-verdict-ratchet-demo.lisp",
+            "{}/scripts/processes/process-phase4-verdict-ratchet-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -24099,7 +24099,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-phase7-reads-demo.lisp",
+            "{}/scripts/processes/process-phase7-reads-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 7 reads demo");
@@ -24159,7 +24159,7 @@ mod tests {
             .eval(&super::load_process_library_source())
             .expect("load builtin process library");
         let script_path = format!(
-            "{}/scripts/process-fields-band-demo.lisp",
+            "{}/scripts/processes/process-fields-band-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read fields band demo");
@@ -24193,7 +24193,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-conductor-demo.lisp",
+            "{}/scripts/processes/process-conductor-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
@@ -24237,7 +24237,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-project-layer-demo.lisp",
+            "{}/scripts/processes/process-project-layer-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read project layer demo");
@@ -24344,7 +24344,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-inlet-patch-demo.lisp",
+            "{}/scripts/processes/process-inlet-patch-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read process-inlet demo");
@@ -24472,7 +24472,7 @@ mod tests {
     fn scheduler_scratch_load_does_not_replace_ui_authored_process_chain_slots() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let script_path = format!(
-            "{}/scripts/process-phase3a-ports-demo.lisp",
+            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
@@ -24525,7 +24525,7 @@ mod tests {
     fn project_scratch_reattach_preserves_saved_process_slot_settings() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let script_path = format!(
-            "{}/scripts/process-phase3a-ports-demo.lisp",
+            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
@@ -24794,7 +24794,7 @@ mod tests {
         );
 
         let script_path = format!(
-            "{}/scripts/process-ui-control-demo.lisp",
+            "{}/scripts/processes/process-ui-control-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -24981,7 +24981,7 @@ mod tests {
         );
 
         let script_path = format!(
-            "{}/scripts/band-coupling-matrix-demo.lisp",
+            "{}/scripts/sequencers/band-coupling-matrix-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -25094,7 +25094,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/band-coupling-matrix-demo.lisp",
+            "{}/scripts/sequencers/band-coupling-matrix-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =

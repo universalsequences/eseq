@@ -3,7 +3,7 @@
 //! Draws the selected filter type's magnitude response (type / freq / res
 //! props) on a log-frequency axis, 20 Hz .. 20.48 kHz, ±24 dB. The response
 //! math mirrors the SVF / comb / resample / dispersion kernels in
-//! `sequencer::roar` closely enough for display purposes.
+//! `sequencer::effects::roar` closely enough for display purposes.
 
 use std::collections::HashMap;
 
@@ -41,7 +41,7 @@ fn prop_num(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     props.get(key).and_then(value_num).unwrap_or(default)
 }
 
-/// Res 0..1 → Q 0.5..~12; mirror of `sequencer::roar::res_to_q`.
+/// Res 0..1 → Q 0.5..~12; mirror of `sequencer::effects::roar::res_to_q`.
 fn res_to_q(res: f32) -> f32 {
     0.5 * (24.0_f32).powf(res.clamp(0.0, 1.0))
 }

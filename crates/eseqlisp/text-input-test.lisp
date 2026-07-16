@@ -1,6 +1,6 @@
 ;; Text input + tree filtering demo
 
-(load "mac-osx-dark.lisp")
+(load "../sequencer/ui/themes/mac-osx-dark.lisp")
 
 ;; ── SDF widgets for search bar styling ──
 

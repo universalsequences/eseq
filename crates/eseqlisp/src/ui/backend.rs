@@ -133,7 +133,7 @@ pub struct StatusIndicator {
 
 /// A complete snapshot of everything a backend needs to draw one frame.
 ///
-/// Built by `crate::tui::build_render_frame` from live `Editor` state and
+/// Built by `crate::ui::frame::build_render_frame` from live `Editor` state and
 /// passed to whichever `Backend` is active. Backends must not mutate editor
 /// state — they only read this frame.
 #[derive(Clone)]

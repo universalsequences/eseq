@@ -239,7 +239,7 @@ Two helpers needed in `midi-fx/_lib/dsp.lisp`:
 
 **String params.** `(midi-fx-param "pattern" :string "(. . -)")` is hypothetical
 — current `midi-fx-param` may not support string-typed params. Check
-`metal-seq-fx.lisp` and the `midi-fx-param` native registration in
+`ui/effects.lisp` and the `midi-fx-param` native registration in
 `src/lisp_host.rs`. If unsupported, **add string param support first** —
 without it, the effect is unusable. This is a prerequisite, called out in §10.
 

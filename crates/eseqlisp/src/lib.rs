@@ -3004,7 +3004,7 @@ mod tests {
 
     /// Regression: confirm that `(h-stack ... (map fn (chunks list n)) other)`
     /// correctly flattens the mapped list of v-stacks as h-stack children.
-    /// This is the pattern used by `ui-rack` in metal-seq-fx.lisp; if the
+    /// This is the pattern used by `ui-rack` in ui/effects.lisp; if the
     /// list isn't spliced, instruments only render one column instead of
     /// multiple.
     #[test]
@@ -3054,7 +3054,7 @@ mod tests {
         );
     }
 
-    /// Verify the ui-rack pattern from metal-seq-fx.lisp produces the expected
+    /// Verify the ui-rack pattern from ui/effects.lisp produces the expected
     /// number of column children (4 panels into 2-per-column = 2 v-stacks per side).
     #[test]
     fn test_ui_rack_breathe_produces_correct_columns() {

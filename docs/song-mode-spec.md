@@ -4,7 +4,7 @@ Status: draft / design
 Author: design pass, 2026-07-10
 Related: `crates/sequencer/src/sequencer/state.rs`,
 `crates/sequencer/src/scheduler.rs`,
-`crates/sequencer/metal-seq-transport.lisp`
+`crates/sequencer/ui/transport.lisp`
 
 ## 1. Summary
 

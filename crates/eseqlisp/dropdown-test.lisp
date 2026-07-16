@@ -1,6 +1,6 @@
 ;; Dropdown widget demo
 
-(load "mac-osx-dark.lisp")
+(load "../sequencer/ui/themes/mac-osx-dark.lisp")
 
 (defwidget panel-bg
   :width 1 :height 1

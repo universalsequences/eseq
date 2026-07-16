@@ -11,7 +11,7 @@
 //!   [--mod1 0.0] ... [--mod4 0.0]
 //!   [--mod-decay-1 0.0] ... [--mod-mix-4 0.0]
 
-use sequencer::multiverb::{
+use sequencer::effects::multiverb::{
     multiverb_vtable, MULTIVERB_PARAM_BASS, MULTIVERB_PARAM_DAMP, MULTIVERB_PARAM_DECAY,
     MULTIVERB_PARAM_DIFFUSION, MULTIVERB_PARAM_ERA, MULTIVERB_PARAM_MIX, MULTIVERB_PARAM_MODE,
     MULTIVERB_PARAM_MOD_DECAY_DEPTH_1, MULTIVERB_PARAM_MOD_DEPTH,

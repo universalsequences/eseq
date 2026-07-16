@@ -1,0 +1,39 @@
+;; Shared state and sizing constants for the Metal Sequencer effect strip.
+;; ui/effects.lisp — Effect chain UI for Metal Sequencer
+;; Renders to *fx* buffer. Loaded by ui/main.lisp after shared macro state.
+
+(defstate instrument-panel-tab 0)
+(defstate instrument-source-tab 0)
+(defstate instrument-mods-open false)
+(defstate instrument-selected-mod-slot 1)
+(defstate instrument-key-lock-octave 4)
+(defstate instrument-key-lock-selected-notes '())
+(defstate instrument-key-lock-audition true)
+(defstate effect-mods-open false)
+(defstate effect-mods-chain "audio")
+(defstate effect-mods-slot -1)
+(defstate effect-mods-bus -1)
+(defstate effect-selected-mod-slot 1)
+(defstate process-panel-selected-track -1)
+(defstate process-panel-selected-instance-id 0)
+;; These are temporary render-context globals used by generated custom synth UI.
+;; They must NOT be defstate: custom UI functions set them while rendering, and
+;; writing reactive state during measurement/layout can perturb the layout.
+(def synth-ui-current-inst false)
+(def synth-ui-current-name "")
+(def midi-fx-ui-current-fx false)
+(def midi-fx-ui-current-name "")
+(def audio-fx-ui-current-fx false)
+(def audio-fx-ui-current-name "")
+(def custom-ui-current-kind "instrument")
+
+(def seq-timebase-options
+  '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
+
+;; Matches a standard built-in FX panel with four parameter rows.
+(def fx-fixed-panel-height 10.8)
+(def fx-panel-header-height 1.0)
+(def fx-panel-body-padding 0.25)
+(def fx-panel-body-top-spacer-height 0.16)
+(def fx-panel-body-content-height 
+  (- fx-fixed-panel-height fx-panel-header-height (* 2 fx-panel-body-padding) fx-panel-body-top-spacer-height))

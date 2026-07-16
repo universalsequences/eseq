@@ -1,7 +1,7 @@
 ;; Tree widget test — macOS-style collapsible folder hierarchy
 
 ;; Load macOS dark theme
-(load "mac-osx-dark.lisp")
+(load "../sequencer/ui/themes/mac-osx-dark.lisp")
 
 (defwidget panel-bg
   :width 1 :height 1

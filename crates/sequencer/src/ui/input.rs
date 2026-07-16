@@ -1,2370 +1,3443 @@
-use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-
-use crate::effects::BUILTIN_SLOT_COUNT;
-use crate::lisp_host;
-use crate::sequencer::{KeyboardTrigger, StepParam, STEPS_PER_PAGE};
-
-use super::browser::BrowserNode;
-use super::cirklon::track_list_row_layout;
-use super::command::{apply_command, AppCommand};
-use super::draw::rect_contains;
-use super::{
-    App, BrowserState, CompileTarget, EffectPaneEntry, EffectTab, InputMode, ParamMouseDrag,
-    ParamMouseDragTarget, PendingEditor, Region, SidebarMode, SidebarTab, BAR_HEIGHT, COL_WIDTH,
+use super::*;
+use eseqlisp::widget_render::number_picker::{
+    clear_number_picker_edit_state, handle_number_picker_edit_key_for_widget,
+    number_picker_edit_state, NumberPickerEditOutcome,
 };
 
-// ── App impl: input handling ──
+#[derive(Clone, Debug)]
+pub(crate) struct HeldKeyboardNote {
+    key: char,
+    transpose: f32,
+    step_at_press: usize,
+    press_time: Instant,
+    tracks: Vec<usize>,
+}
 
-impl App {
-    pub fn handle_input(&mut self) -> std::io::Result<()> {
-        self.tick_control_hooks();
-        self.poll_agent_request();
-
-        if self.editor.pending_project_load.is_some() {
-            let result = self.advance_project_load();
-            if let Err(error) = result {
-                self.editor.pending_project_load = None;
-                self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
-            }
-            if self.editor.pending_project_load.is_some() && event::poll(Duration::from_millis(33))?
-            {
-                let _ = event::read()?;
-            }
-            return Ok(());
+pub(crate) fn layout_node_by_id(
+    node: &eseqlisp::layout::LayoutNode,
+    id: u64,
+) -> Option<&eseqlisp::layout::LayoutNode> {
+    if node.widget_id == id {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = layout_node_by_id(child, id) {
+            return Some(found);
         }
+    }
+    None
+}
 
-        // Poll for async compilation result
-        if let Some(ref pending) = self.editor.pending_compile {
-            match pending.receiver.try_recv() {
-                Ok(Ok(compile_result)) => {
-                    let target = match &pending.target {
-                        CompileTarget::Effect {
-                            name,
-                            slot_idx,
-                            track,
-                        } => CompileTarget::Effect {
-                            name: name.clone(),
-                            slot_idx: *slot_idx,
-                            track: *track,
-                        },
-                        CompileTarget::Instrument { name } => {
-                            CompileTarget::Instrument { name: name.clone() }
-                        }
-                    };
-                    self.editor.pending_compile = None;
-                    match target {
-                        CompileTarget::Effect {
-                            name,
-                            slot_idx,
-                            track,
-                        } => {
-                            self.apply_compiled_effect(compile_result, &name, slot_idx, track);
-                        }
-                        CompileTarget::Instrument { name } => {
-                            self.apply_compiled_instrument(compile_result, &name);
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    self.editor.status_message =
-                        Some((format!("Compile error: {}", e), Instant::now()));
-                    self.editor.pending_compile = None;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // Still compiling — increment tick for spinner animation
-                    self.editor.pending_compile.as_mut().unwrap().tick += 1;
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.editor.status_message =
-                        Some(("Compile thread crashed".to_string(), Instant::now()));
-                    self.editor.pending_compile = None;
-                }
-            }
+pub(crate) fn layout_node_by_stable_key<'a>(
+    node: &'a eseqlisp::layout::LayoutNode,
+    stable_key: &str,
+    widget_type: Option<&str>,
+) -> Option<&'a eseqlisp::layout::LayoutNode> {
+    if node.stable_key.as_deref() == Some(stable_key)
+        && widget_type.is_none_or(|expected| node.widget_type == expected)
+    {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = layout_node_by_stable_key(child, stable_key, widget_type) {
+            return Some(found);
         }
+    }
+    None
+}
 
-        // Block normal input while compiling — just consume events
-        if self.editor.pending_compile.is_some() {
-            if event::poll(Duration::from_millis(33))? {
-                let _ = event::read()?;
-            }
-            return Ok(());
-        }
+pub(crate) fn focused_widget_matches(
+    editor: &Editor,
+    predicate: impl FnOnce(&eseqlisp::layout::LayoutNode) -> bool,
+) -> bool {
+    editor
+        .focused_widget_node()
+        .is_some_and(|node| predicate(&node))
+}
 
-        if event::poll(Duration::from_millis(33))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    // Handle key release for note-off (armed keyboard playing)
-                    if key.kind == KeyEventKind::Release {
-                        if self.any_track_armed() {
-                            if let KeyCode::Char(c) = key.code {
-                                self.handle_note_release(c);
-                            }
-                        }
-                        return Ok(());
-                    }
-                    if key.kind != KeyEventKind::Press {
-                        return Ok(());
-                    }
-                    // Tab/BackTab: always exit current mode and cycle region
-                    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
-                        && self.ui.input_mode != InputMode::Normal
-                    {
-                        self.ui.input_mode = InputMode::Normal;
-                    }
-                    // Ctrl+A: always pass through to handle_normal regardless of mode
-                    if matches!(key.code, KeyCode::Char('a'))
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                        && self.ui.input_mode != InputMode::Normal
-                    {
-                        self.handle_normal(key.code, key.modifiers);
-                        return Ok(());
-                    }
-                    // Backspace/Delete with visual selection: clear all selected steps from any mode
-                    if matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
-                        && !self.ui.visual_steps.is_empty()
-                        && !self.tracks.is_empty()
-                    {
-                        let track = self.ui.cursor_track;
-                        let steps: Vec<usize> = self.ui.visual_steps.drain().collect();
-                        apply_command(self, AppCommand::ClearSteps { track, steps });
-                        return Ok(());
-                    }
-                    match self.ui.input_mode {
-                        InputMode::Normal => self.handle_normal(key.code, key.modifiers),
-                        InputMode::ValueEntry => self.handle_value_entry(key.code),
-                        InputMode::Dropdown => self.handle_dropdown(key.code),
-                        InputMode::PatternSelect => self.handle_pattern_select(key.code),
-                        InputMode::PresetNameEntry => self.handle_preset_name_entry(key.code),
-                        InputMode::ProjectNameEntry => self.handle_project_name_entry(key.code),
-                        InputMode::WavExportNameEntry => {
-                            self.handle_wav_export_name_entry(key.code)
-                        }
-                        InputMode::EffectPicker => self.handle_effect_picker(key.code),
-                        InputMode::InstrumentPicker => {
-                            self.handle_instrument_picker_overlay(key.code)
-                        }
-                        InputMode::ProjectPicker => self.handle_project_picker(key.code),
-                        InputMode::StepInsert => self.handle_step_insert(key.code, key.modifiers),
-                        InputMode::StepSelect => self.handle_step_select(key.code, key.modifiers),
-                        InputMode::StepArm => self.handle_step_arm(key.code, key.modifiers),
-                    }
-                }
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        self.handle_mouse_click(mouse.column, mouse.row, mouse.modifiers);
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        self.handle_mouse_drag(mouse.column, mouse.row, mouse.modifiers);
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        self.ui.param_mouse_drag = None;
-                        self.ui.track_drag_anchor = None;
-                        self.ui.step_drag_anchor = None;
-                    }
-                    MouseEventKind::ScrollUp => {
-                        self.handle_mouse_scroll(mouse.column, mouse.row, -3);
-                    }
-                    MouseEventKind::ScrollDown => {
-                        self.handle_mouse_scroll(mouse.column, mouse.row, 3);
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-        Ok(())
+pub(crate) fn focused_widget_captures_space(editor: &Editor) -> bool {
+    focused_widget_matches(editor, widget_captures_text_input)
+}
+
+pub(crate) fn focused_widget_captures_text_input(editor: &Editor) -> bool {
+    focused_widget_matches(editor, widget_captures_text_input)
+}
+
+fn patcher_handles_plain_tab(editor: &Editor) -> bool {
+    editor.patcher_source_tab_available()
+}
+
+fn widget_type_captures_text_input(widget_type: &str) -> bool {
+    matches!(widget_type, "text-input" | "textbox")
+}
+
+fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
+    widget_type_captures_text_input(node.widget_type.as_str())
+        || eseqlisp::widget_render::patcher::patcher_has_text_edit(node)
+}
+
+fn active_buffer_accepts_global_ui_shortcuts(editor: &Editor) -> bool {
+    matches!(editor.active_buffer().view_mode, ViewMode::UiOnly)
+}
+
+fn global_sequencer_navigation_available(editor: &Editor) -> bool {
+    editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && active_buffer_accepts_global_ui_shortcuts(editor)
+        && editor.focused_widget_id().is_none()
+        && !focused_widget_captures_text_input(editor)
+}
+
+fn fx_plock_row_selected(editor: &mut Editor) -> bool {
+    let Some(callable) = editor.runtime_mut().global_value("fx-plock-row-selected?") else {
+        return false;
+    };
+    matches!(
+        editor.runtime_mut().invoke(callable, vec![]),
+        Ok(Some(Value::Bool(true)))
+    )
+}
+
+fn selected_steps_delete_shortcut_available(
+    editor: &mut Editor,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> bool {
+    let has_selected_steps = !selected_steps.lock().unwrap().is_empty();
+    has_selected_steps && !fx_plock_row_selected(editor)
+}
+
+fn select_track_for_edit(editor: &mut Editor, track: usize) {
+    if let Some(callable) = editor
+        .runtime_mut()
+        .global_value("seqv-select-track-for-edit")
+    {
+        let _ = editor
+            .runtime_mut()
+            .invoke(callable, vec![Value::Number(track as f64)]);
+    } else {
+        let _ = editor.runtime_mut().eval_str(&format!(
+            "(do (set! selected-bus -1) (seq-set-track {track}))"
+        ));
+    }
+}
+
+fn focused_widget_is(editor: &Editor, stable_key: &str, widget_type: &str) -> bool {
+    editor.focused_widget_node().is_some_and(|node| {
+        node.stable_key.as_deref() == Some(stable_key) && node.widget_type == widget_type
+    })
+}
+
+fn shortcut_context_allows_sample_browser_focus(editor: &Editor) -> bool {
+    editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && editor.active_buffer().view_mode != ViewMode::TextOnly
+        && !focused_widget_captures_text_input(editor)
+}
+
+fn shortcut_context_allows_sequencer_tab_switch(editor: &Editor) -> bool {
+    editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && editor.active_buffer().view_mode != ViewMode::TextOnly
+        && !focused_widget_captures_text_input(editor)
+}
+
+fn sequencer_tab_shortcut_index(key: &crossterm::event::KeyEvent) -> Option<usize> {
+    if key.modifiers != crossterm::event::KeyModifiers::SUPER {
+        return None;
+    }
+    let crossterm::event::KeyCode::Char(ch) = key.code else {
+        return None;
+    };
+    ch.to_digit(10)
+        .and_then(|digit| usize::try_from(digit).ok())
+        .filter(|index| (1..=9).contains(index))
+}
+
+fn current_sequencer_step_tab_buffer(editor: &mut Editor) -> String {
+    match editor.runtime_mut().eval_str("(seq-current-step-buffer)") {
+        Ok(Some(Value::String(buffer))) => buffer,
+        _ => "*sequencer*".to_string(),
+    }
+}
+
+fn select_sequencer_tab_by_index(editor: &mut Editor, index: usize) -> bool {
+    let current_buffer = current_sequencer_step_tab_buffer(editor);
+    if !editor.switch_active_tile_to_buffer_named(&current_buffer)
+        && (current_buffer == "*sequencer*"
+            || !editor.switch_active_tile_to_buffer_named("*sequencer*"))
+    {
+        return false;
     }
 
-    fn handle_normal(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        if self.sidebar_text_input_active()
-            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    let selected = matches!(
+        editor
+            .runtime_mut()
+            .eval_str(&format!("(seq-select-main-step-tab-by-index {index})")),
+        Ok(Some(Value::Bool(true)))
+    );
+    if selected {
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+    }
+    selected
+}
+
+fn focus_samples_browser_search(editor: &mut Editor) -> bool {
+    if !editor.switch_active_tile_to_buffer_named("*samples*") {
+        if let Some(callable) = editor.runtime_mut().global_value("sample-browser-here") {
+            let _ = editor.runtime_mut().invoke(callable, vec![]);
+        } else {
+            let _ = editor
+                .runtime_mut()
+                .eval_str(r#"(switch-to-buffer "*samples*")"#);
+        }
+        editor.refresh_runtime_side_effects();
+    }
+    editor.refresh_visible_layouts_for_buffer_named("*samples*");
+    if editor.active_buffer().name != "*samples*" {
+        return false;
+    }
+    editor.focus_widget_by_stable_key("sbrowser-search-input", Some("text-input"))
+}
+
+fn sample_browser_active_tree_key(editor: &mut Editor) -> Option<String> {
+    match editor.runtime_mut().eval_str("(sbrowser-active-tree-key)") {
+        Ok(Some(Value::String(key))) => Some(key),
+        _ => None,
+    }
+}
+
+fn focus_samples_browser_active_tree(editor: &mut Editor) -> bool {
+    let Some(tree_key) = sample_browser_active_tree_key(editor) else {
+        return false;
+    };
+    editor.refresh_visible_layouts_for_buffer_named("*samples*");
+    editor.focus_widget_by_stable_key(&tree_key, Some("tree"))
+}
+
+fn focused_samples_search_should_hand_off_to_tree(
+    editor: &Editor,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && editor.active_buffer().name == "*samples*"
+        && key.modifiers == crossterm::event::KeyModifiers::NONE
+        && matches!(
+            key.code,
+            crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
+        )
+        && focused_widget_is(editor, "sbrowser-search-input", "text-input")
+}
+
+fn sample_browser_tab_shortcut_available(
+    editor: &Editor,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && editor.active_buffer().name == "*samples*"
+        && matches!(
+            (key.code, key.modifiers),
+            (
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE
+            )
+        )
+}
+
+fn sample_browser_search_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Char('f') | KeyCode::Char('F'), KeyModifiers::SUPER)
+    )
+}
+
+fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Char('m') | KeyCode::Char('M') => key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PatternLengthShortcut {
+    Double,
+    Halve,
+}
+
+fn pattern_length_shortcut(key: &crossterm::event::KeyEvent) -> Option<PatternLengthShortcut> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let has_shortcut_modifier = key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+    if !has_shortcut_modifier || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char('+') => Some(PatternLengthShortcut::Double),
+        KeyCode::Char('=') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(PatternLengthShortcut::Double)
+        }
+        KeyCode::Char('-') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(PatternLengthShortcut::Halve)
+        }
+        _ => None,
+    }
+}
+
+fn is_trigger_recording_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Char(','), KeyModifiers::SUPER)
+    )
+}
+
+fn is_plain_tab_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Tab, KeyModifiers::NONE)
+    )
+}
+
+fn is_shift_tab_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Tab, KeyModifiers::SHIFT)
+            | (KeyCode::BackTab, KeyModifiers::SHIFT)
+            | (KeyCode::BackTab, KeyModifiers::NONE)
+    )
+}
+
+pub(crate) fn held_note_for_key(
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    let c = match key.code {
+        crossterm::event::KeyCode::Char(c) => c.to_ascii_lowercase(),
+        _ => return false,
+    };
+    held_notes.lock().unwrap().iter().any(|note| note.key == c)
+}
+
+pub(crate) fn should_route_to_live_keyboard(
+    editor: &Editor,
+    key: &crossterm::event::KeyEvent,
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+) -> bool {
+    use crossterm::event::{KeyEventKind, KeyModifiers};
+
+    if matches!(key.kind, KeyEventKind::Release) {
+        return held_note_for_key(held_notes, key);
+    }
+
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return false;
+    }
+
+    if focused_widget_captures_text_input(editor) {
+        return false;
+    }
+
+    matches!(key.code, crossterm::event::KeyCode::Char(_))
+}
+
+pub(crate) fn normalize_command_shortcuts(
+    key: crossterm::event::KeyEvent,
+) -> crossterm::event::KeyEvent {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    if matches!(
+        key.code,
+        KeyCode::Char('a')
+            | KeyCode::Char('A')
+            | KeyCode::Char('c')
+            | KeyCode::Char('C')
+            | KeyCode::Char('v')
+            | KeyCode::Char('V')
+    ) && key.modifiers.contains(KeyModifiers::SUPER)
+    {
+        let mut modifiers = key.modifiers;
+        modifiers.remove(KeyModifiers::SUPER);
+        modifiers.insert(KeyModifiers::CONTROL);
+        return KeyEvent::new(key.code, modifiers);
+    }
+
+    key
+}
+
+pub(crate) fn should_toggle_play_on_space(
+    editor: &Editor,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    if key.code != KeyCode::Char(' ') || key.modifiers != KeyModifiers::NONE {
+        return false;
+    }
+
+    if editor.minibuffer_prompt().is_some() || focused_widget_captures_space(editor) {
+        return false;
+    }
+
+    let buffer = editor.active_buffer();
+    buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly) || buffer.name == "*metal*"
+}
+
+pub(crate) fn should_reload_custom_ui_after_key(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+pub(crate) fn current_metal_cursor_step(editor: &mut Editor) -> Option<usize> {
+    match editor.runtime_mut().eval_str("(current-step)") {
+        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
+pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
+    match editor.runtime_mut().eval_str("param-mode") {
+        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
+fn current_sequencer_cursor_step(editor: &mut Editor) -> Option<usize> {
+    match editor
+        .runtime_mut()
+        .eval_str("(seqv-current-selected-step)")
+    {
+        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
+fn current_sequencer_param_mode(editor: &mut Editor) -> Option<usize> {
+    match editor.runtime_mut().eval_str("(seqv-current-param-mode)") {
+        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::widget_type_captures_text_input;
+
+    #[test]
+    fn only_text_entry_widgets_capture_text_input_by_type() {
+        assert!(widget_type_captures_text_input("text-input"));
+        assert!(widget_type_captures_text_input("textbox"));
+        assert!(!widget_type_captures_text_input("patcher"));
+        assert!(!widget_type_captures_text_input("button"));
+    }
+}
+
+pub(crate) fn metal_has_selected_bus(editor: &mut Editor) -> bool {
+    matches!(
+        editor.runtime_mut().eval_str("(seq-has-selected-bus?)"),
+        Ok(Some(Value::Bool(true)))
+    )
+}
+
+fn metal_step_param_for_mode(mode: usize) -> Option<StepParam> {
+    match mode {
+        0 => Some(StepParam::Velocity),
+        1 => Some(StepParam::Duration),
+        2 => Some(StepParam::AuxA),
+        3 => Some(StepParam::Transpose),
+        4 => Some(StepParam::Pan),
+        6 => Some(StepParam::Delay),
+        // Sync is rendered as a label in the step footer, not a numeric picker.
+        _ => None,
+    }
+}
+
+fn metal_mode_for_step_param(param: StepParam) -> Option<usize> {
+    match param {
+        StepParam::Velocity => Some(0),
+        StepParam::Duration => Some(1),
+        StepParam::AuxA => Some(2),
+        StepParam::Transpose => Some(3),
+        StepParam::Pan => Some(4),
+        StepParam::Sync => Some(5),
+        StepParam::Delay => Some(6),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SoftStepParamEditKind {
+    StepParam(StepParam),
+    ProcessLane {
+        instance_id: sequencer::process::ProcessInstanceId,
+        inlet_name: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SoftStepParamEditTarget {
+    track: usize,
+    step: usize,
+    kind: SoftStepParamEditKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SoftStepParamEditSpec {
+    value: f32,
+    min: f32,
+    max: f32,
+    decimals: u8,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SoftStepParamEdit {
+    target: Option<SoftStepParamEditTarget>,
+    widget_id: Option<u64>,
+    editing: bool,
+}
+
+impl SoftStepParamEdit {
+    fn is_active(&self) -> bool {
+        self.target.is_some() && self.widget_id.is_some() && self.editing
+    }
+
+    fn clear(&mut self) {
+        if let Some(widget_id) = self.widget_id {
+            clear_number_picker_edit_state(widget_id);
+        }
+        self.target = None;
+        self.widget_id = None;
+        self.editing = false;
+    }
+}
+
+fn soft_step_param_edit_spec(
+    state: &Arc<SequencerState>,
+    target: &SoftStepParamEditTarget,
+) -> Option<SoftStepParamEditSpec> {
+    match &target.kind {
+        SoftStepParamEditKind::StepParam(param) => Some(SoftStepParamEditSpec {
+            value: state.pattern.step_data[target.track].get(target.step, *param),
+            min: param.min(),
+            max: param.max(),
+            decimals: if *param == StepParam::Transpose { 0 } else { 2 },
+        }),
+        SoftStepParamEditKind::ProcessLane {
+            instance_id,
+            inlet_name,
+        } => {
+            let lane = process_lane_edit_info_for_target(
+                state,
+                target.track,
+                *instance_id,
+                inlet_name,
+                target.step,
+            )?;
+            Some(SoftStepParamEditSpec {
+                value: lane.value,
+                min: lane.min,
+                max: lane.max,
+                decimals: lane.decimals,
+            })
+        }
+    }
+}
+
+fn sync_soft_process_lane_commit(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    target: &SoftStepParamEditTarget,
+) {
+    let runtime = editor.runtime_mut();
+    sync_process_chain_state(
+        runtime,
+        state,
+        state.active_track_count(),
+        current_track.load(Ordering::Relaxed),
+    );
+    for viewport in expanded_step_projection.viewports_for_track(target.track) {
+        if let Some(slot) = visible_slot_for_step(viewport, target.step) {
+            let _ = sync_expanded_step_param_slot(runtime, state, viewport, viewport.mode, slot);
+        }
+    }
+}
+
+fn sync_soft_step_param_commit(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    target: &SoftStepParamEditTarget,
+    param: StepParam,
+) {
+    let runtime = editor.runtime_mut();
+    sync_step_param_lists(runtime, state, target.track);
+    if let Some(mode) = metal_mode_for_step_param(param) {
+        for viewport in expanded_step_projection.viewports_for_track(target.track) {
+            if let Some(slot) = visible_slot_for_step(viewport, target.step) {
+                let _ = sync_expanded_step_param_slot(runtime, state, viewport, mode, slot);
+            }
+        }
+    }
+}
+
+fn commit_soft_step_param_edit(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    target: &SoftStepParamEditTarget,
+    value: f64,
+) -> bool {
+    match &target.kind {
+        SoftStepParamEditKind::StepParam(param) => {
+            state.pattern.step_data[target.track].set(target.step, *param, value as f32);
+            state.publish_scheduler_snapshot();
+            sync_soft_step_param_commit(editor, state, expanded_step_projection, target, *param);
+            true
+        }
+        SoftStepParamEditKind::ProcessLane {
+            instance_id,
+            inlet_name,
+        } => {
+            if !state.set_process_lane_value(
+                target.track,
+                *instance_id,
+                inlet_name.clone(),
+                target.step,
+                value as f32,
+            ) {
+                return false;
+            }
+            sync_soft_process_lane_commit(
+                editor,
+                state,
+                current_track,
+                expanded_step_projection,
+                target,
+            );
+            true
+        }
+    }
+}
+
+fn current_soft_step_param_target(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+) -> Option<SoftStepParamEditTarget> {
+    if metal_has_selected_bus(editor) {
+        return None;
+    }
+    let buffer_name = editor.active_buffer().name.clone();
+    let (step, mode) = match buffer_name.as_str() {
+        "*metal*" => (
+            current_metal_cursor_step(editor)?,
+            current_metal_param_mode(editor)?,
+        ),
+        "*sequencer*" => (
+            current_sequencer_cursor_step(editor)?,
+            current_sequencer_param_mode(editor)?,
+        ),
+        _ => return None,
+    };
+    if let Some(param) = metal_step_param_for_mode(mode) {
+        return Some(SoftStepParamEditTarget {
+            track: current_track.load(Ordering::Relaxed),
+            step,
+            kind: SoftStepParamEditKind::StepParam(param),
+        });
+    }
+    let track = current_track.load(Ordering::Relaxed);
+    if buffer_name == "*sequencer*" {
+        let lane = process_lane_edit_info_for_mode(state, track, mode, step)?;
+        return Some(SoftStepParamEditTarget {
+            track,
+            step,
+            kind: SoftStepParamEditKind::ProcessLane {
+                instance_id: lane.instance_id,
+                inlet_name: lane.inlet_name,
+            },
+        });
+    }
+    None
+}
+
+fn current_step_param_number_picker_key(editor: &mut Editor) -> Option<String> {
+    let buffer_name = editor.active_buffer().name.clone();
+    match buffer_name.as_str() {
+        "*metal*" => Some("metal-step-param-number-picker".to_string()),
+        "*sequencer*" => match editor
+            .runtime_mut()
+            .eval_str("(seqv-current-number-picker-key)")
         {
-            match code {
-                KeyCode::Char(_)
-                | KeyCode::Backspace
-                | KeyCode::Delete
-                | KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Home
-                | KeyCode::End
-                | KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::Enter
-                | KeyCode::Esc => {
-                    BrowserState::handle_sidebar_input(self, code);
-                    return;
-                }
-                _ => {}
-            }
-        }
+            Ok(Some(Value::String(key))) => Some(key),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
-        // Global keys first
-        match code {
-            KeyCode::Char('q') => {
-                self.ui.should_quit = true;
-                return;
-            }
-            KeyCode::Char('s')
-                if modifiers.contains(KeyModifiers::CONTROL)
-                    && self.ui.focused_region != Region::Sidebar =>
-            {
-                if self.current_project_name.is_some() {
-                    if let Some(name) = self.current_project_name.clone() {
-                        match self.save_project_named(&name) {
-                            Ok(()) => {
-                                self.editor.status_message =
-                                    Some((format!("Saved project '{}'", name), Instant::now()));
-                            }
-                            Err(error) => {
-                                self.editor.status_message =
-                                    Some((format!("Error: {error}"), Instant::now()));
-                            }
-                        }
-                    }
-                } else {
-                    self.open_project_name_prompt();
-                }
-                return;
-            }
-            KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if !(self.ui.focused_region == Region::Sidebar
-                    && self.effective_sidebar_mode() == SidebarMode::Presets)
-                {
-                    self.open_project_picker();
-                    return;
-                }
-            }
-            KeyCode::Char(' ') if self.ui.focused_region != Region::Sidebar => {
-                let was_playing = self.state.is_playing();
-                apply_command(self, AppCommand::TogglePlay);
-                if was_playing {
-                    self.state.transport.playhead.store(0, Ordering::Relaxed);
-                    for tph in &self.state.transport.track_playheads {
-                        tph.store(0, Ordering::Relaxed);
-                    }
-                } else {
-                    self.state
-                        .transport
-                        .mod_reset_counter
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                return;
-            }
-            KeyCode::Char('l') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.tracks.is_empty() {
-                    // If focused on a loaded custom slot, edit it directly
-                    let Some(slot_idx) = self.selected_effect_slot() else {
-                        return;
-                    };
-                    if slot_idx >= BUILTIN_SLOT_COUNT
-                        && self.ui.focused_region == Region::Params
-                        && self.ui.params_column == 1
-                    {
-                        let chain = &self.state.pattern.effect_chains[self.ui.cursor_track];
-                        if slot_idx < chain.len()
-                            && chain[slot_idx].node_id.load(Ordering::Relaxed) != 0
-                        {
-                            // Edit existing effect
-                            let name = self.graph.effect_descriptors[self.ui.cursor_track]
-                                [slot_idx]
-                                .name
-                                .clone();
-                            self.editor.pending_editor = Some(PendingEditor::Effect {
-                                slot_idx,
-                                name: Some(name),
-                            });
-                            return;
-                        }
-                    }
-                    // Otherwise, open the effect picker
-                    self.editor.picker_items = lisp_host::list_saved_effects();
-                    self.editor.picker_cursor = 0;
-                    self.editor.picker_filter.clear();
-                    self.ui.input_mode = InputMode::EffectPicker;
-                }
-                return;
-            }
-            KeyCode::Char('i') if modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl+I: edit instrument on current custom track
-                if !self.tracks.is_empty() && !self.is_sampler_track(self.ui.cursor_track) {
-                    let name = self.tracks[self.ui.cursor_track].clone();
-                    self.editor.pending_editor =
-                        Some(PendingEditor::Instrument { name: Some(name) });
-                }
-                return;
-            }
-            KeyCode::Char('g') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.tracks.is_empty() {
-                    self.editor.pending_editor = Some(PendingEditor::Scratch);
-                }
-                return;
-            }
-            KeyCode::Tab => {
-                self.ui.focused_region = self.ui.focused_region.next();
-                if self.ui.focused_region == Region::Sidebar {
-                    self.ui.sidebar_tab = if self.tracks.is_empty() {
-                        SidebarTab::Sounds
-                    } else {
-                        self.ui.sidebar_tab
-                    };
-                } else if self.ui.focused_region == Region::Params {
-                    self.ui.params_column = 1;
-                }
-                return;
-            }
-            KeyCode::BackTab => {
-                self.ui.focused_region = self.ui.focused_region.prev();
-                if self.ui.focused_region == Region::Sidebar {
-                    self.ui.sidebar_tab = if self.tracks.is_empty() {
-                        SidebarTab::Sounds
-                    } else {
-                        self.ui.sidebar_tab
-                    };
-                } else if self.ui.focused_region == Region::Params {
-                    self.ui.params_column = 1;
-                }
-                return;
-            }
-            KeyCode::Esc => {
-                if self.has_selection() {
-                    self.ui.selection_anchor = None;
-                    self.ui.visual_steps.clear();
-                    if self.ui.focused_region != Region::Sidebar {
-                        return;
-                    }
-                }
-                if self.ui.focused_region == Region::Sidebar {
-                    BrowserState::handle_sidebar_input(self, KeyCode::Esc);
-                }
-                return;
-            }
-            // Ctrl+A: select all steps (Cirklon) or switch to Audition (Sidebar)
-            KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.ui.focused_region == Region::Sidebar {
-                    if !self.tracks.is_empty() {
-                        self.ui.sidebar_mode = self.effective_sidebar_mode();
-                    }
-                } else if !self.tracks.is_empty() {
-                    self.ui.visual_steps.clear();
-                    self.ui.selection_anchor = None;
-                    for step in 0..self.num_steps() {
-                        self.ui.visual_steps.insert(step);
-                    }
-                }
-                return;
-            }
-            // Ctrl+C: copy selected steps to clipboard
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.tracks.is_empty() && self.ui.focused_region != Region::Sidebar {
-                    let steps = self.selected_steps();
-                    if !steps.is_empty() {
-                        let track = self.ui.cursor_track;
-                        let anchor = steps[0];
-                        let clipboard: Vec<(usize, _)> = steps
-                            .iter()
-                            .map(|&s| (s - anchor, self.state.capture_step_snapshot(track, s)))
-                            .collect();
-                        let count = clipboard.len();
-                        self.ui.step_clipboard = Some((track, clipboard));
-                        self.editor.status_message = Some((
-                            format!("Copied {} step{}", count, if count == 1 { "" } else { "s" }),
-                            Instant::now(),
-                        ));
-                    }
-                }
-                return;
-            }
-            // Ctrl+V: paste clipboard at cursor
-            KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.tracks.is_empty() && self.ui.focused_region != Region::Sidebar {
-                    if let Some((source_track, clipboard)) = self.ui.step_clipboard.take() {
-                        let track = self.ui.cursor_track;
-                        let dest_start = self.ui.cursor_step;
-                        let num_steps = self.num_steps();
-                        apply_command(
-                            self,
-                            AppCommand::PasteSteps {
-                                track,
-                                source_track,
-                                clipboard: clipboard.clone(),
-                                dest_start,
-                                num_steps,
-                            },
-                        );
-                        // Put clipboard back so it can be pasted again
-                        self.ui.step_clipboard = Some((source_track, clipboard));
-                    }
-                }
-                return;
-            }
-            // Ctrl+N: focus sidebar in InstrumentPicker mode
-            KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.ui.instrument_picker_cursor = 0;
-                self.ui.sidebar_mode = SidebarMode::InstrumentPicker;
-                self.focus_sidebar_sounds();
-                return;
-            }
-            KeyCode::Char('s')
-                if modifiers.contains(KeyModifiers::CONTROL)
-                    && self.ui.focused_region == Region::Sidebar
-                    && self.effective_sidebar_mode() == SidebarMode::Presets =>
-            {
-                self.ui.value_buffer.clear();
-                self.ui.preset_prompt_kind = super::PresetPromptKind::SaveNew;
-                self.ui.input_mode = InputMode::PresetNameEntry;
-                return;
-            }
-            KeyCode::Char('o')
-                if modifiers.contains(KeyModifiers::CONTROL)
-                    && self.ui.focused_region == Region::Sidebar
-                    && self.effective_sidebar_mode() == SidebarMode::Presets =>
-            {
-                self.overwrite_loaded_preset();
-                return;
-            }
-            KeyCode::Char('r')
-                if modifiers.contains(KeyModifiers::CONTROL)
-                    && self.ui.focused_region == Region::Sidebar
-                    && self.effective_sidebar_mode() == SidebarMode::Presets =>
-            {
-                self.revert_loaded_preset();
-                return;
-            }
-            // , → toggle recording (when any track armed)
-            KeyCode::Char(',') => {
-                if self.any_track_armed() {
-                    self.ui.recording = !self.ui.recording;
-                }
-                return;
-            }
-            // / → disarm all tracks and focus sidebar search
-            KeyCode::Char('/') => {
-                if self.ui.focused_region == Region::Sidebar
-                    && self.ui.sidebar_tab == SidebarTab::Agent
-                {
-                    BrowserState::handle_sidebar_input(self, code);
-                    return;
-                }
-                for armed in self.graph.record_armed.iter_mut() {
-                    *armed = false;
-                }
-                let all_tracks: Vec<usize> = (0..self.graph.record_armed.len()).collect();
-                self.release_held_notes_for_tracks(&all_tracks);
-                self.ui.recording = false;
-                self.focus_sidebar_sounds();
-                return;
-            }
-            _ => {}
-        }
+fn current_step_param_number_picker_id(editor: &mut Editor) -> Option<u64> {
+    let key = current_step_param_number_picker_key(editor)?;
+    let layout = editor.widget_layout()?;
+    layout_node_by_stable_key(&layout, key.as_str(), Some("number-picker"))
+        .map(|node| node.widget_id)
+}
 
-        // Keyboard playing interception when any track is armed
-        if self.any_track_armed() {
-            if let KeyCode::Char(c) = code {
-                match c {
-                    'z' => {
-                        self.ui.keyboard_octave = (self.ui.keyboard_octave - 12).max(-48);
-                        return;
-                    }
-                    'x' => {
-                        self.ui.keyboard_octave = (self.ui.keyboard_octave + 12).min(48);
-                        return;
-                    }
-                    '[' => {
-                        // Shift record quantize threshold earlier (compensate for more output latency)
-                        apply_command(
-                            self,
-                            AppCommand::AdjustRecordQuantizeThresh { delta: -0.05 },
-                        );
-                        return;
-                    }
-                    ']' => {
-                        // Shift record quantize threshold later
-                        apply_command(self, AppCommand::AdjustRecordQuantizeThresh { delta: 0.05 });
-                        return;
-                    }
-                    _ => {
-                        if let Some(semitone) = Self::note_from_key(c) {
-                            // Ignore key repeat — only trigger on first press
-                            if self.ui.held_notes.iter().any(|note| note.key == c) {
-                                return;
-                            }
-                            let transpose = semitone as f32 + self.ui.keyboard_octave as f32;
-                            let mut pressed_tracks = Vec::new();
-                            // Send note-on to audio thread for all armed tracks
-                            for (track, armed) in self.graph.record_armed.iter().enumerate() {
-                                if *armed {
-                                    pressed_tracks.push(track);
-                                    let _ = self.graph.keyboard_tx.send(KeyboardTrigger {
-                                        track,
-                                        transpose,
-                                        velocity: 1.0,
-                                        note_off: false,
-                                    });
-                                }
-                            }
-                            // Round-to-nearest-step using fractional phase from audio thread.
-                            // If we're past the quantize threshold within the current step,
-                            // snap forward to the next step (the user is anticipating it).
-                            let step = self.state.transport.playhead.load(Ordering::Relaxed);
-                            let phase = f32::from_bits(
-                                self.state.transport.playhead_phase.load(Ordering::Relaxed),
-                            );
-                            let thresh = f32::from_bits(
-                                self.state
-                                    .transport
-                                    .record_quantize_thresh
-                                    .load(Ordering::Relaxed),
-                            );
-                            let step_now = if phase >= thresh {
-                                step.wrapping_add(1) as usize
-                            } else {
-                                step as usize
-                            };
-                            self.ui.held_notes.push(crate::ui::HeldKeyboardNote {
-                                key: c,
-                                transpose,
-                                step_at_press: step_now,
-                                press_time: Instant::now(),
-                                tracks: pressed_tracks,
-                            });
-                            return;
-                        }
-                    }
-                }
-            }
-        }
+fn current_step_param_number_picker_is_editing(editor: &mut Editor) -> bool {
+    current_step_param_number_picker_id(editor)
+        .is_some_and(|widget_id| number_picker_edit_state(widget_id).editing)
+}
 
-        // Step modes: global, work from any region except sidebar (where keys are for filter typing)
-        if !self.tracks.is_empty() && self.ui.focused_region != Region::Sidebar {
-            match code {
-                KeyCode::Char('i') => {
-                    self.ui.input_mode = InputMode::StepInsert;
-                    return;
-                }
-                KeyCode::Char('s') => {
-                    self.ui.visual_steps.clear();
-                    self.ui.input_mode = InputMode::StepSelect;
-                    return;
-                }
-                KeyCode::Char('r') => {
-                    self.ui.input_mode = InputMode::StepArm;
-                    return;
-                }
-                _ => {}
-            }
-        }
+fn numeric_edit_char(key: &crossterm::event::KeyEvent) -> Option<char> {
+    use crossterm::event::{KeyCode, KeyModifiers};
 
-        // Region-specific dispatch
-        match self.ui.focused_region {
-            Region::Cirklon => self.handle_cirklon_input(code, modifiers),
-            Region::Sidebar => BrowserState::handle_sidebar_input(self, code),
-            Region::Params => self.handle_params_input(code, modifiers),
-        }
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    if !(c.is_ascii_digit() || c == '.' || c == '-') {
+        return None;
+    }
+    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+        Some(c)
+    } else {
+        None
+    }
+}
+
+fn number_picker_soft_edit_key(key: &crossterm::event::KeyEvent, edit_active: bool) -> bool {
+    use crossterm::event::KeyCode;
+
+    numeric_edit_char(key).is_some()
+        || (edit_active && matches!(key.code, KeyCode::Backspace | KeyCode::Enter | KeyCode::Esc))
+}
+
+fn number_picker_pending_edit_key(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+
+    matches!(key.code, KeyCode::Backspace | KeyCode::Enter | KeyCode::Esc)
+}
+
+fn starts_unarmed_number_picker_edit(key: &crossterm::event::KeyEvent) -> bool {
+    numeric_edit_char(key).is_some()
+}
+
+/// Route only numeric text-editing keys to the current Metal step parameter or
+/// expanded sequencer process lane.
+///
+/// This deliberately avoids real widget focus so arrow keys can keep their
+/// sequencer meaning. The edit buffer mirrors number-picker semantics: first
+/// numeric key starts a fresh value, Enter commits, Esc cancels.
+pub(crate) fn handle_metal_soft_step_param_key(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    edit: &mut SoftStepParamEdit,
+) -> bool {
+    use crossterm::event::KeyEventKind;
+
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return false;
     }
 
-    fn sidebar_text_input_active(&self) -> bool {
-        if self.ui.focused_region != Region::Sidebar {
+    if focused_widget_captures_text_input(editor) {
+        return false;
+    }
+
+    let soft_edit_key = number_picker_soft_edit_key(key, edit.is_active());
+    if !soft_edit_key {
+        let pending_edit_key = number_picker_pending_edit_key(key);
+        if pending_edit_key {
+            if let (Some(target), Some(widget_id)) = (
+                current_soft_step_param_target(editor, state, current_track),
+                current_step_param_number_picker_id(editor),
+            ) {
+                if number_picker_edit_state(widget_id).editing {
+                    edit.target = Some(target);
+                    edit.widget_id = Some(widget_id);
+                    edit.editing = true;
+                }
+            }
+        }
+
+        if !pending_edit_key || !edit.is_active() {
+            if edit.is_active() {
+                edit.clear();
+                editor.mark_needs_redraw();
+            }
             return false;
         }
-
-        match self.ui.sidebar_tab {
-            SidebarTab::Agent => true,
-            SidebarTab::Sounds => {
-                self.ui.sidebar_search_focused
-                    && self.effective_sidebar_mode() != SidebarMode::InstrumentPicker
-            }
-            SidebarTab::Tools => false,
-        }
     }
 
-    fn handle_mouse_click(&mut self, col: u16, row: u16, modifiers: KeyModifiers) {
-        self.ui.param_mouse_drag = None;
-        match self.ui.input_mode {
-            // Allow mouse through in Normal and step modes
-            InputMode::Normal | InputMode::StepInsert | InputMode::StepSelect => {}
-            // Close picker overlay on click outside
-            InputMode::EffectPicker => {
-                self.ui.input_mode = InputMode::Normal;
-                return;
-            }
-            // Block mouse in other overlay modes
-            _ => return,
+    if numeric_edit_char(key).is_some() {
+        if !edit.is_active() && !starts_unarmed_number_picker_edit(key) {
+            return false;
         }
-
-        let l = &self.ui.layout;
-
-        // Any click outside sidebar: exit AddTrack mode
-        if !rect_contains(l.sidebar_inner, col, row) && !self.tracks.is_empty() {
-            self.ui.sidebar_mode = SidebarMode::Audition;
-        }
-
-        // Sidebar: click selects item and focuses sidebar
-        if rect_contains(l.sidebar_tabs, col, row) {
-            self.ui.focused_region = Region::Sidebar;
-            let x_rel = col.saturating_sub(l.sidebar_tabs.x);
-            let tools_start = 0;
-            let tools_end = 7; // " Tools "
-            let agent_start = 8; // after " Tools " + " "
-            let agent_end = agent_start + 7; // " Agent "
-            let sounds_start = 16; // after tools + gap + agent + gap
-            let sounds_end = sounds_start + 8; // " Sounds "
-            if x_rel >= tools_start && x_rel < tools_end && !self.tracks.is_empty() {
-                self.ui.sidebar_tab = SidebarTab::Tools;
-            } else if x_rel >= agent_start && x_rel < agent_end {
-                self.ui.sidebar_tab = SidebarTab::Agent;
-            } else if x_rel >= sounds_start && x_rel < sounds_end {
-                self.ui.sidebar_tab = SidebarTab::Sounds;
-            }
-            return;
-        }
-
-        if rect_contains(l.sidebar_inner, col, row) {
-            self.ui.focused_region = Region::Sidebar;
-            if self.ui.sidebar_tab == SidebarTab::Tools {
-                if rect_contains(l.track_params_inner, col, row) {
-                    let row_idx =
-                        self.ui.tools_scroll_offset + (row - l.track_params_inner.y) as usize;
-                    self.ui.tools_cursor = row_idx;
-                    self.sync_tools_cursor();
-                    self.ui.params_column = 0;
-                    match row_idx {
-                        idx if idx <= super::TP_LAST => {
-                            let start_display_value = match idx {
-                                super::TP_ATTACK => Some(
-                                    self.state.pattern.track_params[self.ui.cursor_track]
-                                        .get_attack_ms(),
-                                ),
-                                super::TP_RELEASE => Some(
-                                    self.state.pattern.track_params[self.ui.cursor_track]
-                                        .get_release_ms(),
-                                ),
-                                super::TP_SWING => Some(
-                                    self.state.pattern.track_params[self.ui.cursor_track]
-                                        .get_swing(),
-                                ),
-                                super::TP_STEPS => Some(
-                                    self.state.pattern.track_params[self.ui.cursor_track]
-                                        .get_num_steps() as f32,
-                                ),
-                                super::TP_VOLUME => Some(
-                                    self.state.pattern.track_params[self.ui.cursor_track]
-                                        .get_volume(),
-                                ),
-                                super::TP_PAN => Some(
-                                    self.state.pattern.track_params[self.ui.cursor_track].get_pan(),
-                                ),
-                                super::TP_SEND => Some(
-                                    self.state.pattern.track_params[self.ui.cursor_track]
-                                        .get_send(),
-                                ),
-                                super::TP_MASTER => Some(f32::from_bits(
-                                    self.state.transport.master_volume.load(Ordering::Relaxed),
-                                )),
-                                _ => None,
-                            };
-                            if let Some(start_display_value) = start_display_value {
-                                self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                                    track: self.ui.cursor_track,
-                                    target: ParamMouseDragTarget::TrackParam { row_idx: idx },
-                                    start_col: col,
-                                    start_display_value,
-                                });
-                            }
-                        }
-                        idx => {
-                            let accum_idx = idx.saturating_sub(super::TP_LAST + 1);
-                            if accum_idx == super::AC_LIMIT {
-                                let start_display_value = self.state.pattern.track_params
-                                    [self.ui.cursor_track]
-                                    .get_accum_limit();
-                                self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                                    track: self.ui.cursor_track,
-                                    target: ParamMouseDragTarget::AccumParam { row_idx: accum_idx },
-                                    start_col: col,
-                                    start_display_value,
-                                });
-                            }
-                        }
-                    }
-                    return;
-                }
-            } else if self.ui.sidebar_tab == SidebarTab::Agent {
-                let model_row_y = l.sidebar_inner.y;
-                let dropdown_x = l.sidebar_inner.x + 7;
-                let dropdown_width = l.sidebar_inner.width.saturating_sub(7).min(28).max(16);
-                let options = self.agent_model_options();
-                let visible_count = options
-                    .len()
-                    .min(l.sidebar_inner.height.saturating_sub(1) as usize);
-                let scroll = self
-                    .agent_panel
-                    .model_dropdown_cursor
-                    .saturating_sub(visible_count.saturating_sub(1));
-
-                if self.agent_panel.model_dropdown_open
-                    && col >= dropdown_x
-                    && col < dropdown_x + dropdown_width
-                    && row > model_row_y
-                    && row <= model_row_y + visible_count as u16
-                {
-                    let idx = scroll + (row - model_row_y - 1) as usize;
-                    if idx < options.len() {
-                        self.select_agent_model_index(idx);
-                    }
-                    self.agent_panel.model_dropdown_open = false;
-                    return;
-                }
-
-                if row == model_row_y {
-                    self.agent_panel.model_dropdown_open = !self.agent_panel.model_dropdown_open;
-                    if self.agent_panel.model_dropdown_open {
-                        self.agent_panel.model_dropdown_cursor =
-                            self.selected_agent_model_index().unwrap_or(0);
-                    }
-                    return;
-                }
-
-                self.agent_panel.model_dropdown_open = false;
-                return;
-            } else if self.effective_sidebar_mode() == SidebarMode::Presets {
-                let list_start_y = l.sidebar_inner.y + 3;
-                if row >= list_start_y {
-                    let vi = (row - list_start_y) as usize;
-                    let idx = self.preset_browser.scroll_offset + vi;
-                    let items = self.visible_preset_items();
-                    if idx < items.len() {
-                        self.preset_browser.cursor = idx;
-                        self.load_selected_preset_into_track();
-                        self.ui.sidebar_search_focused = false;
-                    }
-                }
-            } else {
-                // First row is the filter/search bar; rows below are list items
-                let list_start_y = l.sidebar_inner.y + 1;
-                if row < list_start_y {
-                    // Clicked the search bar row — focus it
-                    self.ui.sidebar_search_focused = true;
-                } else {
-                    let vi = (row - list_start_y) as usize;
-                    let idx = self.browser.scroll_offset + vi;
-                    let items = self.browser.visible_items();
-                    if idx < items.len() {
-                        self.browser.cursor = idx;
-                        let item = &items[idx];
-                        let path = item.path.clone();
-                        if item.is_dir {
-                            BrowserNode::toggle_expanded(&mut self.browser.tree, &path);
-                        } else {
-                            self.sidebar_select_file(&path);
-                        }
-                        // Blur search so computer keyboard is free for armed tracks
-                        self.ui.sidebar_search_focused = false;
-                    }
-                }
-            }
-            return;
-        }
-
-        // Play button: click toggles playback
-        if rect_contains(l.info_bar, col, row) {
-            let was_playing = self.state.is_playing();
-            apply_command(self, AppCommand::TogglePlay);
-            if !self.state.is_playing() {
-                self.state.transport.playhead.store(0, Ordering::Relaxed);
-            } else if !was_playing {
-                self.state
-                    .transport
-                    .mod_reset_counter
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            return;
-        }
-
-        // REC button: click toggles recording
-        if rect_contains(l.rec_button, col, row) {
-            self.ui.recording = !self.ui.recording;
-            return;
-        }
-
-        if rect_contains(l.master_rec_button, col, row) {
-            self.toggle_master_recording();
-            return;
-        }
-
-        // Pattern buttons (row 1 of info bar)
-        if rect_contains(l.pattern_buttons_area, col, row) {
-            use super::PatternBtn;
-            for (x_start, x_end, btn) in &self.ui.pattern_btn_layout {
-                if col >= *x_start && col < *x_end {
-                    match btn {
-                        PatternBtn::PrevPage => {
-                            if self.ui.pattern_page > 0 {
-                                self.ui.pattern_page -= 1;
-                            }
-                        }
-                        PatternBtn::NextPage => {
-                            self.ui.pattern_page += 1;
-                        }
-                        PatternBtn::Pattern(idx) => {
-                            let num_tracks = self.tracks.len();
-                            if let Some(sample_ids) = self.state.switch_pattern(
-                                *idx,
-                                num_tracks,
-                                &self.graph.track_buffer_ids,
-                                &self.graph.track_sample_rates,
-                                &self.tracks,
-                                &self.graph.track_instrument_types,
-                            ) {
-                                self.graph_controller().apply_sample_ids(&sample_ids);
-                                if let Err(error) = self
-                                    .graph_controller()
-                                    .sync_track_instrument_run_modes_from_live_state()
-                                {
-                                    self.editor.status_message = Some((
-                                        format!("Pattern switch failed: {error}"),
-                                        Instant::now(),
-                                    ));
-                                }
-                                self.graph_controller().sync_current_pattern_mod_routes();
-                                self.push_all_restored_defaults();
-                            }
-                            self.clamp_cursor_to_steps();
-                        }
-                        PatternBtn::Clone => {
-                            let num_tracks = self.tracks.len();
-                            let new_idx = self.state.clone_pattern(
-                                num_tracks,
-                                &self.graph.track_buffer_ids,
-                                &self.graph.track_sample_rates,
-                                &self.tracks,
-                                &self.graph.track_instrument_types,
-                            );
-                            self.graph_controller().sync_current_pattern_mod_routes();
-                            // Show the page containing the new pattern
-                            self.ui.pattern_page = new_idx / 10;
-                        }
-                        PatternBtn::Delete => {
-                            let num_tracks = self.tracks.len();
-                            if let Some(sample_ids) = self.state.delete_pattern(
-                                num_tracks,
-                                &self.graph.track_buffer_ids,
-                                &self.graph.track_sample_rates,
-                                &self.tracks,
-                                &self.graph.track_instrument_types,
-                            ) {
-                                self.graph_controller().apply_sample_ids(&sample_ids);
-                                if let Err(error) = self
-                                    .graph_controller()
-                                    .sync_track_instrument_run_modes_from_live_state()
-                                {
-                                    self.editor.status_message = Some((
-                                        format!("Pattern delete failed: {error}"),
-                                        Instant::now(),
-                                    ));
-                                }
-                                self.graph_controller().sync_current_pattern_mod_routes();
-                                self.push_all_restored_defaults();
-                            }
-                            self.clamp_cursor_to_steps();
-                            // Adjust page if current page is now past the end
-                            let num_pats = self.state.scene_count();
-                            let max_page = num_pats.saturating_sub(1) / 10;
-                            if self.ui.pattern_page > max_page {
-                                self.ui.pattern_page = max_page;
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-            return;
-        }
-
-        // Track list: click selects track, click on arm dot toggles arm
-        if rect_contains(l.track_list, col, row) {
-            let idx = (row - l.track_list.y) as usize;
-            if idx < self.tracks.len() {
-                let layout = track_list_row_layout(l.track_list);
-                let shift_select = modifiers.contains(KeyModifiers::SHIFT);
-                let previous_track = self.ui.cursor_track;
-                self.ui.cursor_track = idx;
-                if previous_track != idx {
-                    self.clear_step_selection();
-                }
-                let arm_hit_left = layout.arm_x.saturating_sub(1);
-                let arm_hit_right = layout.arm_x + 2;
-                if col >= arm_hit_left && col < arm_hit_right {
-                    let was_armed = self.graph.record_armed[idx];
-                    self.graph.record_armed[idx] = !self.graph.record_armed[idx];
-                    if was_armed && !self.graph.record_armed[idx] {
-                        self.release_held_notes_for_tracks(&[idx]);
-                    }
-                    self.ui.focused_region = Region::Cirklon;
-                } else if col >= layout.volume_x && col < layout.volume_x + layout.volume_width {
-                    let inner_width = layout.volume_inner_width.max(1);
-                    let clamped_col = col.clamp(
-                        layout.volume_inner_x,
-                        layout.volume_inner_x + inner_width - 1,
-                    );
-                    let rel = clamped_col - layout.volume_inner_x;
-                    let volume = if inner_width <= 1 {
-                        0.0
-                    } else {
-                        rel as f32 / (inner_width - 1) as f32
-                    };
-                    let apply_bulk = self.has_track_selection() && {
-                        let (lo, hi) = self.track_selected_range();
-                        idx >= lo && idx <= hi
-                    };
-                    if apply_bulk {
-                        self.for_each_selected_track(|app, track| {
-                            app.state.pattern.track_params[track].set_volume(volume);
-                            app.push_track_volume(track);
-                        });
-                    } else {
-                        self.ui.track_selection_anchor = None;
-                        self.state.pattern.track_params[idx].set_volume(volume);
-                        self.push_track_volume(idx);
-                    }
-                    self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                        track: idx,
-                        target: ParamMouseDragTarget::TrackListVolume,
-                        start_col: col,
-                        start_display_value: volume,
-                    });
-                    self.ui.focused_region = Region::Cirklon;
-                } else {
-                    let drag_anchor = if shift_select {
-                        self.ui.track_selection_anchor.unwrap_or(previous_track)
-                    } else {
-                        idx
-                    };
-                    self.ui.track_drag_anchor = Some(drag_anchor);
-                    if shift_select {
-                        if self.ui.track_selection_anchor.is_none() && !self.tracks.is_empty() {
-                            self.ui.track_selection_anchor = Some(previous_track);
-                        }
-                    } else {
-                        self.ui.track_selection_anchor = None;
-                    }
-                    self.ui.cursor_track = idx;
-                    self.clamp_cursor_to_steps();
-                    self.ui.focused_region = Region::Cirklon;
-                }
-                self.browser.sync_to_track(
-                    &self.tracks,
-                    self.ui.cursor_track,
-                    self.is_sampler_track(self.ui.cursor_track),
-                    &self.ui,
-                );
-            }
-            return;
-        }
-
-        // Param tabs row: click selects active param
-        if rect_contains(l.param_tabs, col, row) {
-            let x_off = col.saturating_sub(l.param_tabs.x + 2);
-            let tab_idx = (x_off / 6) as usize;
-            if tab_idx < StepParam::VISIBLE.len() {
-                self.ui.active_param = StepParam::VISIBLE[tab_idx];
-                self.ui.focused_region = Region::Cirklon;
-            }
-            return;
-        }
-
-        // Bars area: click selects step / scrubs value. Shift/Cmd starts step drag-select.
-        if rect_contains(l.bars, col, row) {
-            if let Some(step) = self.step_from_click_x(col, l.bars.x) {
-                self.touch_follow_timer();
-                self.ui.cursor_step = step;
-                self.ui.focused_region = Region::Cirklon;
-                let range_select = modifiers.contains(KeyModifiers::SHIFT)
-                    || modifiers.contains(KeyModifiers::SUPER);
-                if range_select {
-                    self.ui.selection_anchor = Some(step);
-                    self.ui.visual_steps.clear();
-                    self.ui.step_drag_anchor = Some(step);
-                    self.ui.last_step_click = None;
-                } else {
-                    self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                        track: self.ui.cursor_track,
-                        target: ParamMouseDragTarget::CirklonStepParam { step },
-                        start_col: col,
-                        start_display_value: self.state.pattern.step_data[self.ui.cursor_track]
-                            .get(step, self.ui.active_param),
-                    });
-                    self.apply_param_mouse_drag(col, row);
-                }
-            }
-            return;
-        }
-
-        // Trigger row: click selects step, double-click toggles. Shift/Cmd also arms drag-select.
-        if rect_contains(l.trigger_row, col, row) {
-            if let Some(step) = self.step_from_click_x(col, l.trigger_row.x) {
-                self.handle_step_click(step, modifiers);
-                if modifiers.contains(KeyModifiers::SHIFT)
-                    || modifiers.contains(KeyModifiers::SUPER)
-                {
-                    self.ui.step_drag_anchor = Some(step);
-                }
-            }
-            return;
-        }
-
-        if rect_contains(l.effects_tabs, col, row) {
-            let idx = (row - l.effects_tabs.y) as usize;
-            let entries = self.effect_pane_entries();
-            if idx < entries.len() {
-                self.ui.effect_tab_cursor = idx;
-                match entries[idx] {
-                    EffectPaneEntry::Tab(tab) => self.select_effect_tab(tab),
-                    EffectPaneEntry::PlusButton => {
-                        self.editor.picker_items = lisp_host::list_saved_effects();
-                        self.editor.picker_cursor = 0;
-                        self.editor.picker_filter.clear();
-                        self.ui.input_mode = InputMode::EffectPicker;
-                    }
-                }
-                self.ui.focused_region = Region::Params;
-                self.ui.params_column = 0;
-            }
-            return;
-        }
-
-        // Effects inner: click selects effect param row
-        if rect_contains(l.effects_inner, col, row) {
-            if self.ui.effect_tab == EffectTab::Synth {
-                if let Some(row_idx) = self.synth_row_at_position(l.effects_inner, col, row) {
-                    self.ui.focused_region = Region::Params;
-                    self.ui.params_column = 1;
-                    self.ui.instrument_param_cursor = row_idx;
-                    self.ensure_synth_cursor_visible();
-                    if let Some(start_display_value) =
-                        self.synth_row_display_value(self.ui.cursor_track, row_idx)
-                    {
-                        self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                            track: self.ui.cursor_track,
-                            target: ParamMouseDragTarget::SynthParam { row_idx },
-                            start_col: col,
-                            start_display_value,
-                        });
-                    }
-                }
-            } else if self.ui.effect_tab == EffectTab::Mod {
-                if let Some(row_idx) = self.mod_row_at_position(l.effects_inner, col, row) {
-                    self.ui.focused_region = Region::Params;
-                    self.ui.params_column = 1;
-                    self.ui.mod_param_cursor = row_idx;
-                    self.ensure_mod_cursor_visible();
-                    if let Some(desc) = self.current_mod_descriptor() {
-                        if let Some(param) = desc.params.get(row_idx) {
-                            if param.is_enum() {
-                                self.ui.dropdown_open = true;
-                                self.ui.dropdown_cursor = 0;
-                                self.ui.input_mode = InputMode::Dropdown;
-                                let actual_idx =
-                                    self.mod_param_indices(self.ui.cursor_track)[row_idx];
-                                let slot =
-                                    &self.state.pattern.instrument_slots[self.ui.cursor_track];
-                                let val = slot.defaults.get(actual_idx);
-                                self.ui.dropdown_cursor = val.round() as usize;
-                                self.ui.param_mouse_drag = None;
-                                return;
-                            }
-                        }
-                    }
-                    if let Some(start_display_value) =
-                        self.mod_row_display_value(self.ui.cursor_track, row_idx)
-                    {
-                        self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                            track: self.ui.cursor_track,
-                            target: ParamMouseDragTarget::ModParam { row_idx },
-                            start_col: col,
-                            start_display_value,
-                        });
-                    }
-                }
-            } else if self.ui.effect_tab == EffectTab::Sources {
-                if let Some(row_idx) = self.source_row_at_position(l.effects_inner, col, row) {
-                    self.ui.focused_region = Region::Params;
-                    self.ui.params_column = 1;
-                    self.ui.source_param_cursor = row_idx;
-                    self.ensure_source_cursor_visible();
-                    if let Some(desc) = self.current_source_descriptor() {
-                        if let Some(param) = desc.params.get(row_idx) {
-                            if param.is_enum() {
-                                self.ui.dropdown_open = true;
-                                self.ui.dropdown_cursor = 0;
-                                self.ui.input_mode = InputMode::Dropdown;
-                                let actual_idx =
-                                    self.source_param_actual_indices(self.ui.cursor_track)[row_idx];
-                                let slot =
-                                    &self.state.pattern.instrument_slots[self.ui.cursor_track];
-                                let val = slot.defaults.get(actual_idx);
-                                self.ui.dropdown_cursor = val.round() as usize;
-                                self.ui.param_mouse_drag = None;
-                                return;
-                            }
-                        }
-                    }
-                    if let Some(start_display_value) =
-                        self.source_row_display_value(self.ui.cursor_track, row_idx)
-                    {
-                        self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                            track: self.ui.cursor_track,
-                            target: ParamMouseDragTarget::SourceParam { row_idx },
-                            start_col: col,
-                            start_display_value,
-                        });
-                    }
-                }
-            } else if self.ui.effect_tab == EffectTab::Reverb {
-                let row_idx = (row - l.effects_inner.y) as usize;
-                if row_idx < 3 {
-                    self.ui.focused_region = Region::Params;
-                    self.ui.params_column = 1;
-                    self.ui.reverb_param_cursor = row_idx;
-                    let start_display_value = match row_idx {
-                        0 => Some(self.ui.reverb_size),
-                        1 => Some(self.ui.reverb_brightness),
-                        2 => Some(self.ui.reverb_replace),
-                        _ => None,
-                    };
-                    if let Some(start_display_value) = start_display_value {
-                        self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                            track: self.ui.cursor_track,
-                            target: ParamMouseDragTarget::ReverbParam { param_idx: row_idx },
-                            start_col: col,
-                            start_display_value,
-                        });
-                    }
-                }
-            } else if let Some(desc) = self.current_slot_descriptor() {
-                let Some(row_idx) = self.effect_row_at_position(l.effects_inner, col, row) else {
-                    return;
-                };
-                if row_idx < desc.params.len() {
-                    self.ui.focused_region = Region::Params;
-                    self.ui.params_column = 1;
-                    self.ui.effect_param_cursor = row_idx;
-                    self.ensure_effect_cursor_visible();
-                    if let Some(slot_idx) = self.selected_effect_slot() {
-                        if let Some(start_display_value) =
-                            self.effect_row_display_value(self.ui.cursor_track, slot_idx, row_idx)
-                        {
-                            self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                                track: self.ui.cursor_track,
-                                target: ParamMouseDragTarget::EffectParam {
-                                    slot_idx,
-                                    param_idx: row_idx,
-                                },
-                                start_col: col,
-                                start_display_value,
-                            });
-                        }
-                    }
-                }
-            }
-            return;
-        }
-
-        // Page blocks: click navigates to that page
-        if rect_contains(l.page_blocks_area, col, row) {
-            self.touch_follow_timer();
-            for &(x_start, x_end, page_idx) in &self.ui.page_btn_layout {
-                if col >= x_start && col < x_end {
-                    self.ui.cursor_step = page_idx * crate::sequencer::STEPS_PER_PAGE;
-                    self.ui.focused_region = Region::Cirklon;
-                    break;
-                }
-            }
-            return;
-        }
-
-        // Piano roll click: toggle chord notes on cursor step
-        if rect_contains(l.piano_area, col, row)
-            && row < l.piano_area.y + 2  // only key rows, not label/info rows
-            && !self.tracks.is_empty()
-        {
-            let semitone = self.ui.piano_lo + (col as i32 - l.piano_area.x as i32);
-            self.handle_piano_note_click(semitone);
-            self.ui.focused_region = Region::Cirklon;
-            return;
-        }
-
-        // Catch-all: click anywhere in cirklon area focuses cirklon
-        if rect_contains(l.cirklon_area, col, row) {
-            self.ui.focused_region = Region::Cirklon;
-        }
-    }
-
-    fn handle_piano_note_click(&mut self, semitone: i32) {
-        use crate::sequencer::StepParam;
-        let track = self.ui.cursor_track;
-        let step = self.ui.cursor_step;
-        let is_active = self.state.pattern.patterns[track].is_active(step);
-        let chord_count = self.state.pattern.chord_data[track].count(step);
-
-        if !is_active {
-            // Activate the step and set this semitone as the Transpose value
-            apply_command(
-                self,
-                AppCommand::SetStepActive {
-                    track,
-                    step,
-                    active: true,
-                },
-            );
-            apply_command(
-                self,
-                AppCommand::SetStepParam {
-                    track,
-                    step,
-                    param: StepParam::Transpose,
-                    value: semitone as f32,
-                },
-            );
-            return;
-        }
-
-        if chord_count == 0 {
-            // Single-note step using Transpose
-            let current = self.state.pattern.step_data[track]
-                .get(step, StepParam::Transpose)
-                .round() as i32;
-            if semitone == current {
-                // Clicking the same note deactivates the step
-                apply_command(
-                    self,
-                    AppCommand::SetStepActive {
-                        track,
-                        step,
-                        active: false,
-                    },
-                );
-            } else {
-                // Add a second note: migrate Transpose into chord_data, then add new note
-                // These chord mutations go directly through state (ChordData has no AppCommand yet)
-                self.state.pattern.chord_data[track].add_note(step, current as f32);
-                self.state.pattern.chord_data[track].add_note(step, semitone as f32);
-                self.state.publish_scheduler_snapshot();
-            }
-        } else {
-            // Step has chord data — toggle the clicked semitone
-            let added = self.state.pattern.chord_data[track].toggle_note(step, semitone as f32);
-            let new_count = self.state.pattern.chord_data[track].count(step);
-            if !added {
-                if new_count == 0 {
-                    // Removed last note: deactivate step
-                    apply_command(
-                        self,
-                        AppCommand::SetStepActive {
-                            track,
-                            step,
-                            active: false,
-                        },
-                    );
-                    return;
-                } else if new_count == 1 {
-                    // One note left: migrate back to Transpose, clear chord
-                    let remaining = self.state.pattern.chord_data[track].get(step, 0);
-                    apply_command(
-                        self,
-                        AppCommand::SetStepParam {
-                            track,
-                            step,
-                            param: StepParam::Transpose,
-                            value: remaining,
-                        },
-                    );
-                    self.state.pattern.chord_data[track].clear_step(step);
-                    self.state.publish_scheduler_snapshot();
-                    return;
-                }
-            }
-            self.state.publish_scheduler_snapshot();
-        }
-
-        self.state.publish_scheduler_snapshot();
-    }
-
-    fn handle_mouse_scroll(&mut self, col: u16, row: u16, delta: isize) {
-        let l = &self.ui.layout;
-        if rect_contains(l.sidebar_inner, col, row) {
-            if self.ui.sidebar_tab == SidebarTab::Agent {
-                self.scroll_agent_transcript(-delta);
-            } else if self.effective_sidebar_mode() == SidebarMode::Presets {
-                let items = self.visible_preset_items();
-                let max_visible = self.preset_max_visible();
-                let max_scroll = items.len().saturating_sub(max_visible);
-                if delta < 0 {
-                    self.preset_browser.scroll_offset = self
-                        .preset_browser
-                        .scroll_offset
-                        .saturating_sub((-delta) as usize);
-                } else {
-                    self.preset_browser.scroll_offset =
-                        (self.preset_browser.scroll_offset + delta as usize).min(max_scroll);
-                }
-            } else {
-                self.browser.scroll(delta, &self.ui);
-            }
-            return;
-        }
-
-        if rect_contains(l.effects_inner, col, row) {
-            if self.ui.effect_tab == EffectTab::Synth {
-                self.ui.synth_scroll_offset = self.scroll_partition_offset(
-                    l.effects_inner,
-                    self.synth_row_count(),
-                    self.ui.synth_scroll_offset,
-                    delta,
-                );
-            } else if self.ui.effect_tab == EffectTab::Mod {
-                self.ui.mod_scroll_offset = self.scroll_partition_offset(
-                    l.effects_inner,
-                    self.mod_row_count(),
-                    self.ui.mod_scroll_offset,
-                    delta,
-                );
-            } else if self.ui.effect_tab == EffectTab::Sources {
-                self.ui.source_scroll_offset = self.scroll_partition_offset(
-                    l.effects_inner,
-                    self.source_row_count(),
-                    self.ui.source_scroll_offset,
-                    delta,
-                );
-            } else if matches!(self.ui.effect_tab, EffectTab::Slot(_)) {
-                self.ui.effect_scroll_offset = self.scroll_partition_offset(
-                    l.effects_inner,
-                    self.effect_row_count(),
-                    self.ui.effect_scroll_offset,
-                    delta,
-                );
-            }
-        }
-    }
-
-    fn handle_mouse_drag(&mut self, col: u16, row: u16, modifiers: KeyModifiers) {
-        if let Some(anchor) = self.ui.step_drag_anchor {
-            if modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::SUPER) {
-                let l = &self.ui.layout;
-                let step = if rect_contains(l.trigger_row, col, row) {
-                    self.step_from_click_x(col, l.trigger_row.x)
-                } else if rect_contains(l.bars, col, row) {
-                    self.step_from_click_x(col, l.bars.x)
-                } else {
-                    None
-                };
-                if let Some(step) = step {
-                    self.touch_follow_timer();
-                    self.ui.cursor_step = step;
-                    self.ui.selection_anchor = Some(anchor);
-                    self.ui.visual_steps.clear();
-                    self.ui.focused_region = Region::Cirklon;
-                }
-            } else {
-                self.ui.step_drag_anchor = None;
-            }
-            return;
-        }
-        if self.ui.param_mouse_drag.is_some() {
-            self.apply_param_mouse_drag(col, row);
-            return;
-        }
-        if let Some(anchor) = self.ui.track_drag_anchor {
-            let track_list = self.ui.layout.track_list;
-            if rect_contains(track_list, col, row) {
-                let idx = (row - track_list.y) as usize;
-                if idx < self.tracks.len() {
-                    self.ui.cursor_track = idx;
-                    if idx == anchor {
-                        self.ui.track_selection_anchor = None;
-                    } else {
-                        self.ui.track_selection_anchor = Some(anchor);
-                    }
-                    self.clamp_cursor_to_steps();
-                    self.ui.focused_region = Region::Cirklon;
-                    self.browser.sync_to_track(
-                        &self.tracks,
-                        self.ui.cursor_track,
-                        self.is_sampler_track(self.ui.cursor_track),
-                        &self.ui,
-                    );
-                }
-            }
-        }
-    }
-
-    fn handle_step_click(&mut self, step: usize, modifiers: KeyModifiers) {
-        self.touch_follow_timer();
-        let now = Instant::now();
-        let previous_step = self.ui.cursor_step;
-        let is_double = self
-            .ui
-            .last_step_click
-            .map(|(prev_step, prev_time)| {
-                prev_step == step && now.duration_since(prev_time).as_millis() < 400
-            })
-            .unwrap_or(false);
-
-        self.ui.cursor_step = step;
-        self.ui.focused_region = Region::Cirklon;
-
-        let range_select =
-            modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::SUPER);
-        if range_select {
-            if self.ui.selection_anchor.is_none() {
-                self.ui.selection_anchor = Some(previous_step);
-            }
-        } else {
-            self.clear_step_selection();
-        }
-
-        if is_double && !self.tracks.is_empty() {
-            self.clear_step_selection();
-            self.state
-                .toggle_step_and_clear_plocks(self.ui.cursor_track, step);
-            self.ui.last_step_click = None;
-        } else {
-            self.ui.last_step_click = Some((step, now));
-        }
-    }
-
-    pub(super) fn step_from_click_x(&self, col: u16, area_x: u16) -> Option<usize> {
-        let x_offset = 2u16;
-        if col < area_x + x_offset {
-            return None;
-        }
-        let rel = col - area_x - x_offset;
-        let step_in_page = (rel / COL_WIDTH) as usize;
-        let (page_start, page_end) = self.page_range();
-        let step = page_start + step_in_page;
-        if step < page_end && step < self.num_steps() {
-            Some(step)
-        } else {
-            None
-        }
-    }
-
-    fn normalized_step_value_from_bar_row(&self, row: u16) -> Option<f32> {
-        let bars = self.ui.layout.bars;
-        if row < bars.y || row >= bars.y + BAR_HEIGHT as u16 {
-            return None;
-        }
-        let rel_row = row.saturating_sub(bars.y) as usize;
-        let clamped = rel_row.min(BAR_HEIGHT.saturating_sub(1));
-        Some(1.0 - (clamped as f32 + 0.5) / BAR_HEIGHT as f32)
-    }
-
-    pub(super) fn step_param_value_from_bar_position(
-        &self,
-        param: StepParam,
-        row: u16,
-    ) -> Option<f32> {
-        let normalized = self.normalized_step_value_from_bar_row(row)?;
-        let value = param.denormalize_slider(normalized);
-        Some(match param {
-            StepParam::AuxA | StepParam::Chop | StepParam::Sync | StepParam::Transpose => {
-                value.round()
-            }
-            _ => value,
-        })
-    }
-
-    fn handle_value_entry(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                self.ui.value_buffer.push(c);
-            }
-            KeyCode::Char('.') => {
-                if !self.ui.value_buffer.contains('.') {
-                    self.ui.value_buffer.push('.');
-                }
-            }
-            KeyCode::Char('-') => {
-                if self.ui.value_buffer.starts_with('-') {
-                    self.ui.value_buffer.remove(0);
-                } else {
-                    self.ui.value_buffer.insert(0, '-');
-                }
-            }
-            KeyCode::Backspace => {
-                self.ui.value_buffer.pop();
-                if self.ui.value_buffer.is_empty() {
-                    self.ui.bpm_entry = false;
-                    self.ui.input_mode = InputMode::Normal;
-                }
-            }
-            KeyCode::Enter => {
-                if let Ok(val) = self.ui.value_buffer.parse::<f32>() {
-                    self.apply_value_entry(val);
-                }
-                self.ui.value_buffer.clear();
-                self.ui.bpm_entry = false;
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Esc => {
-                self.ui.value_buffer.clear();
-                self.ui.bpm_entry = false;
-                self.ui.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-    }
-
-    fn apply_value_entry(&mut self, val: f32) {
-        if self.ui.bpm_entry {
-            let bpm = (val as u32).clamp(20, 999);
-            apply_command(self, AppCommand::SetBpm { bpm });
-            self.ui.bpm_entry = false;
-            return;
-        }
-
-        if self.tracks.is_empty() {
-            return;
-        }
-
-        match self.ui.focused_region {
-            Region::Cirklon => {
-                let track = self.ui.cursor_track;
-                let param = self.ui.active_param;
-                for step in self.selected_steps() {
-                    apply_command(
-                        self,
-                        AppCommand::SetStepParam {
-                            track,
-                            step,
-                            param,
-                            value: val,
-                        },
-                    );
-                }
-            }
-            Region::Params | Region::Sidebar => {
-                if self.ui.focused_region == Region::Sidebar || self.ui.params_column == 0 {
-                    match self.active_tool_row() {
-                        super::params::ToolRow::Accum(super::AC_LIMIT) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackAccumLimit {
-                                        track,
-                                        value: val.max(0.0),
-                                    },
-                                );
-                            }
-                        }
-                        super::params::ToolRow::Track(super::TP_ATTACK) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(self, AppCommand::SetTrackAttack { track, ms: val });
-                            }
-                        }
-                        super::params::ToolRow::Track(super::TP_RELEASE) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(self, AppCommand::SetTrackRelease { track, ms: val });
-                            }
-                        }
-                        super::params::ToolRow::Track(super::TP_SWING) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                self.set_track_swing_or_plock(track, val);
-                            }
-                        }
-                        super::params::ToolRow::Track(super::TP_STEPS) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackNumSteps {
-                                        track,
-                                        n: val as usize,
-                                    },
-                                );
-                            }
-                            self.clamp_cursor_to_steps();
-                        }
-                        super::params::ToolRow::Track(super::TP_VOLUME) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackVolume {
-                                        track,
-                                        value: val.clamp(0.0, 1.0),
-                                    },
-                                );
-                            }
-                        }
-                        super::params::ToolRow::Track(super::TP_PAN) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackPan {
-                                        track,
-                                        value: val.clamp(-1.0, 1.0),
-                                    },
-                                );
-                            }
-                        }
-                        super::params::ToolRow::Track(super::TP_SEND) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackSend {
-                                        track,
-                                        value: val.clamp(0.0, 1.0),
-                                    },
-                                );
-                            }
-                        }
-                        super::params::ToolRow::Track(super::TP_MASTER) => {
-                            apply_command(
-                                self,
-                                AppCommand::SetMasterVolume {
-                                    value: val.clamp(0.0, 2.0),
-                                },
-                            );
-                        }
-                        super::params::ToolRow::Track(super::TP_MAX_POLY) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                let tp = &self.state.pattern.track_params[track];
-                                let cur = tp.get_max_polyphony() as isize;
-                                let target = val.round().max(1.0) as isize;
-                                apply_command(
-                                    self,
-                                    AppCommand::AdjustTrackMaxPolyphony {
-                                        track,
-                                        delta: target - cur,
-                                    },
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                    self.state.publish_scheduler_snapshot();
-                } else if self.ui.effect_tab == EffectTab::Reverb {
-                    self.set_reverb_param(self.ui.reverb_param_cursor, val);
-                } else if self.ui.effect_tab == EffectTab::Mod {
-                    let track = self.ui.cursor_track;
-                    let mod_indices = self.mod_param_indices(track);
-                    let Some(&param_idx) = mod_indices.get(self.ui.mod_param_cursor) else {
-                        return;
-                    };
-                    let desc = match self.graph.instrument_descriptors.get(track) {
-                        Some(d) => d,
-                        None => return,
-                    };
-                    let param_desc = &desc.params[param_idx];
-                    let store_val = param_desc.clamp(param_desc.user_input_to_stored(val));
-                    self.set_instrument_param_or_plock(track, param_idx, store_val);
-                } else if self.ui.effect_tab == EffectTab::Sources {
-                    let track = self.ui.cursor_track;
-                    let source_indices = self.source_param_actual_indices(track);
-                    let Some(&param_idx) = source_indices.get(self.ui.source_param_cursor) else {
-                        return;
-                    };
-                    let desc = match self.graph.instrument_descriptors.get(track) {
-                        Some(d) => d,
-                        None => return,
-                    };
-                    let param_desc = &desc.params[param_idx];
-                    let store_val = param_desc.clamp(param_desc.user_input_to_stored(val));
-                    self.set_instrument_param_or_plock(track, param_idx, store_val);
-                } else if self.ui.effect_tab == EffectTab::Synth {
-                    // Synth tab value entry
-                    let track = self.ui.cursor_track;
-                    if self.ui.instrument_param_cursor == 0 {
-                        let store_val = val.clamp(-48.0, 48.0);
-                        // Use the helper so publish_scheduler_snapshot is called
-                        self.set_instrument_base_note_offset(track, store_val);
-                    } else {
-                        let synth_indices = self.synth_param_indices(track);
-                        let Some(&param_idx) =
-                            synth_indices.get(self.ui.instrument_param_cursor - 1)
-                        else {
-                            return;
-                        };
-                        let desc = match self.graph.instrument_descriptors.get(track) {
-                            Some(d) => d,
-                            None => return,
-                        };
-                        let param_desc = &desc.params[param_idx];
-                        let store_val = param_desc.clamp(param_desc.user_input_to_stored(val));
-                        let slot = &self.state.pattern.instrument_slots[track];
-
-                        if self.has_selection() {
-                            for step in self.selected_steps() {
-                                slot.set_plock(step, param_idx, store_val);
-                            }
-                            self.state.publish_scheduler_snapshot();
-                        } else {
-                            // publish is called inside set_instrument_param_or_plock
-                            self.set_instrument_param_or_plock(track, param_idx, store_val);
-                        }
-                    }
-                } else {
-                    // Unified effect slot value entry
-                    let track = self.ui.cursor_track;
-                    let Some(slot_idx) = self.selected_effect_slot() else {
-                        return;
-                    };
-                    let param_idx = self.ui.effect_param_cursor;
-
-                    let desc = match self
-                        .graph
-                        .effect_descriptors
-                        .get(track)
-                        .and_then(|d| d.get(slot_idx))
-                    {
-                        Some(d) => d,
-                        None => return,
-                    };
-                    if param_idx >= desc.params.len() {
-                        return;
-                    }
-                    let param_desc = &desc.params[param_idx];
-                    let store_val = param_desc.clamp(param_desc.user_input_to_stored(val));
-
-                    let chain = &self.state.pattern.effect_chains[track];
-                    if slot_idx >= chain.len() {
-                        return;
-                    }
-                    let slot = &chain[slot_idx];
-
-                    if matches!(
-                        param_desc.host_control,
-                        Some(crate::effects::HostControl::FxSidechain { .. })
-                    ) {
-                        let selection = store_val.round().max(0.0) as usize;
-                        self.apply_effect_sidechain_selection(
-                            track, slot_idx, param_idx, selection,
-                        );
-                        slot.defaults.set(param_idx, selection as f32);
-                    } else if self.has_selection() {
-                        for step in self.selected_steps() {
-                            slot.set_plock(step, param_idx, store_val);
-                        }
-                    } else {
-                        slot.defaults.set(param_idx, store_val);
-                        self.send_slot_param(track, slot_idx, param_idx, store_val);
-                    }
-                    self.state.publish_scheduler_snapshot();
-                }
-            }
-        }
-    }
-
-    pub(super) fn adjust_selected(&mut self, delta: f32) {
-        if self.tracks.is_empty() {
-            return;
-        }
-        let track = self.ui.cursor_track;
-        let param = self.ui.active_param;
-        for step in self.selected_steps() {
-            apply_command(
-                self,
-                AppCommand::AdjustStepParam {
-                    track,
-                    step,
-                    param,
-                    delta,
-                },
-            );
-        }
-    }
-
-    pub(super) fn shift_selection(&mut self, direction: isize) {
-        if self.tracks.is_empty() || !self.has_selection() {
-            return;
-        }
-        let (lo, hi) = self.selected_range();
-        let count = hi - lo + 1;
-        let shift = direction;
-        let ns = self.num_steps();
-        let new_lo = (lo as isize + shift).clamp(0, (ns - count) as isize) as usize;
-
-        if new_lo == lo {
-            return;
-        }
-        let track = self.ui.cursor_track;
-        apply_command(
-            self,
-            AppCommand::ShiftStepRange {
-                track,
-                lo,
-                hi,
-                new_lo,
-            },
-        );
-
-        self.ui.cursor_step =
-            (self.ui.cursor_step as isize + shift).clamp(0, (ns - 1) as isize) as usize;
-        if let Some(ref mut anchor) = self.ui.selection_anchor {
-            *anchor = (*anchor as isize + shift).clamp(0, (ns - 1) as isize) as usize;
-        }
-    }
-
-    fn handle_pattern_select(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                if !self.ui.pattern_clone_pending {
-                    self.ui.value_buffer.push(c);
-                }
-            }
-            KeyCode::Char('c') => {
-                if self.ui.value_buffer.is_empty() && !self.ui.pattern_clone_pending {
-                    self.ui.pattern_clone_pending = true;
-                    self.ui.value_buffer = "clone".to_string();
-                }
-            }
-            KeyCode::Char('x') => {
-                let num_tracks = self.tracks.len();
-                if let Some(sample_ids) = self.state.delete_pattern(
-                    num_tracks,
-                    &self.graph.track_buffer_ids,
-                    &self.graph.track_sample_rates,
-                    &self.tracks,
-                    &self.graph.track_instrument_types,
-                ) {
-                    self.graph_controller().apply_sample_ids(&sample_ids);
-                    self.graph_controller().sync_current_pattern_mod_routes();
-                    self.push_all_restored_defaults();
-                }
-                self.clamp_cursor_to_steps();
-                self.ui.value_buffer.clear();
-                self.ui.pattern_clone_pending = false;
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Enter => {
-                if self.ui.pattern_clone_pending {
-                    let num_tracks = self.tracks.len();
-                    self.state.clone_pattern(
-                        num_tracks,
-                        &self.graph.track_buffer_ids,
-                        &self.graph.track_sample_rates,
-                        &self.tracks,
-                        &self.graph.track_instrument_types,
-                    );
-                    self.graph_controller().sync_current_pattern_mod_routes();
-                } else if let Ok(n) = self.ui.value_buffer.parse::<usize>() {
-                    if n >= 1 {
-                        let num_tracks = self.tracks.len();
-                        let num_patterns = self.state.scene_count();
-                        let idx = n - 1;
-                        if idx < num_patterns {
-                            if let Some(sample_ids) = self.state.switch_pattern(
-                                idx,
-                                num_tracks,
-                                &self.graph.track_buffer_ids,
-                                &self.graph.track_sample_rates,
-                                &self.tracks,
-                                &self.graph.track_instrument_types,
-                            ) {
-                                self.graph_controller().apply_sample_ids(&sample_ids);
-                                self.graph_controller().sync_current_pattern_mod_routes();
-                                self.push_all_restored_defaults();
-                            }
-                            self.clamp_cursor_to_steps();
-                        }
-                    }
-                }
-                self.ui.value_buffer.clear();
-                self.ui.pattern_clone_pending = false;
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Backspace => {
-                if self.ui.pattern_clone_pending {
-                    self.ui.pattern_clone_pending = false;
-                    self.ui.value_buffer.clear();
-                } else {
-                    self.ui.value_buffer.pop();
-                }
-            }
-            KeyCode::Esc => {
-                self.ui.value_buffer.clear();
-                self.ui.pattern_clone_pending = false;
-                self.ui.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-    }
-
-    // ── Step modes ──
-
-    /// Map a key character to a step offset (0..15) within the current page.
-    /// Number keys 1-8 map to steps 0-7, QWERTY row q-i maps to steps 8-15.
-    /// Also maps shifted variants (!, @, #, etc. and uppercase Q-I).
-    fn step_from_mode_key(c: char) -> Option<usize> {
-        match c {
-            '1' | '!' => Some(0),
-            '2' | '@' => Some(1),
-            '3' | '#' => Some(2),
-            '4' | '$' => Some(3),
-            '5' | '%' => Some(4),
-            '6' | '^' => Some(5),
-            '7' | '&' => Some(6),
-            '8' | '*' => Some(7),
-            'q' | 'Q' => Some(8),
-            'w' | 'W' => Some(9),
-            'e' | 'E' => Some(10),
-            'r' | 'R' => Some(11),
-            't' | 'T' => Some(12),
-            'y' | 'Y' => Some(13),
-            'u' | 'U' => Some(14),
-            'i' | 'I' => Some(15),
-            _ => None,
-        }
-    }
-
-    /// Resolve a mode key to an absolute step index on the current page.
-    fn resolve_mode_step(&self, c: char) -> Option<usize> {
-        let offset = Self::step_from_mode_key(c)?;
-        let (page_start, page_end) = self.page_range();
-        let step = page_start + offset;
-        if step < page_end && step < self.num_steps() {
-            Some(step)
-        } else {
-            None
-        }
-    }
-
-    /// Navigate to previous page (used by step modes).
-    fn mode_prev_page(&mut self) {
-        let ns = self.num_steps();
-        let total_pages = ns.div_ceil(STEPS_PER_PAGE);
-        if total_pages > 1 {
-            let current_page = self.current_page();
-            self.ui.cursor_step = ((current_page + total_pages - 1) % total_pages) * STEPS_PER_PAGE;
-        }
-    }
-
-    /// Navigate to next page (used by step modes).
-    fn mode_next_page(&mut self) {
-        let ns = self.num_steps();
-        let total_pages = ns.div_ceil(STEPS_PER_PAGE);
-        if total_pages > 1 {
-            let current_page = self.current_page();
-            self.ui.cursor_step = ((current_page + 1) % total_pages) * STEPS_PER_PAGE;
-        }
-    }
-
-    /// Returns true if a mode key character is a shifted variant (accent).
-    fn is_accent_key(c: char) -> bool {
-        matches!(
-            c,
-            '!' | '@'
-                | '#'
-                | '$'
-                | '%'
-                | '^'
-                | '&'
-                | '*'
-                | 'Q'
-                | 'W'
-                | 'E'
-                | 'R'
-                | 'T'
-                | 'Y'
-                | 'U'
-                | 'I'
-        )
-    }
-
-    /// Arrow key navigation shared by step modes (insert/select).
-    fn handle_mode_arrows(&mut self, code: KeyCode) -> bool {
-        let ns = self.num_steps();
-        match code {
-            KeyCode::Up => {
-                let previous_track = self.ui.cursor_track;
-                if self.ui.cursor_track > 0 {
-                    self.ui.cursor_track -= 1;
-                } else if !self.tracks.is_empty() {
-                    self.ui.cursor_track = self.tracks.len() - 1;
-                }
-                if self.ui.cursor_track != previous_track {
-                    self.clear_step_selection();
-                }
-                self.clamp_cursor_to_steps();
-                true
-            }
-            KeyCode::Down => {
-                let previous_track = self.ui.cursor_track;
-                if !self.tracks.is_empty() {
-                    self.ui.cursor_track = (self.ui.cursor_track + 1) % self.tracks.len();
-                }
-                if self.ui.cursor_track != previous_track {
-                    self.clear_step_selection();
-                }
-                self.clamp_cursor_to_steps();
-                true
-            }
-            KeyCode::Left => {
-                if self.ui.cursor_step > 0 {
-                    self.ui.cursor_step -= 1;
-                } else {
-                    self.ui.cursor_step = ns - 1;
-                }
-                true
-            }
-            KeyCode::Right => {
-                self.ui.cursor_step = (self.ui.cursor_step + 1) % ns;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn handle_step_insert(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        if self.handle_mode_arrows(code) {
-            return;
-        }
-        let has_shift = modifiers.contains(KeyModifiers::SHIFT);
-        match code {
-            KeyCode::Char(',') => {
-                if self.any_track_armed() {
-                    self.ui.recording = !self.ui.recording;
-                }
-            }
-            KeyCode::Char('/') if !has_shift => {
-                for armed in self.graph.record_armed.iter_mut() {
-                    *armed = false;
-                }
-                self.ui.recording = false;
-                self.ui.focused_region = Region::Sidebar;
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char(' ') => {
-                let was_playing = self.state.is_playing();
-                apply_command(self, AppCommand::TogglePlay);
-                if was_playing {
-                    self.state.transport.playhead.store(0, Ordering::Relaxed);
-                }
-            }
-            KeyCode::Esc | KeyCode::Enter => {
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char('[') => {
-                self.mode_prev_page();
-            }
-            KeyCode::Char(']') => {
-                self.mode_next_page();
-            }
-            KeyCode::Char(c) => {
-                // Page navigation: a/s (also A/S with shift held)
-                if c == 'a' || c == 'A' {
-                    self.mode_prev_page();
-                    return;
-                }
-                if c == 's' || c == 'S' {
-                    self.mode_next_page();
-                    return;
-                }
-                // xx: clear all steps in current track pattern
-                if c == 'x' || c == 'X' {
-                    let now = Instant::now();
-                    let is_double = self
-                        .ui
-                        .last_x_press
-                        .map(|t| now.duration_since(t).as_millis() < 400)
-                        .unwrap_or(false);
-                    if is_double {
-                        let track = self.ui.cursor_track;
-                        let ns = self.num_steps();
-                        let steps: Vec<usize> = (0..ns)
-                            .filter(|&s| self.state.pattern.patterns[track].is_active(s))
-                            .collect();
-                        apply_command(self, AppCommand::ClearSteps { track, steps });
-                        self.ui.last_x_press = None;
-                        self.editor.status_message =
-                            Some(("Pattern cleared".to_string(), Instant::now()));
-                    } else {
-                        self.ui.last_x_press = Some(now);
-                    }
-                    return;
-                }
-                if let Some(step) = self.resolve_mode_step(c) {
-                    let track = self.ui.cursor_track;
-                    let is_accent = has_shift || Self::is_accent_key(c);
-                    let is_active = self.state.pattern.patterns[track].is_active(step);
-
-                    if is_active && is_accent {
-                        // Already active + accent: lift velocity to 1.0 instead of toggling off
-                        apply_command(
-                            self,
-                            AppCommand::SetStepParam {
-                                track,
-                                step,
-                                param: StepParam::Velocity,
-                                value: 1.0,
-                            },
-                        );
-                    } else if is_active {
-                        // Already active + no accent: toggle off
-                        apply_command(self, AppCommand::ToggleStep { track, step });
-                    } else {
-                        // Inactive: toggle on with appropriate velocity
-                        let vel = if is_accent { 1.0 } else { 0.5 };
-                        apply_command(
-                            self,
-                            AppCommand::SetStepActive {
-                                track,
-                                step,
-                                active: true,
-                            },
-                        );
-                        apply_command(
-                            self,
-                            AppCommand::SetStepParam {
-                                track,
-                                step,
-                                param: StepParam::Velocity,
-                                value: vel,
-                            },
-                        );
-                    }
-                    self.ui.cursor_step = step;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_step_select(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
-        if self.handle_mode_arrows(code) {
-            return;
-        }
-        match code {
-            KeyCode::Char(',') => {
-                if self.any_track_armed() {
-                    self.ui.recording = !self.ui.recording;
-                }
-            }
-            KeyCode::Char('/') => {
-                for armed in self.graph.record_armed.iter_mut() {
-                    *armed = false;
-                }
-                self.ui.recording = false;
-                self.ui.focused_region = Region::Sidebar;
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char(' ') => {
-                let was_playing = self.state.is_playing();
-                apply_command(self, AppCommand::TogglePlay);
-                if was_playing {
-                    self.state.transport.playhead.store(0, Ordering::Relaxed);
-                }
-            }
-            KeyCode::Esc | KeyCode::Enter => {
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char('[') | KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.mode_prev_page();
-            }
-            KeyCode::Char(']') | KeyCode::Char('s') | KeyCode::Char('S') => {
-                self.mode_next_page();
-            }
-            KeyCode::Char('x') | KeyCode::Char('X') => {
-                // Delete: untoggle all selected active steps
-                let track = self.ui.cursor_track;
-                let steps: Vec<usize> = self
-                    .ui
-                    .visual_steps
-                    .iter()
-                    .copied()
-                    .filter(|&s| self.state.pattern.patterns[track].is_active(s))
-                    .collect();
-                for step in steps {
-                    apply_command(self, AppCommand::ToggleStep { track, step });
-                }
-                self.ui.visual_steps.clear();
-            }
-            KeyCode::Char(c) => {
-                if let Some(step) = self.resolve_mode_step(c) {
-                    // Toggle step in/out of visual selection
-                    if self.ui.visual_steps.contains(&step) {
-                        self.ui.visual_steps.remove(&step);
-                    } else {
-                        self.ui.visual_steps.insert(step);
-                    }
-                    self.ui.cursor_step = step;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_step_arm(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
-        match code {
-            KeyCode::Char(c) => {
-                // , → toggle recording from arm mode too
-                if c == ',' {
-                    if self.any_track_armed() {
-                        self.ui.recording = !self.ui.recording;
-                    }
-                    return;
-                }
-                // r → exit arm mode (toggle behavior)
-                if c == 'r' {
-                    self.ui.input_mode = InputMode::Normal;
-                    return;
-                }
-                let track = match c {
-                    '1' => Some(0),
-                    '2' => Some(1),
-                    '3' => Some(2),
-                    '4' => Some(3),
-                    '5' => Some(4),
-                    '6' => Some(5),
-                    '7' => Some(6),
-                    '8' => Some(7),
-                    'q' => Some(8),
-                    'w' => Some(9),
-                    'e' => Some(10),
-                    'r' => Some(11), // unreachable due to early return above
-                    't' => Some(12),
-                    'y' => Some(13),
-                    'u' => Some(14),
-                    _ => None,
-                };
-                if let Some(t) = track {
-                    if t < self.tracks.len() && t < self.graph.record_armed.len() {
-                        let was_armed = self.graph.record_armed[t];
-                        self.graph.record_armed[t] = !self.graph.record_armed[t];
-                        if was_armed && !self.graph.record_armed[t] {
-                            self.release_held_notes_for_tracks(&[t]);
-                        }
-                        if !self.any_track_armed() {
-                            self.ui.recording = false;
-                        }
-                    }
-                }
-            }
-            KeyCode::Esc | KeyCode::Enter => {
-                self.ui.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-    }
-
-    pub(super) fn any_track_armed(&self) -> bool {
-        self.graph.record_armed.iter().any(|a| *a)
-    }
-
-    /// Map QWERTY key to semitone offset (standard DAW layout).
-    fn note_from_key(c: char) -> Option<i32> {
-        match c {
-            'a' => Some(0),  // C
-            'w' => Some(1),  // C#
-            's' => Some(2),  // D
-            'e' => Some(3),  // D#
-            'd' => Some(4),  // E
-            'f' => Some(5),  // F
-            't' => Some(6),  // F#
-            'g' => Some(7),  // G
-            'y' => Some(8),  // G#
-            'h' => Some(9),  // A
-            'u' => Some(10), // A#
-            'j' => Some(11), // B
-            'k' => Some(12), // C+1
-            'o' => Some(13), // C#+1
-            'l' => Some(14), // D+1
-            _ => None,
-        }
-    }
-
-    /// Handle key release: send note-off to audio and optionally record into pattern.
-    fn handle_note_release(&mut self, c: char) {
-        // Find and remove the held note for this key
-        let held = self.ui.held_notes.iter().position(|note| note.key == c);
-        let held = match held {
-            Some(idx) => self.ui.held_notes.remove(idx),
-            None => return,
+        let Some(target) = current_soft_step_param_target(editor, state, current_track) else {
+            return false;
         };
-        let transpose = held.transpose;
-        let step_at_press = held.step_at_press;
-        let press_time = held.press_time;
-
-        // Send note-off to the exact tracks that received the original note-on.
-        for track in held.tracks {
-            let _ = self.graph.keyboard_tx.send(KeyboardTrigger {
-                track,
-                transpose,
-                velocity: 0.0,
-                note_off: true,
-            });
+        let Some(widget_id) = current_step_param_number_picker_id(editor) else {
+            return false;
+        };
+        if edit.target.as_ref() != Some(&target) || edit.widget_id != Some(widget_id) {
+            edit.clear();
+            edit.target = Some(target);
+            edit.widget_id = Some(widget_id);
+            edit.editing = false;
         }
-
-        // Record into pattern if recording + playing
-        if !self.ui.recording || !self.state.is_playing() {
-            return;
-        }
-
-        // Compute duration in 1/16th note units from hold time
-        let bpm = self.state.transport.bpm.load(Ordering::Relaxed) as f64;
-        let secs_per_step = 60.0 / bpm / 4.0; // duration of one 1/16th note
-        let hold_secs = press_time.elapsed().as_secs_f64();
-        let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0);
-
-        for (track, armed) in self.graph.record_armed.iter().enumerate() {
-            if !*armed {
-                continue;
-            }
-            let num_steps = self.state.pattern.track_params[track].get_num_steps();
-            let local_step = step_at_press % num_steps;
-            // Enable step trigger
-            if !self.state.pattern.patterns[track].is_active(local_step) {
-                self.state.pattern.patterns[track].toggle_step(local_step);
-            }
-            // Add note to chord data (supports multiple notes per step)
-            self.state.pattern.chord_data[track].add_note(local_step, transpose);
-            // Keep StepData::Transpose in sync with first chord note for bar display
-            let first_note = self.state.pattern.chord_data[track].get(local_step, 0);
-            self.state.pattern.step_data[track].set(local_step, StepParam::Transpose, first_note);
-            // Set velocity and duration p-locks
-            self.state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
-            self.state.pattern.step_data[track].set(
-                local_step,
-                StepParam::Duration,
-                duration_steps as f32,
-            );
-        }
-
-        self.state.publish_scheduler_snapshot();
     }
 
-    pub(super) fn release_held_notes_for_tracks(&mut self, tracks: &[usize]) {
-        if tracks.is_empty() {
-            return;
+    let Some(target) = edit.target.clone() else {
+        return false;
+    };
+    let Some(widget_id) = edit.widget_id else {
+        return false;
+    };
+    let Some(spec) = soft_step_param_edit_spec(state, &target) else {
+        edit.clear();
+        editor.mark_needs_redraw();
+        return true;
+    };
+    let outcome = handle_number_picker_edit_key_for_widget(
+        widget_id,
+        eseqlisp::widget_render::WidgetKeyEvent {
+            code: key.code,
+            modifiers: key.modifiers,
+        },
+        spec.value as f64,
+        spec.min as f64,
+        spec.max as f64,
+        u32::from(spec.decimals),
+    );
+
+    match outcome {
+        Some(NumberPickerEditOutcome::StateChanged) => {
+            edit.editing = number_picker_edit_state(widget_id).editing;
+            if !edit.editing {
+                edit.clear();
+            }
+            editor.mark_needs_redraw();
+            true
         }
-        let mut retained = Vec::with_capacity(self.ui.held_notes.len());
-        for mut held in self.ui.held_notes.drain(..) {
-            for &track in tracks {
-                if held.tracks.contains(&track) {
-                    let _ = self.graph.keyboard_tx.send(KeyboardTrigger {
+        Some(NumberPickerEditOutcome::Commit(value)) => {
+            if !commit_soft_step_param_edit(
+                editor,
+                state,
+                current_track,
+                expanded_step_projection,
+                &target,
+                value,
+            ) {
+                edit.clear();
+                editor.mark_needs_redraw();
+                return true;
+            }
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            edit.clear();
+            editor.mark_needs_redraw();
+            true
+        }
+        None if edit.is_active() => {
+            edit.clear();
+            editor.mark_needs_redraw();
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn handle_metal_command_shortcut(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    step_clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
+) -> bool {
+    let ui_epoch = AtomicUsize::new(0);
+    handle_metal_command_shortcut_with_ui_epoch(
+        editor,
+        key,
+        state,
+        current_track,
+        selected_steps,
+        step_clipboard,
+        &ui_epoch,
+    )
+}
+
+pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    step_clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
+    ui_epoch: &AtomicUsize,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && is_trigger_recording_shortcut(key)
+    {
+        let _ = editor.runtime_mut().eval_str("(seq-toggle-record)");
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+        return true;
+    }
+
+    if number_picker_pending_edit_key(key) && current_step_param_number_picker_is_editing(editor) {
+        return false;
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && !focused_widget_captures_text_input(editor)
+        && is_toggle_mods_view_shortcut(key)
+    {
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-current-track-mods-view)");
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+        return true;
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && !focused_widget_captures_text_input(editor)
+        && is_shift_tab_shortcut(key)
+        && editor
+            .runtime_mut()
+            .eval_str(r#"(or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))"#)
+            .ok()
+            .flatten()
+            .is_some_and(|value| matches!(value, eseqlisp::vm::Value::Bool(true)))
+    {
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-main-or-piano-roll)");
+        editor.refresh_runtime_side_effects();
+        return true;
+    }
+
+    if shortcut_context_allows_sequencer_tab_switch(editor) {
+        if let Some(index) = sequencer_tab_shortcut_index(key) {
+            return select_sequencer_tab_by_index(editor, index);
+        }
+    }
+
+    if shortcut_context_allows_sample_browser_focus(editor) && sample_browser_search_shortcut(key) {
+        return focus_samples_browser_search(editor);
+    }
+
+    if focused_samples_search_should_hand_off_to_tree(editor, key) {
+        return focus_samples_browser_active_tree(editor);
+    }
+
+    if sample_browser_tab_shortcut_available(editor, key) {
+        let refocus_tree = editor
+            .focused_widget_node()
+            .is_some_and(|node| node.widget_type == "tree");
+        let refocus_search = focused_widget_is(editor, "sbrowser-search-input", "text-input");
+        let _ = editor.runtime_mut().eval_str("(sbrowser-next-tab)");
+        editor.refresh_runtime_side_effects();
+        if refocus_tree {
+            let _ = focus_samples_browser_active_tree(editor);
+        } else if refocus_search {
+            let _ = editor.focus_widget_by_stable_key("sbrowser-search-input", Some("text-input"));
+        }
+        editor.mark_needs_redraw();
+        return true;
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+        && key.modifiers == KeyModifiers::NONE
+        && selected_steps_delete_shortcut_available(editor, selected_steps)
+    {
+        let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");
+        editor.refresh_runtime_side_effects();
+        return true;
+    }
+
+    if global_sequencer_navigation_available(editor) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Left, KeyModifiers::SHIFT) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-select-left)");
+                editor.refresh_runtime_side_effects();
+                editor.mark_needs_redraw();
+                return true;
+            }
+            (KeyCode::Right, KeyModifiers::SHIFT) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-select-right)");
+                editor.refresh_runtime_side_effects();
+                editor.mark_needs_redraw();
+                return true;
+            }
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-left)");
+                editor.refresh_runtime_side_effects();
+                editor.mark_needs_redraw();
+                return true;
+            }
+            (KeyCode::Right, KeyModifiers::NONE) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-right)");
+                editor.refresh_runtime_side_effects();
+                editor.mark_needs_redraw();
+                return true;
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-toggle)");
+                editor.refresh_runtime_side_effects();
+                editor.mark_needs_redraw();
+                return true;
+            }
+            (KeyCode::Up | KeyCode::Down, KeyModifiers::NONE) => {
+                let track_count = state.active_track_count();
+                if track_count == 0 {
+                    return true;
+                }
+                let current = current_track.load(Ordering::Relaxed).min(track_count - 1);
+                let next = if key.code == KeyCode::Up {
+                    if current == 0 {
+                        track_count - 1
+                    } else {
+                        current - 1
+                    }
+                } else {
+                    (current + 1) % track_count
+                };
+                select_track_for_edit(editor, next);
+                editor.refresh_runtime_side_effects();
+                editor.mark_needs_redraw();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && active_buffer_accepts_global_ui_shortcuts(editor)
+        && !focused_widget_captures_text_input(editor)
+    {
+        if let Some(shortcut) = pattern_length_shortcut(key) {
+            if metal_has_selected_bus(editor) {
+                return false;
+            }
+            let command = match shortcut {
+                PatternLengthShortcut::Double => "(double-track-pattern)",
+                PatternLengthShortcut::Halve => "(halve-track-pattern)",
+            };
+            let _ = editor.runtime_mut().eval_str(command);
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+            return true;
+        }
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('a') | KeyCode::Char('A'), modifiers)
+                if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                    && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
+                let command = if editor.active_buffer().name == "*sequencer*" {
+                    "(seqv-select-all-current-track-steps)"
+                } else {
+                    "(select-all-steps)"
+                };
+                let _ = editor.runtime_mut().eval_str(command);
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "selected-steps",
+                    build_selection_value(selected_steps),
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                editor.refresh_visible_layouts_for_buffer_named("*metal*");
+                editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                editor.mark_needs_redraw();
+                return true;
+            }
+            (KeyCode::Tab, KeyModifiers::CONTROL) => {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(seq-toggle-piano-roll-placement)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            _ if is_plain_tab_shortcut(key) => {
+                if patcher_handles_plain_tab(editor) {
+                    return false;
+                }
+                let _ = if let Some(callable) = editor
+                    .runtime_mut()
+                    .global_value("seq-toggle-current-track-expanded-main")
+                {
+                    editor.runtime_mut().invoke(callable, vec![])
+                } else {
+                    editor
+                        .runtime_mut()
+                        .eval_str("(seq-toggle-current-track-expanded-main)")
+                };
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            _ if is_shift_tab_shortcut(key) => {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(seq-toggle-main-or-piano-roll)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            _ if editor.focused_widget_id().is_some() => {}
+            (KeyCode::Char('h') | KeyCode::Char('H'), KeyModifiers::CONTROL) => {
+                let _ = editor.runtime_mut().eval_str("(seqv-collapse-all-tracks)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Char('i') | KeyCode::Char('I'), KeyModifiers::SUPER) => {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(host-command \"enter-new-instrument-editor\" (dict))");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Char('d') | KeyCode::Char('D'), KeyModifiers::SUPER)
+                if editor.active_buffer().name == "*mixer*" =>
+            {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(seq-clone-active-track-pattern)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
+    {
+        // A 2+ track multi-selection only exists via mixer cmd-click, so C-g
+        // groups when one is present; otherwise it opens the agent. The Lisp
+        // dispatcher (seq-ctrl-g) decides.
+        let _ = editor.runtime_mut().eval_str("(seq-ctrl-g)");
+        editor.refresh_runtime_side_effects();
+        return true;
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && active_buffer_accepts_global_ui_shortcuts(editor)
+        && editor.focused_widget_id().is_none()
+        && !focused_widget_captures_text_input(editor)
+    {
+        match (key.code, key.modifiers) {
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-left)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Right, KeyModifiers::NONE) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-right)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Backspace | KeyCode::Delete, KeyModifiers::NONE) => {
+                if !selected_steps_delete_shortcut_available(editor, selected_steps) {
+                    return false;
+                }
+                let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            _ => {}
+        }
+    } else {
+        return false;
+    }
+
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        match key.code {
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                let track = current_track.load(Ordering::Relaxed);
+                let steps: Vec<usize> = {
+                    let set = selected_steps.lock().unwrap();
+                    if set.is_empty() {
+                        current_metal_cursor_step(editor).into_iter().collect()
+                    } else {
+                        let mut steps: Vec<usize> = set.iter().copied().collect();
+                        steps.sort_unstable();
+                        steps
+                    }
+                };
+                if steps.is_empty() {
+                    return true;
+                }
+                let anchor = steps[0];
+                let clipboard: Vec<(usize, sequencer::sequencer::StepSnapshot)> = steps
+                    .iter()
+                    .map(|&s| (s - anchor, state.capture_step_snapshot(track, s)))
+                    .collect();
+                let count = clipboard.len();
+                *step_clipboard.lock().unwrap() = Some((track, clipboard));
+                editor.handle_host_event(HostEvent::Status(format!(
+                    "Copied {} step{}",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                )));
+                return true;
+            }
+            KeyCode::Char('v') | KeyCode::Char('V') => {
+                let dest_start = match current_metal_cursor_step(editor) {
+                    Some(step) => step,
+                    None => return true,
+                };
+                let clipboard = {
+                    let guard = step_clipboard.lock().unwrap();
+                    guard.clone()
+                };
+                let Some((source_track, clipboard)) = clipboard else {
+                    return true;
+                };
+                let track = current_track.load(Ordering::Relaxed);
+                let preserve_audio_plocks = source_track == track;
+                let num_steps = state.pattern.track_params[track].get_num_steps();
+                let mut applied_count = 0usize;
+                for (offset, snapshot) in &clipboard {
+                    let dest = dest_start + offset;
+                    if dest >= num_steps {
+                        continue;
+                    }
+                    if !snapshot.active && state.pattern.patterns[track].is_active(dest) {
+                        continue;
+                    }
+                    let sanitized = if preserve_audio_plocks {
+                        snapshot.clone()
+                    } else {
+                        snapshot.without_audio_plocks()
+                    };
+                    state.restore_step_snapshot(track, dest, &sanitized);
+                    applied_count += 1;
+                }
+                if applied_count > 0 {
+                    state.publish_scheduler_snapshot();
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    editor.mark_needs_redraw();
+                }
+                editor.handle_host_event(HostEvent::Status(format!(
+                    "Pasted {} step{}",
+                    applied_count,
+                    if applied_count == 1 { "" } else { "s" }
+                )));
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Map keyboard character to semitone offset (piano-style layout).
+pub(crate) fn note_from_key(c: char) -> Option<i32> {
+    match c {
+        'a' => Some(0),  // C
+        'w' => Some(1),  // C#
+        's' => Some(2),  // D
+        'e' => Some(3),  // D#
+        'd' => Some(4),  // E
+        'f' => Some(5),  // F
+        't' => Some(6),  // F#
+        'g' => Some(7),  // G
+        'y' => Some(8),  // G#
+        'h' => Some(9),  // A
+        'u' => Some(10), // A#
+        'j' => Some(11), // B
+        'k' => Some(12), // C+1
+        'o' => Some(13), // C#+1
+        'l' => Some(14), // D+1
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordingKeyOutcome {
+    Ignored,
+    Consumed,
+    Recorded,
+}
+
+impl RecordingKeyOutcome {
+    pub(crate) fn consumed(self) -> bool {
+        !matches!(self, Self::Ignored)
+    }
+
+    pub(crate) fn recorded(self) -> bool {
+        matches!(self, Self::Recorded)
+    }
+}
+
+/// Intercept keyboard events for live recording.
+pub(crate) fn handle_recording_key(
+    key: &crossterm::event::KeyEvent,
+    state: &Arc<SequencerState>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    recording: &Arc<AtomicBool>,
+    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
+    current_track: &Arc<AtomicUsize>,
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    ui_epoch: &Arc<AtomicUsize>,
+) -> RecordingKeyOutcome {
+    use crossterm::event::{KeyCode, KeyEventKind};
+
+    let c = match key.code {
+        KeyCode::Char(c) => c.to_ascii_lowercase(),
+        _ => return RecordingKeyOutcome::Ignored,
+    };
+
+    // Octave shift keys (only on press)
+    if c == 'z' || c == 'x' {
+        if key.kind == KeyEventKind::Press {
+            let delta = if c == 'z' { -12 } else { 12 };
+            keyboard_octave.fetch_add(delta, Ordering::Relaxed);
+        }
+        return RecordingKeyOutcome::Consumed;
+    }
+
+    let note = match note_from_key(c) {
+        Some(n) => n,
+        None => return RecordingKeyOutcome::Ignored,
+    };
+
+    match key.kind {
+        KeyEventKind::Press => {
+            // Suppress key repeat — only trigger on first press
+            let mut held = held_notes.lock().unwrap();
+            if held.iter().any(|note| note.key == c) {
+                return RecordingKeyOutcome::Consumed;
+            }
+
+            let armed = record_armed.lock().unwrap();
+            let octave = keyboard_octave.load(Ordering::Relaxed);
+            let transpose = (note + octave) as f32;
+            let mut pressed_tracks = Vec::new();
+
+            // Send note-on to audio thread for all armed tracks
+            for (track, a) in armed.iter().enumerate() {
+                if *a {
+                    pressed_tracks.push(track);
+                    let _ = keyboard_tx.send(KeyboardTrigger {
                         track,
-                        transpose: held.transpose,
+                        transpose,
+                        velocity: 1.0,
+                        note_off: false,
+                    });
+                }
+            }
+
+            // Record the step at press time
+            let ct = current_track.load(Ordering::Relaxed);
+            let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed) as usize;
+            held.push(HeldKeyboardNote {
+                key: c,
+                transpose,
+                step_at_press: playhead,
+                press_time: Instant::now(),
+                tracks: pressed_tracks,
+            });
+            RecordingKeyOutcome::Consumed
+        }
+        KeyEventKind::Release => {
+            // Find and remove the held note
+            let held_entry = {
+                let mut held = held_notes.lock().unwrap();
+                let pos = held.iter().position(|note| note.key == c);
+                pos.map(|idx| held.remove(idx))
+            };
+
+            // Record into pattern if recording + playing
+            if let Some(note) = held_entry {
+                for track in &note.tracks {
+                    let _ = keyboard_tx.send(KeyboardTrigger {
+                        track: *track,
+                        transpose: note.transpose,
                         velocity: 0.0,
                         note_off: true,
                     });
                 }
+
+                if recording.load(Ordering::Relaxed) && state.is_playing() {
+                    let armed = record_armed.lock().unwrap();
+                    let bpm = state.transport.bpm.load(Ordering::Relaxed) as f64;
+                    let secs_per_step = 60.0 / bpm / 4.0;
+                    let hold_secs = note.press_time.elapsed().as_secs_f64();
+                    let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
+                    let mut recorded = false;
+
+                    for (track, a) in armed.iter().enumerate() {
+                        if !*a {
+                            continue;
+                        }
+                        let num_steps = state.pattern.track_params[track].get_num_steps();
+                        let local_step = note.step_at_press % num_steps;
+                        if !state.pattern.patterns[track].is_active(local_step) {
+                            state.pattern.patterns[track].toggle_step(local_step);
+                        }
+                        state.pattern.chord_data[track].add_note(local_step, note.transpose);
+                        let first_note = state.pattern.chord_data[track].get(local_step, 0);
+                        state.pattern.step_data[track].set(
+                            local_step,
+                            StepParam::Transpose,
+                            first_note,
+                        );
+                        state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
+                        state.pattern.step_data[track].set(
+                            local_step,
+                            StepParam::Duration,
+                            duration_steps,
+                        );
+                        recorded = true;
+                    }
+                    if recorded {
+                        state.publish_scheduler_snapshot();
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        return RecordingKeyOutcome::Recorded;
+                    }
+                }
             }
-            held.tracks.retain(|track| !tracks.contains(track));
-            if !held.tracks.is_empty() {
-                retained.push(held);
-            }
+            RecordingKeyOutcome::Consumed
         }
-        self.ui.held_notes = retained;
+        _ => RecordingKeyOutcome::Consumed, // consume Repeat events too
+    }
+}
+
+#[cfg(test)]
+mod live_keyboard_tests {
+    use super::{
+        build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
+        handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
+        held_note_for_key, note_from_key, ExpandedStepProjectionRegistry, ExpandedStepViewport,
+        HeldKeyboardNote, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
+    };
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use eseqlisp::editor::ViewMode;
+    use eseqlisp::mode::BufferMode;
+    use eseqlisp::vm::Value;
+    use eseqlisp::widget_render::WidgetKeyEvent;
+    use eseqlisp::HostCommand;
+    use eseqlisp::{Editor, EditorConfig, Runtime};
+    use sequencer::sequencer::{SequencerState, StepParam, StepSnapshot};
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    #[test]
+    fn held_note_lookup_is_case_insensitive_for_release_matching() {
+        let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            key: 'a',
+            transpose: 0.0,
+            step_at_press: 0,
+            press_time: Instant::now(),
+            tracks: vec![0],
+        }]));
+        let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+
+        assert!(held_note_for_key(&held, &key));
+    }
+
+    #[test]
+    fn live_note_map_uses_lowercase_keys() {
+        assert_eq!(note_from_key('a'), Some(0));
+        assert_eq!(note_from_key('A'), None);
+    }
+
+    #[test]
+    fn up_down_switch_tracks_outside_piano_roll() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str("(defstate selected-bus -1)")
+            .expect("install selected bus state");
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let native_track = Arc::clone(&current_track);
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(eseqlisp::vm::Value::Number(track)) = args.first() else {
+                    return Err("expected track".to_string());
+                };
+                native_track.store(*track as usize, Ordering::Relaxed);
+                Ok(eseqlisp::vm::Value::Number(*track))
+            });
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 1);
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 0);
+    }
+
+    fn sample_browser_keyboard_editor() -> Editor {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.set_layout_viewport(100, 30);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate sbrowser-tab "samples")
+                (defstate sbrowser-filter "")
+                (defstate sbrowser-modified-label "")
+                (def sbrowser-active-tree-key ()
+                  (if (= sbrowser-tab "samples") "samples-tab-tree" "instruments-tab-tree"))
+                (def sbrowser-next-tab ()
+                  (set! sbrowser-tab
+                    (if (= sbrowser-tab "samples") "instruments" "samples")))
+                (def sample-browser-here () (switch-to-buffer "*samples*"))
+                (def sbrowser-keyboard-items ()
+                  (list (dict :label "kick.wav" :path "samples/kick.wav")))
+                (def sbrowser-keyboard-panel ()
+                  (v-stack :width :fill :height :fill
+                    (text-input
+                      :key "sbrowser-search-input"
+                      :width :fill
+                      :value sbrowser-filter
+                      :placeholder "Search"
+                      :on-change (lambda (v) (set! sbrowser-filter v)))
+                    (if (= sbrowser-tab "samples")
+                      (tree
+                        :key "samples-tab-tree"
+                        :width :fill
+                        :focusable true
+                        :items (sbrowser-keyboard-items)
+                        :on-modified-activate
+                          (lambda (item) (set! sbrowser-modified-label (get item :label))))
+                      (tree
+                        :key "instruments-tab-tree"
+                        :width :fill
+                        :focusable true
+                        :items (sbrowser-keyboard-items)))))
+                (effect-buffer "*samples*" (sbrowser-keyboard-panel))
+                "#,
+            )
+            .expect("install sample browser keyboard fixture");
+        editor.refresh_runtime_side_effects();
+        editor.open_scratch_buffer("*sequencer*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+    }
+
+    fn empty_command_state() -> (
+        Arc<SequencerState>,
+        Arc<AtomicUsize>,
+        Arc<Mutex<HashSet<usize>>>,
+        Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>>,
+    ) {
+        (
+            Arc::new(SequencerState::new(1, vec![])),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    #[test]
+    fn command_comma_toggles_trigger_recording_without_claiming_plain_comma() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*source*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def record-toggle-count (state 0))
+                (def seq-toggle-record ()
+                  (set! record-toggle-count (+ record-toggle-count 1)))
+                "#,
+            )
+            .expect("install record toggle hook");
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char(','), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+    }
+
+    #[test]
+    fn slash_does_not_focus_sample_browser_search_from_ui_buffers() {
+        let mut editor = sample_browser_keyboard_editor();
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert_eq!(editor.active_buffer().name, "*sequencer*");
+        assert!(editor.focused_widget_node().is_none());
+    }
+
+    #[test]
+    fn command_f_focuses_sample_browser_search_from_ui_buffers() {
+        let mut editor = sample_browser_keyboard_editor();
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert_eq!(editor.active_buffer().name, "*samples*");
+        let focused = editor
+            .focused_widget_node()
+            .expect("Cmd+F should focus the browser search");
+        assert_eq!(focused.widget_type, "text-input");
+        assert_eq!(focused.stable_key.as_deref(), Some("sbrowser-search-input"));
+    }
+
+    #[test]
+    fn selected_plock_row_blocks_global_selected_step_delete_shortcut() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def delete-count (state 0))
+                (def plock-row-selected (state false))
+                (def delete-selected-steps ()
+                  (set! delete-count (+ delete-count 1)))
+                (def fx-plock-row-selected? () plock-row-selected)
+                "#,
+            )
+            .expect("install step/plock delete hooks");
+
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+        selected_steps.lock().unwrap().insert(3);
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! plock-row-selected true)")
+            .expect("select plock row");
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("delete-count").unwrap(),
+            Some(Value::Number(0.0)),
+            "global step deletion must not run while a plock row is selected"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! plock-row-selected false)")
+            .expect("clear plock row selection");
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("delete-count").unwrap(),
+            Some(Value::Number(1.0)),
+            "global step deletion should still work once no plock row is selected"
+        );
+    }
+
+    #[test]
+    fn slash_does_not_steal_focused_search_or_text_only_buffers() {
+        let mut editor = sample_browser_keyboard_editor();
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(editor.active_buffer().name, "*samples*");
+
+        editor.open_scratch_buffer("*source*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(editor.active_buffer().name, "*source*");
+    }
+
+    #[test]
+    fn sample_browser_search_up_down_focuses_active_tree() {
+        let mut editor = sample_browser_keyboard_editor();
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        let focused = editor
+            .focused_widget_node()
+            .expect("down from search should focus the active tree");
+        assert_eq!(focused.widget_type, "tree");
+        assert_eq!(focused.stable_key.as_deref(), Some("samples-tab-tree"));
+    }
+
+    #[test]
+    fn sample_browser_tab_cycles_tabs_and_refocuses_tree() {
+        let mut editor = sample_browser_keyboard_editor();
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+            Some(Value::String("instruments".to_string()))
+        );
+        let focused = editor
+            .focused_widget_node()
+            .expect("tab cycling from a tree should focus the next tab tree");
+        assert_eq!(focused.widget_type, "tree");
+        assert_eq!(focused.stable_key.as_deref(), Some("instruments-tab-tree"));
+    }
+
+    #[test]
+    fn modified_enter_on_sample_browser_tree_uses_modified_activate() {
+        let mut editor = sample_browser_keyboard_editor();
+        let samples_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("samples buffer")
+            .id;
+        editor.set_active_buffer(samples_id);
+        editor.refresh_runtime_side_effects();
+        assert!(editor.focus_widget_by_stable_key("samples-tab-tree", Some("tree")));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-modified-label")
+                .unwrap(),
+            Some(Value::String("kick.wav".to_string()))
+        );
+    }
+
+    #[test]
+    fn plain_arrows_navigate_from_piano_roll_ui_buffer() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*piano-roll*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let native_track = Arc::clone(&current_track);
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(Value::Number(track)) = args.first() else {
+                    return Err("expected track".to_string());
+                };
+                native_track.store(*track as usize, Ordering::Relaxed);
+                Ok(Value::Number(*track))
+            });
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate selected-bus 1)
+                (defstate cursor-left-count 0)
+                (defstate cursor-right-count 0)
+                (defstate cursor-select-left-count 0)
+                (defstate cursor-select-right-count 0)
+                (defstate cursor-toggle-count 0)
+                (defstate selected-track-via-seqv -1)
+                (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                (def cursor-right () (set! cursor-right-count (+ cursor-right-count 1)))
+                (def cursor-select-left () (set! cursor-select-left-count (+ cursor-select-left-count 1)))
+                (def cursor-select-right () (set! cursor-select-right-count (+ cursor-select-right-count 1)))
+                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (def seqv-select-track-for-edit (track)
+                  (do
+                    (set! selected-bus -1)
+                    (set! selected-track-via-seqv track)
+                    (seq-set-track track)))
+                "#,
+            )
+            .expect("install arrow navigation handlers");
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-left-count").unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-right-count").unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("cursor-select-left-count")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("cursor-select-right-count")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("cursor-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(Value::Number(-1.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("selected-track-via-seqv")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+    }
+
+    #[test]
+    fn plain_arrows_do_not_navigate_while_widget_is_focused() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.set_layout_viewport(80, 20);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate cursor-left-count 0)
+                (defstate cursor-toggle-count 0)
+                (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :tool :draw
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items ()
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| e))
+                "#,
+            )
+            .expect("install focused widget fixture");
+        editor.handle_mouse_precise(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 10,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            },
+            0,
+            0,
+            80,
+            20,
+            10.0,
+            3.0,
+        );
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "fixture should focus a widget before testing global arrow routing"
+        );
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-left-count").unwrap(),
+            Some(Value::Number(0.0))
+        );
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("cursor-toggle-count")
+                .unwrap(),
+            Some(Value::Number(0.0))
+        );
+    }
+
+    #[test]
+    fn tab_shortcuts_call_main_panel_toggles() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                (def seq-toggle-current-track-expanded-main () (set! tab-target "expand"))
+                (def seq-toggle-piano-roll-placement () (set! tab-target "placement"))
+                (def seq-toggle-mixer-panel () (set! tab-target "mixer"))
+                "#,
+            )
+            .expect("install tab handlers");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("expand".to_string()))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("piano".to_string()))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("piano".to_string()))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("placement".to_string()))
+        );
+    }
+
+    #[test]
+    fn cmd_number_selects_visible_sequencer_step_tab() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let sequencer_id =
+            editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let tab_id = editor.open_scratch_buffer_with_mode("*script-tab*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let samples_id =
+            editor.open_scratch_buffer_with_mode("*samples*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate step-panel-buffer "*sequencer*")
+                (defstate remembered-step-panel-buffer "*sequencer*")
+                (defstate selected-step-tab "")
+                (def seq-current-step-buffer () step-panel-buffer)
+                (def seq-select-main-step-tab-by-index (index)
+                  (if (= index 2)
+                    (do
+                      (set! selected-step-tab "script")
+                      (set! step-panel-buffer "*script-tab*")
+                      (set! remembered-step-panel-buffer "*script-tab*")
+                      (set-window-buffer "*script-tab*")
+                      true)
+                    false))
+                (set-layout
+                  (list :cols
+                    0.5 (list :buf "*sequencer*"
+                          :tabs (list (list "Seq" "*sequencer*") (list "Script" "*script-tab*"))
+                          :hide-status true)
+                    0.5 (list :buf "*samples*" :hide-status true)))
+                "#,
+            )
+            .expect("install sequencer tab fixture");
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*samples*"),
+            "samples tile should be visible"
+        );
+        assert_eq!(editor.active_buffer().id, samples_id);
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('2'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert_eq!(editor.active_buffer().id, tab_id);
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-step-tab").unwrap(),
+            Some(eseqlisp::vm::Value::String("script".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(eseqlisp::vm::Value::String("*script-tab*".to_string()))
+        );
+        assert_ne!(
+            editor.active_buffer().id,
+            sequencer_id,
+            "the shortcut should switch to the requested tab, not just focus the base sequencer buffer"
+        );
+    }
+
+    #[test]
+    fn plain_tab_expands_current_track_even_with_focused_sequencer_widget() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let transport_id =
+            editor.open_scratch_buffer_with_mode("*transport*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let sequencer_id =
+            editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.set_active_buffer(sequencer_id);
+        assert_eq!(editor.active_buffer().name, "*sequencer*");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :tool :draw
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items ()
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| e))
+                (def seqv-toggle-current-track-expanded ()
+                  (set! tab-target "expanded"))
+                (def seq-toggle-current-track-expanded-main ()
+                  (set! tab-target "expanded-main"))
+                (def seq-toggle-mixer-panel ()
+                  (set! tab-target "mixer"))
+                "#,
+            )
+            .expect("install tab handler");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (set-layout
+                  (list :cols
+                    0.5 (list :buf "*transport*" :hide-status true)
+                    0.5 (list :buf "*sequencer*" :hide-status true)))
+                "#,
+            )
+            .expect("install visible sequencer layout");
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*transport*"),
+            "transport tile should be visible"
+        );
+        assert_eq!(
+            editor.active_buffer().id,
+            transport_id,
+            "fixture should start on the first layout tile"
+        );
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*sequencer*"),
+            "sequencer tile should be visible"
+        );
+        editor.handle_mouse_precise(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 10,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            },
+            0,
+            0,
+            30,
+            8,
+            10.0,
+            3.0,
+        );
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "fixture should cover the focused-widget path that used to bypass the Tab fast path"
+        );
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set! tab-target "")"#)
+            .expect("reset tab target");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("expanded-main".to_string())),
+            "plain Tab should expand the selected sequencer track even when a sequencer widget has focus"
+        );
+    }
+
+    #[test]
+    fn plain_tab_in_focused_patcher_is_left_for_editor_source_toggle() {
+        let path = std::env::temp_dir().join(format!(
+            "eseq-focused-patcher-tab-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.set_layout_viewport(80, 20);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                r#"
+                (defstate tab-target "")
+                (def seq-toggle-current-track-expanded-main () (set! tab-target "expand"))
+                (effect
+                  (patcher
+                    :height 10
+                    :intent :effect
+                    :path "{}"))
+                "#,
+                path.display()
+            ))
+            .expect("install focused patcher fixture");
+        editor.set_layout_viewport(80, 20);
+        editor.handle_mouse_precise(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            },
+            0,
+            0,
+            80,
+            20,
+            20.0,
+            5.0,
+        );
+        assert_eq!(
+            editor
+                .focused_widget_node()
+                .expect("focused widget")
+                .widget_type,
+            "patcher"
+        );
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "metal_seq must not consume Tab while the patcher owns the focused widget"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("".to_string()))
+        );
+
+        editor.handle_key(tab);
+
+        assert_eq!(
+            editor.active_buffer().name,
+            "*scratch*",
+            "Tab should keep the patcher tile active instead of switching to the source buffer"
+        );
+        assert_eq!(editor.tile_root.leaf_count(), 2);
+        assert!(
+            editor.tile_root.leaf_ids().into_iter().any(|tile_id| {
+                editor
+                    .tile_root
+                    .find_leaf(tile_id)
+                    .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
+                    .is_some_and(|buffer| {
+                        buffer.name
+                            == eseqlisp::widget_render::patcher::emitted_source_buffer_name(
+                                &path.to_string_lossy(),
+                            )
+                    })
+            }),
+            "source buffer should be visible in a sibling tile"
+        );
+    }
+
+    #[test]
+    fn control_h_collapses_expanded_sequencer_tracks() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate seqv-expanded-track-ids '(0 1))
+                (def seqv-collapse-all-tracks () (set! seqv-expanded-track-ids '()))
+                "#,
+            )
+            .expect("install collapse handler");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("seqv-expanded-track-ids")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::List(vec![]))
+        );
+    }
+
+    #[test]
+    fn command_or_control_a_selects_current_sequencer_track_steps() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![("selected-steps", build_selection_value(&selected_steps))],
+            true,
+        );
+        {
+            let selected_steps = Arc::clone(&selected_steps);
+            editor
+                .runtime_mut()
+                .register_native("seq-select-all-steps", move |_args, _ctx| {
+                    let mut selected_steps = selected_steps.lock().unwrap();
+                    selected_steps.clear();
+                    selected_steps.extend(0..16);
+                    Ok(Value::Number(16.0))
+                });
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate selected-bus 1)
+                (defstate select-all-count 0)
+                (def seqv-select-all-current-track-steps ()
+                  (do
+                    (set! selected-bus -1)
+                    (set! select-all-count (+ select-all-count 1))
+                    (seq-select-all-steps)))
+                "#,
+            )
+            .expect("install select-all handler");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(eseqlisp::vm::Value::Number(-1.0))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("select-all-count").unwrap(),
+            Some(eseqlisp::vm::Value::Number(1.0))
+        );
+        let selected_value = editor
+            .runtime_mut()
+            .eval_str("SEQ.selected-steps")
+            .unwrap()
+            .expect("selected steps reactive value");
+        let Value::List(items) = selected_value else {
+            panic!("selected steps should be a list");
+        };
+        assert!(
+            items
+                .iter()
+                .take(16)
+                .all(|item| matches!(*item.borrow(), Value::Bool(true))),
+            "Cmd+A should synchronously publish the selected-step reactive list"
+        );
+    }
+
+    #[test]
+    fn command_i_queues_new_instrument_editor() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                HostCommand::Custom { name, .. } if name == "enter-new-instrument-editor"
+            )),
+            "Cmd+i should queue the new instrument editor command: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn command_d_clones_selected_track_pattern_in_mixer() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*mixer*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let cloned = Arc::new(AtomicBool::new(false));
+        {
+            let cloned = Arc::clone(&cloned);
+            editor.runtime_mut().register_native(
+                "seq-clone-active-track-pattern",
+                move |_args, _ctx| {
+                    cloned.store(true, Ordering::Relaxed);
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(
+            cloned.load(Ordering::Relaxed),
+            "Cmd+D in the mixer should invoke selected track-pattern clone"
+        );
+    }
+
+    #[test]
+    fn control_plus_and_minus_use_track_pattern_length_actions() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate selected-bus -1)
+                (defstate pattern-length-action "")
+                (def seq-has-selected-bus? () (>= selected-bus 0))
+                (def double-track-pattern () (set! pattern-length-action "double"))
+                (def halve-track-pattern () (set! pattern-length-action "halve"))
+                "#,
+            )
+            .expect("install pattern length handlers");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('+'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("double".to_string()))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set! pattern-length-action "")"#)
+            .expect("reset action");
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(
+                KeyCode::Char('='),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("double".to_string()))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('-'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("halve".to_string()))
+        );
+    }
+
+    #[test]
+    fn control_plus_and_minus_do_not_resize_track_pattern_while_bus_is_selected() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate selected-bus 0)
+                (defstate pattern-length-action "")
+                (def seq-has-selected-bus? () (>= selected-bus 0))
+                (def double-track-pattern () (set! pattern-length-action "double"))
+                (def halve-track-pattern () (set! pattern-length-action "halve"))
+                "#,
+            )
+            .expect("install selected bus fixture");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('+'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('-'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_or_control_m_toggles_current_track_mods_view() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate instrument-panel-tab 2)
+                (defstate instrument-mods-open false)
+                (defstate selected-bus 1)
+                (def instrument-toggle-mods-view ()
+                  (do
+                    (set! instrument-panel-tab 0)
+                    (set! instrument-mods-open (not instrument-mods-open))))
+                (def seq-toggle-current-track-mods-view ()
+                  (do
+                    (set! selected-bus -1)
+                    (instrument-toggle-mods-view)))
+                "#,
+            )
+            .expect("install mods view handler");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-mods-open")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Bool(true))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-panel-tab")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Number(0.0))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(eseqlisp::vm::Value::Number(-1.0))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-mods-open")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn command_m_toggles_mods_view_outside_ui_buffers() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().read_only = true;
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate instrument-mods-open false)
+                (def instrument-toggle-mods-view ()
+                  (set! instrument-mods-open (not instrument-mods-open)))
+                (def seq-toggle-current-track-mods-view ()
+                  (instrument-toggle-mods-view))
+                "#,
+            )
+            .expect("install mods view handler");
+        editor.clear_needs_redraw();
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-mods-open")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Bool(true))
+        );
+        assert!(
+            editor.needs_redraw(),
+            "mods shortcut should schedule a frame after mutating Lisp UI state"
+        );
+    }
+
+    #[test]
+    fn global_ui_shortcuts_do_not_run_in_command_menu() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (defstate cursor-left-count 0)
+                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                "#,
+            )
+            .expect("install tab handler");
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert!(editor.minibuffer_prompt().is_some());
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("".to_string()))
+        );
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-left-count").unwrap(),
+            Some(eseqlisp::vm::Value::Number(0.0))
+        );
+    }
+
+    #[test]
+    fn global_ui_shortcuts_do_not_run_in_editable_buffers() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                "#,
+            )
+            .expect("install tab handler");
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("".to_string()))
+        );
+    }
+
+    #[test]
+    fn global_ui_shortcuts_do_not_run_in_read_only_text_buffers() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().read_only = true;
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                "#,
+            )
+            .expect("install tab handler");
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let native_track = Arc::clone(&current_track);
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(eseqlisp::vm::Value::Number(track)) = args.first() else {
+                    return Err("expected track".to_string());
+                };
+                native_track.store(*track as usize, Ordering::Relaxed);
+                Ok(eseqlisp::vm::Value::Number(*track))
+            });
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 0);
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("".to_string()))
+        );
+    }
+
+    #[test]
+    fn sequencer_soft_number_entry_edits_current_expanded_track_step() {
+        fn number_list(values: &[f64]) -> Value {
+            Value::List(
+                values
+                    .iter()
+                    .copied()
+                    .map(|value| Rc::new(RefCell::new(Value::Number(value))))
+                    .collect(),
+            )
+        }
+
+        fn list(values: Vec<Value>) -> Value {
+            Value::List(
+                values
+                    .into_iter()
+                    .map(|value| Rc::new(RefCell::new(value)))
+                    .collect(),
+            )
+        }
+
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.set_layout_viewport(80, 20);
+        let initial_values = number_list(&[1.0; 16]);
+        editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("velocities", initial_values.clone()),
+                ("track-velocities", list(vec![initial_values])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selected-bus? () false)
+                (def seqv-current-selected-step () 2)
+                (def seqv-current-param-mode () 0)
+                (def seqv-current-number-picker-key () "seqv-expanded-param-number-picker-0")
+                (defstate seqv-soft-edit-flushed 1)
+                (defstate cursor-toggle-count 0)
+                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (effect
+                  (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
+                "#,
+            )
+            .expect("install sequencer soft edit fixture");
+        let tree = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(number-picker :key "seqv-expanded-param-number-picker-0"
+                    :value 1 :min 0 :max 1 :decimals 2
+                    :width 8 :height 1.3 :font-size 11)"#,
+            )
+            .expect("build sequencer number picker")
+            .expect("number picker should produce a widget tree");
+        editor
+            .active_buffer_mut()
+            .set_widget_tree(Some(tree.clone()), None);
+        editor.runtime_mut().set_widget_tree(tree);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .widget_layout()
+            .expect("sequencer number picker should lay out");
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        expanded_step_projection.set_viewport(ExpandedStepViewport {
+            track: 0,
+            track_id: 0,
+            page: 0,
+            mode: 0,
+            cursor_step: 2,
+        });
+        let mut edit = SoftStepParamEdit::default();
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            assert!(
+                handle_metal_soft_step_param_key(
+                    &mut editor,
+                    &key,
+                    &state,
+                    &current_track,
+                    &expanded_step_projection,
+                    &mut edit,
+                ),
+                "sequencer soft edit should consume {key:?}"
+            );
+        }
+
+        assert_eq!(
+            state.pattern.step_data[0].get(2, StepParam::Velocity),
+            0.5,
+            "sequencer numeric entry should commit through the same soft number-picker path"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(nth SEQ.velocities 2)")
+                .unwrap(),
+            Some(Value::Number(0.5)),
+            "soft edit should keep the current-track parameter mirror in sync"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(nth (nth SEQ.track-velocities 0) 2)")
+                .unwrap(),
+            Some(Value::Number(0.5)),
+            "soft edit should keep the all-track sequencer parameter mirror in sync"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("seqv-soft-edit-flushed")
+                .unwrap(),
+            Some(Value::Number(0.5)),
+            "soft edit commit should flush the reactive cycle immediately"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-0-2")"#)
+                .unwrap(),
+            Some(Value::Number(0.5)),
+            "soft edit commit should update the visible expanded slider slot immediately"
+        );
+    }
+
+    #[test]
+    fn sequencer_soft_number_entry_edits_current_process_lane_step() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.set_layout_viewport(80, 20);
+        editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("process-lanes", Value::List(vec![])),
+                ("track-process-lanes", Value::List(vec![])),
+                ("process-slots", Value::List(vec![])),
+                ("track-process-slots", Value::List(vec![])),
+                ("process-library", Value::List(vec![])),
+            ],
+            true,
+        );
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            editor.runtime_mut(),
+            Arc::clone(&state),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selected-bus? () false)
+                (def seqv-current-selected-step () 2)
+                (def seqv-current-param-mode () 7)
+                (def seqv-current-number-picker-key () "seqv-expanded-param-number-picker-0")
+                (defstate cursor-toggle-count 0)
+                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+
+                (def-accumulator sparse-transpose
+                  :target (step-param :transpose)
+                  :amount (amount :lane true :default 0)
+                  :range (-24 24)
+                  :mode :clip)
+
+                (def climb
+                  (processes :track 0
+                    (sparse-transpose :amount (lane 0 1 0 0))))
+                "#,
+            )
+            .expect("install process lane soft edit fixture");
+        let tree = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(number-picker :key "seqv-expanded-param-number-picker-0"
+                    :value 0 :min -24 :max 24 :decimals 0
+                    :width 8 :height 1.3 :font-size 11)"#,
+            )
+            .expect("build process lane number picker")
+            .expect("number picker should produce a widget tree");
+        editor
+            .active_buffer_mut()
+            .set_widget_tree(Some(tree.clone()), None);
+        editor.runtime_mut().set_widget_tree(tree);
+        editor
+            .widget_layout()
+            .expect("process lane number picker should lay out");
+
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        expanded_step_projection.set_viewport(ExpandedStepViewport {
+            track: 0,
+            track_id: 0,
+            page: 0,
+            mode: PROCESS_LANE_MODE_OFFSET,
+            cursor_step: 2,
+        });
+        let mut edit = SoftStepParamEdit::default();
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            assert!(
+                handle_metal_soft_step_param_key(
+                    &mut editor,
+                    &key,
+                    &state,
+                    &current_track,
+                    &expanded_step_projection,
+                    &mut edit,
+                ),
+                "process lane soft edit should consume {key:?}"
+            );
+        }
+
+        let chain = state
+            .track_process_chain(0)
+            .expect("track 0 process chain should exist");
+        let amount_lane = chain.slots[0]
+            .lanes
+            .get("amount")
+            .expect("amount lane should exist");
+        assert_eq!(
+            amount_lane.values.get(2).copied(),
+            Some(2.0),
+            "sequencer numeric entry should update the process lane at the cursor step"
+        );
+        assert_eq!(
+            state.pattern.step_data[0].get(2, StepParam::Transpose),
+            0.0,
+            "process lane soft edits must not mutate built-in step data"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-7-2")"#)
+                .unwrap(),
+            Some(Value::Number(2.0)),
+            "soft edit commit should update the visible process lane slider slot immediately"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("cursor-toggle-count")
+                .unwrap(),
+            Some(Value::Number(0.0)),
+            "soft Enter commit should not fall through to the step gate toggle"
+        );
+    }
+
+    #[test]
+    fn sequencer_soft_enter_commits_existing_number_picker_edit() {
+        fn number_list(values: &[f64]) -> Value {
+            Value::List(
+                values
+                    .iter()
+                    .copied()
+                    .map(|value| Rc::new(RefCell::new(Value::Number(value))))
+                    .collect(),
+            )
+        }
+
+        fn list(values: Vec<Value>) -> Value {
+            Value::List(
+                values
+                    .into_iter()
+                    .map(|value| Rc::new(RefCell::new(value)))
+                    .collect(),
+            )
+        }
+
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.set_layout_viewport(80, 20);
+        let initial_values = number_list(&[1.0; 16]);
+        editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("velocities", initial_values.clone()),
+                ("track-velocities", list(vec![initial_values])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selected-bus? () false)
+                (def seqv-current-selected-step () 2)
+                (def seqv-current-param-mode () 0)
+                (def seqv-current-number-picker-key () "seqv-expanded-param-number-picker-0")
+                (defstate seqv-soft-edit-flushed 1)
+                (defstate cursor-toggle-count 0)
+                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (effect
+                  (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
+                "#,
+            )
+            .expect("install sequencer soft edit fixture");
+        let tree = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(number-picker :key "seqv-expanded-param-number-picker-0"
+                    :value 1 :min 0 :max 1 :decimals 2
+                    :width 8 :height 1.3 :font-size 11)"#,
+            )
+            .expect("build sequencer number picker")
+            .expect("number picker should produce a widget tree");
+        editor
+            .active_buffer_mut()
+            .set_widget_tree(Some(tree.clone()), None);
+        editor.runtime_mut().set_widget_tree(tree);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .widget_layout()
+            .expect("sequencer number picker should lay out");
+
+        let widget_id = current_step_param_number_picker_id(&mut editor)
+            .expect("current sequencer parameter number picker id");
+        for key in [
+            KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+        ] {
+            assert!(
+                handle_number_picker_edit_key_for_widget(
+                    widget_id,
+                    WidgetKeyEvent {
+                        code: key.code,
+                        modifiers: key.modifiers,
+                    },
+                    1.0,
+                    0.0,
+                    1.0,
+                    2,
+                )
+                .is_some(),
+                "fixture should arm number-picker edit state with {key:?}"
+            );
+        }
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        expanded_step_projection.set_viewport(ExpandedStepViewport {
+            track: 0,
+            track_id: 0,
+            page: 0,
+            mode: 0,
+            cursor_step: 2,
+        });
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+        let mut edit = SoftStepParamEdit::default();
+
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "global Enter should not toggle the cursor step while the current parameter picker is editing"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("cursor-toggle-count")
+                .unwrap(),
+            Some(Value::Number(0.0)),
+            "global Enter should leave cursor-toggle untouched while the picker edit is pending"
+        );
+
+        assert!(
+            handle_metal_soft_step_param_key(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &state,
+                &current_track,
+                &expanded_step_projection,
+                &mut edit,
+            ),
+            "Enter should commit an already-editing sequencer number picker instead of falling through to cursor-toggle"
+        );
+
+        assert_eq!(
+            state.pattern.step_data[0].get(2, StepParam::Velocity),
+            0.25,
+            "Enter should commit the pending number-picker edit through the soft step path"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("seqv-soft-edit-flushed")
+                .unwrap(),
+            Some(Value::Number(0.25)),
+            "commit should flush the reactive mirror immediately"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-0-2")"#)
+                .unwrap(),
+            Some(Value::Number(0.25)),
+            "Enter commit should update the visible expanded slider slot immediately"
+        );
     }
 }

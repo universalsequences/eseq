@@ -1197,8 +1197,9 @@ impl Runtime {
                     .map(|path| Value::String(path.display().to_string()))
                     .unwrap_or_else(|| Value::String(String::new()))
             });
-        // (load path) — read through the source manager so dirty editor overlays
-        // and load-stack-relative paths participate in normal evaluation.
+        // (load path) — read through the source manager so dirty editor overlays,
+        // load-stack-relative paths, and explicit `@/` cwd-relative paths
+        // participate in normal evaluation.
         runtime.vm.register_native_with_vm("load", |args, vm| {
             let Some(Value::String(path_str)) = args.first() else {
                 return Value::String("load: expects a string path".into());
@@ -1621,7 +1622,11 @@ impl Runtime {
             ("vec2", "(vec2 x y)", "Return a two-number vector list."),
             ("length", "(length vec2)", "Return the length of a two-number vector."),
             ("dot", "(dot a b)", "Return the dot product of two vec2 lists."),
-            ("load", "(load path)", "Read and evaluate a Lisp file from path."),
+            (
+                "load",
+                "(load path)",
+                "Read and evaluate a Lisp file. Relative paths follow the loading file; @/ paths follow the process working directory.",
+            ),
             ("sdf->metal", "(sdf->metal sdf-expr)", "Compile a quoted SDF expression to Metal shader source."),
             ("defwidget", "(defwidget name :width w :height h :animates bool :shader expr ...)", "Register an SDF-backed widget constructor."),
             ("vec3", "(vec3 x y z)", "Return a tagged SDF vec3 expression."),

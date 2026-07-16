@@ -1,15 +1,36 @@
-target/
+# Rust build output
+/target/
+
+# OS and editor state
 .DS_Store
-samples/
-samples.backup.*/
-sample-assets/
-samples.db
-audiograph/*.o
-audiograph/tests/test_capacity_growth
-audiograph/tests/test_custom_engine_growth
-recordings/
+/.claude/
+/.eseqlisp-scratch
+**/__pycache__/
+*.pyc
+
+# Local sequencer data
+/samples/
+/samples.backup.*/
+/sample-assets/
+/samples.db
+/recordings/
+/projects/
+/projects.backup.*/
+/instruments-backup/
+
+# Native build and DGenLisp output
+/audiograph/*.o
+/audiograph/tests/test_*
+!/audiograph/tests/*.c
+/patch.c
+/patch.dylib
+/patch.json
+/tools/*.bak-*
+
+# Diagnostics and accidental temporary output
+/sequencer-crash.log
+/sequencer-profile
+/$TMP_PLACEHOLDER
+
+# Local configuration
 .env
-/projects
-/projects
-projects.backup.*/
-instruments-backup

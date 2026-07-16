@@ -6638,7 +6638,7 @@ fn inspect_source_span_opens_sampler_base_knob_fixture() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../sequencer/metal-seq-fx/sampler-panel.lisp")
+        .join("../sequencer/ui/effects/sampler-panel.lisp")
         .canonicalize()
         .unwrap();
     let source = std::fs::read_to_string(&path).unwrap();

@@ -563,7 +563,7 @@ load DSP from `dsp.lisp` and render the Synth tab body from `ui.lisp`.
 
 ## Implementation Notes
 
-The minimal implementation can be layered on existing `metal-seq-fx.lisp`
+The minimal implementation can be layered on existing `ui/effects.lisp`
 patterns:
 
 - reuse the current generic parameter row behavior for `param :as :slider`

@@ -2547,7 +2547,7 @@ mod tests {
 
     #[test]
     fn natural_width_sequencer_layout_fits_wide_viewport() {
-        // Mirrors the full sequencer layout from metal-seq-grid.lisp
+        // Mirrors the full sequencer layout from ui/main.lisp
         // at a wide viewport (content should fit → no scroll needed)
         let transport = hstack(
             1.0,

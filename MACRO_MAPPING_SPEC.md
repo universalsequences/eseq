@@ -46,6 +46,7 @@ patterns* (quantized), independently toggleable from the param morph. See §8.
 | Mapping ownership | **Exclusive per parameter.** A parameter may belong to at most one macro. Mapped device controls are read-only and carry a green ownership dot; ranges are edited in the mapping table. |
 | Target type | **Reuse `crate::process::ParamTarget`** (new in rev 2) — do not invent a parallel `MacroTarget` enum. See §2.4/§3.2. |
 | Scene-macro anchoring | **Live reference, diff at press time** (not a snapshot captured at map time). Editing scene 4 changes what the push does. See §8.2. |
+| Rack macros (future) | **Second scope of the same mechanism, locked 2026-07-15** (see `docs/racks-spec.md` A3 #6/#7). Rack macro banks are **rack-scoped with rack-relative addressing**, serialized inside the rack/rack preset — never project-global mappings pointing into a rack. They ride the same override layer + effective-send seam (a rack-local table consulted in the same path). Consequence for Phases 1–4: keep the override table lookup and recompute loop **scope-agnostic** — keyed tables, no hardwired assumption that exactly one global table exists. A rack macro is itself a param, so project macros mapping onto rack macros (macro-of-macros) falls out for free. |
 
 ---
 
@@ -62,12 +63,12 @@ A UI knob edit routes:
 ```
 param-controls.lisp  fx-set-effect-value / fx-set-instrument-value
   → host-command "set-effect-param" / "set-instrument-param"
-    → src/bin/metal_seq/main.rs dispatch ("set-instrument-param" @ ~7929,
+    → src/ui/main.rs dispatch ("set-instrument-param" @ ~7929,
                                            "set-effect-param" @ ~8360)
-      → ui::apply_command(AppCommand::SetEffectParam{..})   (src/ui/command.rs)
+      → ui::apply_command(AppCommand::SetEffectParam{..})   (src/tui/command.rs)
 ```
 
-The `AppCommand::SetEffectParam` apply arm (`src/ui/command.rs:1845`) does
+The `AppCommand::SetEffectParam` apply arm (`src/tui/command.rs:1845`) does
 **two** things:
 
 ```rust
@@ -75,11 +76,11 @@ slot.defaults.set(param_idx, value);          // (A) the live/base value store
 app.send_slot_param(track, slot_idx, param_idx, value);  // (B) push to DSP node
 ```
 
-The `AppCommand::SetInstrumentParam` apply arm (`src/ui/command.rs:1900`) is the
+The `AppCommand::SetInstrumentParam` apply arm (`src/tui/command.rs:1900`) is the
 analog with `slot.defaults.set` + `app.send_instrument_param`.
 
-The send functions themselves live in `src/ui/effect_params.rs:484`
-(`send_slot_param`) and `src/ui/synth.rs:932` (`send_instrument_param`).
+The send functions themselves live in `src/tui/effect_params.rs:484`
+(`send_slot_param`) and `src/tui/synth.rs:932` (`send_instrument_param`).
 
 **Key fact:** `slot.defaults` is the canonical *live base value* (it is what the
 UI knob reflects and what is persisted). `send_*_param` is the only thing the DSP
@@ -98,10 +99,10 @@ same `ParamNodeId` identity concept, and the override must coexist with p-locks
 
 ### 2.3 Modulation mapping mode — the UI template
 
-`metal-seq-fx/param-controls.lisp` already implements an arm-and-highlight UI:
+`ui/effects/param-controls.lisp` already implements an arm-and-highlight UI:
 
 - Global flags `instrument-mods-open` / `effect-mods-open` (in
-  `metal-seq-fx/state.lisp`).
+  `ui/effects/state.lisp`).
 - `param-mod-wrapper` (`param-controls.lisp:396`) and
   `instrument-param-mod-wrapper` (`:605`) wrap each `:modulatable` param in a box
   with blue highlight `(rgba 0.18 0.48 0.95 0.24)`, swap the knob's min/max to the
@@ -165,7 +166,7 @@ whose outlet targets a macro" — see §9.1).
   scene-macro diff reads (§8.2).**
 - Switch path: host command `"switch-pattern"` (`main.rs:12531`) →
   `state.switch_pattern(..)` (profiled variant `state.rs:5880`) →
-  **`push_all_restored_defaults`** (`src/ui/projects.rs:2587`), which re-sends
+  **`push_all_restored_defaults`** (`src/tui/projects.rs:2587`), which re-sends
   every restored `slot.defaults` value to the DSP via `send_slot_param` /
   `push_*`. Per-track launches (`"launch-track-pattern"`, `main.rs:12380`) and
   `scene_silenced` handling ride the same machinery.
@@ -357,7 +358,7 @@ manual scene switch (§8.5).
 
 ## 4. Phase 2 — Macro write path + host commands
 
-### 4.1 New `AppCommand` variants (`src/ui/command.rs`)
+### 4.1 New `AppCommand` variants (`src/tui/command.rs`)
 
 ```rust
 MacroCreate { name: String },
@@ -382,7 +383,7 @@ raw_idx)` (`scheduler.rs:428`) so the mapping is rebuild-safe.
 `MacroSetValue` calls `MacroEngine::set_value` and fans `send_effective_*` over
 the returned targets.
 
-### 4.2 Host-command dispatch (`src/bin/metal_seq/main.rs`)
+### 4.2 Host-command dispatch (`src/ui/main.rs`)
 
 Register alongside `set-instrument-param` (~7929) / `set-effect-param` (~8360):
 
@@ -419,7 +420,7 @@ binding commands perform — share that helper).
 
 The UI needs to render macro list, mappings, ranges, and live values. Follow the
 project's existing state-readback mechanism (the state snapshot / reactive-field
-path in `src/bin/metal_seq/state_values.rs`, as used for effect params and the
+path in `src/ui/state_values.rs`, as used for effect params and the
 process panels). Expose:
 
 - `macros` → list of `{id, key, name, kind, value, mappings: [{target-label, min, max, curve, current}]}`
@@ -465,14 +466,14 @@ adds to the macro-effective value rather than the persisted scene base.
 
 ## 5. Phase 3 — Mapping-mode UI (highlight fork)
 
-### 5.1 New UI state (`metal-seq-fx/state.lisp`)
+### 5.1 New UI state (`ui/effects/state.lisp`)
 
 ```lisp
 (defstate macro-mapping-open false)   ;; arm flag — global, like effect-mods-open
 (defstate macro-mapping-selected -1)  ;; MacroId currently being mapped, -1 none
 ```
 
-### 5.2 Wrapper fork (`metal-seq-fx/param-controls.lisp`)
+### 5.2 Wrapper fork (`ui/effects/param-controls.lisp`)
 
 Extend `param-mod-wrapper` (`:396`) and `instrument-param-mod-wrapper` (`:605`)
 with a macro branch alongside the existing mods-open branch:
@@ -783,6 +784,19 @@ single-threaded override table with a defined entry point (`set_value`), and
 a macro value (the pattern-crossfade idea in §8.3) needs the override/value
 table snapshotted into the scheduler snapshot — the same hook noted in §4.4.
 Neither is built here; do not break these seams.
+
+### 9.2 P-locked macro values (declared intent, 2026-07-15)
+
+P-locks are the defining feature of this sequencer, and macro values —
+project macros now, rack macros later (`docs/racks-spec.md` A3 #6/#7) — are
+intended to become **p-lockable targets**: a step locks the macro's value,
+the trigger writes it through the same `set_value` entry point, release
+semantics per §4.4 precedence. This is the p-lock flavor of Phase 5's
+"sequencer-driven macro values" and shares its requirements (stable
+`MacroId`s, single write entry point, scheduler→command marshalling). Not
+designed here, but nothing in Phases 1–4 may assume macro values are only
+ever UI-driven. The killer combination this enables: one p-lock lane
+sweeping a rack macro that fans out across a whole curated sound.
 
 ---
 

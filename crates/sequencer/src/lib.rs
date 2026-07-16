@@ -48,48 +48,21 @@ pub mod analysis;
 pub mod audio;
 pub mod audio_tap;
 pub mod audiograph;
-#[allow(dead_code)]
-mod compressor;
-pub mod conv_reverb;
 pub mod crash;
 #[allow(dead_code)]
-mod delay;
-#[allow(dead_code)]
-mod dimension;
-#[allow(dead_code)]
-mod dj_mixer;
-#[allow(dead_code)]
-mod dynamics;
-#[allow(dead_code)]
 pub mod effects;
-#[allow(dead_code)]
-mod eq8;
-#[allow(dead_code)]
-mod filter;
-#[allow(dead_code)]
-mod gatepitch;
 pub mod generator;
 pub mod graph;
-#[allow(dead_code)]
-mod limiter;
 #[allow(dead_code)]
 pub mod lisp_host;
 pub mod macro_engine;
 pub mod mixer_volume;
-pub mod multiverb;
 pub mod neural;
-#[allow(dead_code)]
-pub mod ott;
 pub mod paths;
-mod phaser_flanger;
 pub mod plock_variants;
 pub mod process;
 pub mod project;
 pub mod recorder;
-#[allow(dead_code)]
-pub mod reverb;
-#[allow(dead_code)]
-pub mod roar;
 pub mod sample_db;
 pub mod sample_import;
 pub mod sampler;
@@ -98,19 +71,10 @@ mod scheduled_event;
 mod scheduler;
 #[allow(dead_code)]
 pub mod sequencer;
-#[allow(dead_code)]
-mod space_echo;
-pub mod spring;
-#[allow(dead_code)]
-pub mod stereo_panner;
-#[allow(dead_code)]
-mod str8_delay;
-#[allow(dead_code)]
-mod tape;
 pub mod track_color;
 #[allow(dead_code)]
 pub mod track_modulator;
-pub mod ui;
+pub mod tui;
 #[allow(dead_code)]
 mod voice;
 #[allow(dead_code)]

@@ -319,7 +319,7 @@ skip when status hasn't changed.
 The project BPM lives in `state.transport.bpm: AtomicU32` (see
 `src/sequencer/state.rs:680`, default `DEFAULT_BPM = 120` from
 `src/sequencer/data.rs:10`). It is set from Lisp via `seq-set-bpm`
-(`metal-seq-transport.lisp:366`) and is already an atomic that other audio-
+(`ui/transport.lisp:366`) and is already an atomic that other audio-
 thread nodes read directly (see `STATE_BPM` slots in `filter.rs`, `delay.rs`,
 and `voice_modulator.rs`, which receive BPM via the existing param push in
 `audio.rs:1978`).

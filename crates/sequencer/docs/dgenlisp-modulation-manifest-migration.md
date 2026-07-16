@@ -92,7 +92,7 @@ Remove old reads of `sourceCellId` and top-level `depthCellId`.
 
 ## UI Migration
 
-Update `src/ui/graph.rs` where instrument modulation UI currently builds one source enum and one amount control per `modDestination`.
+Update `src/ttui/graph.rs` where instrument modulation UI currently builds one source enum and one amount control per `modDestination`.
 
 New model:
 
@@ -126,7 +126,7 @@ Update stale docs/schema references:
 
 - `tools/DGenLispReadme.md`: currently says modulatable params generate source/depth params.
 - `docs/dgenlisp-modulation-mini-spec.md`: should match the new active/depth-lane model.
-- `scripts/generate_dgenlisp_api.py`: update `ManifestModDestination` schema from `sourceCellId`/`depthCellId` to `activeCellId`/`depthLanes`.
+- `tools/generate_dgenlisp_api.py`: update `ManifestModDestination` schema from `sourceCellId`/`depthCellId` to `activeCellId`/`depthLanes`.
 - Regenerate `docs/dgenlisp-api.json` after the script is updated.
 
 ## Compatibility

@@ -19,14 +19,14 @@ of scope here:
 - **Empty (instrument-less) tracks** and **per-pattern instruments**
   (Autechre-style slot changes across scenes). The rack subsystem already
   proves the per-pattern graph-rebuild approach (`sync_live_rack_tracks_from_pattern_state`,
-  `src/ui/graph.rs`); not touched here.
+  `src/ttui/graph.rs`); not touched here.
 
 ## UX behavior
 
 ### 1. Drag instrument → existing track
 
 Instruments in the browser tree already carry `:drag-type "instrument"`
-(`metal-seq-browser.lisp`, `sbrowser-create-picker` ~line 684), and rack
+(`ui/browser.lisp`, `sbrowser-create-picker` ~line 684), and rack
 panels/drum pads already accept them. New drop targets, all with
 `:drop-types (list "instrument")`:
 
@@ -59,7 +59,7 @@ affordance (see drum pads, `instrument-panel.lisp:100`).
 
 ### 2. Double-click in the Instruments tab
 
-`sbrowser-select-create-item` (`metal-seq-browser.lisp:627`) is the
+`sbrowser-select-create-item` (`ui/browser.lisp:627`) is the
 `:on-activate` handler (double-click / Enter). **Behavior change:**
 
 - Today: activate always **adds a new track** (`add-track-instrument`).
@@ -129,7 +129,7 @@ the same invariant `migrate_project_instrument_slots` exists to maintain):
 ## Engine + graph mechanics (Rust core)
 
 The key architectural fact: a swap is a **rebind, not a reload**.
-`hot_reload_instrument` (`src/ui/graph.rs:1985`) mutates the *engine* in
+`hot_reload_instrument` (`src/ttui/graph.rs:1985`) mutates the *engine* in
 place, which would clobber every other track sharing that engine. Swap instead
 changes *which engine the track's routes point at* — exactly what the rack
 rebuild already does per pattern:
@@ -145,25 +145,25 @@ App::swap_track_instrument(track, name) -> Result<(), String>
    analogue: `pending_instrument_swap { track, name }`), then a
    `apply_compiled_instrument_swap` on completion. FreePatch-mode instruments
    get a dedicated engine via `register_dedicated_instrument_engine`, as in
-   `try_add_cached_saved_instrument_track_sync` (`src/ui/effects.rs:442`).
+   `try_add_cached_saved_instrument_track_sync` (`src/tui/effects.rs:442`).
 2. **Rebind the graph** under a `GraphEditBatchGuard`:
    - `delete_engine_route_for_track(old_engine_id, track)` (exists, used by
-     rack rebuild `src/ui/graph.rs:3628`)
+     rack rebuild `src/ttui/graph.rs:3628`)
    - `ensure_custom_engine_runtime(new_engine_id, …)` — lazily materializes
      the engine's synth/modulator nodes if not yet in the graph (exists)
-   - `connect_engine_to_track(new_engine_id, track, …)` (`src/ui/graph.rs:4697`)
+   - `connect_engine_to_track(new_engine_id, track, …)` (`src/ttui/graph.rs:4697`)
      — per-voice route gains into the track's existing `voice_sum` /
      `voice_sum_r`, so the whole downstream chain (FX, mixer, sends) is
      untouched by construction
    - Update `graph.track_engine_ids[track]`, `graph.instrument_descriptors[track]`
      via `apply_instrument_slot_descriptor(track, name, manifest,
-     preserve_runtime_values: false)` (`src/ui/graph.rs:5476` — the reset
+     preserve_runtime_values: false)` (`src/ttui/graph.rs:5476` — the reset
      branch already exists), `self.tracks[track] = instrument_display_name(name)`
    - FreePatch: `apply_free_patch_idle_voice(track)` as hot-reload does
 3. **Reset pattern state across all scenes.** For the live pattern: reset the
    `instrument_slot` in `state.pattern.instrument_slots[track]` and push new
    defaults to the audio thread (`push_instrument_defaults_for_track`,
-   `src/ui/synth.rs:1602`). For every saved scene snapshot
+   `src/tui/synth.rs:1602`). For every saved scene snapshot
    (`pattern.scenes`): rewrite that track's lane (`TrackPatternData`,
    `state.rs:498`) with the cleared fields from the table above. Add a
    `SequencerState` helper (`reset_instrument_slot_all_patterns(track, desc)`)
@@ -189,7 +189,7 @@ instrument-side teardown/build differs:
   (`sample_ids` in `TrackPatternData`).
 - Custom → Sampler (drop a sample on a custom track): route teardown, then
   build sampler voices into the same `voice_sum` (exactly what
-  `build_sampler_voices` does for rack slots, `src/ui/graph.rs:3677`), load
+  `build_sampler_voices` does for rack slots, `src/ttui/graph.rs:3677`), load
   the dropped sample, set `sample_ids` in all patterns.
 - Update `track_instrument_types[track]`, per-pattern `instrument_types`, and
   the `ProjectTrack` enum variant (happens automatically at save time — see
@@ -216,7 +216,7 @@ New host commands (handled in `metal_seq/main.rs`'s command match, or
 
 Lisp side:
 
-- `metal-seq-browser.lisp`: `sbrowser-select-create-item` branches on
+- `ui/browser.lisp`: `sbrowser-select-create-item` branches on
   "instrument" → `swap-track-instrument` with `SEQ.current-track` (fallback to
   `add-track-instrument` when no tracks / non-swappable track type).
 - `drag-drop.lisp` (or a new `instrument-swap.lisp` beside it): drop handlers
@@ -254,9 +254,13 @@ Lisp side:
    sample-onto-custom-track, macro/neural/process cleanup edge cases.
 3. **Future — Sounds tab**: browser tab listing (instrument, preset) pairs;
    activating one = `swap-track-instrument` + `load-instrument-preset`
-   (`metal-seq-browser.lisp:442`). Storage: a `sounds/` index of
+   (`ui/browser.lisp:442`). Storage: a `sounds/` index of
    `{instrument, preset-name}` entries; instrument-agnostic by construction
-   once swap exists.
+   once swap exists. The richest Sound is a **rack preset presenting a rack
+   macro bank**: the rack loads collapsed, showing only its 6–8 macros
+   (Ableton's model). Design locked in `docs/racks-spec.md` A3 #6/#7 —
+   rack-relative macro addressing serialized with the rack is precisely what
+   makes such a Sound portable across projects and tracks.
 
 ## Open questions
 

@@ -59,7 +59,7 @@ Instead:
 - The mixer builds a **render order** that interleaves loose tracks and group
   blocks, mirroring the existing `mixer-v2-display-bus-index` indirection that
   already decouples bus *display* order from bus *storage* order
-  (`metal-seq-mixer-v2.lisp:661`).
+  (`ui/mixer.lisp:661`).
 - Audio, fader, mute/solo, and effects for the group are provided by an
   auto-created backing **bus** (`ProjectBusChannel`, `src/project.rs:56`).
   Members route into that bus via the existing `TrackOutput::Bus(id)`
@@ -127,11 +127,11 @@ the existing track-deletion path (`docs/track-deletion-implementation-checklist.
 ### Current state
 
 Track selection today is a single value: `current_track: Arc<AtomicUsize>`
-(`src/bin/metal_seq/natives.rs:286`). Exactly one `track-selected-{i}` reactive
-field is true at a time (`src/bin/metal_seq/state_values.rs`,
+(`src/ui/natives.rs:286`). Exactly one `track-selected-{i}` reactive
+field is true at a time (`src/ui/state_values.rs`,
 `sync_track_selection_binding_fields`). cmd-click currently drives the *delete
 target* mechanism (`mixer-v2-select-track-delete-target`,
-`metal-seq-mixer-v2.lisp:85`), not multi-select.
+`ui/mixer.lisp:85`), not multi-select.
 
 ### Target state
 
@@ -162,8 +162,8 @@ different modifier. Resolve in "Open Questions".
 Extend `sync_track_selection_binding_fields` so `track-selected-{i}` is true for
 **every** `i` in `selected_tracks`, not just `current_track`. The mixer strip
 already reads `track-selected-{i}` (`mixer-v2-track-selected-binding`,
-`metal-seq-mixer-v2.lisp:22`) and renders a selected background/border
-(`mixer-v2-strip-bg`, `metal-seq-mixer-v2.lisp:50`), so multiple highlighted
+`ui/mixer.lisp:22`) and renders a selected background/border
+(`mixer-v2-strip-bg`, `ui/mixer.lisp:50`), so multiple highlighted
 strips fall out for free once the set drives the bindings.
 
 Expose the selection set to Lisp as a reactive list (e.g. `SEQ.selected-tracks`)
@@ -172,7 +172,7 @@ so the group command and any "N tracks selected" UI affordance can read it.
 ## Commands
 
 All commands are host-commands dispatched from Lisp, parsed in the main event
-loop (`src/bin/metal_seq/main.rs`, alongside `reveal-sequencer-track` at
+loop (`src/ui/main.rs`, alongside `reveal-sequencer-track` at
 `main.rs:4201`).
 
 ### `group-selected-tracks` (cmd+g)
@@ -205,9 +205,9 @@ Steps:
 ### `toggle-group-collapsed`
 
 Flip `group.collapsed`. Mirrors the existing per-track
-`seq-toggle-track-collapsed` native (`src/bin/metal_seq/natives.rs:1480`) and its
+`seq-toggle-track-collapsed` native (`src/ui/natives.rs:1480`) and its
 project-backed reactive list `SEQ.track-collapsed`
-(`metal-seq-track-collapse.lisp`). Add a parallel `SEQ.group-collapsed` reactive
+(`ui/track-collapse.lisp`). Add a parallel `SEQ.group-collapsed` reactive
 surface so the mixer can branch on it.
 
 ### `add-to-group` / `remove-from-group` (v1.1)
@@ -240,7 +240,7 @@ Group backing bus:    summed members -> bus gate -> bus fx -> Mix
 ### Render-order layer
 
 Today the mixer renders a flat range over tracks
-(`metal-seq-mixer-v2.lisp:777`):
+(`ui/mixer.lisp:777`):
 
 ```lisp
 (each (range 0 SEQ.num-tracks) |i|
@@ -283,14 +283,14 @@ strips:
 
 - Colored label with the group name (the Ableton "3 Group" header), using the
   group color via the existing `mixer-v2-track-color-*` tinting helpers
-  (`metal-seq-mixer-v2.lisp:42`).
+  (`ui/mixer.lisp:42`).
 - A collapse/expand toggle button (the ☰ / triangle affordance) calling
   `toggle-group-collapsed`. Reuse the double-click-to-collapse precedent on
-  track strips (`metal-seq-mixer-v2.lisp:594`).
+  track strips (`ui/mixer.lisp:594`).
 - Group fader, meter, mute, solo — bound to the backing bus, reusing the bus
   strip controls (`mixer-v2-bus-strip`).
 - Selecting the header selects the group channel (shows the bus effect chain),
-  analogous to `mixer-v2-select-bus` (`metal-seq-mixer-v2.lisp:97`).
+  analogous to `mixer-v2-select-bus` (`ui/mixer.lisp:97`).
 
 ### Collapsed vs expanded
 
@@ -324,11 +324,11 @@ members for subsequent operations — see Open Questions.
 ## Keybindings
 
 - Rebind `C-g`. It is currently `(bind-key "C-g" "agent-open")`
-  (`metal-seq-agent.lisp:322`). Point it at `group-selected-tracks` (scoped to the
+  (`ui/agent.lisp:322`). Point it at `group-selected-tracks` (scoped to the
   mixer mode, `seq-mixer-mode`, so it only groups when the mixer is focused).
 - Give agent-open a new binding/home. The agent is also reachable via UI
-  (`metal-seq-agent.lisp:130`) and `agent-open-instrument`
-  (`src/bin/metal_seq/input.rs:659`), so it does not depend solely on `C-g`.
+  (`ui/agent.lisp:130`) and `agent-open-instrument`
+  (`src/ui/input.rs:659`), so it does not depend solely on `C-g`.
   Suggested replacement is out of scope here; pick an unused chord.
 
 ## Implementation Phases

@@ -88,13 +88,13 @@ Rust builtin per the established recipe (see `builtin-ott-effect` memory; Compre
 the minimal template, Space Echo the closest analog since it also has a mode grid and
 mod-target slots):
 
-1. `crates/sequencer/src/multiverb.rs` — state consts + `MULTIVERB_STATE_SIZE`,
+1. `crates/sequencer/src/effects/multiverb.rs` — state consts + `MULTIVERB_STATE_SIZE`,
    `MULTIVERB_PARAM_*`, `init`/`process` extern "C", `multiverb_vtable()`.
 2. `src/lib.rs`: `pub mod multiverb;`
 3. `src/effects.rs`: `builtin_multiverb()` descriptor, name in `builtin_insert_names()`
    + exact-names test, arm in `builtin_insert()`.
-4. `src/ui/effects.rs` `create_builtin_effect_node()`: name → (vtable, state size).
-5. Panel `metal-seq-fx/builtin/multiverb.lisp`, loaded in `metal-seq-builtin-fx-ui.lisp`,
+4. `src/tui/effects.rs` `create_builtin_effect_node()`: name → (vtable, state size).
+5. Panel `ui/effects/builtin/multiverb.lisp`, loaded in `ui/builtin-effects.lisp`,
    dispatched in `builtin/audio-fx.lisp` (nested-if dispatcher: extra trailing paren per
    branch), file added to `metal_seq_core_lisp_files_parse` list, params fixture in
    `state_values.rs`, layout test.

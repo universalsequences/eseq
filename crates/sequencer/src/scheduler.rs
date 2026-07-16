@@ -9576,7 +9576,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-project-performance-lanes-demo.lisp",
+            "{}/scripts/processes/process-project-performance-lanes-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path)
@@ -9967,7 +9967,7 @@ mod tests {
                 0,
             );
             let script_path = format!(
-                "{}/scripts/process-phase7-reads-demo.lisp",
+                "{}/scripts/processes/process-phase7-reads-demo.lisp",
                 env!("CARGO_MANIFEST_DIR")
             );
             let source = std::fs::read_to_string(&script_path).expect("read Phase 7 reads demo");
@@ -10238,7 +10238,7 @@ mod tests {
                 0,
             );
             let script_path = format!(
-                "{}/scripts/process-conductor-demo.lisp",
+                "{}/scripts/processes/process-conductor-demo.lisp",
                 env!("CARGO_MANIFEST_DIR")
             );
             let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
@@ -10857,7 +10857,7 @@ mod tests {
                     );
                     assert!(effect_params.iter().any(|param| {
                         param.logical_id == 42
-                            && param.idx == crate::filter::FILTER_PARAM_MODE as u64
+                            && param.idx == crate::effects::filter::FILTER_PARAM_MODE as u64
                             && (param.value - 3.0).abs() < 1e-6
                     }));
                 }
@@ -10915,7 +10915,7 @@ mod tests {
                 0,
             );
             let script_path = format!(
-                "{}/scripts/process-phase3a-ports-demo.lisp",
+                "{}/scripts/processes/process-phase3a-ports-demo.lisp",
                 env!("CARGO_MANIFEST_DIR")
             );
             let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");

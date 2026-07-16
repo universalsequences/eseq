@@ -30,7 +30,7 @@ The current `metal-seq-agent` path is useful but too narrow:
 - A read-only user question can therefore cause an unintended instrument edit.
 
 There is also an older tool-capable agent path in `src/agent/protocol.rs` and
-`src/ui/mod.rs`, but it is not the path used by `metal-seq-agent`. That path
+`src/tui/mod.rs`, but it is not the path used by `metal-seq-agent`. That path
 already has useful read/doc/edit concepts, but its mutating tools return
 pending app actions rather than artifact IDs and explicit apply/validation
 semantics.

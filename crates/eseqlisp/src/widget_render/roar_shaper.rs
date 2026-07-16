@@ -10,7 +10,7 @@
 //! domain, i.e. post gain+bias).
 //!
 //! The curve formulas are dual-maintained with
-//! `sequencer::roar::shaper_transfer` — keep the two in sync.
+//! `sequencer::effects::roar::shaper_transfer` — keep the two in sync.
 
 use std::collections::HashMap;
 
@@ -85,7 +85,7 @@ fn prop_num(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     props.get(key).and_then(value_num).unwrap_or(default)
 }
 
-/// Mirror of `sequencer::roar::shaper_transfer` (stateless part).
+/// Mirror of `sequencer::effects::roar::shaper_transfer` (stateless part).
 pub fn shaper_transfer(shaper: usize, amount: f32, x: f32) -> f32 {
     let a = amount.clamp(0.0, 1.0);
     let soft_sine = |x: f32| {
@@ -301,7 +301,7 @@ impl WidgetDefinition for RoarShaperWidget {
     }
 }
 
-// Dual-maintained with `sequencer::roar::shaper_transfer` and the Rust
+// Dual-maintained with `sequencer::effects::roar::shaper_transfer` and the Rust
 // mirror above.
 #[cfg(target_os = "macos")]
 const ROAR_SHAPER_SHADER: &str = r#"

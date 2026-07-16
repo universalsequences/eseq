@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::audiograph::*;
+use crate::effects::gatepitch;
 use crate::effects::{EffectSlotSnapshot, EffectSlotState, MAX_SLOT_PARAMS};
-use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
     PARAM_ATTACK_SAMPLES, PARAM_LOOP_XFADE_SAMPLES, PARAM_RELEASE_SAMPLES, PARAM_WARP_PROJECT_BPM,
@@ -36,7 +36,7 @@ use crate::sequencer::{
     SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES,
     MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
-use crate::ui::BusGateRuntimeState;
+use crate::tui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
 
 pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;
@@ -3752,7 +3752,7 @@ fn sync_bus_gate_params(data: &mut AudioCallbackData, block_start_sample: u64) {
             crate::audiograph::params_push_wrapper(
                 data.lg.0,
                 crate::audiograph::ParamMsg {
-                    idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
                     logical_id: gate.gate_id as u64,
                     fvalue: target,
                 },
@@ -3893,7 +3893,7 @@ fn sync_dj_mixer_transport_phase(data: &mut AudioCallbackData, block_start_sampl
     } else {
         0.0
     };
-    let beat_phase = crate::dj_mixer::transport_beat_phase(total_beats);
+    let beat_phase = crate::effects::dj_mixer::transport_beat_phase(total_beats);
 
     for chain in &data.state.pattern.effect_chains {
         for slot in chain {
@@ -4171,7 +4171,7 @@ unsafe fn push_rack_slot_panner_params(
     params_push_wrapper(
         lg,
         ParamMsg {
-            idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+            idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
             logical_id: slot_pan_lid,
             fvalue: params.gain,
         },
@@ -4179,7 +4179,7 @@ unsafe fn push_rack_slot_panner_params(
     params_push_wrapper(
         lg,
         ParamMsg {
-            idx: crate::stereo_panner::STEREO_PANNER_PARAM_PAN,
+            idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_PAN,
             logical_id: slot_pan_lid,
             fvalue: params.pan,
         },
@@ -4187,7 +4187,7 @@ unsafe fn push_rack_slot_panner_params(
     params_push_wrapper(
         lg,
         ParamMsg {
-            idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+            idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE,
             logical_id: slot_pan_lid,
             fvalue: if params.mute { 1.0 } else { 0.0 },
         },
@@ -4195,7 +4195,7 @@ unsafe fn push_rack_slot_panner_params(
     params_push_wrapper(
         lg,
         ParamMsg {
-            idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+            idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
             logical_id: slot_pan_lid,
             fvalue: if muted_by_solo { 1.0 } else { 0.0 },
         },
@@ -4738,7 +4738,7 @@ fn fire_rack_resolved(
             crate::audiograph::params_push_wrapper(
                 data.lg.0,
                 crate::audiograph::ParamMsg {
-                    idx: crate::stereo_panner::STEREO_PANNER_PARAM_PAN,
+                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_PAN,
                     logical_id: pan_lid,
                     fvalue: effective_pan,
                 },
@@ -5146,7 +5146,7 @@ fn fire_resolved(
             crate::audiograph::params_push_wrapper(
                 data.lg.0,
                 crate::audiograph::ParamMsg {
-                    idx: crate::stereo_panner::STEREO_PANNER_PARAM_PAN,
+                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_PAN,
                     logical_id: pan_lid,
                     fvalue: effective_pan,
                 },
@@ -7134,11 +7134,11 @@ mod tests {
         let dj_slot = EffectSlotState::new(&dj, 42);
         assert_eq!(
             dj_slot.transport_phase_param_idx.load(Ordering::Relaxed),
-            crate::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32
+            crate::effects::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32
         );
         assert_eq!(
             EffectSlotSnapshot::capture(&dj_slot).transport_phase_param_idx,
-            crate::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32
+            crate::effects::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32
         );
 
         let str8 = EffectDescriptor::builtin_str8_delay();
