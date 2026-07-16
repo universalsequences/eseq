@@ -531,7 +531,13 @@ impl WidgetDefinition for NumberPickerWidget {
         true
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        _local_col: f32,
+        local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         // Store start value and start row (layout-space).
         // local_row ≈ screen_row_from_content_top + scroll, so for non-scrolled
         // views it equals the screen distance from the content area top.

@@ -90,34 +90,41 @@
 
 (defwidget pattern-pill-bg
   :width 1 :height 1
-  :state (active)
+  :state (active push push-target scene)
   :bindable (active)
   :paint-margin 0.3
   :shader
-  (sdf/layer
-    (sdf/fill (sdf/rounded-rect width height 0.54)
-      (material
-        :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
-          :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
-        :color
-        (if (> active 0)
-          (let ((base (rgba 0.00 0.01 0.42 1.0))
-                (lit (+ 0.06 (* 0.03 diffuse)))
-                (shine (* 0.25 specular)))
-            (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
-          (if hit/hover
-            (let ((base (rgba 0.10 0.10 0.12 0.72))
+  (let ((push-amount (if (= scene push-target) push 0.0)))
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect width height 0.54)
+        (material
+          :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+            :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+          :color
+          (if (> active 0)
+            (let ((base (rgba 0.00 0.01 0.42 1.0))
                   (lit (+ 0.06 (* 0.03 diffuse)))
                   (shine (* 0.25 specular)))
               (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
-            (rgba 0 0 0 0)))))))
+            (if hit/hover
+              (let ((base (rgba 0.10 0.10 0.12 0.72))
+                    (lit (+ 0.06 (* 0.03 diffuse)))
+                    (shine (* 0.25 specular)))
+                (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
+              (rgba 0 0 0 0)))))
+      (if (> push-amount 0.001)
+        (sdf/fill (sdf/rounded-rect width height 0.54)
+          (material :color (rgba 0.08 0.38 1.0 (* 0.82 (clamp push-amount 0.0 1.0)))))
+        (rgba 0 0 0 0)))))
 
 (defwidget queued-scene-pill-bg
   :width 1 :height 1
+  :state (push push-target scene)
   :paint-margin 0.3
   :animates true
   :shader
   (let ((pulse (+ 0.5 (* 0.5 (cos (* itime 5.4)))))
+        (push-amount (if (= scene push-target) push 0.0))
         (base (rgba
           (+ 0.01 (* 0.04 pulse))
           (+ 0.03 (* 0.10 pulse))
@@ -133,7 +140,11 @@
                 (shine (* (+ 0.12 (* 0.16 pulse)) specular)))
             (+ base
               (rgba lit lit lit 1)
-              (rgba shine shine shine 0))))))))
+              (rgba shine shine shine 0)))))
+      (if (> push-amount 0.001)
+        (sdf/fill (sdf/rounded-rect width height 0.54)
+          (material :color (rgba 0.08 0.38 1.0 (* 0.62 (clamp push-amount 0.0 1.0)))))
+        (rgba 0 0 0 0)))))
 
 
 (defwidget pattern-pill-btn-bg
@@ -424,6 +435,44 @@
       nil
       (host-command "reorder-scene" (dict :source source :target target)))))
 
+;; Shift gesture state is UI-local and intentionally ephemeral. The modifier
+;; is sampled only on pointer-down; releasing Shift while still holding the
+;; mouse cannot turn the gesture into a reorder operation.
+(def scene-push-target (state -1))
+(def scene-push-value (state 1.0))
+(def scene-push-start-y (state 0.0))
+(def scene-push-from-source (state false))
+
+(def scene-push-begin (scene event)
+  (let ((from-source (or (get event :cmd) (get event :meta) (get event :super))))
+  (if (or (get event :shift) from-source)
+    (do
+      (set! scene-push-target scene)
+      (set! scene-push-from-source from-source)
+      (set! scene-push-value (if from-source 0.0 1.0))
+      (set! scene-push-start-y (get event :y))
+      (host-command "scene-push-begin"
+        (dict :target-scene scene :value (if from-source 0.0 1.0))))
+    (seq-switch-pattern scene))))
+
+(def scene-push-drag (scene event)
+  (if (= scene-push-target scene)
+    (let ((value (if scene-push-from-source
+          (clamp (* 0.14 (- (get event :y) scene-push-start-y)) 0.0 1.0)
+          (clamp (+ 1.0 (* 0.14 (- scene-push-start-y (get event :y)))) 0.0 1.0))))
+      (set! scene-push-value value)
+      (host-command "scene-push-set-value" (dict :value value)))
+    nil))
+
+(def scene-push-end (scene event)
+  (if (= scene-push-target scene)
+    (do
+      (host-command "scene-push-end" (dict))
+      (set! scene-push-target -1)
+      (set! scene-push-from-source false)
+      (set! scene-push-value 1.0))
+    nil))
+
 (def transport-icon-style
   (ui/style
     :pressed (dict
@@ -576,14 +625,21 @@
                 "queued-scene-pill-bg"
                 "pattern-pill-bg")
               :active (if (= i SEQ.current-pattern) 1 0)
+              :push scene-push-value
+              :push-target scene-push-target
+              :scene i
               :style pattern-control-style
+              :capture-pointer true
               :drag-type "transport-scene"
+              :drag-modifier :none
               :drag-payload (dict :scene i)
               :drop-types (list "transport-scene")
               :drop-meta (dict :scene i)
               :drop-hover-border-color :mixer-strip-selected-border
               :on-drop seq-reorder-scene-drop
-              :on-click |x y r| (seq-switch-pattern i)
+              :on-mouse-down (lambda (event) (scene-push-begin i event))
+              :on-drag (lambda (event) (scene-push-drag i event))
+              :on-mouse-up (lambda (event) (scene-push-end i event))
               (v-stack :align :center
                 (label (fmt " {} " (+ i 1))
                   :font-size 11

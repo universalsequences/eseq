@@ -10,8 +10,29 @@ use std::collections::HashMap;
 
 use crate::neural::ParamNodeId;
 use crate::process::ParamTarget;
+use crate::sequencer::BusId;
 
 pub type MacroId = u32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ParamScope {
+    Track(usize),
+    Bus(BusId),
+}
+
+impl From<usize> for ParamScope {
+    fn from(track: usize) -> Self {
+        Self::Track(track)
+    }
+}
+
+impl From<BusId> for ParamScope {
+    fn from(bus: BusId) -> Self {
+        Self::Bus(bus)
+    }
+}
+
+pub type ScopedParamTarget = (ParamScope, ParamTarget);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MacroCurve {
@@ -49,7 +70,7 @@ pub enum MacroKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MacroMapping {
-    pub track: usize,
+    pub scope: ParamScope,
     pub target: ParamTarget,
     pub range_min: f32,
     pub range_max: f32,
@@ -61,19 +82,19 @@ pub struct MacroMapping {
 
 impl MacroMapping {
     pub fn new(
-        track: usize,
+        scope: impl Into<ParamScope>,
         target: ParamTarget,
         range_min: f32,
         range_max: f32,
         curve: MacroCurve,
     ) -> Result<Self, MacroEngineError> {
-        Self::new_resolved(track, target, None, range_min, range_max, curve)
+        Self::new_resolved(scope, target, None, range_min, range_max, curve)
     }
 
     /// Constructs a mapping whose descriptor index has already been resolved.
     /// The index is used only when the live node has no stable `ParamNodeId`.
     pub fn new_resolved(
-        track: usize,
+        scope: impl Into<ParamScope>,
         target: ParamTarget,
         param_idx: Option<usize>,
         range_min: f32,
@@ -90,9 +111,10 @@ impl MacroMapping {
             return Err(MacroEngineError::NonFiniteRange);
         }
 
-        let resolved_key = MacroParamKey::from_target(track, &target, param_idx);
+        let scope = scope.into();
+        let resolved_key = MacroParamKey::from_target(scope, &target, param_idx);
         Ok(Self {
-            track,
+            scope,
             target,
             range_min,
             range_max,
@@ -165,6 +187,15 @@ pub enum MacroParamKey {
         slot: usize,
         param: String,
     },
+    BusNode {
+        bus: BusId,
+        param_id: ParamNodeId,
+    },
+    BusEffect {
+        bus: BusId,
+        slot: usize,
+        param: usize,
+    },
 }
 
 impl MacroParamKey {
@@ -194,11 +225,45 @@ impl MacroParamKey {
         )
     }
 
+    pub fn for_bus_effect(
+        bus: BusId,
+        slot: usize,
+        param_idx: usize,
+        param_id: Option<ParamNodeId>,
+    ) -> Self {
+        param_id.map_or(
+            Self::BusEffect {
+                bus,
+                slot,
+                param: param_idx,
+            },
+            |param_id| Self::BusNode { bus, param_id },
+        )
+    }
+
     pub fn from_target(
-        track: usize,
+        scope: ParamScope,
         target: &ParamTarget,
         param_idx: Option<usize>,
     ) -> Option<Self> {
+        let ParamScope::Track(track) = scope else {
+            let bus = match scope {
+                ParamScope::Bus(bus) => bus,
+                ParamScope::Track(_) => unreachable!(),
+            };
+            return match target {
+                ParamTarget::EffectParam { slot, param_id, .. } => param_id
+                    .map(|param_id| Self::BusNode { bus, param_id })
+                    .or_else(|| {
+                        param_idx.map(|param| Self::BusEffect {
+                            bus,
+                            slot: *slot,
+                            param,
+                        })
+                    }),
+                _ => None,
+            };
+        };
         match target {
             ParamTarget::InstrumentParam { param_id, .. } => param_id
                 .map(|param_id| Self::Node { track, param_id })
@@ -267,9 +332,22 @@ pub struct ResolvedMacroTarget {
     pub key: MacroParamKey,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverrideOwner {
+    Macro(MacroId),
+    ScenePush,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ActiveOverride {
-    macro_id: MacroId,
+    owner: OverrideOwner,
+    value: f32,
+    write_order: u64,
+}
+
+#[derive(Debug)]
+struct ScenePushOverride {
+    mappings: Vec<MacroMapping>,
     value: f32,
     write_order: u64,
 }
@@ -280,6 +358,7 @@ pub struct MacroEngine {
     next_id: MacroId,
     overrides: HashMap<MacroParamKey, f32>,
     next_write_order: u64,
+    scene_push: Option<ScenePushOverride>,
 }
 
 impl Default for MacroEngine {
@@ -289,6 +368,7 @@ impl Default for MacroEngine {
             next_id: 1,
             overrides: HashMap::new(),
             next_write_order: 1,
+            scene_push: None,
         }
     }
 }
@@ -406,7 +486,7 @@ impl MacroEngine {
         &mut self,
         id: MacroId,
         config: SceneMacroConfig,
-    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+    ) -> Result<Vec<ScopedParamTarget>, MacroEngineError> {
         let Some(definition) = self.macros.iter_mut().find(|item| item.id == id) else {
             return Err(MacroEngineError::UnknownMacro(id));
         };
@@ -434,7 +514,7 @@ impl MacroEngine {
         id: MacroId,
         mappings: Vec<MacroMapping>,
         value: f32,
-    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+    ) -> Result<Vec<ScopedParamTarget>, MacroEngineError> {
         let Some(index) = self.macros.iter().position(|item| item.id == id) else {
             return Err(MacroEngineError::UnknownMacro(id));
         };
@@ -476,7 +556,7 @@ impl MacroEngine {
     pub fn delete_macro(
         &mut self,
         id: MacroId,
-    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+    ) -> Result<Vec<ScopedParamTarget>, MacroEngineError> {
         let Some(index) = self.macros.iter().position(|item| item.id == id) else {
             return Err(MacroEngineError::UnknownMacro(id));
         };
@@ -485,7 +565,7 @@ impl MacroEngine {
             .mappings
             .into_iter()
             .filter(|mapping| !mapping.suspended && mapping.resolved_key.is_some())
-            .map(|mapping| (mapping.track, mapping.target))
+            .map(|mapping| (mapping.scope, mapping.target))
             .collect();
         self.rebuild_ownership();
         Ok(touched)
@@ -531,7 +611,7 @@ impl MacroEngine {
         mapping_idx: usize,
         min: f32,
         max: f32,
-    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+    ) -> Result<Vec<ScopedParamTarget>, MacroEngineError> {
         if !min.is_finite() || !max.is_finite() {
             return Err(MacroEngineError::NonFiniteRange);
         }
@@ -548,7 +628,7 @@ impl MacroEngine {
         id: MacroId,
         mapping_idx: usize,
         curve: MacroCurve,
-    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+    ) -> Result<Vec<ScopedParamTarget>, MacroEngineError> {
         let mapping = self.mapping_mut(id, mapping_idx)?;
         mapping.curve = curve;
         let touched = mapping_touch(mapping);
@@ -560,7 +640,7 @@ impl MacroEngine {
         &mut self,
         id: MacroId,
         mapping_idx: usize,
-    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+    ) -> Result<Vec<ScopedParamTarget>, MacroEngineError> {
         let Some(macro_definition) = self.macros.iter_mut().find(|item| item.id == id) else {
             return Err(MacroEngineError::UnknownMacro(id));
         };
@@ -587,7 +667,7 @@ impl MacroEngine {
         let mut removed = 0;
         for macro_definition in &mut self.macros {
             macro_definition.mappings.retain(|mapping| {
-                let should_remove = mapping.track == track
+                let should_remove = mapping.scope == ParamScope::Track(track)
                     && matches!(&mapping.target, ParamTarget::InstrumentParam { .. });
                 removed += usize::from(should_remove);
                 !should_remove
@@ -648,7 +728,7 @@ impl MacroEngine {
 
     /// Updates one macro and returns every resolved target whose effective
     /// value must be sent again by the App layer.
-    pub fn set_value(&mut self, id: MacroId, value: f32) -> Vec<(usize, ParamTarget)> {
+    pub fn set_value(&mut self, id: MacroId, value: f32) -> Vec<ScopedParamTarget> {
         if !value.is_finite() {
             return Vec::new();
         }
@@ -666,7 +746,7 @@ impl MacroEngine {
                 .mappings
                 .iter()
                 .filter(|mapping| !mapping.suspended && mapping.resolved_key.is_some())
-                .map(|mapping| (mapping.track, mapping.target.clone()))
+                .map(|mapping| (mapping.scope, mapping.target.clone()))
                 .collect()
         };
         self.rebuild_ownership();
@@ -676,7 +756,7 @@ impl MacroEngine {
     /// Explicitly releases a momentary macro and returns its visible position
     /// to zero. This remains distinct from `set_value(id, 0.0)`, which engages
     /// a continuous macro at its mapped minimum.
-    pub fn release(&mut self, id: MacroId) -> Vec<(usize, ParamTarget)> {
+    pub fn release(&mut self, id: MacroId) -> Vec<ScopedParamTarget> {
         let Some(macro_definition) = self.macros.iter_mut().find(|item| item.id == id) else {
             return Vec::new();
         };
@@ -686,7 +766,7 @@ impl MacroEngine {
             .mappings
             .iter()
             .filter(|mapping| !mapping.suspended && mapping.resolved_key.is_some())
-            .map(|mapping| (mapping.track, mapping.target.clone()))
+            .map(|mapping| (mapping.scope, mapping.target.clone()))
             .collect();
         if matches!(macro_definition.kind, MacroKind::Scene(_)) {
             macro_definition.mappings.clear();
@@ -695,7 +775,7 @@ impl MacroEngine {
         touched
     }
 
-    pub fn release_all_scene_macros(&mut self) -> Vec<(usize, ParamTarget)> {
+    pub fn release_all_scene_macros(&mut self) -> Vec<ScopedParamTarget> {
         let ids = self
             .macros
             .iter()
@@ -703,6 +783,69 @@ impl MacroEngine {
             .map(|definition| definition.id)
             .collect::<Vec<_>>();
         ids.into_iter().flat_map(|id| self.release(id)).collect()
+    }
+
+    /// Starts a non-persistent scene morph owned by the current pointer
+    /// gesture. Persistent macro ownership is respected, so a performance
+    /// gesture cannot silently steal a mapped control from the project.
+    pub fn begin_scene_push(
+        &mut self,
+        mappings: Vec<MacroMapping>,
+        value: f32,
+    ) -> Vec<ScopedParamTarget> {
+        let mut touched = self.end_scene_push();
+        let accepted = mappings
+            .into_iter()
+            .filter(|mapping| {
+                mapping
+                    .resolved_key
+                    .as_ref()
+                    .is_none_or(|key| self.mapping_owner(key).is_none())
+            })
+            .collect::<Vec<_>>();
+        touched.extend(accepted.iter().filter_map(mapping_touch));
+        let write_order = self.allocate_write_order();
+        self.scene_push = Some(ScenePushOverride {
+            mappings: accepted,
+            value: if value.is_finite() {
+                value.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            write_order,
+        });
+        self.rebuild_ownership();
+        touched
+    }
+
+    pub fn set_scene_push_value(&mut self, value: f32) -> Vec<ScopedParamTarget> {
+        if !value.is_finite() || self.scene_push.is_none() {
+            return Vec::new();
+        }
+        let write_order = self.allocate_write_order();
+        let scene_push = self.scene_push.as_mut().expect("checked above");
+        scene_push.value = value.clamp(0.0, 1.0);
+        scene_push.write_order = write_order;
+        let touched = scene_push
+            .mappings
+            .iter()
+            .filter_map(mapping_touch)
+            .collect();
+        self.rebuild_ownership();
+        touched
+    }
+
+    pub fn end_scene_push(&mut self) -> Vec<ScopedParamTarget> {
+        let Some(scene_push) = self.scene_push.take() else {
+            return Vec::new();
+        };
+        let touched = scene_push
+            .mappings
+            .iter()
+            .filter_map(mapping_touch)
+            .collect();
+        self.rebuild_ownership();
+        touched
     }
 
     pub fn remap_scene_targets_after_delete(&mut self, deleted: usize, scene_count: usize) {
@@ -730,19 +873,23 @@ impl MacroEngine {
                 .filter_map(|(index, macro_definition)| {
                     macro_definition
                         .last_write_order
-                        .map(|order| (index, order))
+                        .map(|order| (OverrideOwner::Macro(macro_definition.id), index, order))
                 })
                 .collect::<Vec<_>>();
-            engaged.sort_unstable_by_key(|(_, order)| *order);
-            for (new_order, (index, _)) in engaged.into_iter().enumerate() {
-                self.macros[index].last_write_order = Some(new_order as u64 + 1);
+            if let Some(scene_push) = &self.scene_push {
+                engaged.push((OverrideOwner::ScenePush, usize::MAX, scene_push.write_order));
             }
-            self.next_write_order = self
-                .macros
-                .iter()
-                .filter(|macro_definition| macro_definition.last_write_order.is_some())
-                .count() as u64
-                + 1;
+            engaged.sort_unstable_by_key(|(_, _, order)| *order);
+            for (new_order, (owner, index, _)) in engaged.iter().enumerate() {
+                let order = new_order as u64 + 1;
+                match owner {
+                    OverrideOwner::Macro(_) => self.macros[*index].last_write_order = Some(order),
+                    OverrideOwner::ScenePush => {
+                        self.scene_push.as_mut().expect("listed above").write_order = order
+                    }
+                }
+            }
+            self.next_write_order = engaged.len() as u64 + 1;
         }
         let order = self.next_write_order;
         self.next_write_order += 1;
@@ -752,15 +899,15 @@ impl MacroEngine {
     /// Re-resolves every mapping against the current scene. Missing targets are
     /// retained as suspended mappings, and engaged macros are rebuilt onto the
     /// newly resolved identities without changing their writer precedence.
-    pub fn revalidate_mappings<F>(&mut self, mut resolve: F) -> Vec<(usize, ParamTarget)>
+    pub fn revalidate_mappings<F>(&mut self, mut resolve: F) -> Vec<ScopedParamTarget>
     where
-        F: FnMut(usize, &ParamTarget) -> Option<ResolvedMacroTarget>,
+        F: FnMut(ParamScope, &ParamTarget) -> Option<ResolvedMacroTarget>,
     {
         let mut touched = Vec::new();
         for macro_definition in &mut self.macros {
             for mapping in &mut macro_definition.mappings {
-                touched.push((mapping.track, mapping.target.clone()));
-                if let Some(resolved) = resolve(mapping.track, &mapping.target) {
+                touched.push((mapping.scope, mapping.target.clone()));
+                if let Some(resolved) = resolve(mapping.scope, &mapping.target) {
                     mapping.target = resolved.target;
                     mapping.resolved_key = Some(resolved.key);
                     mapping.suspended = false;
@@ -768,7 +915,7 @@ impl MacroEngine {
                     mapping.resolved_key = None;
                     mapping.suspended = true;
                 }
-                touched.push((mapping.track, mapping.target.clone()));
+                touched.push((mapping.scope, mapping.target.clone()));
             }
         }
         let mut claimed = HashMap::<MacroParamKey, MacroId>::new();
@@ -809,17 +956,38 @@ impl MacroEngine {
                 let entries = owners.entry(key).or_default();
                 if let Some(existing) = entries
                     .iter_mut()
-                    .find(|entry| entry.macro_id == macro_definition.id)
+                    .find(|entry| entry.owner == OverrideOwner::Macro(macro_definition.id))
                 {
                     existing.value = value;
                     existing.write_order = write_order;
                 } else {
                     entries.push(ActiveOverride {
-                        macro_id: macro_definition.id,
+                        owner: OverrideOwner::Macro(macro_definition.id),
                         value,
                         write_order,
                     });
                 }
+            }
+        }
+
+        if let Some(scene_push) = &self.scene_push {
+            for mapping in &scene_push.mappings {
+                if mapping.suspended {
+                    continue;
+                }
+                let Some(key) = mapping.resolved_key.clone() else {
+                    continue;
+                };
+                owners.entry(key).or_default().push(ActiveOverride {
+                    owner: OverrideOwner::ScenePush,
+                    value: lerp_curved(
+                        mapping.range_min,
+                        mapping.range_max,
+                        scene_push.value,
+                        mapping.curve,
+                    ),
+                    write_order: scene_push.write_order,
+                });
             }
         }
 
@@ -843,9 +1011,9 @@ pub fn normalize_macro_key(key: &str) -> Result<String, MacroEngineError> {
     Ok(key.to_ascii_lowercase())
 }
 
-fn mapping_touch(mapping: &MacroMapping) -> Option<(usize, ParamTarget)> {
+fn mapping_touch(mapping: &MacroMapping) -> Option<ScopedParamTarget> {
     (!mapping.suspended && mapping.resolved_key.is_some())
-        .then(|| (mapping.track, mapping.target.clone()))
+        .then(|| (mapping.scope, mapping.target.clone()))
 }
 
 pub fn lerp_curved(range_min: f32, range_max: f32, value: f32, curve: MacroCurve) -> f32 {
@@ -888,6 +1056,36 @@ mod tests {
                 node_param_idx: 7,
             },
         }
+    }
+
+    #[test]
+    fn scene_push_is_ephemeral_interpolated_and_restores_the_base_layer() {
+        let mut engine = MacroEngine::default();
+        let target = effect_target(91);
+        let key = effect_key(91);
+        let mapping = MacroMapping::new(0, target.clone(), 0.2, 0.8, MacroCurve::Linear).unwrap();
+
+        assert_eq!(
+            engine.begin_scene_push(vec![mapping], 1.0),
+            vec![(ParamScope::Track(0), target.clone())]
+        );
+        assert_eq!(engine.override_value(&key), Some(0.8));
+
+        assert_eq!(
+            engine.set_scene_push_value(0.25),
+            vec![(ParamScope::Track(0), target.clone())]
+        );
+        assert!((engine.override_value(&key).unwrap() - 0.35).abs() < 1.0e-6);
+
+        assert_eq!(
+            engine.end_scene_push(),
+            vec![(ParamScope::Track(0), target)]
+        );
+        assert_eq!(engine.override_value(&key), None);
+        assert!(
+            engine.macros().is_empty(),
+            "scene pushes must never enter project persistence"
+        );
     }
 
     fn mapped_engine(range_min: f32, range_max: f32) -> (MacroEngine, MacroId) {
@@ -1100,7 +1298,7 @@ mod tests {
 
         assert_eq!(
             engine.set_mapping_range(id, 0, 10.0, 20.0),
-            Ok(vec![(0, effect_target(11))])
+            Ok(vec![(ParamScope::Track(0), effect_target(11))])
         );
         assert_eq!(engine.override_value(&key), Some(15.0));
 
@@ -1118,7 +1316,7 @@ mod tests {
 
         assert_eq!(
             engine.remove_mapping(id, 0),
-            Ok(vec![(0, effect_target(11))])
+            Ok(vec![(ParamScope::Track(0), effect_target(11))])
         );
         assert_eq!(engine.override_value(&key), None);
         assert!(engine.macro_definition(id).unwrap().mappings.is_empty());
@@ -1184,21 +1382,27 @@ mod tests {
         let mappings = &engine.macro_definition(id).expect("macro remains").mappings;
         assert_eq!(mappings.len(), 2);
         assert!(mappings.iter().any(|mapping| {
-            mapping.track == 0 && matches!(&mapping.target, ParamTarget::EffectParam { .. })
+            mapping.scope == ParamScope::Track(0)
+                && matches!(&mapping.target, ParamTarget::EffectParam { .. })
         }));
         assert!(mappings.iter().any(|mapping| {
-            mapping.track == 1 && matches!(&mapping.target, ParamTarget::InstrumentParam { .. })
+            mapping.scope == ParamScope::Track(1)
+                && matches!(&mapping.target, ParamTarget::InstrumentParam { .. })
         }));
         assert_eq!(
             engine.override_value(&MacroParamKey::Instrument { track: 0, param: 0 }),
             None
         );
-        assert!(engine
-            .override_value(&effect_key(11))
-            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
-        assert!(engine
-            .override_value(&MacroParamKey::Instrument { track: 1, param: 0 })
-            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
+        assert!(
+            engine
+                .override_value(&effect_key(11))
+                .is_some_and(|value| (value - 0.5).abs() < 1.0e-6)
+        );
+        assert!(
+            engine
+                .override_value(&MacroParamKey::Instrument { track: 1, param: 0 })
+                .is_some_and(|value| (value - 0.5).abs() < 1.0e-6)
+        );
     }
 
     #[test]

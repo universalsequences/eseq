@@ -795,7 +795,13 @@ pub trait WidgetDefinition: Sync {
         vec![]
     }
     fn tui_render(&self, _props: &HashMap<String, Value>, _rect: Rect, _buf: &mut CellBuffer) {}
-    fn begin_gesture(&self, _node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        _node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         None
     }
     fn mouse_event(
@@ -2360,8 +2366,13 @@ pub fn widget_unclamped_drag(widget_type: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn begin_widget_gesture(node: &LayoutNode, local_col: f32, local_row: f32) -> Option<Value> {
-    widget_definition(&node.widget_type)?.begin_gesture(node, local_col, local_row)
+pub fn begin_widget_gesture(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+    modifiers: KeyModifiers,
+) -> Option<Value> {
+    widget_definition(&node.widget_type)?.begin_gesture(node, local_col, local_row, modifiers)
 }
 
 pub fn map_key_event(node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {

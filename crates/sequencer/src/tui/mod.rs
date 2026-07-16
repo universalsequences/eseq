@@ -949,7 +949,8 @@ impl App {
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
         let _ = self.state.quantized_launches().cancel_all();
         self.scene_macro_runtime.clear();
-        let touched = self.macro_engine.release_all_scene_macros();
+        let mut touched = self.macro_engine.release_all_scene_macros();
+        touched.extend(self.macro_engine.end_scene_push());
         self.send_macro_targets(touched);
         self.apply_pattern_launch(target)
     }
@@ -993,7 +994,8 @@ impl App {
     pub fn handle_scene_deleted(&mut self, deleted: usize) {
         let _ = self.state.quantized_launches().cancel_all();
         self.scene_macro_runtime.clear();
-        let touched = self.macro_engine.release_all_scene_macros();
+        let mut touched = self.macro_engine.release_all_scene_macros();
+        touched.extend(self.macro_engine.end_scene_push());
         self.macro_engine
             .remap_scene_targets_after_delete(deleted, self.state.scene_count());
         self.send_macro_targets(touched);
@@ -1335,11 +1337,33 @@ impl App {
                     .bus_node_ids
                     .iter()
                     .find(|nodes| nodes.id == bus.id)?;
+                let mut effect_slots = bus.effect_slots.clone();
+                for (slot_idx, slot) in effect_slots.iter_mut().enumerate() {
+                    let count = (slot.num_params as usize).min(slot.defaults.len());
+                    for param_idx in 0..count {
+                        let raw_idx = slot
+                            .param_node_indices
+                            .get(param_idx)
+                            .copied()
+                            .unwrap_or(param_idx as u32);
+                        let param_id = crate::neural::ParamNodeId::from_slot_param(
+                            slot.node_id,
+                            slot.modulator_node_id,
+                            raw_idx,
+                        );
+                        let key = crate::macro_engine::MacroParamKey::for_bus_effect(
+                            bus.id, slot_idx, param_idx, param_id,
+                        );
+                        slot.defaults[param_idx] = self
+                            .macro_engine
+                            .effective_value(&key, slot.defaults[param_idx]);
+                    }
+                }
                 Some(BusGateRuntimeState {
                     id: bus.id,
                     gate_id: nodes.gate_id,
                     sequence: bus.gate_sequence.clone(),
-                    effect_slots: bus.effect_slots.clone(),
+                    effect_slots,
                 })
             })
             .collect();

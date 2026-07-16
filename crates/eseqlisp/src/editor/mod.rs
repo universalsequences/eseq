@@ -5770,7 +5770,13 @@ impl Editor {
                         );
                         return;
                     }
-                    self.begin_widget_gesture(content_col, content_row, precise_col, precise_row);
+                    self.begin_widget_gesture(
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                        mouse.modifiers,
+                    );
                     if self.try_handle_widget_mouse_precise(
                         mouse,
                         content_col,

@@ -29,9 +29,53 @@ fn resolve_live_macro_target(
     state: &crate::sequencer::SequencerState,
     effect_descriptors: &[Vec<EffectDescriptor>],
     instrument_descriptors: &[EffectDescriptor],
-    track: usize,
+    buses: &[super::BusChannelState],
+    scope: crate::macro_engine::ParamScope,
     target: &ParamTarget,
 ) -> Option<ResolvedMacroTarget> {
+    if let crate::macro_engine::ParamScope::Bus(bus_id) = scope {
+        let ParamTarget::EffectParam {
+            slot,
+            effect,
+            param,
+            param_id: previous_param_id,
+        } = target
+        else {
+            return None;
+        };
+        let bus = buses.iter().find(|bus| bus.id == bus_id)?;
+        let descriptor = bus.effect_descriptors.get(*slot)?;
+        if !descriptor.name.eq_ignore_ascii_case(effect) {
+            return None;
+        }
+        let param_idx = descriptor
+            .params
+            .iter()
+            .position(|descriptor| descriptor.has_tag_or_name(param))?;
+        let live_slot = bus.effect_slots.get(*slot)?;
+        let raw_idx = live_slot
+            .param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32);
+        let param_id =
+            ParamNodeId::from_slot_param(live_slot.node_id, live_slot.modulator_node_id, raw_idx);
+        if previous_param_id.is_some() && param_id.is_none() {
+            return None;
+        }
+        return Some(ResolvedMacroTarget {
+            target: ParamTarget::EffectParam {
+                slot: *slot,
+                effect: effect.clone(),
+                param: param.clone(),
+                param_id,
+            },
+            key: MacroParamKey::for_bus_effect(bus_id, *slot, param_idx, param_id),
+        });
+    }
+    let crate::macro_engine::ParamScope::Track(track) = scope else {
+        unreachable!()
+    };
     match target {
         ParamTarget::EffectParam {
             slot,
@@ -103,7 +147,7 @@ fn resolve_live_macro_target(
         ParamTarget::StepParam { .. } | ParamTarget::ProcessInlet { .. } => None,
         _ => Some(ResolvedMacroTarget {
             target: target.clone(),
-            key: MacroParamKey::from_target(track, target, None)?,
+            key: MacroParamKey::from_target(scope, target, None)?,
         }),
     }
 }
@@ -2696,12 +2740,14 @@ impl App {
         let state = Arc::clone(&self.state);
         let effect_descriptors = &self.graph.effect_descriptors;
         let instrument_descriptors = &self.graph.instrument_descriptors;
-        self.macro_engine.revalidate_mappings(|track, target| {
+        let buses = &self.buses;
+        self.macro_engine.revalidate_mappings(|scope, target| {
             resolve_live_macro_target(
                 &state,
                 effect_descriptors,
                 instrument_descriptors,
-                track,
+                buses,
+                scope,
                 target,
             )
         });

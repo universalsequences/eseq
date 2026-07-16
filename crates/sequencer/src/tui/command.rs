@@ -737,6 +737,14 @@ pub enum AppCommand {
     MacroRelease {
         id: MacroId,
     },
+    ScenePushBegin {
+        target_scene: usize,
+        value: f32,
+    },
+    ScenePushSetValue {
+        value: f32,
+    },
+    ScenePushEnd,
     MacroMapParam {
         id: MacroId,
         track: usize,
@@ -793,7 +801,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        apply_command, command_mutates_sequencer_state, sanitize_pasted_step_snapshot, AppCommand,
+        AppCommand, apply_command, command_mutates_sequencer_state, sanitize_pasted_step_snapshot,
     };
     use crate::audiograph::LiveGraphPtr;
     use crate::effects::{
@@ -807,10 +815,10 @@ mod tests {
     use crate::quantized_launch::PatternLaunchTarget;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType, RackRouting,
-        RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, SequencerState,
-        StepSlotPlocks, StepSnapshot, SwingResolution, Timebase, TrackSendSnapshot,
-        TrackSoundState, NUM_PARAMS,
+        CustomInstrumentRunMode, InstrumentType, NUM_PARAMS, RackRouting, RackSlotParam,
+        RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, SequencerState, StepSlotPlocks,
+        StepSnapshot, SwingResolution, Timebase, TrackSendSnapshot, TrackSoundState,
+        default_empty_effect_chain,
     };
     use crate::tui::{App, AudioBuses};
 
@@ -1190,26 +1198,34 @@ mod tests {
         assert_eq!(sanitized.timebase, Some(Timebase::Eighth));
         assert_eq!(sanitized.swing, Some(62.0));
         assert_eq!(sanitized.swing_resolution, Some(SwingResolution::Eighth));
-        assert!(sanitized
-            .effect_plocks
-            .iter()
-            .flat_map(|plocks| plocks.params.iter())
-            .all(Option::is_none));
-        assert!(sanitized
-            .instrument_plocks
-            .params
-            .iter()
-            .all(Option::is_none));
-        assert!(sanitized
-            .rack_slot_param_plocks
-            .iter()
-            .flat_map(|plocks| plocks.params.iter())
-            .all(Option::is_none));
-        assert!(sanitized
-            .rack_slot_instrument_plocks
-            .iter()
-            .flat_map(|plocks| plocks.params.iter())
-            .all(Option::is_none));
+        assert!(
+            sanitized
+                .effect_plocks
+                .iter()
+                .flat_map(|plocks| plocks.params.iter())
+                .all(Option::is_none)
+        );
+        assert!(
+            sanitized
+                .instrument_plocks
+                .params
+                .iter()
+                .all(Option::is_none)
+        );
+        assert!(
+            sanitized
+                .rack_slot_param_plocks
+                .iter()
+                .flat_map(|plocks| plocks.params.iter())
+                .all(Option::is_none)
+        );
+        assert!(
+            sanitized
+                .rack_slot_instrument_plocks
+                .iter()
+                .flat_map(|plocks| plocks.params.iter())
+                .all(Option::is_none)
+        );
     }
 
     #[test]
@@ -1769,13 +1785,102 @@ mod tests {
         assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.5).abs() < 1.0e-6);
 
         app.release_macro(id);
-        assert!(app
-            .macro_engine
-            .macro_definition(id)
-            .unwrap()
-            .mappings
-            .is_empty());
+        assert!(
+            app.macro_engine
+                .macro_definition(id)
+                .unwrap()
+                .mappings
+                .is_empty()
+        );
         assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.2).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scene_push_gesture_morphs_without_creating_a_project_macro() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc);
+        let capture = |app: &App| {
+            app.state.capture_current_pattern_snapshot(
+                1,
+                &[-1],
+                &[44_100],
+                &["Track 1".to_string()],
+                &[InstrumentType::Sampler],
+            )
+        };
+        app.state.pattern.effect_chains[0][0].defaults.set(0, 0.2);
+        let origin = capture(&app);
+        app.state.pattern.effect_chains[0][0].defaults.set(0, 0.8);
+        let target = capture(&app);
+        app.state
+            .replace_pattern_repository(vec![origin, target], 0);
+        app.state.restore_current_pattern_from_repository().unwrap();
+
+        app.begin_scene_push(1, 1.0);
+        assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.8).abs() < 1.0e-6);
+        app.set_scene_push_value(0.5);
+        assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.5).abs() < 1.0e-6);
+        app.end_scene_push();
+
+        assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.2).abs() < 1.0e-6);
+        assert!(app.macro_engine.macros().is_empty());
+    }
+
+    #[test]
+    fn scene_push_morphs_bus_effect_defaults_and_restores_them() {
+        let mut app = test_app_with_bus_effect_descriptor(effect_mod_test_descriptor());
+        let first = app.state.capture_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        );
+        app.state
+            .replace_pattern_repository(vec![first.clone(), first], 0);
+
+        app.buses[0].effect_slots[0].defaults[0] = 0.2;
+        let origin = app.capture_bus_pattern_snapshot();
+        app.buses[0].effect_slots[0].defaults[0] = 0.8;
+        let target = app.capture_bus_pattern_snapshot();
+        app.buses[0].effect_slots[0].defaults[0] = 0.2;
+        app.state
+            .replace_bus_pattern_repository(vec![origin.clone(), target], &origin);
+        app.buses[0].effect_slots[0].plocks[0][0] = Some(0.33);
+        app.graph.bus_node_ids.push(crate::tui::BusNodeIds {
+            id: app.buses[0].id,
+            left_id: 0,
+            right_id: 0,
+            merge_id: 0,
+            gate_id: 1,
+            volume_id: 0,
+            mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+        });
+
+        app.begin_scene_push(1, 1.0);
+        assert!(app.macro_engine.macros().is_empty());
+        assert!(
+            app.macro_engine
+                .override_snapshot()
+                .keys()
+                .any(|key| matches!(
+                    key,
+                    crate::macro_engine::MacroParamKey::BusEffect { bus, .. }
+                        if *bus == app.buses[0].id
+                ))
+        );
+        assert!((app.effective_bus_slot_param_value(0, 0, 0).unwrap() - 0.8).abs() < 1.0e-6);
+        {
+            let runtime = app.graph.bus_gate_runtime.lock().unwrap();
+            assert!((runtime[0].effect_slots[0].defaults[0] - 0.8).abs() < 1.0e-6);
+            assert_eq!(runtime[0].effect_slots[0].plocks[0][0], Some(0.33));
+        }
+
+        app.set_scene_push_value(0.5);
+        assert!((app.effective_bus_slot_param_value(0, 0, 0).unwrap() - 0.5).abs() < 1.0e-6);
+
+        app.end_scene_push();
+        assert!((app.effective_bus_slot_param_value(0, 0, 0).unwrap() - 0.2).abs() < 1.0e-6);
     }
 
     #[test]
@@ -2700,6 +2805,12 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         }
         AppCommand::MacroSetValue { id, value } => app.set_macro_value(id, value),
         AppCommand::MacroRelease { id } => app.release_macro(id),
+        AppCommand::ScenePushBegin {
+            target_scene,
+            value,
+        } => app.begin_scene_push(target_scene, value),
+        AppCommand::ScenePushSetValue { value } => app.set_scene_push_value(value),
+        AppCommand::ScenePushEnd => app.end_scene_push(),
         AppCommand::MacroMapParam { id, track, target } => {
             if let Err(error) = app.map_macro_param(id, track, target) {
                 eprintln!("macro-map-param failed: {error:?}");

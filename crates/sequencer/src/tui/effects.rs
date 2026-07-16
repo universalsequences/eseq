@@ -3269,7 +3269,7 @@ impl App {
         Ok(())
     }
 
-    fn push_bus_effect_param_to_graph(
+    pub(super) fn push_bus_effect_param_to_graph(
         &self,
         node_id: u32,
         modulator_node_id: u32,

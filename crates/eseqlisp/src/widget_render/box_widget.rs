@@ -448,9 +448,37 @@ impl WidgetDefinition for BoxWidget {
             .collect()
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
-        if let Some(Value::String(drag_type) | Value::Keyword(drag_type)) =
-            node.props.get("drag-type")
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+        modifiers: KeyModifiers,
+    ) -> Option<Value> {
+        let drag_modifier_matches = match node.props.get("drag-modifier") {
+            None => true,
+            Some(Value::String(value) | Value::Keyword(value)) if value == "none" => {
+                modifiers.is_empty()
+            }
+            Some(Value::String(value) | Value::Keyword(value)) if value == "shift" => {
+                modifiers.contains(KeyModifiers::SHIFT)
+            }
+            Some(Value::String(value) | Value::Keyword(value)) if value == "ctrl" => {
+                modifiers.contains(KeyModifiers::CONTROL)
+            }
+            Some(Value::String(value) | Value::Keyword(value)) if value == "alt" => {
+                modifiers.contains(KeyModifiers::ALT)
+            }
+            Some(Value::String(value) | Value::Keyword(value))
+                if matches!(value.as_str(), "super" | "cmd" | "meta") =>
+            {
+                modifiers.contains(KeyModifiers::SUPER)
+            }
+            Some(_) => false,
+        };
+        if drag_modifier_matches
+            && let Some(Value::String(drag_type) | Value::Keyword(drag_type)) =
+                node.props.get("drag-type")
         {
             Some(box_drag_value(node, drag_type))
         } else if prop_truthy(&node.props, "capture-pointer")

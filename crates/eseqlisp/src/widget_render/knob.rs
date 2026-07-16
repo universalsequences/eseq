@@ -197,7 +197,13 @@ impl WidgetDefinition for KnobWidget {
         }
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        local_col: f32,
+        local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         Some(Value::List(vec![
             std::rc::Rc::new(std::cell::RefCell::new(Value::Number(get_f32_prop(
                 &node.props,

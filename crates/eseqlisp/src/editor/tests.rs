@@ -3956,6 +3956,103 @@ fn clickable_child_inside_draggable_parent_does_not_start_parent_drag() {
 }
 
 #[test]
+fn box_drag_modifier_latches_shift_pointer_mode_instead_of_drag_and_drop() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def pushed (state false))
+                (def dragged-with-shift (state false))
+                (def released (state false))
+                (def dropped (state 0))
+                (effect
+                  (box :width 20 :height 4
+                       :capture-pointer true
+                       :drag-type "scene"
+                       :drag-modifier :none
+                       :drag-payload (dict :scene 0)
+                       :drop-types '("scene")
+                       :on-drop (lambda (event) (set! dropped (+ dropped 1)))
+                       :on-mouse-down (lambda (event) (set! pushed (get event :shift)))
+                       :on-drag (lambda (event) (set! dragged-with-shift (get event :shift)))
+                       :on-mouse-up (lambda (event) (set! released true))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 8);
+
+    let shifted_down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 1,
+        modifiers: KeyModifiers::SHIFT,
+    };
+    editor.handle_mouse(shifted_down, 0, 0, 40, 8);
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 8, 3),
+        0,
+        0,
+        40,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 30, 7),
+        0,
+        0,
+        40,
+        8,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("pushed").unwrap(),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dragged-with-shift").unwrap(),
+        Some(Value::Bool(true)),
+        "the pointer-down modifier must remain latched for the whole gesture"
+    );
+    assert_eq!(
+        editor.runtime.eval_str("released").unwrap(),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap(),
+        Some(Value::Number(0.0))
+    );
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        0,
+        0,
+        40,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 8, 3),
+        0,
+        0,
+        40,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 8, 3),
+        0,
+        0,
+        40,
+        8,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap(),
+        Some(Value::Number(1.0)),
+        "an unmodified gesture must retain the original drag-and-drop mode"
+    );
+}
+
+#[test]
 fn patcher_background_double_click_consumes_local_only_event() {
     let path = temp_file_path("patcher-double-click-create");
     std::fs::write(&path, "(+ 1 2)\n").unwrap();

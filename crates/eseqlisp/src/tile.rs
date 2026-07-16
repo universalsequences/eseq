@@ -143,6 +143,9 @@ pub struct WidgetGesture {
     pub start_precise_row: f32,
     pub drag_active: bool,
     pub gesture_data: Option<Value>,
+    /// Modifier mode captured at pointer-down. Gesture routing must not change
+    /// merely because the user releases a modifier before the mouse button.
+    pub modifiers: crossterm::event::KeyModifiers,
 }
 
 #[derive(Debug, Clone)]

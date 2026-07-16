@@ -43,6 +43,9 @@ pub(crate) fn handle_macro_host_command(
             | "macro-rename"
             | "macro-set-value"
             | "macro-release"
+            | "scene-push-begin"
+            | "scene-push-set-value"
+            | "scene-push-end"
             | "macro-map-param"
             | "macro-set-range"
             | "macro-set-curve"
@@ -149,6 +152,25 @@ pub(crate) fn handle_macro_host_command(
             };
             tui::AppCommand::MacroRelease { id }
         }
+        "scene-push-begin" => {
+            let Some(target_scene) = map_usize(map, "target-scene") else {
+                return Ignored;
+            };
+            let value = map_number(map, "value").unwrap_or(1.0) as f32;
+            tui::AppCommand::ScenePushBegin {
+                target_scene,
+                value,
+            }
+        }
+        "scene-push-set-value" => {
+            let Some(value) = map_number(map, "value") else {
+                return Ignored;
+            };
+            tui::AppCommand::ScenePushSetValue {
+                value: value as f32,
+            }
+        }
+        "scene-push-end" => tui::AppCommand::ScenePushEnd,
         "macro-map-param" => {
             let Some(id) = map_u32(map, "id") else {
                 return Ignored;

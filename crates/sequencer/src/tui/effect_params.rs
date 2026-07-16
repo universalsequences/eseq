@@ -3,10 +3,10 @@ use std::sync::atomic::Ordering;
 
 use crate::effects::reverb;
 use crate::effects::{
-    EffectDescriptor, EffectSlotState, ParamKind, SyncDivision, BUILTIN_SLOT_COUNT,
+    BUILTIN_SLOT_COUNT, EffectDescriptor, EffectSlotState, ParamKind, SyncDivision,
 };
 
-use super::command::{apply_command, AppCommand};
+use super::command::{AppCommand, apply_command};
 use super::draw::rect_contains;
 use super::{App, EffectPaneEntry, EffectTab, InputMode, ParamMouseDragTarget};
 
@@ -141,6 +141,61 @@ fn append_scene_effect_mappings(
             };
             if let Ok(mapping) = crate::macro_engine::MacroMapping::new_resolved(
                 track,
+                target,
+                Some(param_idx),
+                base,
+                target_value,
+                scene_macro_curve(param),
+            ) {
+                mappings.push(mapping);
+            }
+        }
+    }
+}
+
+fn append_scene_bus_effect_mappings(
+    app: &App,
+    bus_idx: usize,
+    target: &crate::sequencer::BusPatternSnapshot,
+    mappings: &mut Vec<crate::macro_engine::MacroMapping>,
+) {
+    let Some(bus) = app.buses.get(bus_idx) else {
+        return;
+    };
+    for (slot_idx, descriptor) in bus.effect_descriptors.iter().enumerate() {
+        let (Some(live_slot), Some(target_defaults)) = (
+            bus.effect_slots.get(slot_idx),
+            target.effect_defaults.get(slot_idx),
+        ) else {
+            continue;
+        };
+        for (param_idx, param) in descriptor.params.iter().enumerate() {
+            let (Some(&base), Some(&target_value)) = (
+                live_slot.defaults.get(param_idx),
+                target_defaults.get(param_idx),
+            ) else {
+                continue;
+            };
+            if !scene_values_differ(param, base, target_value) {
+                continue;
+            }
+            let raw_idx = live_slot
+                .param_node_indices
+                .get(param_idx)
+                .copied()
+                .unwrap_or(param_idx as u32);
+            let target = crate::process::ParamTarget::EffectParam {
+                slot: slot_idx,
+                effect: descriptor.name.clone(),
+                param: param.name.clone(),
+                param_id: crate::neural::ParamNodeId::from_slot_param(
+                    live_slot.node_id,
+                    live_slot.modulator_node_id,
+                    raw_idx,
+                ),
+            };
+            if let Ok(mapping) = crate::macro_engine::MacroMapping::new_resolved(
+                bus.id,
                 target,
                 Some(param_idx),
                 base,
@@ -721,6 +776,62 @@ impl App {
         self.send_slot_param(track, slot_idx, param_idx, value);
     }
 
+    pub fn effective_bus_slot_param_value(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+        param_idx: usize,
+    ) -> Option<f32> {
+        let bus = self.buses.get(bus_idx)?;
+        let slot = bus.effect_slots.get(slot_idx)?;
+        let base = *slot.defaults.get(param_idx)?;
+        let raw_idx = slot
+            .param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32);
+        let param_id = crate::neural::ParamNodeId::from_slot_param(
+            slot.node_id,
+            slot.modulator_node_id,
+            raw_idx,
+        );
+        let key = crate::macro_engine::MacroParamKey::for_bus_effect(
+            bus.id, slot_idx, param_idx, param_id,
+        );
+        Some(self.macro_engine.effective_value(&key, base))
+    }
+
+    pub(super) fn send_effective_bus_slot_param(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+        param_idx: usize,
+    ) {
+        let Some(value) = self.effective_bus_slot_param_value(bus_idx, slot_idx, param_idx) else {
+            return;
+        };
+        let Some(bus) = self.buses.get(bus_idx) else {
+            return;
+        };
+        let Some(slot) = bus.effect_slots.get(slot_idx) else {
+            return;
+        };
+        let Some(param) = bus
+            .effect_descriptors
+            .get(slot_idx)
+            .and_then(|descriptor| descriptor.params.get(param_idx))
+        else {
+            return;
+        };
+        self.push_bus_effect_param_to_graph(
+            slot.node_id,
+            slot.modulator_node_id,
+            param.node_param_idx,
+            param.node_param_span,
+            value,
+        );
+    }
+
     /// Applies a live macro position and re-sends every affected target.
     /// Phase 2 commands call this entry point rather than mutating the engine
     /// directly so both engagement and release reach the DSP immediately.
@@ -751,12 +862,41 @@ impl App {
         self.send_macro_targets(touched);
     }
 
+    /// Begins the transport's ephemeral Shift gesture. This deliberately
+    /// morphs parameter snapshots only: pattern switching is discrete and
+    /// therefore has no meaningful value between 0 and 1.
+    pub fn begin_scene_push(&mut self, target_scene: usize, value: f32) {
+        if target_scene >= self.state.scene_count() {
+            return;
+        }
+        let config = crate::macro_engine::SceneMacroConfig {
+            target_scene,
+            morph_params: true,
+            steal_patterns: false,
+            quantize: crate::macro_engine::StealQuantize::Off,
+            track_mask: None,
+        };
+        let mappings = self.scene_macro_mappings(&config);
+        let touched = self.macro_engine.begin_scene_push(mappings, value);
+        self.send_macro_targets(touched);
+    }
+
+    pub fn set_scene_push_value(&mut self, value: f32) {
+        let touched = self.macro_engine.set_scene_push_value(value);
+        self.send_macro_targets(touched);
+    }
+
+    pub fn end_scene_push(&mut self) {
+        let touched = self.macro_engine.end_scene_push();
+        self.send_macro_targets(touched);
+    }
+
     fn engage_scene_macro(
         &mut self,
         id: crate::macro_engine::MacroId,
         config: &crate::macro_engine::SceneMacroConfig,
         value: f32,
-    ) -> Vec<(usize, crate::process::ParamTarget)> {
+    ) -> Vec<crate::macro_engine::ScopedParamTarget> {
         if config.target_scene >= self.state.scene_count() {
             return Vec::new();
         }
@@ -841,6 +981,15 @@ impl App {
                     append_scene_effect_mappings(self, track, target, &mut mappings);
                 });
         }
+        let current_bus_snapshot = self.capture_bus_pattern_snapshot();
+        let target_buses = self
+            .state
+            .bus_pattern_snapshot_or_default(config.target_scene, &current_bus_snapshot);
+        for (bus_idx, bus) in self.buses.iter().enumerate() {
+            if let Some(target) = target_buses.iter().find(|target| target.id == bus.id) {
+                append_scene_bus_effect_mappings(self, bus_idx, target, &mut mappings);
+            }
+        }
         mappings
     }
 
@@ -850,18 +999,22 @@ impl App {
 
     pub(super) fn send_macro_targets(
         &mut self,
-        touched: Vec<(usize, crate::process::ParamTarget)>,
+        touched: Vec<crate::macro_engine::ScopedParamTarget>,
     ) {
         self.state
             .publish_macro_overrides(self.macro_engine.override_snapshot());
-        for (track, target) in touched {
-            match target {
-                crate::process::ParamTarget::EffectParam {
-                    slot,
-                    effect,
-                    param,
-                    ..
-                } => {
+        let mut bus_touched = false;
+        for (scope, target) in touched {
+            match (scope, target) {
+                (
+                    crate::macro_engine::ParamScope::Track(track),
+                    crate::process::ParamTarget::EffectParam {
+                        slot,
+                        effect,
+                        param,
+                        ..
+                    },
+                ) => {
                     let Some(param_idx) = self
                         .graph
                         .effect_descriptors
@@ -879,7 +1032,10 @@ impl App {
                     };
                     self.send_effective_slot_param(track, slot, param_idx);
                 }
-                crate::process::ParamTarget::InstrumentParam { param, .. } => {
+                (
+                    crate::macro_engine::ParamScope::Track(track),
+                    crate::process::ParamTarget::InstrumentParam { param, .. },
+                ) => {
                     let Some(param_idx) =
                         self.graph
                             .instrument_descriptors
@@ -895,8 +1051,40 @@ impl App {
                     };
                     self.send_effective_instrument_param(track, param_idx);
                 }
+                (
+                    crate::macro_engine::ParamScope::Bus(bus_id),
+                    crate::process::ParamTarget::EffectParam {
+                        slot,
+                        effect,
+                        param,
+                        ..
+                    },
+                ) => {
+                    bus_touched = true;
+                    let Some(bus_idx) = self.buses.iter().position(|bus| bus.id == bus_id) else {
+                        continue;
+                    };
+                    let Some(param_idx) = self
+                        .buses
+                        .get(bus_idx)
+                        .and_then(|bus| bus.effect_descriptors.get(slot))
+                        .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(&effect))
+                        .and_then(|descriptor| {
+                            descriptor
+                                .params
+                                .iter()
+                                .position(|descriptor| descriptor.has_tag_or_name(&param))
+                        })
+                    else {
+                        continue;
+                    };
+                    self.send_effective_bus_slot_param(bus_idx, slot, param_idx);
+                }
                 _ => {}
             }
+        }
+        if bus_touched {
+            self.publish_bus_gate_runtime();
         }
     }
 
@@ -994,7 +1182,10 @@ impl App {
         self.macro_engine.add_mapping(id, mapping)?;
         let engaged = self.macro_engine.is_engaged(id);
         if engaged {
-            self.send_macro_targets(vec![(track, resend_target)]);
+            self.send_macro_targets(vec![(
+                crate::macro_engine::ParamScope::Track(track),
+                resend_target,
+            )]);
         }
         Ok(())
     }

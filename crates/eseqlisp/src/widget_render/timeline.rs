@@ -384,7 +384,13 @@ impl WidgetDefinition for TimelineWidget {
         }
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        local_col: f32,
+        local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         let view = TimelineView::from_props(&node.props, node.rect);
         view.begin_gesture(local_col, local_row)
     }

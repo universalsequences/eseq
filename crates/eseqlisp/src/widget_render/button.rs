@@ -495,7 +495,13 @@ impl WidgetDefinition for ButtonWidget {
         }
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         node.props
             .get("on-release")
             .filter(|callback| !matches!(callback, Value::Nil | Value::Bool(false)))
@@ -762,7 +768,7 @@ mod tests {
         ]));
 
         assert_eq!(
-            ButtonWidget.begin_gesture(&node, 5.0, 3.0),
+            ButtonWidget.begin_gesture(&node, 5.0, 3.0, KeyModifiers::empty()),
             Some(Value::String("button-release".to_string())),
             "release-capable buttons must retain the original press target"
         );

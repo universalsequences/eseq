@@ -623,33 +623,58 @@ fn macro_mapping_current_value(
     app: &tui::App,
     mapping: &sequencer::macro_engine::MacroMapping,
 ) -> Option<f32> {
-    match &mapping.target {
-        sequencer::process::ParamTarget::EffectParam {
-            slot,
-            effect,
-            param,
-            ..
-        } => {
+    match (mapping.scope, &mapping.target) {
+        (
+            sequencer::macro_engine::ParamScope::Track(track),
+            sequencer::process::ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                ..
+            },
+        ) => {
             let param_idx = app
                 .graph
                 .effect_descriptors
-                .get(mapping.track)?
+                .get(track)?
                 .get(*slot)
                 .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?
                 .params
                 .iter()
                 .position(|descriptor| descriptor.has_tag_or_name(param))?;
-            app.effective_slot_param_value(mapping.track, *slot, param_idx)
+            app.effective_slot_param_value(track, *slot, param_idx)
         }
-        sequencer::process::ParamTarget::InstrumentParam { param, .. } => {
+        (
+            sequencer::macro_engine::ParamScope::Track(track),
+            sequencer::process::ParamTarget::InstrumentParam { param, .. },
+        ) => {
             let param_idx = app
                 .graph
                 .instrument_descriptors
-                .get(mapping.track)?
+                .get(track)?
                 .params
                 .iter()
                 .position(|descriptor| descriptor.has_tag_or_name(param))?;
-            app.effective_instrument_param_value(mapping.track, param_idx)
+            app.effective_instrument_param_value(track, param_idx)
+        }
+        (
+            sequencer::macro_engine::ParamScope::Bus(bus_id),
+            sequencer::process::ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                ..
+            },
+        ) => {
+            let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id)?;
+            let param_idx = app.buses[bus_idx]
+                .effect_descriptors
+                .get(*slot)
+                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?
+                .params
+                .iter()
+                .position(|descriptor| descriptor.has_tag_or_name(param))?;
+            app.effective_bus_slot_param_value(bus_idx, *slot, param_idx)
         }
         _ => None,
     }
@@ -662,17 +687,20 @@ fn macro_mapping_param_descriptor<'a>(
     &'a sequencer::effects::EffectDescriptor,
     &'a sequencer::effects::ParamDescriptor,
 )> {
-    match &mapping.target {
-        sequencer::process::ParamTarget::EffectParam {
-            slot,
-            effect,
-            param,
-            ..
-        } => {
+    match (mapping.scope, &mapping.target) {
+        (
+            sequencer::macro_engine::ParamScope::Track(track),
+            sequencer::process::ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                ..
+            },
+        ) => {
             let device = app
                 .graph
                 .effect_descriptors
-                .get(mapping.track)?
+                .get(track)?
                 .get(*slot)
                 .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?;
             let param = device
@@ -681,8 +709,31 @@ fn macro_mapping_param_descriptor<'a>(
                 .find(|descriptor| descriptor.has_tag_or_name(param))?;
             Some((device, param))
         }
-        sequencer::process::ParamTarget::InstrumentParam { param, .. } => {
-            let device = app.graph.instrument_descriptors.get(mapping.track)?;
+        (
+            sequencer::macro_engine::ParamScope::Track(track),
+            sequencer::process::ParamTarget::InstrumentParam { param, .. },
+        ) => {
+            let device = app.graph.instrument_descriptors.get(track)?;
+            let param = device
+                .params
+                .iter()
+                .find(|descriptor| descriptor.has_tag_or_name(param))?;
+            Some((device, param))
+        }
+        (
+            sequencer::macro_engine::ParamScope::Bus(bus_id),
+            sequencer::process::ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                ..
+            },
+        ) => {
+            let bus = app.buses.iter().find(|bus| bus.id == bus_id)?;
+            let device = bus
+                .effect_descriptors
+                .get(*slot)
+                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?;
             let param = device
                 .params
                 .iter()
@@ -698,8 +749,17 @@ fn macro_mapping_display_metadata(
     mapping: &sequencer::macro_engine::MacroMapping,
 ) -> (String, String, f32, f32, f32, f32, f32, u8, String) {
     let Some((device, param)) = macro_mapping_param_descriptor(app, mapping) else {
+        let scope_label = match mapping.scope {
+            sequencer::macro_engine::ParamScope::Track(track) => format!("Track {}", track + 1),
+            sequencer::macro_engine::ParamScope::Bus(bus_id) => app
+                .buses
+                .iter()
+                .find(|bus| bus.id == bus_id)
+                .map(|bus| bus.name.clone())
+                .unwrap_or_else(|| format!("Bus {}", bus_id.0)),
+        };
         return (
-            format!("Track {}", mapping.track + 1),
+            scope_label,
             process_param_target_label(&mapping.target),
             mapping.range_min,
             mapping.range_max,
@@ -720,8 +780,17 @@ fn macro_mapping_display_metadata(
             (decimals, unit.clone().unwrap_or_default())
         }
     };
+    let scope_label = match mapping.scope {
+        sequencer::macro_engine::ParamScope::Track(track) => format!("T{}", track + 1),
+        sequencer::macro_engine::ParamScope::Bus(bus_id) => app
+            .buses
+            .iter()
+            .find(|bus| bus.id == bus_id)
+            .map(|bus| bus.name.clone())
+            .unwrap_or_else(|| format!("Bus {}", bus_id.0)),
+    };
     (
-        format!("T{} · {}", mapping.track + 1, device.name),
+        format!("{scope_label} · {}", device.name),
         param.name.clone(),
         param.stored_to_user(mapping.range_min),
         param.stored_to_user(mapping.range_max),
@@ -760,13 +829,26 @@ pub(crate) fn build_macros_value(app: &tui::App) -> Value {
                 };
                 map_value([
                     ("mapping-idx", Value::Number(mapping_idx as f64)),
-                    ("track", Value::Number(mapping.track as f64)),
+                    (
+                        "track",
+                        Value::Number(match mapping.scope {
+                            sequencer::macro_engine::ParamScope::Track(track) => track as f64,
+                            sequencer::macro_engine::ParamScope::Bus(_) => -1.0,
+                        }),
+                    ),
+                    (
+                        "scope",
+                        Value::String(match mapping.scope {
+                            sequencer::macro_engine::ParamScope::Track(_) => "track".to_string(),
+                            sequencer::macro_engine::ParamScope::Bus(_) => "bus".to_string(),
+                        }),
+                    ),
                     ("target", macro_mapping_target_value(&mapping.target)),
                     (
                         "target-label",
                         Value::String(format!(
-                            "Track {} · {}",
-                            mapping.track + 1,
+                            "{} · {}",
+                            path_label,
                             process_param_target_label(&mapping.target)
                         )),
                     ),
@@ -804,9 +886,14 @@ pub(crate) fn build_macros_value(app: &tui::App) -> Value {
         ));
         let (target_scene, morph_params, steal_patterns, quantize, track_mask, diff_count) =
             match &macro_definition.kind {
-                sequencer::macro_engine::MacroKind::Mapped => {
-                    (Value::Nil, Value::Nil, Value::Nil, Value::Nil, Value::Nil, Value::Nil)
-                }
+                sequencer::macro_engine::MacroKind::Mapped => (
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                ),
                 sequencer::macro_engine::MacroKind::Scene(config) => (
                     Value::Number(config.target_scene as f64),
                     Value::Bool(config.morph_params),
@@ -27013,7 +27100,37 @@ mod tests {
             assert!(pill.props.contains_key("drop-types"));
             assert!(pill.props.contains_key("drop-meta"));
             assert!(pill.props.contains_key("on-drop"));
+            assert!(pill.props.contains_key("on-mouse-down"));
+            assert!(pill.props.contains_key("on-drag"));
+            assert!(pill.props.contains_key("on-mouse-up"));
+            assert!(matches!(
+                pill.props.get("drag-modifier"),
+                Some(Value::Keyword(value)) if value == "none"
+            ));
         }
+
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! scene-push-target 1) (set! scene-push-value 0.5))")
+            .expect("show scene push interpolation control");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let push_layout = editor.widget_layout().expect("scene push transport layout");
+        let push_pill = find_layout_node_by_stable_key(&push_layout, "transport-scene-pill-1")
+            .expect("active scene push pill");
+        assert_finite_nonzero_rect(push_pill, "transport-scene-pill-1");
+        assert!(
+            matches!(push_pill.props.get("push"), Some(Value::Number(value)) if (*value - 0.5).abs() < 1.0e-6),
+            "scene push must pass interpolation directly into the pill shader"
+        );
+        assert!(
+            matches!(push_pill.props.get("push-target"), Some(Value::Number(value)) if (*value - 1.0).abs() < 1.0e-6),
+            "scene target must be passed into the pill shader"
+        );
+        assert!(
+            find_layout_node_by_stable_key(&push_layout, "scene-push-slider-1").is_none(),
+            "scene push must not offset the centered label with a child slider"
+        );
 
         editor
             .runtime_mut()
@@ -27053,6 +27170,53 @@ mod tests {
             }
             other => panic!("expected reorder-scene host command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn metal_seq_transport_command_push_drags_from_source_to_target() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let _ = editor.drain_host_commands();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(scene-push-begin 1 (dict :cmd true :meta true :super true :shift false :y 2.0))",
+            )
+            .expect("begin command scene push");
+        assert_eq!(
+            editor.runtime_mut().eval_str("scene-push-value").unwrap(),
+            Some(Value::Number(0.0)),
+            "Command push must begin at the source without jumping to the target"
+        );
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "scene-push-begin");
+                let Value::Map(map) = payload else {
+                    panic!("scene-push-begin payload must be a map")
+                };
+                let value = map.get("value").expect("scene push value").borrow();
+                assert!(matches!(&*value, Value::Number(value) if value.abs() < 1.0e-6));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(scene-push-drag 1 (dict :y 5.0))")
+            .expect("drag command scene push toward target");
+        assert!(matches!(
+            editor.runtime_mut().eval_str("scene-push-value").unwrap(),
+            Some(Value::Number(value)) if (value - 0.42).abs() < 1.0e-6
+        ));
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            eseqlisp::host::HostCommand::Custom { name, .. }
+                if name == "scene-push-set-value"
+        ));
     }
 
     #[test]

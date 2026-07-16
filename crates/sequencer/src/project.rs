@@ -6,16 +6,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::effects::{EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::macro_engine::{
-    normalize_macro_key, Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping,
-    SceneMacroConfig, StealQuantize,
+    Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping, SceneMacroConfig, StealQuantize,
+    normalize_macro_key,
 };
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
-    RackTrackSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
-    TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MAX_STEPS, MidiFxPosition,
+    ModConnection, ModDestination, NUM_PARAMS, PatternSnapshot, RackRouting, RackSlotParamPlocks,
+    RackSlotSnapshot, RackTrackSnapshot, SwingResolution, TRACK_PATTERN_WORDS, Timebase,
+    TrackOutput, TrackParamsSnapshot, TrackSendSnapshot, TrackSoundState,
 };
 use crate::track_color::TrackColor;
 
@@ -89,12 +89,19 @@ pub enum ProjectStealQuantize {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectMacroMapping {
-    pub track: usize,
+    pub scope: ProjectParamScope,
     pub target: crate::process::ParamTarget,
     pub range_min: f32,
     pub range_max: f32,
     #[serde(default)]
     pub curve: ProjectMacroCurve,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum ProjectParamScope {
+    Track(usize),
+    Bus(u64),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +167,10 @@ impl TryFrom<ProjectMacro> for Macro {
 impl From<&MacroMapping> for ProjectMacroMapping {
     fn from(value: &MacroMapping) -> Self {
         Self {
-            track: value.track,
+            scope: match value.scope {
+                crate::macro_engine::ParamScope::Track(track) => ProjectParamScope::Track(track),
+                crate::macro_engine::ParamScope::Bus(bus) => ProjectParamScope::Bus(bus.0),
+            },
             target: value.target.clone(),
             range_min: value.range_min,
             range_max: value.range_max,
@@ -174,7 +184,12 @@ impl TryFrom<ProjectMacroMapping> for MacroMapping {
 
     fn try_from(value: ProjectMacroMapping) -> Result<Self, Self::Error> {
         MacroMapping::new(
-            value.track,
+            match value.scope {
+                ProjectParamScope::Track(track) => crate::macro_engine::ParamScope::Track(track),
+                ProjectParamScope::Bus(bus) => {
+                    crate::macro_engine::ParamScope::Bus(crate::sequencer::BusId(bus))
+                }
+            },
             value.target,
             value.range_min,
             value.range_max,
@@ -2345,21 +2360,35 @@ mod tests {
             name: "Push".to_string(),
             value: 0.75,
             kind: ProjectMacroKind::Mapped,
-            mappings: vec![ProjectMacroMapping {
-                track: 1,
-                target: crate::process::ParamTarget::EffectParam {
-                    slot: 2,
-                    effect: "delay".to_string(),
-                    param: "feedback".to_string(),
-                    param_id: Some(ParamNodeId {
-                        logical_id: 91,
-                        node_param_idx: 4,
-                    }),
+            mappings: vec![
+                ProjectMacroMapping {
+                    scope: ProjectParamScope::Track(1),
+                    target: crate::process::ParamTarget::EffectParam {
+                        slot: 2,
+                        effect: "delay".to_string(),
+                        param: "feedback".to_string(),
+                        param_id: Some(ParamNodeId {
+                            logical_id: 91,
+                            node_param_idx: 4,
+                        }),
+                    },
+                    range_min: 0.2,
+                    range_max: 0.93,
+                    curve: ProjectMacroCurve::Exp,
                 },
-                range_min: 0.2,
-                range_max: 0.93,
-                curve: ProjectMacroCurve::Exp,
-            }],
+                ProjectMacroMapping {
+                    scope: ProjectParamScope::Bus(crate::sequencer::DEFAULT_BUS_A_ID),
+                    target: crate::process::ParamTarget::EffectParam {
+                        slot: 0,
+                        effect: "reverb".to_string(),
+                        param: "mix".to_string(),
+                        param_id: None,
+                    },
+                    range_min: 0.0,
+                    range_max: 0.7,
+                    curve: ProjectMacroCurve::Linear,
+                },
+            ],
         }];
 
         let json = serde_json::to_string(&project).expect("serialize macros");
@@ -2371,6 +2400,10 @@ mod tests {
         let macro_definition = Macro::try_from(restored.macros[0].clone()).expect("valid macro");
         assert_eq!(macro_definition.id, 7);
         assert_eq!(macro_definition.mappings[0].curve, MacroCurve::Exp);
+        assert_eq!(
+            macro_definition.mappings[1].scope,
+            crate::macro_engine::ParamScope::Bus(crate::sequencer::BusId::DEFAULT_A)
+        );
     }
 
     #[test]
