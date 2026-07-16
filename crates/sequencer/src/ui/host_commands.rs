@@ -7,6 +7,7 @@ use eseqlisp::{Editor, HostEvent};
 use sequencer::sequencer::SequencerState;
 use sequencer::tui;
 
+use super::natives;
 use super::state_values::{
     build_accumulator_names, build_effects_value, build_instrument_panel_value,
     build_midi_effects_value, build_step_has_plocks, build_steps_value, build_track_ids,
@@ -14,6 +15,149 @@ use super::state_values::{
     sync_fx_param_binding_fields, sync_groups_bindings, sync_step_param_lists,
     sync_track_mixer_state, sync_track_name_state, sync_track_params, sync_track_peak_fields,
 };
+use super::{map_number, map_string, map_u32, map_usize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MacroHostCommandOutcome {
+    NotMacro,
+    Ignored,
+    Applied,
+}
+
+pub(crate) fn handle_macro_host_command(
+    name: &str,
+    payload: &Value,
+    app: &mut tui::App,
+    state: &SequencerState,
+    current_track: usize,
+) -> MacroHostCommandOutcome {
+    use MacroHostCommandOutcome::{Applied, Ignored, NotMacro};
+
+    let is_macro_command = matches!(
+        name,
+        "macro-create"
+            | "macro-ensure"
+            | "macro-delete"
+            | "macro-rename"
+            | "macro-set-value"
+            | "macro-release"
+            | "macro-map-param"
+            | "macro-set-range"
+            | "macro-set-curve"
+            | "macro-unmap"
+    );
+    if !is_macro_command {
+        return NotMacro;
+    }
+    let Value::Map(map) = payload else {
+        return Ignored;
+    };
+
+    let command = match name {
+        "macro-create" => {
+            let Some(name) = map_string(map, "name") else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroCreate { name }
+        }
+        "macro-ensure" => {
+            let (Some(key), Some(name)) = (map_string(map, "key"), map_string(map, "name")) else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroEnsure { key, name }
+        }
+        "macro-delete" => {
+            let Some(id) = map_u32(map, "id") else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroDelete { id }
+        }
+        "macro-rename" => {
+            let (Some(id), Some(name)) = (map_u32(map, "id"), map_string(map, "name")) else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroRename { id, name }
+        }
+        "macro-set-value" => {
+            let (Some(id), Some(value)) = (map_u32(map, "id"), map_number(map, "value")) else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroSetValue {
+                id,
+                value: value as f32,
+            }
+        }
+        "macro-release" => {
+            let Some(id) = map_u32(map, "id") else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroRelease { id }
+        }
+        "macro-map-param" => {
+            let Some(id) = map_u32(map, "id") else {
+                return Ignored;
+            };
+            let track = map_number(map, "track")
+                .map(|track| track as usize)
+                .unwrap_or(current_track);
+            let target = match natives::param_target_from_value(state, track, payload) {
+                Ok(target) => target,
+                Err(error) => {
+                    eprintln!("macro-map-param failed: {error}");
+                    return Ignored;
+                }
+            };
+            tui::AppCommand::MacroMapParam { id, track, target }
+        }
+        "macro-set-range" => {
+            let (Some(id), Some(mapping_idx), Some(min), Some(max)) = (
+                map_u32(map, "id"),
+                map_usize(map, "mapping-idx"),
+                map_number(map, "min"),
+                map_number(map, "max"),
+            ) else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroSetRange {
+                id,
+                mapping_idx,
+                min: min as f32,
+                max: max as f32,
+            }
+        }
+        "macro-set-curve" => {
+            let (Some(id), Some(mapping_idx), Some(curve)) = (
+                map_u32(map, "id"),
+                map_usize(map, "mapping-idx"),
+                map_string(map, "curve"),
+            ) else {
+                return Ignored;
+            };
+            let curve = match curve.as_str() {
+                "linear" => sequencer::macro_engine::MacroCurve::Linear,
+                "exp" | "exponential" => sequencer::macro_engine::MacroCurve::Exp,
+                "log" | "logarithmic" => sequencer::macro_engine::MacroCurve::Log,
+                _ => return Ignored,
+            };
+            tui::AppCommand::MacroSetCurve {
+                id,
+                mapping_idx,
+                curve,
+            }
+        }
+        "macro-unmap" => {
+            let (Some(id), Some(mapping_idx)) = (map_u32(map, "id"), map_usize(map, "mapping-idx"))
+            else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroUnmap { id, mapping_idx }
+        }
+        _ => unreachable!("macro command set and command dispatch must stay in sync"),
+    };
+
+    tui::apply_command(app, command);
+    Applied
+}
 
 pub(crate) struct AddTrackInstrumentCtx<'a> {
     pub(crate) app: &'a mut tui::App,

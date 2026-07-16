@@ -4,8 +4,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MouseEventOutcome,
-    WidgetDefinition, WidgetEvent, get_f32_prop, label::label_text_row, ndc_bounds, plock_active,
-    plock_color, resolve_named_color, styled_cell,
+    PointerEvent, WidgetDefinition, WidgetEvent, get_f32_prop, label::label_text_row, ndc_bounds,
+    plock_active, plock_color, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
 use crate::layout::{
@@ -495,6 +495,13 @@ impl WidgetDefinition for ButtonWidget {
         }
     }
 
+    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
+        node.props
+            .get("on-release")
+            .filter(|callback| !matches!(callback, Value::Nil | Value::Bool(false)))
+            .map(|_| Value::String("button-release".to_string()))
+    }
+
     fn mouse_event(
         &self,
         node: &LayoutNode,
@@ -514,8 +521,28 @@ impl WidgetDefinition for ButtonWidget {
             return MouseEventOutcome::Consume;
         }
         match mouse_kind {
+            MouseEventKind::Down(MouseButton::Left)
+                if node.props.get("on-press").is_some_and(|callback| {
+                    !matches!(callback, Value::Nil | Value::Bool(false))
+                }) =>
+            {
+                MouseEventOutcome::Dispatch(WidgetEvent::PointerDown(PointerEvent {
+                    local_col: _local_col,
+                    local_row: _local_row,
+                }))
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 MouseEventOutcome::Dispatch(WidgetEvent::Activate(modifiers))
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if node.props.get("on-release").is_some_and(|callback| {
+                    !matches!(callback, Value::Nil | Value::Bool(false))
+                }) =>
+            {
+                MouseEventOutcome::Dispatch(WidgetEvent::PointerUp(PointerEvent {
+                    local_col: _local_col,
+                    local_row: _local_row,
+                }))
             }
             _ => MouseEventOutcome::Ignore,
         }
@@ -538,13 +565,16 @@ impl WidgetDefinition for ButtonWidget {
         if node.widget_type == "badge" {
             return None;
         }
-        let WidgetEvent::Activate(modifiers) = event else {
-            return None;
+        let (callback_name, phase, modifiers) = match event {
+            WidgetEvent::Activate(modifiers) => ("on-click", "click", modifiers),
+            WidgetEvent::PointerDown(_) => ("on-press", "press", KeyModifiers::empty()),
+            WidgetEvent::PointerUp(_) => ("on-release", "release", KeyModifiers::empty()),
+            _ => return None,
         };
-        let callback = node.props.get("on-click")?.clone();
+        let callback = node.props.get(callback_name)?.clone();
         Some(EventOutput {
             callback,
-            args: vec![click_info("click", modifiers)],
+            args: vec![click_info(phase, modifiers)],
         })
     }
 
@@ -719,6 +749,77 @@ mod tests {
             children: Vec::new(),
             focusable: true,
         }
+    }
+
+    #[test]
+    fn momentary_button_dispatches_press_and_release_callbacks() {
+        let node = test_button_node(HashMap::from([
+            ("on-press".to_string(), Value::Symbol("press".to_string())),
+            (
+                "on-release".to_string(),
+                Value::Symbol("release".to_string()),
+            ),
+        ]));
+
+        assert_eq!(
+            ButtonWidget.begin_gesture(&node, 5.0, 3.0),
+            Some(Value::String("button-release".to_string())),
+            "release-capable buttons must retain the original press target"
+        );
+
+        let press = ButtonWidget.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            5.0,
+            3.0,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        let MouseEventOutcome::Dispatch(press) = press else {
+            panic!("press should dispatch");
+        };
+        let press = ButtonWidget
+            .handle_event(&node, press)
+            .expect("press callback");
+        assert_eq!(press.callback, Value::Symbol("press".to_string()));
+        assert!(matches!(
+            press.args.first(),
+            Some(Value::Map(info))
+                if matches!(
+                    info.get("phase").map(|value| value.borrow().clone()),
+                    Some(Value::String(phase)) if phase == "press"
+                )
+        ));
+
+        let release = ButtonWidget.mouse_event(
+            &node,
+            MouseEventKind::Up(MouseButton::Left),
+            20.0,
+            20.0,
+            None,
+            Some(&Value::String("button-release".to_string())),
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        let MouseEventOutcome::Dispatch(release) = release else {
+            panic!("release should dispatch");
+        };
+        let release = ButtonWidget
+            .handle_event(&node, release)
+            .expect("release callback");
+        assert_eq!(release.callback, Value::Symbol("release".to_string()));
+        assert!(matches!(
+            release.args.first(),
+            Some(Value::Map(info))
+                if matches!(
+                    info.get("phase").map(|value| value.borrow().clone()),
+                    Some(Value::String(phase)) if phase == "release"
+                )
+        ));
     }
 
     #[cfg(target_os = "macos")]

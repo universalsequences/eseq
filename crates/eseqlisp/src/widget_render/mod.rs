@@ -954,6 +954,8 @@ pub fn is_layout_widget_type(widget_type: &str) -> bool {
 
 pub fn node_handles_pointer_events(node: &LayoutNode) -> bool {
     let has_pointer_callback = node.props.contains_key("on-click")
+        || node.props.contains_key("on-press")
+        || node.props.contains_key("on-release")
         || node.props.contains_key("on-drag")
         || node.props.contains_key("on-drop")
         || node.props.contains_key("on-change")

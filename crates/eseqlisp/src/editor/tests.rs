@@ -5164,6 +5164,51 @@ fn box_pointer_handlers_receive_clicks_through_noninteractive_sdf_child() {
 }
 
 #[test]
+fn button_release_stays_bound_to_the_original_pressed_button() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(8, 4);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def pressed (state false))
+                (def released (state false))
+                (effect
+                  (button "hold" :width 4 :height 2
+                    :on-press (lambda (evt) (set! pressed true))
+                    :on-release (lambda (evt) (set! released true))))
+                "#,
+        )
+        .unwrap();
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        1,
+        1,
+        8,
+        4,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 7, 3),
+        1,
+        1,
+        8,
+        4,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("pressed").unwrap(),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        editor.runtime.eval_str("released").unwrap(),
+        Some(Value::Bool(true)),
+        "releasing outside the button must not leave a momentary action engaged"
+    );
+}
+
+#[test]
 fn knob_updates_shared_label_state_from_each_binding() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

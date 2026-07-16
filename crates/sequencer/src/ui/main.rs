@@ -6358,6 +6358,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for command in editor.drain_host_commands() {
             if let HostCommand::Custom { name, payload } = command {
                 let _ = current_track_for_app(&mut app, &current_track);
+                match handle_macro_host_command(
+                    &name,
+                    &payload,
+                    &mut app,
+                    &state,
+                    current_track.load(Ordering::Relaxed),
+                ) {
+                    MacroHostCommandOutcome::Applied => {
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    MacroHostCommandOutcome::Ignored => continue,
+                    MacroHostCommandOutcome::NotMacro => {}
+                }
                 match name.as_str() {
                     "reveal-sequencer-track" => {
                         if let Some(track) = extract_usize_from_payload(&payload, "track") {
@@ -8637,156 +8651,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                            }
-                        }
-                    }
-                    "macro-create" => {
-                        if let Value::Map(ref map) = payload {
-                            if let Some(name) = map_string(map, "name") {
-                                tui::apply_command(&mut app, tui::AppCommand::MacroCreate { name });
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    "macro-ensure" => {
-                        if let Value::Map(ref map) = payload {
-                            if let (Some(key), Some(name)) =
-                                (map_string(map, "key"), map_string(map, "name"))
-                            {
-                                tui::apply_command(
-                                    &mut app,
-                                    tui::AppCommand::MacroEnsure { key, name },
-                                );
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    "macro-delete" => {
-                        if let Value::Map(ref map) = payload {
-                            if let Some(id) = map_u32(map, "id") {
-                                tui::apply_command(&mut app, tui::AppCommand::MacroDelete { id });
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    "macro-rename" => {
-                        if let Value::Map(ref map) = payload {
-                            if let (Some(id), Some(name)) =
-                                (map_u32(map, "id"), map_string(map, "name"))
-                            {
-                                tui::apply_command(
-                                    &mut app,
-                                    tui::AppCommand::MacroRename { id, name },
-                                );
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    "macro-set-value" => {
-                        if let Value::Map(ref map) = payload {
-                            if let (Some(id), Some(value)) =
-                                (map_u32(map, "id"), map_number(map, "value"))
-                            {
-                                tui::apply_command(
-                                    &mut app,
-                                    tui::AppCommand::MacroSetValue {
-                                        id,
-                                        value: value as f32,
-                                    },
-                                );
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    "macro-release" => {
-                        if let Value::Map(ref map) = payload {
-                            if let Some(id) = map_u32(map, "id") {
-                                tui::apply_command(&mut app, tui::AppCommand::MacroRelease { id });
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    "macro-map-param" => {
-                        if let Value::Map(ref map) = payload {
-                            if let Some(id) = map_u32(map, "id") {
-                                let track = map_number(map, "track")
-                                    .map(|track| track as usize)
-                                    .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
-                                match natives::param_target_from_value(&state, track, &payload) {
-                                    Ok(target) => {
-                                        tui::apply_command(
-                                            &mut app,
-                                            tui::AppCommand::MacroMapParam { id, track, target },
-                                        );
-                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    Err(error) => eprintln!("macro-map-param failed: {error}"),
-                                }
-                            }
-                        }
-                    }
-                    "macro-set-range" => {
-                        if let Value::Map(ref map) = payload {
-                            if let (Some(id), Some(mapping_idx), Some(min), Some(max)) = (
-                                map_u32(map, "id"),
-                                map_usize(map, "mapping-idx"),
-                                map_number(map, "min"),
-                                map_number(map, "max"),
-                            ) {
-                                tui::apply_command(
-                                    &mut app,
-                                    tui::AppCommand::MacroSetRange {
-                                        id,
-                                        mapping_idx,
-                                        min: min as f32,
-                                        max: max as f32,
-                                    },
-                                );
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    "macro-set-curve" => {
-                        if let Value::Map(ref map) = payload {
-                            if let (Some(id), Some(mapping_idx), Some(curve)) = (
-                                map_u32(map, "id"),
-                                map_usize(map, "mapping-idx"),
-                                map_string(map, "curve"),
-                            ) {
-                                let curve = match curve.as_str() {
-                                    "linear" => Some(sequencer::macro_engine::MacroCurve::Linear),
-                                    "exp" | "exponential" => {
-                                        Some(sequencer::macro_engine::MacroCurve::Exp)
-                                    }
-                                    "log" | "logarithmic" => {
-                                        Some(sequencer::macro_engine::MacroCurve::Log)
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(curve) = curve {
-                                    tui::apply_command(
-                                        &mut app,
-                                        tui::AppCommand::MacroSetCurve {
-                                            id,
-                                            mapping_idx,
-                                            curve,
-                                        },
-                                    );
-                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                        }
-                    }
-                    "macro-unmap" => {
-                        if let Value::Map(ref map) = payload {
-                            if let (Some(id), Some(mapping_idx)) =
-                                (map_u32(map, "id"), map_usize(map, "mapping-idx"))
-                            {
-                                tui::apply_command(
-                                    &mut app,
-                                    tui::AppCommand::MacroUnmap { id, mapping_idx },
-                                );
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }

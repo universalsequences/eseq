@@ -414,6 +414,30 @@ impl Drop for HeadlessGraphGuard {
     }
 }
 
+fn apply_capture_macro_host_commands(
+    editor: &mut Editor,
+    app: &mut tui::App,
+    state: &SequencerState,
+    current_track: usize,
+) -> Result<bool, String> {
+    let mut applied = false;
+    for command in editor.drain_host_commands() {
+        let HostCommand::Custom { name, payload } = command else {
+            continue;
+        };
+        match handle_macro_host_command(&name, &payload, app, state, current_track) {
+            MacroHostCommandOutcome::Applied => applied = true,
+            MacroHostCommandOutcome::Ignored => {
+                return Err(format!(
+                    "capture setup emitted invalid {name} payload: {payload:?}"
+                ));
+            }
+            MacroHostCommandOutcome::NotMacro => {}
+        }
+    }
+    Ok(applied)
+}
+
 pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = parse_capture_script(&args.script)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
@@ -514,9 +538,11 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         .runtime_mut()
         .eval_source_at_path(args.script.clone(), &parsed.executable_source)
         .map_err(|error| format!("capture setup Lisp failed: {error:?}"))?;
+    apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)?;
     {
         let runtime = editor.runtime_mut();
         sync_project_state(runtime, &app);
+        sync_macro_state(runtime, &app);
         sync_track_topology_state(
             runtime,
             &app,
@@ -546,6 +572,9 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         .runtime_mut()
         .eval_str("(capture-after-sync)")
         .map_err(|error| format!("capture-after-sync failed: {error:?}"))?;
+    if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
+        sync_macro_state(editor.runtime_mut(), &app);
+    }
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 

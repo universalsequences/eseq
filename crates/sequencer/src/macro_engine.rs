@@ -600,12 +600,14 @@ impl MacroEngine {
         touched
     }
 
-    /// Explicitly releases a momentary macro without overloading value `0`,
-    /// which is a valid engaged minimum for continuous mapped macros.
+    /// Explicitly releases a momentary macro and returns its visible position
+    /// to zero. This remains distinct from `set_value(id, 0.0)`, which engages
+    /// a continuous macro at its mapped minimum.
     pub fn release(&mut self, id: MacroId) -> Vec<(usize, ParamTarget)> {
         let Some(macro_definition) = self.macros.iter_mut().find(|item| item.id == id) else {
             return Vec::new();
         };
+        macro_definition.value = 0.0;
         macro_definition.last_write_order = None;
         let touched = macro_definition
             .mappings
@@ -813,6 +815,7 @@ mod tests {
         engine.release(id);
         assert_eq!(engine.effective_value(&key, 0.35), 0.35);
         assert_eq!(engine.override_value(&key), None);
+        assert_eq!(engine.macro_definition(id).unwrap().value, 0.0);
     }
 
     #[test]

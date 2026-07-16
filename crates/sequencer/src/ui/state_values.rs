@@ -18571,7 +18571,7 @@ mod tests {
     }
 
     #[test]
-    fn macro_mapping_sidebar_renders_editable_min_max_rows() {
+    fn macro_mapping_sidebar_renders_editable_range_curve_and_state_rows() {
         let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
         let mut app = test_app_with_instrument_descriptor(desc.clone());
         let id = app
@@ -18629,13 +18629,32 @@ mod tests {
             .expect("mapping min picker");
         let max = find_layout_node_by_debug_name(&layout, "macro-mapping-max")
             .expect("mapping max picker");
+        let curve = find_layout_node_by_debug_name(&layout, "macro-mapping-curve")
+            .expect("mapping curve dropdown");
+        let state = find_layout_node_by_debug_name(&layout, "macro-mapping-state")
+            .expect("mapping state label");
         let unmap = find_layout_node_by_debug_name(&layout, "macro-mapping-unmap")
             .expect("mapping unmap button");
-        for (node, label) in [(row, "row"), (min, "min"), (max, "max"), (unmap, "unmap")] {
+        for (node, label) in [
+            (row, "row"),
+            (min, "min"),
+            (max, "max"),
+            (curve, "curve"),
+            (state, "state"),
+            (unmap, "unmap"),
+        ] {
             assert_finite_nonzero_rect(node, label);
         }
         assert_eq!(layout_prop_number(min, "value"), Some(10.0));
         assert_eq!(layout_prop_number(max, "value"), Some(30.0));
+        assert!(matches!(
+            curve.props.get("value"),
+            Some(Value::String(value)) if value == "linear"
+        ));
+        assert!(matches!(
+            state.props.get("text"),
+            Some(Value::String(value)) if value == "live"
+        ));
         editor.drain_host_commands();
         editor
             .runtime_mut()
@@ -18650,6 +18669,113 @@ mod tests {
                 if name == "macro-set-range"
                     && matches!(payload.get("min").map(|value| value.borrow().clone()), Some(Value::Number(value)) if (value - 12.5).abs() < 1.0e-6)
         ));
+        editor
+            .runtime_mut()
+            .invoke(
+                curve
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("curve callback"),
+                vec![Value::String("log".to_string())],
+            )
+            .expect("edit mapping curve");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
+                if name == "macro-set-curve"
+                    && matches!(payload.get("curve").map(|value| value.borrow().clone()), Some(Value::String(value)) if value == "log")
+        ));
+    }
+
+    #[test]
+    fn reusable_macro_mapping_editor_scopes_rows_and_marks_suspended_targets() {
+        let mut editor = macro_controls_editor(0.25);
+        editor.set_layout_viewport(64, 20);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "macros",
+            test_list(vec![
+                test_named_macro_value_with_mappings(
+                    7,
+                    "player/delay-push",
+                    "Delay Push",
+                    vec![test_macro_mapping_value(
+                        0,
+                        0,
+                        "instrument",
+                        None,
+                        None,
+                        "cutoff",
+                        0.2,
+                        0.8,
+                        true,
+                    )],
+                ),
+                test_named_macro_value_with_mappings(
+                    8,
+                    "player/other",
+                    "Other",
+                    vec![test_macro_mapping_value(
+                        0,
+                        0,
+                        "instrument",
+                        None,
+                        None,
+                        "resonance",
+                        0.0,
+                        1.0,
+                        false,
+                    )],
+                ),
+            ]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*macro-editor-test*"
+                  (macro-mapping-editor :macro :player/delay-push))
+                "#,
+            )
+            .expect("create scoped macro mapping editor");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*macro-editor-test*")
+            .expect("macro editor buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+
+        let layout = editor.widget_layout().expect("scoped macro editor layout");
+        assert_finite_layout_tree(&layout);
+        let editor_node = find_layout_node_by_debug_name(&layout, "macro-mapping-editor")
+            .expect("reusable macro mapping editor");
+        let row = find_layout_node_by_debug_name(&layout, "macro-mapping-table-row-suspended")
+            .expect("suspended mapping row");
+        let state =
+            find_layout_node_by_debug_name(&layout, "macro-mapping-state").expect("mapping state");
+        let curve =
+            find_layout_node_by_debug_name(&layout, "macro-mapping-curve").expect("mapping curve");
+        for (node, label) in [
+            (editor_node, "editor"),
+            (row, "suspended row"),
+            (state, "state"),
+            (curve, "curve"),
+        ] {
+            assert_finite_nonzero_rect(node, label);
+        }
+        assert!(matches!(
+            state.props.get("text"),
+            Some(Value::String(value)) if value == "off"
+        ));
+        assert!(layout_node_contains_text_fragment(&layout, "cutoff"));
+        assert!(
+            !layout_node_contains_text_fragment(&layout, "resonance"),
+            "a key-scoped editor must not leak mappings from another macro"
+        );
     }
 
     #[test]
@@ -18711,6 +18837,7 @@ mod tests {
         param: &str,
         min: f64,
         max: f64,
+        suspended: bool,
     ) -> Value {
         let mut target = vec![
             ("kind", Value::String(kind.to_string())),
@@ -18729,21 +18856,39 @@ mod tests {
             ("target-label", Value::String(param.to_string())),
             ("min", Value::Number(min)),
             ("max", Value::Number(max)),
+            ("path-label", Value::String("T1 · Test".to_string())),
+            ("param-label", Value::String(param.to_string())),
+            ("display-min", Value::Number(min)),
+            ("display-max", Value::Number(max)),
+            ("domain-min", Value::Number(min.min(0.0))),
+            ("domain-max", Value::Number(max.max(1.0))),
+            ("display-scale", Value::Number(1.0)),
+            ("display-decimals", Value::Number(2.0)),
+            ("display-unit", Value::String(String::new())),
             ("curve", Value::String("linear".to_string())),
             ("current", Value::Number(min)),
-            ("suspended", Value::Bool(false)),
+            ("suspended", Value::Bool(suspended)),
         ])
     }
 
-    fn test_macro_value_with_mappings(mappings: Vec<Value>) -> Value {
+    fn test_named_macro_value_with_mappings(
+        id: u32,
+        key: &str,
+        name: &str,
+        mappings: Vec<Value>,
+    ) -> Value {
         map_value([
-            ("id", Value::Number(7.0)),
-            ("key", Value::String("player/delay-push".to_string())),
-            ("name", Value::String("Delay Push".to_string())),
+            ("id", Value::Number(id as f64)),
+            ("key", Value::String(key.to_string())),
+            ("name", Value::String(name.to_string())),
             ("kind", Value::String("mapped".to_string())),
             ("value", Value::Number(0.25)),
             ("mappings", test_list(mappings)),
         ])
+    }
+
+    fn test_macro_value_with_mappings(mappings: Vec<Value>) -> Value {
+        test_named_macro_value_with_mappings(7, "player/delay-push", "Delay Push", mappings)
     }
 
     fn macro_controls_editor(value: f64) -> eseqlisp::Editor {
@@ -18811,7 +18956,7 @@ mod tests {
     }
 
     #[test]
-    fn macro_knob_and_map_button_render_and_emit_by_resolved_id() {
+    fn macro_knob_momentary_and_map_button_render_and_emit_by_resolved_id() {
         let mut editor = macro_controls_editor(0.25);
         editor
             .runtime_mut()
@@ -18820,6 +18965,7 @@ mod tests {
                 (effect-buffer "*macro-controls-test*"
                   (h-stack :gap 1
                     (macro-knob :macro :player/delay-push)
+                    (macro-momentary :macro :player/delay-push)
                     (macro-map-button :macro :player/delay-push)))
                 "#,
             )
@@ -18837,9 +18983,12 @@ mod tests {
         assert_finite_layout_tree(&layout);
         let knob = find_layout_node_by_widget_type(&layout, "knob-number")
             .expect("macro knob layout node");
-        let map_button = find_layout_node_by_widget_type(&layout, "button")
+        let momentary = find_layout_node_by_debug_name(&layout, "macro-momentary")
+            .expect("macro momentary layout node");
+        let map_button = find_layout_node_by_debug_name(&layout, "macro-map-button")
             .expect("macro map button layout node");
         assert_finite_nonzero_rect(knob, "macro knob");
+        assert_finite_nonzero_rect(momentary, "macro momentary");
         assert_finite_nonzero_rect(map_button, "macro map button");
         assert_eq!(layout_prop_number(knob, "value"), Some(0.25));
 
@@ -18869,6 +19018,42 @@ mod tests {
         assert!(matches!(
             payload.get("value").map(|value| value.borrow().clone()),
             Some(Value::Number(value)) if value == 0.75
+        ));
+
+        editor
+            .runtime_mut()
+            .invoke(
+                momentary
+                    .props
+                    .get("on-press")
+                    .cloned()
+                    .expect("macro momentary on-press"),
+                vec![Value::Nil],
+            )
+            .expect("press momentary macro");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
+                if name == "macro-set-value"
+                    && matches!(payload.get("id").map(|value| value.borrow().clone()), Some(Value::Number(id)) if id == 7.0)
+                    && matches!(payload.get("value").map(|value| value.borrow().clone()), Some(Value::Number(value)) if value == 1.0)
+        ));
+        editor
+            .runtime_mut()
+            .invoke(
+                momentary
+                    .props
+                    .get("on-release")
+                    .cloned()
+                    .expect("macro momentary on-release"),
+                vec![Value::Nil],
+            )
+            .expect("release momentary macro");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
+                if name == "macro-release"
+                    && matches!(payload.get("id").map(|value| value.borrow().clone()), Some(Value::Number(id)) if id == 7.0)
         ));
 
         editor
@@ -18909,8 +19094,9 @@ mod tests {
         let updated_knob = find_layout_node_by_widget_type(&updated_layout, "knob-number")
             .expect("updated macro knob layout node");
         assert_eq!(layout_prop_number(updated_knob, "value"), Some(0.6));
-        let updated_map_button = find_layout_node_by_widget_type(&updated_layout, "button")
-            .expect("updated macro map button layout node");
+        let updated_map_button =
+            find_layout_node_by_debug_name(&updated_layout, "macro-map-button")
+                .expect("updated macro map button layout node");
         assert_layout_rgba_prop(
             updated_map_button,
             "background-color",
@@ -19075,7 +19261,7 @@ mod tests {
             "SEQ",
             "macros",
             test_list(vec![test_macro_value_with_mappings(vec![
-                test_macro_mapping_value(0, 0, "instrument", None, None, "cutoff", 0.2, 0.8),
+                test_macro_mapping_value(0, 0, "instrument", None, None, "cutoff", 0.2, 0.8, false),
             ])]),
         );
         editor.runtime_mut().run_reactive_cycle();
@@ -24245,30 +24431,63 @@ mod tests {
         assert_finite_layout_tree(&layout);
         let title = find_layout_node_by_stable_key(&layout, "macro-player-title")
             .expect("macro player title");
+        let mapping_editor = find_layout_node_by_debug_name(&layout, "macro-mapping-editor")
+            .expect("embedded macro mapping editor");
+        let mapping_empty = find_layout_node_by_debug_name(&layout, "macro-mapping-editor-empty")
+            .expect("empty mapping editor state");
         assert_finite_nonzero_rect(&layout, "macro player surface");
         assert_finite_nonzero_rect(title, "macro player title");
+        assert_finite_nonzero_rect(mapping_editor, "macro player mapping editor");
+        assert_finite_nonzero_rect(mapping_empty, "macro player empty mapping state");
 
         let mut knob_count = 0;
         let mut button_count = 0;
+        let mut momentary_count = 0;
+        let mut map_button_count = 0;
         fn count_controls(
             node: &eseqlisp::layout::LayoutNode,
             knob_count: &mut usize,
             button_count: &mut usize,
+            momentary_count: &mut usize,
+            map_button_count: &mut usize,
         ) {
             if node.widget_type == "knob-number" {
                 *knob_count += 1;
                 assert_finite_nonzero_rect(node, "macro player knob");
             } else if node.widget_type == "button" {
                 *button_count += 1;
-                assert_finite_nonzero_rect(node, "macro player map button");
+                assert_finite_nonzero_rect(node, "macro player button");
+                match node.props.get("debug-name") {
+                    Some(Value::String(name)) if name == "macro-momentary" => {
+                        *momentary_count += 1;
+                    }
+                    Some(Value::String(name)) if name == "macro-map-button" => {
+                        *map_button_count += 1;
+                    }
+                    _ => {}
+                }
             }
             for child in &node.children {
-                count_controls(child, knob_count, button_count);
+                count_controls(
+                    child,
+                    knob_count,
+                    button_count,
+                    momentary_count,
+                    map_button_count,
+                );
             }
         }
-        count_controls(&layout, &mut knob_count, &mut button_count);
+        count_controls(
+            &layout,
+            &mut knob_count,
+            &mut button_count,
+            &mut momentary_count,
+            &mut map_button_count,
+        );
         assert_eq!(knob_count, 3);
-        assert_eq!(button_count, 3);
+        assert_eq!(button_count, 6);
+        assert_eq!(momentary_count, 3);
+        assert_eq!(map_button_count, 3);
         assert_eq!(
             editor
                 .runtime_mut()
