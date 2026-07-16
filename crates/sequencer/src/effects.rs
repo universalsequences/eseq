@@ -1191,6 +1191,96 @@ mod tests {
     }
 
     #[test]
+    fn builtin_multiverb_pins_param_order_within_state_bounds() {
+        let descriptor = EffectDescriptor::builtin_insert("Multiverb").unwrap();
+        assert_eq!(
+            descriptor.input_channels,
+            2 + crate::voice_modulator::NUM_OUTPUTS
+        );
+        assert_eq!(descriptor.output_channels, 2);
+        // Param order is append-only (plocks persist by descriptor index) —
+        // this list may only ever grow at the end.
+        let names: Vec<&str> = descriptor
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect();
+        let base_param_count = 14;
+        assert_eq!(
+            names[..base_param_count],
+            [
+                "mode",
+                "decay",
+                "size",
+                "predelay",
+                "damp",
+                "bass",
+                "diffusion",
+                "mod rate",
+                "mod depth",
+                "mod shape",
+                "era",
+                "width",
+                "mix",
+                "enabled",
+            ]
+        );
+        let source_descriptors = crate::voice_modulator::effect_param_descriptors();
+        let source_names = source_descriptors
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names[base_param_count..base_param_count + source_names.len()],
+            source_names,
+            "standard effect-modulator source controls must follow the locked base params"
+        );
+        assert_eq!(
+            names[base_param_count + source_names.len()..],
+            [
+                "mod decay slot 1 amt",
+                "mod decay slot 2 amt",
+                "mod decay slot 3 amt",
+                "mod decay slot 4 amt",
+                "mod size slot 1 amt",
+                "mod size slot 2 amt",
+                "mod size slot 3 amt",
+                "mod size slot 4 amt",
+                "mod depth slot 1 amt",
+                "mod depth slot 2 amt",
+                "mod depth slot 3 amt",
+                "mod depth slot 4 amt",
+                "mod mix slot 1 amt",
+                "mod mix slot 2 amt",
+                "mod mix slot 3 amt",
+                "mod mix slot 4 amt",
+            ]
+        );
+        assert_eq!(
+            descriptor.instrument_modulators.len(),
+            crate::voice_modulator::SLOT_COUNT
+        );
+        assert_eq!(
+            descriptor.instrument_modulation_targets.len(),
+            crate::voice_modulator::SLOT_COUNT * 4
+        );
+        for param in &descriptor.params {
+            if !crate::voice_modulator::is_source_param(param.node_param_idx) {
+                assert!(
+                    (param.node_param_idx as usize) < crate::multiverb::MULTIVERB_STATE_SIZE,
+                    "param {:?} writes outside the Multiverb state array",
+                    param.name
+                );
+            }
+            assert!(
+                param.default >= param.min && param.default <= param.max,
+                "param {:?} default out of range",
+                param.name
+            );
+        }
+    }
+
+    #[test]
     fn builtin_compressor_names_are_canonical_and_legacy_dynamics_loads() {
         assert_eq!(
             EffectDescriptor::builtin_insert_names(),
@@ -1205,6 +1295,7 @@ mod tests {
                 "Roar",
                 "DJ Mixer",
                 "Reverb",
+                "Multiverb",
                 "444 Compressor",
                 "Glue Compressor",
                 "Compressor",
@@ -1941,6 +2032,7 @@ impl EffectDescriptor {
             "Roar",
             "DJ Mixer",
             "Reverb",
+            "Multiverb",
             "444 Compressor",
             "Glue Compressor",
             "Compressor",
@@ -1992,6 +2084,7 @@ impl EffectDescriptor {
             "Roar" => Some(Self::builtin_roar()),
             "DJ Mixer" => Some(Self::builtin_dj_mixer()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
+            "Multiverb" => Some(Self::builtin_multiverb()),
             "444 Compressor" => Some(Self::builtin_444_compressor()),
             "Glue Compressor" => Some(Self::builtin_glue_compressor()),
             "Compressor" => Some(Self::builtin_compressor()),
@@ -4561,6 +4654,265 @@ impl EffectDescriptor {
                 Self::enabled_param(crate::reverb::REVERB_PARAM_ENABLED as u32, 1.0),
             ],
         }
+    }
+
+    /// Multi-mode vintage reverb (Plate / Hall / Quad / Mod) as a stereo
+    /// insert. Spec: docs/reverb-modes-spec.md. Param order is append-only —
+    /// plocks and mod routings persist by descriptor index.
+    pub fn builtin_multiverb() -> Self {
+        fn knob(
+            name: &str,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        let mut desc = Self {
+            name: "Multiverb".to_string(),
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 3.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "plate".to_string(),
+                            "hall".to_string(),
+                            "quad".to_string(),
+                            "mod".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::multiverb::MULTIVERB_PARAM_MODE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                knob(
+                    "decay",
+                    0.0,
+                    1.0,
+                    0.55,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_DECAY,
+                ),
+                knob(
+                    "size",
+                    0.0,
+                    1.0,
+                    0.5,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_SIZE,
+                ),
+                knob(
+                    "predelay",
+                    0.0,
+                    250.0,
+                    0.0,
+                    Some("ms"),
+                    crate::multiverb::MULTIVERB_PARAM_PREDELAY_MS,
+                ),
+                knob(
+                    "damp",
+                    0.0,
+                    1.0,
+                    0.35,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_DAMP,
+                ),
+                knob(
+                    "bass",
+                    0.0,
+                    1.0,
+                    0.5,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_BASS,
+                ),
+                knob(
+                    "diffusion",
+                    0.0,
+                    1.0,
+                    0.7,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_DIFFUSION,
+                ),
+                knob(
+                    "mod rate",
+                    0.05,
+                    8.0,
+                    0.7,
+                    Some("Hz"),
+                    crate::multiverb::MULTIVERB_PARAM_MOD_RATE,
+                ),
+                knob(
+                    "mod depth",
+                    0.0,
+                    1.0,
+                    0.15,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_MOD_DEPTH,
+                ),
+                knob(
+                    "mod shape",
+                    0.0,
+                    1.0,
+                    0.0,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_MOD_SHAPE,
+                ),
+                knob(
+                    "era",
+                    0.0,
+                    1.0,
+                    0.15,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_ERA,
+                ),
+                knob(
+                    "width",
+                    0.0,
+                    1.0,
+                    1.0,
+                    None,
+                    crate::multiverb::MULTIVERB_PARAM_WIDTH,
+                ),
+                knob(
+                    "mix",
+                    0.0,
+                    1.0,
+                    0.35,
+                    Some("%"),
+                    crate::multiverb::MULTIVERB_PARAM_MIX,
+                ),
+                Self::enabled_param(crate::multiverb::MULTIVERB_PARAM_ENABLED as u32, 1.0),
+            ],
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let decay_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "decay")
+            .expect("built-in Multiverb decay param should exist");
+        let size_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "size")
+            .expect("built-in Multiverb size param should exist");
+        let mod_depth_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "mod depth")
+            .expect("built-in Multiverb mod depth param should exist");
+        let mix_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "mix")
+            .expect("built-in Multiverb mix param should exist");
+
+        let mut append_depth_targets =
+            |base_param_idx: usize,
+             destination_name: &str,
+             depth_params: [u64; crate::voice_modulator::SLOT_COUNT]| {
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: -1.0,
+                        max: 1.0,
+                        default: 0.0,
+                        kind: ParamKind::Continuous { unit: None },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min: -1.0,
+                            depth_max: 1.0,
+                            depth_unit: None,
+                        });
+                }
+            };
+
+        append_depth_targets(
+            decay_idx,
+            "decay",
+            [
+                crate::multiverb::MULTIVERB_PARAM_MOD_DECAY_DEPTH_1,
+                crate::multiverb::MULTIVERB_PARAM_MOD_DECAY_DEPTH_2,
+                crate::multiverb::MULTIVERB_PARAM_MOD_DECAY_DEPTH_3,
+                crate::multiverb::MULTIVERB_PARAM_MOD_DECAY_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            size_idx,
+            "size",
+            [
+                crate::multiverb::MULTIVERB_PARAM_MOD_SIZE_DEPTH_1,
+                crate::multiverb::MULTIVERB_PARAM_MOD_SIZE_DEPTH_2,
+                crate::multiverb::MULTIVERB_PARAM_MOD_SIZE_DEPTH_3,
+                crate::multiverb::MULTIVERB_PARAM_MOD_SIZE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            mod_depth_idx,
+            "depth",
+            [
+                crate::multiverb::MULTIVERB_PARAM_MOD_DEPTH_DEPTH_1,
+                crate::multiverb::MULTIVERB_PARAM_MOD_DEPTH_DEPTH_2,
+                crate::multiverb::MULTIVERB_PARAM_MOD_DEPTH_DEPTH_3,
+                crate::multiverb::MULTIVERB_PARAM_MOD_DEPTH_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            mix_idx,
+            "mix",
+            [
+                crate::multiverb::MULTIVERB_PARAM_MOD_MIX_DEPTH_1,
+                crate::multiverb::MULTIVERB_PARAM_MOD_MIX_DEPTH_2,
+                crate::multiverb::MULTIVERB_PARAM_MOD_MIX_DEPTH_3,
+                crate::multiverb::MULTIVERB_PARAM_MOD_MIX_DEPTH_4,
+            ],
+        );
+
+        desc
     }
 
     fn builtin_dynamics_variant(

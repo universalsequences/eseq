@@ -7,6 +7,7 @@
 (load "metal-seq-fx/builtin/eq8.lisp")
 (load "metal-seq-fx/builtin/str8-delay.lisp")
 (load "metal-seq-fx/builtin/space-echo.lisp")
+(load "metal-seq-fx/builtin/multiverb.lisp")
 (load "metal-seq-fx/builtin/dimension.lisp")
 (load "metal-seq-fx/builtin/phaser-flanger.lisp")
 (load "metal-seq-fx/builtin/roar.lisp")

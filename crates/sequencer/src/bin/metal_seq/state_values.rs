@@ -22,6 +22,22 @@ fn instrument_modulation_depth_display_range(
     (target.depth_min, target.depth_max)
 }
 
+fn modulation_routing_param_indices(
+    desc: &sequencer::effects::EffectDescriptor,
+) -> std::collections::HashSet<usize> {
+    let mut indices = std::collections::HashSet::new();
+    for target in &desc.instrument_modulation_targets {
+        indices.insert(target.depth_param_idx);
+        if let Some(source_param_idx) = target.source_param_idx {
+            indices.insert(source_param_idx);
+        }
+        if let Some(active_param_idx) = target.active_param_idx {
+            indices.insert(active_param_idx);
+        }
+    }
+    indices
+}
+
 /// Build a Lisp Value::List of bools from the step pattern for a given track.
 pub(crate) fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
@@ -5084,10 +5100,6 @@ pub(crate) fn build_effects_value(
         depth_unit: Option<String>,
     }
 
-    fn is_mod_param(name: &str) -> bool {
-        name.starts_with("mod ")
-    }
-
     fn is_generated_host_mod_param(name: &str) -> bool {
         name.starts_with("__host_mod__")
     }
@@ -5295,6 +5307,8 @@ pub(crate) fn build_effects_value(
                     .push(target.1);
             }
 
+            let modulation_routing_params = modulation_routing_param_indices(desc);
+
             let params: Vec<Rc<RefCell<Value>>> = desc
                 .params
                 .iter()
@@ -5305,7 +5319,7 @@ pub(crate) fn build_effects_value(
                             pdesc.host_control,
                             Some(sequencer::effects::HostControl::FxSidechain { .. })
                         ))
-                        || is_mod_param(&pdesc.name)
+                        || modulation_routing_params.contains(&param_idx)
                         || is_generated_host_mod_param(&pdesc.name)
                         || is_hidden_dgen_mod_param(&pdesc.name)
                     {
@@ -5646,10 +5660,6 @@ pub(crate) fn build_bus_effects_value_for_selection(
         depth_unit: Option<String>,
     }
 
-    fn is_mod_param(name: &str) -> bool {
-        name.starts_with("mod ")
-    }
-
     fn is_generated_host_mod_param(name: &str) -> bool {
         name.starts_with("__host_mod__")
     }
@@ -5889,6 +5899,8 @@ pub(crate) fn build_bus_effects_value_for_selection(
                             .push(target.1);
                     }
 
+                    let modulation_routing_params = modulation_routing_param_indices(desc);
+
                     let params: Vec<Rc<RefCell<Value>>> = desc
                         .params
                         .iter()
@@ -5899,7 +5911,7 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                     pdesc.host_control,
                                     Some(sequencer::effects::HostControl::FxSidechain { .. })
                                 ))
-                                || is_mod_param(&pdesc.name)
+                                || modulation_routing_params.contains(&param_idx)
                                 || is_generated_host_mod_param(&pdesc.name)
                                 || is_hidden_dgen_mod_param(&pdesc.name)
                             {
@@ -11094,6 +11106,7 @@ mod tests {
             "metal-seq-fx/builtin/eq8.lisp",
             "metal-seq-fx/builtin/str8-delay.lisp",
             "metal-seq-fx/builtin/space-echo.lisp",
+            "metal-seq-fx/builtin/multiverb.lisp",
             "metal-seq-fx/builtin/dimension.lisp",
             "metal-seq-fx/builtin/phaser-flanger.lisp",
             "metal-seq-fx/builtin/roar.lisp",
@@ -15773,6 +15786,116 @@ mod tests {
             )),
             Value::Map(test_param_map("stereo width", 17, 0.7, 0.0, 1.0)),
         ]
+    }
+
+    fn test_multiverb_params() -> Vec<Value> {
+        let depth_start = 14
+            + sequencer::voice_modulator::SLOT_COUNT
+                * sequencer::voice_modulator::PARAM_SLOT_STRIDE;
+
+        fn mod_target(depth_idx: usize, source_slot: usize) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx as f64))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot as f64))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(0.0))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-1.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]))
+        }
+
+        fn modulatable_param(name: &str, idx: usize, value: f64, depth_start: usize) -> Value {
+            let mut param = test_param_map(name, idx, value, 0.0, 1.0);
+            param.insert(
+                "modulatable".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+            param.insert(
+                "mod-targets".to_string(),
+                Rc::new(RefCell::new(test_list(
+                    (0..sequencer::voice_modulator::SLOT_COUNT)
+                        .map(|slot| mod_target(depth_start + slot, slot + 1))
+                        .collect(),
+                ))),
+            );
+            Value::Map(param)
+        }
+
+        vec![
+            Value::Map(test_enum_param_map(
+                "mode",
+                0,
+                1.0,
+                vec!["plate", "hall", "quad", "mod"],
+            )),
+            modulatable_param("decay", 1, 0.55, depth_start),
+            modulatable_param("size", 2, 0.5, depth_start + 4),
+            Value::Map(test_param_map("predelay", 3, 0.0, 0.0, 250.0)),
+            Value::Map(test_param_map("damp", 4, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("bass", 5, 0.5, 0.0, 1.0)),
+            Value::Map(test_param_map("diffusion", 6, 0.7, 0.0, 1.0)),
+            Value::Map(test_param_map("mod rate", 7, 0.7, 0.05, 8.0)),
+            modulatable_param("mod depth", 8, 0.15, depth_start + 8),
+            Value::Map(test_param_map("mod shape", 9, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("era", 10, 0.15, 0.0, 1.0)),
+            Value::Map(test_param_map("width", 11, 1.0, 0.0, 1.0)),
+            modulatable_param("mix", 12, 0.35, depth_start + 12),
+            Value::Map(test_param_map("enabled", 13, 1.0, 0.0, 1.0)),
+        ]
+    }
+
+    fn test_multiverb_fx_map() -> HashMap<String, Rc<RefCell<Value>>> {
+        let mut fx = test_fx_map("Multiverb", 0, test_multiverb_params());
+        let source_labels = vec![
+            "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4",
+        ];
+        let sources = (0..sequencer::voice_modulator::SLOT_COUNT)
+            .map(|slot| {
+                let source_idx = 14 + slot * sequencer::voice_modulator::PARAM_SLOT_STRIDE;
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String(format!("Mod {}", slot + 1)))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number((slot + 1) as f64))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            &format!("mod{}_source", slot + 1),
+                            source_idx,
+                            0.0,
+                            source_labels.clone(),
+                        )))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![]))),
+                    ),
+                ]))
+            })
+            .collect();
+        fx.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(sources))),
+        );
+        fx
     }
 
     fn test_dimension_params() -> Vec<Value> {
@@ -34552,6 +34675,216 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_multiverb_layout_contains_modes_presets_and_live_knobs() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("bpm", Value::Number(120.0)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Multiverb".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_multiverb_fx_map())]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe Multiverb ui")
+            .expect("Multiverb ui probe value");
+        for text in [
+            "MULTIVERB",
+            "Plate",
+            "Hall",
+            "Quad",
+            "Mod",
+            "Gold Plate",
+            "224 Bloom",
+            "Xtal Wash",
+            "Seasick",
+            "MOTION / STEREO",
+        ] {
+            assert!(
+                value_contains_string(&ui_probe, text),
+                "Multiverb custom UI should contain {text:?}: {ui_probe:?}"
+            );
+        }
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Multiverb fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(160, 22);
+        let layout = editor.widget_layout().expect("Multiverb fx layout");
+        assert_finite_layout_tree(&layout);
+        let panel = find_layout_node_by_debug_name(&layout, "audio-fx-panel-root-0-Multiverb")
+            .expect("layout should contain the built-in Multiverb panel");
+        assert_finite_nonzero_rect(panel, "Multiverb panel");
+        for section_name in [
+            "multiverb-mode-section",
+            "multiverb-space-section",
+            "multiverb-tone-section",
+            "multiverb-motion-section",
+        ] {
+            let section = find_layout_node_by_debug_name(&layout, section_name)
+                .unwrap_or_else(|| panic!("Multiverb layout should contain {section_name}"));
+            assert_finite_nonzero_rect(section, section_name);
+            assert_layout_inside(section, panel, section_name);
+        }
+        for label in [
+            "Plate",
+            "Hall",
+            "Quad",
+            "Mod",
+            "Gold Plate",
+            "224 Bloom",
+            "Xtal Wash",
+            "Seasick",
+        ] {
+            let node = find_layout_node_by_text(&layout, label)
+                .unwrap_or_else(|| panic!("Multiverb layout should contain {label:?}"));
+            assert_finite_nonzero_rect(node, &format!("Multiverb {label}"));
+            assert_layout_inside(node, panel, &format!("Multiverb {label}"));
+        }
+        for (key, label) in [
+            ("multiverb-param-1-base", "decay knob"),
+            ("multiverb-param-2-base", "size knob"),
+            ("multiverb-param-8-base", "mod depth knob"),
+            ("multiverb-param-9-base", "mod shape knob"),
+        ] {
+            let wrapper = find_layout_node_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("Multiverb layout should contain {label}"));
+            let knob = find_layout_node_by_widget_type(wrapper, "knob-number")
+                .unwrap_or_else(|| panic!("Multiverb {label} should contain a knob-number"));
+            assert_finite_nonzero_rect(knob, &format!("Multiverb {label}"));
+            assert_layout_inside(knob, panel, &format!("Multiverb {label}"));
+        }
+        assert_eq!(
+            count_widget_type(&layout, "knob-number"),
+            12,
+            "Multiverb panel should render all twelve continuous controls"
+        );
+
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "rendering Multiverb should not author effect values"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(builtin-fx-multiverb-apply-preset (nth SEQ.effects 0) \"Xtal Wash\")")
+            .expect("apply Xtal Wash factory setting");
+        let mut writes = Vec::new();
+        let mut source_writes = Vec::new();
+        for command in editor.drain_host_commands() {
+            let eseqlisp::host::HostCommand::Custom { name, payload } = command else {
+                panic!("expected custom Multiverb factory command, got {command:?}");
+            };
+            let Value::Map(payload) = payload else {
+                panic!("{name} payload should be a map: {payload:?}");
+            };
+            let idx = payload
+                .get("param-idx")
+                .and_then(|value| match &*value.borrow() {
+                    Value::Number(value) => Some(*value as usize),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} payload should contain param-idx"));
+            if name == "set-effect-param" {
+                let value = payload
+                    .get("value")
+                    .and_then(|value| match &*value.borrow() {
+                        Value::Number(value) => Some(*value),
+                        _ => None,
+                    })
+                    .expect("set-effect-param payload should contain value");
+                writes.push((idx, value));
+            } else if name == "set-effect-param-option" {
+                let label = payload
+                    .get("label")
+                    .and_then(|value| match &*value.borrow() {
+                        Value::String(value) => Some(value.clone()),
+                        _ => None,
+                    })
+                    .expect("set-effect-param-option payload should contain label");
+                source_writes.push((idx, label));
+            } else {
+                panic!("unexpected Multiverb factory command {name:?}");
+            }
+        }
+        assert_eq!(writes.len(), 30, "Xtal Wash should reset all modulation depths, set 13 base controls, and assign one modulation depth");
+        let depth_start = 14
+            + sequencer::voice_modulator::SLOT_COUNT
+                * sequencer::voice_modulator::PARAM_SLOT_STRIDE;
+        for idx in depth_start..depth_start + 16 {
+            assert!(
+                writes.contains(&(idx, 0.0)),
+                "Xtal Wash should reset hidden modulation depth param {idx}: {writes:?}"
+            );
+        }
+        assert_eq!(
+            writes.last(),
+            Some(&(depth_start, 0.08)),
+            "Xtal Wash should route host modulator 1 to decay through descriptor metadata"
+        );
+        let expected_source_writes = (0..sequencer::voice_modulator::SLOT_COUNT)
+            .map(|slot| {
+                (
+                    14 + slot * sequencer::voice_modulator::PARAM_SLOT_STRIDE,
+                    "off".to_string(),
+                )
+            })
+            .chain(std::iter::once((14, "drift".to_string())))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_writes, expected_source_writes,
+            "Xtal Wash should reset every mod source, then enable a slow drift source for decay"
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_str8_delay_layout_contains_curve_and_offsets() {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -41534,6 +41867,154 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(labels, vec!["off".to_string(), "Track 2".to_string()]);
+    }
+
+    #[test]
+    fn effect_param_filter_uses_modulation_target_indices_not_names() {
+        fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow())
+        }
+
+        let desc = sequencer::effects::EffectDescriptor::builtin_multiverb();
+        let routing_indices = modulation_routing_param_indices(&desc);
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 43);
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+
+        let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
+        let Value::List(slots) = effects else {
+            panic!("effects value should be a list");
+        };
+        let first_slot = slots
+            .first()
+            .expect("Multiverb descriptor should produce an effect slot")
+            .borrow();
+        let sources = map_get(&first_slot, "sources").expect("Multiverb should expose mod sources");
+        let Value::List(sources) = &*sources else {
+            panic!("Multiverb mod sources should be a list: {sources:?}");
+        };
+        assert_eq!(sources.len(), sequencer::voice_modulator::SLOT_COUNT);
+        for (slot, source) in sources.iter().enumerate() {
+            let source = source.borrow();
+            let source_param = map_get(&source, "source-param").unwrap_or_else(|| {
+                panic!("Multiverb mod slot {} needs a source control", slot + 1)
+            });
+            let options = map_get(&source_param, "options")
+                .unwrap_or_else(|| panic!("Multiverb mod slot {} needs source options", slot + 1));
+            let Value::List(options) = &*options else {
+                panic!(
+                    "Multiverb mod slot {} source options should be a list: {options:?}",
+                    slot + 1
+                );
+            };
+            assert!(
+                options.iter().any(
+                    |option| matches!(&*option.borrow(), Value::String(label) if label == "lfo")
+                ),
+                "Multiverb mod slot {} should offer the standard LFO source",
+                slot + 1
+            );
+        }
+        let params = map_get(&first_slot, "params").expect("Multiverb should expose params");
+        let Value::List(params) = &*params else {
+            panic!("params should be a list: {params:?}");
+        };
+        let visible = params
+            .iter()
+            .map(|param| {
+                let param = param.borrow();
+                let name = map_get(&param, "name").expect("visible param should have a name");
+                let Value::String(name) = &*name else {
+                    panic!("param name should be a string: {name:?}");
+                };
+                name.clone()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            visible,
+            desc.params[..14]
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>(),
+            "sound-design params named `mod ...` must remain visible while routing params stay private"
+        );
+        assert!(visible.iter().any(|name| name == "mod rate"));
+        assert!(visible.iter().any(|name| name == "mod depth"));
+        assert!(visible.iter().any(|name| name == "mod shape"));
+        assert!(
+            routing_indices
+                .iter()
+                .all(|idx| !visible.contains(&desc.params[*idx].name)),
+            "modulation routing depth params must not appear as ordinary effect controls"
+        );
+
+        for name in ["decay", "size", "mod depth", "mix"] {
+            let param = params
+                .iter()
+                .find(|param| {
+                    map_get(&param.borrow(), "name")
+                        .map(|candidate| {
+                            matches!(&*candidate, Value::String(candidate) if candidate == name)
+                        })
+                        .unwrap_or(false)
+                })
+                .unwrap_or_else(|| panic!("Multiverb should expose {name:?}"))
+                .borrow();
+            let targets = map_get(&param, "mod-targets")
+                .unwrap_or_else(|| panic!("{name:?} should expose host modulation targets"));
+            let Value::List(targets) = &*targets else {
+                panic!("{name:?} mod targets should be a list: {targets:?}");
+            };
+            assert_eq!(targets.len(), sequencer::voice_modulator::SLOT_COUNT);
+        }
+
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        let bus = app
+            .buses
+            .first_mut()
+            .expect("test app should start with the mix bus");
+        bus.effect_descriptors = vec![desc.clone()];
+        bus.effect_slots = vec![sequencer::effects::EffectSlotSnapshot::new_default(
+            &desc, 44,
+        )];
+        let bus_effects = build_bus_effects_value_for_selection(&app, None);
+        let Value::List(buses) = bus_effects else {
+            panic!("bus effects value should be a list");
+        };
+        let mix_bus = buses.first().expect("mix bus should be present").borrow();
+        let Value::List(slots) = &*mix_bus else {
+            panic!("mix bus effects should be a slot list: {mix_bus:?}");
+        };
+        let multiverb = slots
+            .first()
+            .expect("bus Multiverb slot should be present")
+            .borrow();
+        let params = map_get(&multiverb, "params").expect("bus Multiverb should expose params");
+        let Value::List(params) = &*params else {
+            panic!("bus Multiverb params should be a list: {params:?}");
+        };
+        let bus_visible = params
+            .iter()
+            .map(|param| {
+                let param = param.borrow();
+                let name = map_get(&param, "name").expect("visible bus param should have a name");
+                let Value::String(name) = &*name else {
+                    panic!("bus param name should be a string: {name:?}");
+                };
+                name.clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bus_visible, visible,
+            "track and bus effect panels must use the same descriptor-indexed routing filter"
+        );
     }
 
     #[test]

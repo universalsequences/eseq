@@ -1456,6 +1456,10 @@ impl App {
                 crate::reverb::reverb_vtable(),
                 crate::reverb::REVERB_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Multiverb" => (
+                crate::multiverb::multiverb_vtable(),
+                crate::multiverb::MULTIVERB_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             "444 Compressor" | "Glue Compressor" => (
                 crate::dynamics::dynamics_vtable(),
                 crate::dynamics::DYNAMICS_STATE_SIZE * std::mem::size_of::<f32>(),
