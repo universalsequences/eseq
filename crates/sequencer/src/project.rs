@@ -103,6 +103,7 @@ pub enum ProjectMacroCurve {
     Linear,
     Exp,
     Log,
+    LogDomain,
 }
 
 fn default_next_macro_id() -> u32 {
@@ -125,6 +126,7 @@ impl From<&Macro> for ProjectMacro {
             mappings: value
                 .mappings
                 .iter()
+                .filter(|_| matches!(value.kind, MacroKind::Mapped))
                 .map(ProjectMacroMapping::from)
                 .collect(),
         }
@@ -187,6 +189,7 @@ impl From<MacroCurve> for ProjectMacroCurve {
             MacroCurve::Linear => Self::Linear,
             MacroCurve::Exp => Self::Exp,
             MacroCurve::Log => Self::Log,
+            MacroCurve::LogDomain => Self::LogDomain,
         }
     }
 }
@@ -197,6 +200,7 @@ impl From<ProjectMacroCurve> for MacroCurve {
             ProjectMacroCurve::Linear => Self::Linear,
             ProjectMacroCurve::Exp => Self::Exp,
             ProjectMacroCurve::Log => Self::Log,
+            ProjectMacroCurve::LogDomain => Self::LogDomain,
         }
     }
 }
@@ -2367,6 +2371,39 @@ mod tests {
         let macro_definition = Macro::try_from(restored.macros[0].clone()).expect("valid macro");
         assert_eq!(macro_definition.id, 7);
         assert_eq!(macro_definition.mappings[0].curve, MacroCurve::Exp);
+    }
+
+    #[test]
+    fn scene_macro_persistence_excludes_transient_diff_mappings() {
+        let mut definition = Macro::new(
+            9,
+            "Scene Push",
+            MacroKind::Scene(SceneMacroConfig {
+                target_scene: 2,
+                morph_params: true,
+                steal_patterns: true,
+                quantize: StealQuantize::Bar,
+                track_mask: Some(vec![true, false]),
+            }),
+        );
+        definition.mappings.push(
+            MacroMapping::new(
+                0,
+                crate::process::ParamTarget::EffectParam {
+                    slot: 0,
+                    effect: "filter".to_string(),
+                    param: "cutoff".to_string(),
+                    param_id: None,
+                },
+                100.0,
+                1_000.0,
+                MacroCurve::LogDomain,
+            )
+            .unwrap(),
+        );
+        let persisted = ProjectMacro::from(&definition);
+        assert!(persisted.mappings.is_empty());
+        assert!(matches!(persisted.kind, ProjectMacroKind::Scene(_)));
     }
 
     #[test]

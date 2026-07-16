@@ -10,6 +10,149 @@ use super::command::{apply_command, AppCommand};
 use super::draw::rect_contains;
 use super::{App, EffectPaneEntry, EffectTab, InputMode, ParamMouseDragTarget};
 
+const SCENE_MACRO_DIFF_EPSILON: f32 = 1.0e-5;
+
+fn scene_macro_launch_quantize(
+    quantize: crate::macro_engine::StealQuantize,
+) -> crate::quantized_launch::LaunchQuantize {
+    match quantize {
+        crate::macro_engine::StealQuantize::Off => crate::quantized_launch::LaunchQuantize::Off,
+        crate::macro_engine::StealQuantize::Sixteenth => {
+            crate::quantized_launch::LaunchQuantize::Sixteenth
+        }
+        crate::macro_engine::StealQuantize::Bar => crate::quantized_launch::LaunchQuantize::Bar,
+    }
+}
+
+fn scene_macro_launch_target(
+    config: &crate::macro_engine::SceneMacroConfig,
+) -> crate::quantized_launch::PatternLaunchTarget {
+    scene_macro_launch_target_for_scene(config, config.target_scene)
+}
+
+fn scene_macro_launch_target_for_scene(
+    config: &crate::macro_engine::SceneMacroConfig,
+    scene: usize,
+) -> crate::quantized_launch::PatternLaunchTarget {
+    match &config.track_mask {
+        None => crate::quantized_launch::PatternLaunchTarget::Scene { scene },
+        Some(mask) => crate::quantized_launch::PatternLaunchTarget::SceneTracks {
+            scene,
+            tracks: mask
+                .iter()
+                .enumerate()
+                .filter_map(|(track, enabled)| enabled.then_some(track))
+                .collect(),
+        },
+    }
+}
+
+fn scene_macro_curve(param: &crate::effects::ParamDescriptor) -> crate::macro_engine::MacroCurve {
+    match param.scaling {
+        crate::effects::ParamScaling::Linear => crate::macro_engine::MacroCurve::Linear,
+        crate::effects::ParamScaling::Exponential => crate::macro_engine::MacroCurve::LogDomain,
+    }
+}
+
+fn scene_values_differ(param: &crate::effects::ParamDescriptor, base: f32, target: f32) -> bool {
+    (param.normalize(base) - param.normalize(target)).abs() > SCENE_MACRO_DIFF_EPSILON
+}
+
+fn append_scene_instrument_mappings(
+    app: &App,
+    track: usize,
+    target: &crate::sequencer::TrackPatternData,
+    mappings: &mut Vec<crate::macro_engine::MacroMapping>,
+) {
+    let (Some(descriptor), Some(live_slot)) = (
+        app.graph.instrument_descriptors.get(track),
+        app.state.pattern.instrument_slots.get(track),
+    ) else {
+        return;
+    };
+    if live_slot.node_id.load(Ordering::Relaxed) != target.instrument_slot.node_id {
+        return;
+    }
+    for (param_idx, param) in descriptor.params.iter().enumerate() {
+        let Some(&target_value) = target.instrument_slot.defaults.get(param_idx) else {
+            continue;
+        };
+        let base = live_slot.defaults.get(param_idx);
+        if !scene_values_differ(param, base, target_value) {
+            continue;
+        }
+        let target = crate::process::ParamTarget::InstrumentParam {
+            param: param.name.clone(),
+            param_id: live_slot.param_node_id(param_idx),
+        };
+        if let Ok(mapping) = crate::macro_engine::MacroMapping::new_resolved(
+            track,
+            target,
+            Some(param_idx),
+            base,
+            target_value,
+            scene_macro_curve(param),
+        ) {
+            mappings.push(mapping);
+        }
+    }
+}
+
+fn append_scene_effect_mappings(
+    app: &App,
+    track: usize,
+    target: &crate::sequencer::TrackPatternData,
+    mappings: &mut Vec<crate::macro_engine::MacroMapping>,
+) {
+    for (slot_idx, descriptor) in app
+        .graph
+        .effect_descriptors
+        .get(track)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let (Some(live_slot), Some(target_slot)) = (
+            app.state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx)),
+            target.effect_slots.get(slot_idx),
+        ) else {
+            continue;
+        };
+        if live_slot.node_id.load(Ordering::Relaxed) != target_slot.node_id {
+            continue;
+        }
+        for (param_idx, param) in descriptor.params.iter().enumerate() {
+            let Some(&target_value) = target_slot.defaults.get(param_idx) else {
+                continue;
+            };
+            let base = live_slot.defaults.get(param_idx);
+            if !scene_values_differ(param, base, target_value) {
+                continue;
+            }
+            let target = crate::process::ParamTarget::EffectParam {
+                slot: slot_idx,
+                effect: descriptor.name.clone(),
+                param: param.name.clone(),
+                param_id: live_slot.param_node_id(param_idx),
+            };
+            if let Ok(mapping) = crate::macro_engine::MacroMapping::new_resolved(
+                track,
+                target,
+                Some(param_idx),
+                base,
+                target_value,
+                scene_macro_curve(param),
+            ) {
+                mappings.push(mapping);
+            }
+        }
+    }
+}
+
 impl App {
     pub(super) fn effect_pane_entries(&self) -> Vec<EffectPaneEntry> {
         let mut entries = Vec::new();
@@ -582,13 +725,127 @@ impl App {
     /// Phase 2 commands call this entry point rather than mutating the engine
     /// directly so both engagement and release reach the DSP immediately.
     pub fn set_macro_value(&mut self, id: crate::macro_engine::MacroId, value: f32) {
-        let touched = self.macro_engine.set_value(id, value);
+        let scene_config = self.macro_engine.scene_config(id).cloned();
+        let touched = if let Some(config) = scene_config {
+            if value > 0.0 && !self.macro_engine.is_engaged(id) {
+                self.engage_scene_macro(id, &config, value)
+            } else if self.macro_engine.is_engaged(id) {
+                self.macro_engine.set_value(id, value)
+            } else {
+                Vec::new()
+            }
+        } else {
+            self.macro_engine.set_value(id, value)
+        };
         self.send_macro_targets(touched);
     }
 
     pub fn release_macro(&mut self, id: crate::macro_engine::MacroId) {
-        let touched = self.macro_engine.release(id);
+        let defer_release =
+            self.macro_engine.scene_config(id).is_some() && self.release_scene_macro_patterns(id);
+        let touched = if defer_release {
+            self.macro_engine.set_value(id, 0.0)
+        } else {
+            self.macro_engine.release(id)
+        };
         self.send_macro_targets(touched);
+    }
+
+    fn engage_scene_macro(
+        &mut self,
+        id: crate::macro_engine::MacroId,
+        config: &crate::macro_engine::SceneMacroConfig,
+        value: f32,
+    ) -> Vec<(usize, crate::process::ParamTarget)> {
+        if config.target_scene >= self.state.scene_count() {
+            return Vec::new();
+        }
+        let mappings = self.scene_macro_mappings(config);
+        let touched = self
+            .macro_engine
+            .engage_scene(id, mappings, value)
+            .unwrap_or_default();
+        let mut runtime = super::SceneMacroRuntime {
+            origin_scene: self.state.current_scene_index(),
+            target_token: None,
+            return_token: None,
+            target_applied: config.target_scene == self.state.current_scene_index(),
+        };
+        if config.steal_patterns && config.target_scene != runtime.origin_scene {
+            let target = scene_macro_launch_target(config);
+            let quantize = scene_macro_launch_quantize(config.quantize);
+            runtime.target_token = self
+                .state
+                .schedule_quantized_pattern_launch(
+                    target,
+                    quantize,
+                    crate::quantized_launch::QuantizedLaunchOwner::SceneMacro(id),
+                )
+                .ok();
+        }
+        self.scene_macro_runtime.insert(id, runtime);
+        touched
+    }
+
+    fn release_scene_macro_patterns(&mut self, id: crate::macro_engine::MacroId) -> bool {
+        let owner = crate::quantized_launch::QuantizedLaunchOwner::SceneMacro(id);
+        let _ = self.state.quantized_launches().cancel_owner(owner);
+        let Some(mut runtime) = self.scene_macro_runtime.remove(&id) else {
+            return false;
+        };
+        if !runtime.target_applied || runtime.origin_scene == self.state.current_scene_index() {
+            return false;
+        }
+        let Some(config) = self.macro_engine.scene_config(id).cloned() else {
+            return false;
+        };
+        runtime.return_token = self
+            .state
+            .schedule_quantized_pattern_launch(
+                scene_macro_launch_target_for_scene(&config, runtime.origin_scene),
+                scene_macro_launch_quantize(config.quantize),
+                owner,
+            )
+            .ok();
+        let scheduled = runtime.return_token.is_some();
+        self.scene_macro_runtime.insert(id, runtime);
+        scheduled
+    }
+
+    pub(super) fn cancel_scene_macro(&mut self, id: crate::macro_engine::MacroId) {
+        let _ = self.state.quantized_launches().cancel_owner(
+            crate::quantized_launch::QuantizedLaunchOwner::SceneMacro(id),
+        );
+        self.scene_macro_runtime.remove(&id);
+    }
+
+    fn scene_macro_mappings(
+        &self,
+        config: &crate::macro_engine::SceneMacroConfig,
+    ) -> Vec<crate::macro_engine::MacroMapping> {
+        if !config.morph_params {
+            return Vec::new();
+        }
+        let mut mappings = Vec::new();
+        for track in 0..self.tracks.len() {
+            if config
+                .track_mask
+                .as_ref()
+                .is_some_and(|mask| !mask.get(track).copied().unwrap_or(false))
+            {
+                continue;
+            }
+            self.state
+                .with_scene_track_pattern(config.target_scene, track, |target| {
+                    append_scene_instrument_mappings(self, track, target, &mut mappings);
+                    append_scene_effect_mappings(self, track, target, &mut mappings);
+                });
+        }
+        mappings
+    }
+
+    pub fn scene_macro_diff_count(&self, config: &crate::macro_engine::SceneMacroConfig) -> usize {
+        self.scene_macro_mappings(config).len()
     }
 
     pub(super) fn send_macro_targets(

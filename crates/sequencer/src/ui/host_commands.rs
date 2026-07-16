@@ -37,6 +37,8 @@ pub(crate) fn handle_macro_host_command(
         name,
         "macro-create"
             | "macro-ensure"
+            | "macro-create-scene"
+            | "macro-scene-config"
             | "macro-delete"
             | "macro-rename"
             | "macro-set-value"
@@ -59,6 +61,60 @@ pub(crate) fn handle_macro_host_command(
                 return Ignored;
             };
             tui::AppCommand::MacroCreate { name }
+        }
+        "macro-create-scene" => {
+            let (Some(name), Some(target_scene)) =
+                (map_string(map, "name"), map_usize(map, "target-scene"))
+            else {
+                return Ignored;
+            };
+            tui::AppCommand::MacroCreateScene { name, target_scene }
+        }
+        "macro-scene-config" => {
+            let Some(id) = map_u32(map, "id") else {
+                return Ignored;
+            };
+            let Some(existing) = app.macro_engine.scene_config(id).cloned() else {
+                return Ignored;
+            };
+            let quantize = map_string(map, "quantize")
+                .map(|value| match value.as_str() {
+                    "off" => sequencer::macro_engine::StealQuantize::Off,
+                    "sixteenth" | "1/16" => sequencer::macro_engine::StealQuantize::Sixteenth,
+                    _ => sequencer::macro_engine::StealQuantize::Bar,
+                })
+                .unwrap_or(existing.quantize);
+            let bool_value = |key: &str, fallback: bool| {
+                map.get(key)
+                    .and_then(|cell| match &*cell.borrow() {
+                        Value::Bool(value) => Some(*value),
+                        _ => None,
+                    })
+                    .unwrap_or(fallback)
+            };
+            let track_mask = map
+                .get("track-mask")
+                .and_then(|cell| match &*cell.borrow() {
+                    Value::Nil => Some(None),
+                    Value::List(items) => Some(Some(
+                        items
+                            .iter()
+                            .map(|item| matches!(&*item.borrow(), Value::Bool(true)))
+                            .collect(),
+                    )),
+                    _ => None,
+                })
+                .unwrap_or(existing.track_mask);
+            tui::AppCommand::MacroSceneConfig {
+                id,
+                config: sequencer::macro_engine::SceneMacroConfig {
+                    target_scene: map_usize(map, "target-scene").unwrap_or(existing.target_scene),
+                    morph_params: bool_value("morph-params", existing.morph_params),
+                    steal_patterns: bool_value("steal-patterns", existing.steal_patterns),
+                    quantize,
+                    track_mask,
+                },
+            }
         }
         "macro-ensure" => {
             let (Some(key), Some(name)) = (map_string(map, "key"), map_string(map, "name")) else {

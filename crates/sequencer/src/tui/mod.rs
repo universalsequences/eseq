@@ -810,6 +810,7 @@ pub struct UiState {
 pub struct App {
     pub state: Arc<SequencerState>,
     pub macro_engine: crate::macro_engine::MacroEngine,
+    scene_macro_runtime: HashMap<crate::macro_engine::MacroId, SceneMacroRuntime>,
     pub tracks: Vec<String>,
     pub track_colors: Vec<TrackColor>,
     pub track_collapsed: Vec<bool>,
@@ -840,6 +841,14 @@ pub struct PatternLaunchOutcome {
     /// Non-transactional graph repair failures are reported without hiding
     /// the fact that project state was successfully launched.
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SceneMacroRuntime {
+    origin_scene: usize,
+    target_token: Option<crate::quantized_launch::QuantizedLaunchToken>,
+    return_token: Option<crate::quantized_launch::QuantizedLaunchToken>,
+    target_applied: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -939,6 +948,9 @@ impl App {
         target: &PatternLaunchTarget,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
         let _ = self.state.quantized_launches().cancel_all();
+        self.scene_macro_runtime.clear();
+        let touched = self.macro_engine.release_all_scene_macros();
+        self.send_macro_targets(touched);
         self.apply_pattern_launch(target)
     }
 
@@ -949,11 +961,42 @@ impl App {
         due.into_iter()
             .map(|DuePatternLaunch { token, target }| {
                 self.apply_pattern_launch(&target).map(|mut outcome| {
+                    self.note_scene_macro_launch_applied(token);
                     outcome.token = Some(token);
                     outcome
                 })
             })
             .collect()
+    }
+
+    fn note_scene_macro_launch_applied(
+        &mut self,
+        token: crate::quantized_launch::QuantizedLaunchToken,
+    ) {
+        let mut completed_return = None;
+        for (id, runtime) in &mut self.scene_macro_runtime {
+            if runtime.target_token == Some(token) {
+                runtime.target_token = None;
+                runtime.target_applied = true;
+            }
+            if runtime.return_token == Some(token) {
+                completed_return = Some(*id);
+            }
+        }
+        if let Some(id) = completed_return {
+            self.scene_macro_runtime.remove(&id);
+            let touched = self.macro_engine.release(id);
+            self.send_macro_targets(touched);
+        }
+    }
+
+    pub fn handle_scene_deleted(&mut self, deleted: usize) {
+        let _ = self.state.quantized_launches().cancel_all();
+        self.scene_macro_runtime.clear();
+        let touched = self.macro_engine.release_all_scene_macros();
+        self.macro_engine
+            .remap_scene_targets_after_delete(deleted, self.state.scene_count());
+        self.send_macro_targets(touched);
     }
 
     pub fn next_track_color(&self) -> TrackColor {
@@ -1352,6 +1395,7 @@ impl App {
         let mut app = Self {
             state,
             macro_engine: crate::macro_engine::MacroEngine::default(),
+            scene_macro_runtime: HashMap::new(),
             tracks: Vec::new(),
             track_colors: Vec::new(),
             track_collapsed: Vec::new(),

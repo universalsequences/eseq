@@ -14,6 +14,9 @@
     (filter |macro| (= (get macro :key) (macro-key-string key)) SEQ.macros)
     0))
 
+(def macro-by-id (id)
+  (nth (filter |macro| (= (get macro :id) id) SEQ.macros) 0))
+
 (def macro-id-for-key (key)
   (let ((macro (macro-by-key key)))
     (if macro (get macro :id) -1)))
@@ -235,3 +238,85 @@
       :background-color (if active (rgba 0.27 0.78 0.43 1.0) :mixer-control-bg)
       :color (if active :black :dim)
       :on-click (lambda (event) (macro-toggle-mapping-arm key)))))
+
+(def scene-macro-options ()
+  (map |scene| (str "Scene " (+ scene 1)) (range 0 SEQ.num-patterns)))
+
+(def scene-macro-option-index (label)
+  (reduce |found scene|
+    (if (= label (str "Scene " (+ scene 1))) scene found)
+    0
+    (range 0 SEQ.num-patterns)))
+
+(def scene-macro-track-mask-with (macro selected value)
+  (let ((mask (get macro :track-mask)))
+    (map |track|
+      (if (= track selected)
+        value
+        (if mask (nth mask track) true))
+      (range 0 (len SEQ.track-names)))))
+
+(def scene-macro-config (macro fields)
+  (host-command "macro-scene-config" (merge (dict :id (get macro :id)) fields)))
+
+;; Reusable scene-macro surface addressed by its stable numeric MacroId.
+(def scene-macro-controls (_macro id)
+  (let ((macro (macro-by-id id)))
+    (box :debug-name "scene-macro-controls" :width :fill :padding 0.55
+         :background-color :buffer-bg
+      (if macro
+        (v-stack :width :fill :gap 0.35
+          (h-stack :width :fill :gap 0.5 :align :center
+            (label (str "PUSH · SCENE " (+ (get macro :target-scene) 1))
+              :debug-name "scene-macro-title" :width 12 :font-size 10
+              :color :foreground :bg :transparent)
+            (dropdown :debug-name "scene-macro-target"
+              :value (nth (scene-macro-options) (get macro :target-scene))
+              :options (scene-macro-options) :width 10.0 :height 1.0
+              :on-change (lambda (label)
+                (scene-macro-config macro (dict :target-scene
+                  (scene-macro-option-index label))))))
+          (h-stack :gap 0.6 :align :center
+            (knob-number :debug-name "scene-macro-knob"
+              :label (get macro :name) :value (get macro :value)
+              :min 0 :max 1 :decimals 2 :width 7.0 :height 3.0 :knob-size 2.2
+              :on-change (lambda (value)
+                (host-command "macro-set-value" (dict :id (get macro :id) :value value))))
+            (button "hold" :debug-name "scene-macro-momentary"
+              :width 4.8 :height 1.0 :active (> (get macro :value) 0.999)
+              :on-press (lambda (event)
+                (host-command "macro-set-value" (dict :id (get macro :id) :value 1.0)))
+              :on-release (lambda (event)
+                (host-command "macro-release" (dict :id (get macro :id)))))
+            (label (str "diff: " (get macro :diff-count) " params")
+              :debug-name "scene-macro-diff" :width 10 :font-size 8
+              :color :dim :bg :transparent))
+          (h-stack :gap 0.45 :align :center
+            (label "params" :width 4 :font-size 8 :color :dim :bg :transparent)
+            (toggle :debug-name "scene-macro-morph-params"
+              :value (get macro :morph-params)
+              :on-change (lambda (value)
+                (scene-macro-config macro (dict :morph-params value))))
+            (label "patterns" :width 5 :font-size 8 :color :dim :bg :transparent)
+            (toggle :debug-name "scene-macro-steal-patterns"
+              :value (get macro :steal-patterns)
+              :on-change (lambda (value)
+                (scene-macro-config macro (dict :steal-patterns value))))
+            (dropdown :debug-name "scene-macro-quantize"
+              :value (get macro :quantize) :options '("off" "sixteenth" "bar")
+              :width 6.5 :height 1.0
+              :on-change (lambda (value)
+                (scene-macro-config macro (dict :quantize value)))))
+          (h-stack :debug-name "scene-macro-track-mask" :gap 0.3 :align :center
+            (label "tracks" :width 4 :font-size 8 :color :dim :bg :transparent)
+            (each (range 0 (len SEQ.track-names)) |track|
+              (h-stack :gap 0.1 :align :center
+                (toggle :value (if (get macro :track-mask)
+                                  (nth (get macro :track-mask) track) true)
+                  :on-change (lambda (value)
+                    (scene-macro-config macro (dict :track-mask
+                      (scene-macro-track-mask-with macro track value)))))
+                (label (str (+ track 1)) :width 1.2 :font-size 8
+                  :color :dim :bg :transparent)))))
+        (label "Scene macro unavailable" :debug-name "scene-macro-missing"
+          :width 14 :font-size 9 :color :dim :bg :transparent)))))

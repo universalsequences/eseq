@@ -846,6 +846,7 @@ impl App {
                         }
                         PatternBtn::Delete => {
                             let num_tracks = self.tracks.len();
+                            let deleted_scene = self.state.current_scene_index();
                             if let Some(sample_ids) = self.state.delete_pattern(
                                 num_tracks,
                                 &self.graph.track_buffer_ids,
@@ -853,6 +854,7 @@ impl App {
                                 &self.tracks,
                                 &self.graph.track_instrument_types,
                             ) {
+                                self.handle_scene_deleted(deleted_scene);
                                 self.graph_controller().apply_sample_ids(&sample_ids);
                                 if let Err(error) = self
                                     .graph_controller()

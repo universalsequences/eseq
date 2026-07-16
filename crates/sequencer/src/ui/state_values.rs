@@ -756,6 +756,7 @@ pub(crate) fn build_macros_value(app: &tui::App) -> Value {
                     sequencer::macro_engine::MacroCurve::Linear => "linear",
                     sequencer::macro_engine::MacroCurve::Exp => "exp",
                     sequencer::macro_engine::MacroCurve::Log => "log",
+                    sequencer::macro_engine::MacroCurve::LogDomain => "log-domain",
                 };
                 map_value([
                     ("mapping-idx", Value::Number(mapping_idx as f64)),
@@ -801,6 +802,31 @@ pub(crate) fn build_macros_value(app: &tui::App) -> Value {
                 ])
             },
         ));
+        let (target_scene, morph_params, steal_patterns, quantize, track_mask, diff_count) =
+            match &macro_definition.kind {
+                sequencer::macro_engine::MacroKind::Mapped => {
+                    (Value::Nil, Value::Nil, Value::Nil, Value::Nil, Value::Nil, Value::Nil)
+                }
+                sequencer::macro_engine::MacroKind::Scene(config) => (
+                    Value::Number(config.target_scene as f64),
+                    Value::Bool(config.morph_params),
+                    Value::Bool(config.steal_patterns),
+                    Value::String(
+                        match config.quantize {
+                            sequencer::macro_engine::StealQuantize::Off => "off",
+                            sequencer::macro_engine::StealQuantize::Sixteenth => "sixteenth",
+                            sequencer::macro_engine::StealQuantize::Bar => "bar",
+                        }
+                        .to_string(),
+                    ),
+                    config
+                        .track_mask
+                        .as_ref()
+                        .map(|mask| list_value(mask.iter().copied().map(Value::Bool)))
+                        .unwrap_or(Value::Nil),
+                    Value::Number(app.scene_macro_diff_count(config) as f64),
+                ),
+            };
         map_value([
             ("id", Value::Number(macro_definition.id as f64)),
             (
@@ -815,6 +841,12 @@ pub(crate) fn build_macros_value(app: &tui::App) -> Value {
             ("kind", Value::String(kind.to_string())),
             ("value", Value::Number(macro_definition.value as f64)),
             ("mappings", mappings),
+            ("target-scene", target_scene),
+            ("morph-params", morph_params),
+            ("steal-patterns", steal_patterns),
+            ("quantize", quantize),
+            ("track-mask", track_mask),
+            ("diff-count", diff_count),
         ])
     }))
 }
@@ -18686,6 +18718,71 @@ mod tests {
                 if name == "macro-set-curve"
                     && matches!(payload.get("curve").map(|value| value.borrow().clone()), Some(Value::String(value)) if value == "log")
         ));
+    }
+
+    #[test]
+    fn scene_macro_controls_have_visible_nonzero_layout() {
+        let mut app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::builtin_sampler(),
+        );
+        let id = app
+            .macro_engine
+            .create_macro(
+                "Scene Push",
+                sequencer::macro_engine::MacroKind::Scene(
+                    sequencer::macro_engine::SceneMacroConfig {
+                        target_scene: 0,
+                        morph_params: true,
+                        steal_patterns: false,
+                        quantize: sequencer::macro_engine::StealQuantize::Bar,
+                        track_mask: None,
+                    },
+                ),
+            )
+            .expect("scene macro");
+        let mut editor = full_grid_editor_for_scroll_tests();
+        sync_macro_state(editor.runtime_mut(), &app);
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(effect-buffer \"*scene-macro-test*\" (scene-macro-controls :macro {id}))"
+            ))
+            .expect("create scene macro controls");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(set-layout (list :buf "*scene-macro-test*" :hide-status true :min-width 32))"#,
+            )
+            .expect("isolate scene macro controls");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*scene-macro-test*")
+            .expect("scene macro buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(80, 24);
+        let layout = editor.widget_layout().expect("scene macro layout");
+        assert_finite_layout_tree(&layout);
+        for (name, label) in [
+            ("scene-macro-controls", "controls"),
+            ("scene-macro-title", "title"),
+            ("scene-macro-target", "target"),
+            ("scene-macro-knob", "knob"),
+            ("scene-macro-momentary", "momentary"),
+            ("scene-macro-morph-params", "params toggle"),
+            ("scene-macro-steal-patterns", "patterns toggle"),
+            ("scene-macro-quantize", "quantize"),
+            ("scene-macro-track-mask", "track mask"),
+            ("scene-macro-diff", "diff readout"),
+        ] {
+            let node = find_layout_node_by_debug_name(&layout, name)
+                .unwrap_or_else(|| panic!("missing scene macro {label}"));
+            assert_finite_nonzero_rect(node, label);
+        }
     }
 
     #[test]

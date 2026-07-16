@@ -3232,6 +3232,20 @@ impl SequencerState {
         self.pattern.scenes.lock().unwrap().scene_count()
     }
 
+    /// Reads one scene track in place without cloning the complete pattern.
+    pub fn with_scene_track_pattern<R>(
+        &self,
+        scene: usize,
+        track: usize,
+        read: impl FnOnce(&TrackPatternData) -> R,
+    ) -> Option<R> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let scene = scenes.scenes.get(scene)?;
+        let pattern_id = scene.cells.get(track).copied().flatten()?;
+        let pattern = scenes.track_pools.get(track)?.get(pattern_id)?;
+        Some(read(pattern))
+    }
+
     pub fn pattern_repository_len(&self) -> usize {
         self.scene_count()
     }

@@ -19,6 +19,9 @@ pub enum MacroCurve {
     Linear,
     Exp,
     Log,
+    /// Interpolate positive stored values in descriptor/log space. Scene
+    /// macros synthesize this curve for exponential parameters.
+    LogDomain,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -255,6 +258,7 @@ pub enum MacroEngineError {
     UnsupportedTarget,
     NonFiniteValue,
     NonFiniteRange,
+    NotSceneMacro(MacroId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -396,6 +400,75 @@ impl MacroEngine {
         };
         macro_definition.name = name.into();
         Ok(())
+    }
+
+    pub fn set_scene_config(
+        &mut self,
+        id: MacroId,
+        config: SceneMacroConfig,
+    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+        let Some(definition) = self.macros.iter_mut().find(|item| item.id == id) else {
+            return Err(MacroEngineError::UnknownMacro(id));
+        };
+        if !matches!(definition.kind, MacroKind::Scene(_)) {
+            return Err(MacroEngineError::NotSceneMacro(id));
+        }
+        let touched = definition
+            .mappings
+            .iter()
+            .filter_map(mapping_touch)
+            .collect();
+        definition.kind = MacroKind::Scene(config);
+        definition.mappings.clear();
+        definition.value = 0.0;
+        definition.last_write_order = None;
+        self.rebuild_ownership();
+        Ok(touched)
+    }
+
+    /// Installs the transient diff synthesized at scene-macro engagement.
+    /// Targets already owned by another macro are skipped as specified by the
+    /// later-writer scene-macro rule; these mappings are never persisted.
+    pub fn engage_scene(
+        &mut self,
+        id: MacroId,
+        mappings: Vec<MacroMapping>,
+        value: f32,
+    ) -> Result<Vec<(usize, ParamTarget)>, MacroEngineError> {
+        let Some(index) = self.macros.iter().position(|item| item.id == id) else {
+            return Err(MacroEngineError::UnknownMacro(id));
+        };
+        if !matches!(self.macros[index].kind, MacroKind::Scene(_)) {
+            return Err(MacroEngineError::NotSceneMacro(id));
+        }
+        let accepted = mappings
+            .into_iter()
+            .filter(|mapping| {
+                mapping
+                    .resolved_key
+                    .as_ref()
+                    .is_none_or(|key| self.mapping_owner(key).is_none_or(|owner| owner == id))
+            })
+            .collect::<Vec<_>>();
+        let previous = std::mem::take(&mut self.macros[index].mappings);
+        let mut touched = previous
+            .into_iter()
+            .filter_map(|mapping| mapping_touch(&mapping))
+            .collect::<Vec<_>>();
+        touched.extend(accepted.iter().filter_map(mapping_touch));
+        let write_order = self.allocate_write_order();
+        self.macros[index].mappings = accepted;
+        self.macros[index].value = value.clamp(0.0, 1.0);
+        self.macros[index].last_write_order = Some(write_order);
+        self.rebuild_ownership();
+        Ok(touched)
+    }
+
+    pub fn scene_config(&self, id: MacroId) -> Option<&SceneMacroConfig> {
+        match &self.macro_definition(id)?.kind {
+            MacroKind::Scene(config) => Some(config),
+            MacroKind::Mapped => None,
+        }
     }
 
     /// Deletes a macro and returns its targets so the App can re-send whichever
@@ -615,8 +688,37 @@ impl MacroEngine {
             .filter(|mapping| !mapping.suspended && mapping.resolved_key.is_some())
             .map(|mapping| (mapping.track, mapping.target.clone()))
             .collect();
+        if matches!(macro_definition.kind, MacroKind::Scene(_)) {
+            macro_definition.mappings.clear();
+        }
         self.rebuild_ownership();
         touched
+    }
+
+    pub fn release_all_scene_macros(&mut self) -> Vec<(usize, ParamTarget)> {
+        let ids = self
+            .macros
+            .iter()
+            .filter(|definition| matches!(definition.kind, MacroKind::Scene(_)))
+            .map(|definition| definition.id)
+            .collect::<Vec<_>>();
+        ids.into_iter().flat_map(|id| self.release(id)).collect()
+    }
+
+    pub fn remap_scene_targets_after_delete(&mut self, deleted: usize, scene_count: usize) {
+        let last = scene_count.saturating_sub(1);
+        for definition in &mut self.macros {
+            let MacroKind::Scene(config) = &mut definition.kind else {
+                continue;
+            };
+            config.target_scene = if config.target_scene > deleted {
+                config.target_scene - 1
+            } else if config.target_scene == deleted {
+                deleted.min(last)
+            } else {
+                config.target_scene.min(last)
+            };
+        }
     }
 
     fn allocate_write_order(&mut self) -> u64 {
@@ -752,6 +854,12 @@ pub fn lerp_curved(range_min: f32, range_max: f32, value: f32, curve: MacroCurve
         MacroCurve::Linear => t,
         MacroCurve::Exp => t * t,
         MacroCurve::Log => t.sqrt(),
+        MacroCurve::LogDomain => {
+            if range_min > 0.0 && range_max > 0.0 {
+                return (range_min.ln() + (range_max.ln() - range_min.ln()) * t).exp();
+            }
+            t
+        }
     };
     range_min + (range_max - range_min) * curved
 }
@@ -884,6 +992,74 @@ mod tests {
         assert_eq!(lerp_curved(0.0, 1.0, 0.5, MacroCurve::Linear), 0.5);
         assert_eq!(lerp_curved(0.0, 1.0, 0.5, MacroCurve::Exp), 0.25);
         assert!((lerp_curved(0.0, 1.0, 0.25, MacroCurve::Log) - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn log_domain_curve_interpolates_geometrically() {
+        assert!((lerp_curved(20.0, 20_000.0, 0.5, MacroCurve::LogDomain) - 632.4555).abs() < 0.1);
+    }
+
+    #[test]
+    fn scene_mappings_are_transient_and_discarded_on_release() {
+        let mut engine = MacroEngine::default();
+        let id = engine
+            .create_macro(
+                "scene push",
+                MacroKind::Scene(SceneMacroConfig {
+                    target_scene: 1,
+                    morph_params: true,
+                    steal_patterns: false,
+                    quantize: StealQuantize::Bar,
+                    track_mask: None,
+                }),
+            )
+            .unwrap();
+        let mapping = MacroMapping::new_resolved(
+            0,
+            effect_target(88),
+            Some(0),
+            20.0,
+            20_000.0,
+            MacroCurve::LogDomain,
+        )
+        .unwrap();
+        let touched = engine.engage_scene(id, vec![mapping], 0.5).unwrap();
+        assert_eq!(touched.len(), 1);
+        assert_eq!(engine.macro_definition(id).unwrap().mappings.len(), 1);
+        assert!((engine.override_value(&effect_key(88)).unwrap() - 632.4555).abs() < 0.1);
+
+        engine.release(id);
+        assert!(engine.macro_definition(id).unwrap().mappings.is_empty());
+        assert_eq!(engine.override_value(&effect_key(88)), None);
+    }
+
+    #[test]
+    fn scene_delete_remaps_and_clamps_scene_macro_targets() {
+        let mut engine = MacroEngine::default();
+        for target_scene in [0, 1, 3] {
+            engine
+                .create_macro(
+                    format!("scene {target_scene}"),
+                    MacroKind::Scene(SceneMacroConfig {
+                        target_scene,
+                        morph_params: true,
+                        steal_patterns: false,
+                        quantize: StealQuantize::Bar,
+                        track_mask: None,
+                    }),
+                )
+                .unwrap();
+        }
+        engine.remap_scene_targets_after_delete(1, 3);
+        let targets = engine
+            .macros()
+            .iter()
+            .map(|definition| match &definition.kind {
+                MacroKind::Scene(config) => config.target_scene,
+                MacroKind::Mapped => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(targets, vec![0, 1, 2]);
     }
 
     #[test]

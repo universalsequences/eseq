@@ -711,6 +711,14 @@ pub enum AppCommand {
     MacroCreate {
         name: String,
     },
+    MacroCreateScene {
+        name: String,
+        target_scene: usize,
+    },
+    MacroSceneConfig {
+        id: MacroId,
+        config: crate::macro_engine::SceneMacroConfig,
+    },
     MacroEnsure {
         key: String,
         name: String,
@@ -1716,6 +1724,114 @@ mod tests {
     }
 
     #[test]
+    fn scene_macro_diffs_live_scene_values_and_restores_base_on_release() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc);
+        let capture = |app: &App| {
+            app.state.capture_current_pattern_snapshot(
+                1,
+                &[-1],
+                &[44_100],
+                &["Track 1".to_string()],
+                &[InstrumentType::Sampler],
+            )
+        };
+        app.state.pattern.effect_chains[0][0].defaults.set(0, 0.2);
+        let origin = capture(&app);
+        app.state.pattern.effect_chains[0][0].defaults.set(0, 0.8);
+        let target = capture(&app);
+        app.state
+            .replace_pattern_repository(vec![origin, target], 0);
+        app.state.restore_current_pattern_from_repository().unwrap();
+
+        let id = app
+            .macro_engine
+            .create_macro(
+                "scene morph",
+                MacroKind::Scene(crate::macro_engine::SceneMacroConfig {
+                    target_scene: 1,
+                    morph_params: true,
+                    steal_patterns: false,
+                    quantize: crate::macro_engine::StealQuantize::Off,
+                    track_mask: None,
+                }),
+            )
+            .unwrap();
+        app.set_macro_value(id, 0.5);
+        assert_eq!(
+            app.macro_engine
+                .macro_definition(id)
+                .unwrap()
+                .mappings
+                .len(),
+            1
+        );
+        assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.5).abs() < 1.0e-6);
+
+        app.release_macro(id);
+        assert!(app
+            .macro_engine
+            .macro_definition(id)
+            .unwrap()
+            .mappings
+            .is_empty());
+        assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.2).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scene_macro_steal_returns_only_after_target_launch_applies() {
+        let mut app = test_app_with_effect_descriptor(effect_mod_test_descriptor());
+        let first = app.state.capture_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        );
+        let mut second = first.clone();
+        second.track_bits[0][0] |= 1 << 3;
+        app.state.replace_pattern_repository(vec![first, second], 0);
+        app.state.restore_current_pattern_from_repository().unwrap();
+        let id = app
+            .macro_engine
+            .create_macro(
+                "pattern steal",
+                MacroKind::Scene(crate::macro_engine::SceneMacroConfig {
+                    target_scene: 1,
+                    morph_params: false,
+                    steal_patterns: true,
+                    quantize: crate::macro_engine::StealQuantize::Off,
+                    track_mask: None,
+                }),
+            )
+            .unwrap();
+        let mut pending = crate::quantized_launch::PendingQuantizedLaunches::default();
+
+        app.set_macro_value(id, 1.0);
+        assert_eq!(app.state.current_scene_index(), 0);
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 0.0, true);
+        let results = app.drain_due_pattern_launches();
+        assert!(results[0].is_ok());
+        assert_eq!(app.state.current_scene_index(), 1);
+
+        app.release_macro(id);
+        assert_eq!(
+            app.state.current_scene_index(),
+            1,
+            "return is scheduler-owned"
+        );
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 0.0, true);
+        let results = app.drain_due_pattern_launches();
+        assert!(results[0].is_ok());
+        assert_eq!(app.state.current_scene_index(), 0);
+        assert!(!app.macro_engine.is_engaged(id));
+    }
+
+    #[test]
     fn effect_depth_plock_command_updates_dgen_mod_active_plock() {
         let desc = effect_mod_test_descriptor();
         let mut app = test_app_with_effect_descriptor(desc);
@@ -2543,15 +2659,40 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
                 eprintln!("macro-create failed: {error:?}");
             }
         }
+        AppCommand::MacroCreateScene { name, target_scene } => {
+            let config = crate::macro_engine::SceneMacroConfig {
+                target_scene,
+                morph_params: true,
+                steal_patterns: false,
+                quantize: crate::macro_engine::StealQuantize::Bar,
+                track_mask: None,
+            };
+            if let Err(error) = app
+                .macro_engine
+                .create_macro(name, crate::macro_engine::MacroKind::Scene(config))
+            {
+                eprintln!("macro-create-scene failed: {error:?}");
+            }
+        }
+        AppCommand::MacroSceneConfig { id, config } => {
+            app.cancel_scene_macro(id);
+            match app.macro_engine.set_scene_config(id, config) {
+                Ok(touched) => app.send_macro_targets(touched),
+                Err(error) => eprintln!("macro-scene-config failed: {error:?}"),
+            }
+        }
         AppCommand::MacroEnsure { key, name } => {
             if let Err(error) = app.macro_engine.ensure_macro(key, name) {
                 eprintln!("macro-ensure failed: {error:?}");
             }
         }
-        AppCommand::MacroDelete { id } => match app.macro_engine.delete_macro(id) {
-            Ok(touched) => app.send_macro_targets(touched),
-            Err(error) => eprintln!("macro-delete failed: {error:?}"),
-        },
+        AppCommand::MacroDelete { id } => {
+            app.cancel_scene_macro(id);
+            match app.macro_engine.delete_macro(id) {
+                Ok(touched) => app.send_macro_targets(touched),
+                Err(error) => eprintln!("macro-delete failed: {error:?}"),
+            }
+        }
         AppCommand::MacroRename { id, name } => {
             if let Err(error) = app.macro_engine.rename_macro(id, name) {
                 eprintln!("macro-rename failed: {error:?}");

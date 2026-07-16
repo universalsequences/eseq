@@ -13710,6 +13710,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &app.tracks,
                             &app.graph.track_instrument_types,
                         ) {
+                            app.handle_scene_deleted(deleted_pattern);
                             app.graph_controller().apply_sample_ids(&sample_ids);
                             app.graph_controller().sync_current_pattern_mod_routes();
                             app.push_all_restored_defaults();
