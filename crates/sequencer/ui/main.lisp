@@ -469,8 +469,8 @@
   (list :cols :gap 1
     0.78 (seq-main-step-tile-layout-spec)
     0.22 (list :rows :gap 1
-      0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)
-      0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))))
+      0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28)
+      0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28))))
 
 (def seq-collapsible-panel-layout-spec (buffer on-collapse min-width max-width min-height max-height)
   (list :buf buffer
