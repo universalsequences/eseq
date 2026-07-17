@@ -334,7 +334,6 @@ impl FxChainLeaseStore {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(super) fn contains_host(&self, locator: FxChainLocator) -> bool {
         self.rows.contains_key(&locator)
     }

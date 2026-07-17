@@ -3886,13 +3886,35 @@ impl SequencerState {
     /// Fold a flat track's instrument and insert chain into a one-slot rack in
     /// every stored pattern. Per-pattern instrument/effect values are retained;
     /// only their ownership moves from the track container to the rack slot.
+    pub fn validate_group_flat_track_to_rack(&self, track: usize) -> Result<(), String> {
+        self.validate_instrument_source_reset_target(track)?;
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let effective_pattern_id = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no stored pattern pool", track + 1))?;
+        if !pool.patterns.contains_key(&effective_pattern_id) {
+            return Err(format!(
+                "Track {} effective pattern is missing from its pool",
+                track + 1
+            ));
+        }
+        Ok(())
+    }
+
     pub fn group_flat_track_to_rack(
         &self,
         track: usize,
+        instrument_type: InstrumentType,
+        instrument_run_mode: CustomInstrumentRunMode,
+        engine_id: Option<usize>,
         effect_descriptors: &[EffectDescriptor],
         custom_effect_names: &[Option<String>],
     ) -> Option<RackTrackSnapshot> {
-        self.validate_instrument_source_reset_target(track).ok()?;
+        self.validate_group_flat_track_to_rack(track).ok()?;
         let live_instrument =
             EffectSlotSnapshot::capture(self.pattern.instrument_slots.get(track)?);
         let live_effects = self
@@ -3904,9 +3926,11 @@ impl SequencerState {
             .collect::<Vec<_>>();
 
         let make_slot = |data: &TrackPatternData| {
+            let mut track_sound_state = data.track_sound_state.clone();
+            track_sound_state.engine_id = engine_id;
             let mut slot = RackSlotSnapshot {
-                instrument_type: data.instrument_type,
-                instrument_run_mode: data.instrument_run_mode,
+                instrument_type,
+                instrument_run_mode,
                 instrument_base_note_offset: data.instrument_base_note_offset,
                 pad_note: None,
                 choke_group: None,
@@ -3920,8 +3944,8 @@ impl SequencerState {
                 effect_slots: data.effect_slots.clone(),
                 effect_descriptors: effect_descriptors.to_vec(),
                 custom_effect_names: custom_effect_names.to_vec(),
-                track_sound_state: data.track_sound_state.clone(),
-                sample_id: (data.instrument_type == InstrumentType::Sampler)
+                track_sound_state,
+                sample_id: (instrument_type == InstrumentType::Sampler)
                     .then(|| data.sample_id.clone()),
             };
             slot.normalize_effect_chain();
