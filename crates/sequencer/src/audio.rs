@@ -1,6 +1,6 @@
 use arrayvec::ArrayVec;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,19 +25,19 @@ use crate::sampler::{
     SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE, SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE,
 };
 use crate::scheduled_event::{
-    resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
-    ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
-    ScheduledInstrumentParams, ScheduledInstrumentTensorParam, ScheduledInstrumentTensorParams,
-    ScheduledSamplerParams,
+    ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
+    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
+    ScheduledInstrumentTensorParam, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
+    resolved_chord_transpose,
 };
 use crate::sequencer::{
-    rack_slot_pool_index, sync_beats, BusId, CustomInstrumentRunMode, InstrumentType,
-    KeyboardTrigger, RackRouting, RackSlotParam, RackSlotSnapshot, RackTrackSnapshot,
-    SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES,
-    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
+    BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, MAX_INSTRUMENT_ENGINES,
+    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS, RackRouting, RackSlotParam, RackSlotSnapshot,
+    RackTrackSnapshot, SequencerSnapshot, SequencerState, StepParam, SwingResolution,
+    rack_slot_pool_index, sync_beats,
 };
 use crate::tui::BusGateRuntimeState;
-use crate::voice::{VoicePool, MAX_VOICES};
+use crate::voice::{MAX_VOICES, VoicePool};
 
 pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
@@ -2970,6 +2970,7 @@ fn dispatch_scheduled_step(
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
+    rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
     unsafe {
         dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
@@ -2987,6 +2988,7 @@ fn dispatch_scheduled_step(
         instrument_tensor_params,
         instrument_fingerprint,
         Some(sampler_params),
+        rack_macro_values,
     );
 }
 
@@ -3003,6 +3005,7 @@ fn dispatch_scheduled_network_step(
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
+    rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
     unsafe {
         dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
@@ -3020,6 +3023,7 @@ fn dispatch_scheduled_network_step(
         instrument_tensor_params,
         instrument_fingerprint,
         Some(sampler_params),
+        rack_macro_values,
     );
 }
 
@@ -3040,6 +3044,7 @@ fn dispatch_scheduled_event(
             instrument_tensor_params,
             sampler_params,
             instrument_fingerprint,
+            rack_macro_values,
         } => {
             dispatch_scheduled_step(
                 data,
@@ -3054,6 +3059,7 @@ fn dispatch_scheduled_event(
                 instrument_tensor_params,
                 sampler_params,
                 instrument_fingerprint,
+                rack_macro_values,
             );
         }
         ScheduledEventKind::InstrumentParams {
@@ -3083,6 +3089,7 @@ fn dispatch_scheduled_event(
             instrument_tensor_params,
             sampler_params,
             instrument_fingerprint,
+            rack_macro_values,
             seed,
             ..
         } => {
@@ -3099,6 +3106,7 @@ fn dispatch_scheduled_event(
                 instrument_tensor_params,
                 sampler_params,
                 instrument_fingerprint,
+                rack_macro_values,
             );
         }
     }
@@ -4005,6 +4013,120 @@ fn resolve_rack_slot_params(slot: &RackSlotSnapshot, step: usize) -> ResolvedRac
     }
 }
 
+fn rack_macro_curve_value(curve: crate::sequencer::RackMacroCurve, value: f32) -> f32 {
+    match curve {
+        crate::sequencer::RackMacroCurve::Linear => value,
+        crate::sequencer::RackMacroCurve::Exp => value * value,
+        crate::sequencer::RackMacroCurve::Log => value.sqrt(),
+    }
+}
+
+fn apply_rack_macros_at_step(
+    rack: &mut RackTrackSnapshot,
+    step: usize,
+    process_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+) {
+    let macros = rack.macros.clone();
+    for rack_macro in macros {
+        let normalized = process_values
+            .get(rack_macro.id.index())
+            .and_then(|value| *value)
+            .unwrap_or_else(|| {
+                rack.runtime_macro_value_at(rack_macro.id, step)
+                    .unwrap_or_else(|| rack_macro.value_at(step))
+            });
+        for mapping in rack_macro.mappings {
+            let value = mapping.range_min
+                + (mapping.range_max - mapping.range_min)
+                    * rack_macro_curve_value(mapping.curve, normalized);
+            match mapping.target {
+                crate::sequencer::RackMacroTarget::SlotParam { slot, param } => {
+                    let Some(slot) = rack.slots.get_mut(slot) else {
+                        continue;
+                    };
+                    let normalized = param
+                        .trim_start_matches(':')
+                        .replace('_', "-")
+                        .to_ascii_lowercase();
+                    let target = match normalized.as_str() {
+                        "base-note" | "transpose" => Some(RackSlotParam::BaseNote),
+                        "gain" => Some(RackSlotParam::Gain),
+                        "pan" => Some(RackSlotParam::Pan),
+                        "max-polyphony" | "polyphony" => Some(RackSlotParam::MaxPolyphony),
+                        "mute" => Some(RackSlotParam::Mute),
+                        "solo" => Some(RackSlotParam::Solo),
+                        _ => None,
+                    };
+                    let Some(target) = target else {
+                        continue;
+                    };
+                    if slot.param_plocks.get(step, target).is_some() {
+                        continue;
+                    }
+                    match target {
+                        RackSlotParam::BaseNote => {
+                            slot.instrument_base_note_offset = target.clamp(value)
+                        }
+                        RackSlotParam::Gain => slot.gain = target.clamp(value),
+                        RackSlotParam::Pan => slot.pan = target.clamp(value),
+                        RackSlotParam::MaxPolyphony => {
+                            slot.max_polyphony = target.clamp(value).round() as usize
+                        }
+                        RackSlotParam::Mute => slot.mute = value >= 0.5,
+                        RackSlotParam::Solo => slot.solo = value >= 0.5,
+                    }
+                }
+                crate::sequencer::RackMacroTarget::SlotInstrumentParam {
+                    slot,
+                    param_index,
+                    ..
+                } => {
+                    let Some(slot) = rack.slots.get_mut(slot) else {
+                        continue;
+                    };
+                    let locked = slot
+                        .instrument_slot
+                        .plocks
+                        .get(step)
+                        .and_then(|row| row.get(param_index))
+                        .and_then(|value| *value)
+                        .is_some();
+                    if !locked {
+                        if let Some(default) = slot.instrument_slot.defaults.get_mut(param_index) {
+                            *default = value;
+                        }
+                    }
+                }
+                crate::sequencer::RackMacroTarget::SlotEffectParam {
+                    slot,
+                    effect_slot,
+                    param_index,
+                    ..
+                } => {
+                    let Some(effect) = rack
+                        .slots
+                        .get_mut(slot)
+                        .and_then(|slot| slot.effect_slots.get_mut(effect_slot))
+                    else {
+                        continue;
+                    };
+                    let locked = effect
+                        .plocks
+                        .get(step)
+                        .and_then(|row| row.get(param_index))
+                        .and_then(|value| *value)
+                        .is_some();
+                    if !locked {
+                        if let Some(default) = effect.defaults.get_mut(param_index) {
+                            *default = value;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn rack_slot_accepts_resolved(params: ResolvedRackSlotParams, has_solo: bool) -> bool {
     if has_solo {
         params.solo && !params.mute
@@ -4733,8 +4855,10 @@ fn fire_rack_resolved(
     samples_per_step: f64,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
-    rack: RackTrackSnapshot,
+    mut rack: RackTrackSnapshot,
+    rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
+    apply_rack_macros_at_step(&mut rack, step, rack_macro_values);
     let (track_pan, track_send, gate_mode) = {
         let tp = &data.state.pattern.track_params[track_idx];
         (
@@ -5008,6 +5132,7 @@ fn fire_resolved(
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     instrument_fingerprint: u64,
     scheduled_sampler_params: Option<ScheduledSamplerParams>,
+    rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
     if !track_accepts_scheduled_trigger(&data.state, track_idx) {
         return;
@@ -5041,6 +5166,7 @@ fn fire_resolved(
                 resolved,
                 chord,
                 rack,
+                rack_macro_values,
             );
         }
         return;
@@ -6067,8 +6193,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     let enabled = data.custom_engine_pools[engine_id].enabled_voice_count;
                     eprintln!(
                         "audio-trace: keyboard custom note-on track={} engine={engine_id} voice={voice_idx} lid={voice_lid} synth={synth_id} mod={modulator_id} enabled_voices={enabled} poly={track_polyphonic} stolen={}",
-                        kt.track,
-                        allocation.stole_active_voice,
+                        kt.track, allocation.stole_active_voice,
                     );
                     data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
                 }
@@ -6726,11 +6851,15 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     use super::{
-        bus_gate_target_at, clear_active_keyboard_note_by_lid,
+        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
+        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
+        FALLBACK_SAMPLE_RATE, FreePatchTransportRouteState, FreePatchTransportRouteTarget,
+        GateOffEvent, GateOffTarget, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
+        apply_rack_macros_at_step, bus_gate_target_at, clear_active_keyboard_note_by_lid,
         collect_rack_choke_group_voice_releases, free_patch_transport_route_cache_is_fresh,
         free_patch_transport_route_target, instrument_sound_fingerprint,
         key_locked_live_instrument_params, mute_group_winner_for_block_events,
@@ -6739,13 +6868,9 @@ mod tests {
         resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
         select_output_channels, select_output_config, store_active_keyboard_note,
         swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
-        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
-        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
-        FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
-        OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
-    use crate::analysis::{pack_ptr, OnsetTableShared};
+    use crate::analysis::{OnsetTableShared, pack_ptr};
     use crate::effects::{
         EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
         ParamScaling, TensorParamDescriptor,
@@ -6755,14 +6880,14 @@ mod tests {
         ScheduledInstrumentParams, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
     };
     use crate::sequencer::{
-        CustomInstrumentRunMode, InstrumentType, RackRouting, RackSlotParamPlocks,
-        RackSlotSnapshot, RackTrackSnapshot, SequencerState, SwingResolution, TrackSoundState,
+        CustomInstrumentRunMode, InstrumentType, RackMacroCurve, RackMacroMapping, RackMacroTarget,
+        RackRouting, RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot,
+        SequencerState, SwingResolution, TrackSoundState, default_rack_macros,
     };
     use crate::voice::VoicePool;
 
-    fn active_keyboard_notes_fixture(
-    ) -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
-    {
+    fn active_keyboard_notes_fixture()
+    -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS] {
         [[None; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
     }
 
@@ -6798,6 +6923,82 @@ mod tests {
             track_sound_state: TrackSoundState::default(),
             sample_id: None,
         }
+    }
+
+    #[test]
+    fn rack_macro_is_effective_default_beneath_target_plock() {
+        let mut rack = RackTrackSnapshot::new(
+            RackRouting::Broadcast,
+            vec![rack_routing_test_slot(None)],
+            default_rack_macros(),
+        );
+        rack.macros[0].value = 0.75;
+        rack.macros[0].mappings.push(RackMacroMapping {
+            target: RackMacroTarget::SlotParam {
+                slot: 0,
+                param: "gain".to_string(),
+            },
+            range_min: 0.0,
+            range_max: 2.0,
+            curve: RackMacroCurve::Linear,
+        });
+        apply_rack_macros_at_step(&mut rack, 2, [None; crate::sequencer::RACK_MACRO_COUNT]);
+        assert_eq!(rack.slots[0].gain, 1.5);
+
+        rack.macros[0].plocks[2] = Some(0.25);
+        apply_rack_macros_at_step(&mut rack, 2, [None; crate::sequencer::RACK_MACRO_COUNT]);
+        assert_eq!(rack.slots[0].gain, 0.5);
+
+        rack.slots[0].param_plocks.set(2, RackSlotParam::Gain, 0.25);
+        apply_rack_macros_at_step(&mut rack, 2, [None; crate::sequencer::RACK_MACRO_COUNT]);
+        assert_eq!(
+            rack.slots[0].param_value_at_step(RackSlotParam::Gain, 2),
+            0.25
+        );
+    }
+
+    #[test]
+    fn published_rack_snapshot_observes_live_macro_defaults_and_plocks() {
+        let state = SequencerState::new(1, vec![Vec::new()]);
+        let mut rack = RackTrackSnapshot::new(
+            RackRouting::Broadcast,
+            vec![rack_routing_test_slot(None)],
+            default_rack_macros(),
+        );
+        rack.macros[0].mappings.push(RackMacroMapping {
+            target: RackMacroTarget::SlotParam {
+                slot: 0,
+                param: "gain".to_string(),
+            },
+            range_min: 0.0,
+            range_max: 2.0,
+            curve: RackMacroCurve::Linear,
+        });
+        state.set_rack_track_for_all_pattern_snapshots(0, rack);
+        state.publish_scheduler_snapshot();
+
+        let snapshot = state.latest_scheduler_snapshot();
+        let mut published_rack = snapshot.tracks[0]
+            .rack_track
+            .clone()
+            .expect("published rack snapshot");
+        let macro_id = crate::sequencer::RackMacroId::from_index(0).expect("macro id");
+
+        state.set_live_rack_macro_default(0, macro_id, 0.75);
+        apply_rack_macros_at_step(
+            &mut published_rack,
+            2,
+            [None; crate::sequencer::RACK_MACRO_COUNT],
+        );
+        assert_eq!(published_rack.slots[0].gain, 1.5);
+
+        assert!(state.set_rack_macro_plocks_in_current_pattern(0, macro_id, &[2], 0.25));
+        apply_rack_macros_at_step(
+            &mut published_rack,
+            2,
+            [None; crate::sequencer::RACK_MACRO_COUNT],
+        );
+        assert_eq!(published_rack.slots[0].gain, 0.5);
     }
 
     fn audio_test_param(name: &str, default: f32, node_param_idx: u32) -> ParamDescriptor {
@@ -7048,10 +7249,11 @@ mod tests {
         voice_pools[unrelated_pool_id].add_voice(20, 200);
         voice_pools[unrelated_pool_id].voices[0].active = true;
 
-        let sampler_rack = RackTrackSnapshot {
-            routing: RackRouting::ByPitch,
-            slots: vec![released_sampler, triggering_sampler, unrelated_sampler],
-        };
+        let sampler_rack = RackTrackSnapshot::new(
+            RackRouting::ByPitch,
+            vec![released_sampler, triggering_sampler, unrelated_sampler],
+            crate::sequencer::default_rack_macros(),
+        );
         let sampler_note_offs = collect_rack_choke_group_voice_releases(
             &mut voice_pools,
             &mut custom_engine_pools,
@@ -7133,10 +7335,11 @@ mod tests {
             }),
         });
 
-        let custom_rack = RackTrackSnapshot {
-            routing: RackRouting::ByPitch,
-            slots: vec![released_custom, triggering_custom, unrelated_custom],
-        };
+        let custom_rack = RackTrackSnapshot::new(
+            RackRouting::ByPitch,
+            vec![released_custom, triggering_custom, unrelated_custom],
+            crate::sequencer::default_rack_macros(),
+        );
         let custom_note_offs = collect_rack_choke_group_voice_releases(
             &mut voice_pools,
             &mut custom_engine_pools,
@@ -7446,6 +7649,7 @@ mod tests {
                 pattern_epoch: 1,
                 sample_time: 128,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                     track,
                     step: 0,
                     samples_per_step: 1024.0,
@@ -7484,6 +7688,7 @@ mod tests {
                 pattern_epoch: 1,
                 sample_time: 128,
                 kind: ScheduledEventKind::NetworkTrigger {
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                     track,
                     source_neuron: 0,
                     seed: None,

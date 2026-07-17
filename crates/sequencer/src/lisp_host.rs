@@ -6046,6 +6046,9 @@ fn process_param_target_label_for_error(target: &crate::process::ParamTarget) ->
         crate::process::ParamTarget::RackSlotInstrumentParam { slot, param, .. } => {
             format!("rack{}:instrument:{param}", slot + 1)
         }
+        crate::process::ParamTarget::RackMacroParam { macro_id } => {
+            format!("rack-macro:{}", macro_id + 1)
+        }
     }
 }
 
@@ -7322,6 +7325,9 @@ fn parse_process_target_kind(value: &EValue) -> Result<crate::process::ProcessTa
         | "rack_slot_instrument_param"
         | "rack-instrument-param"
         | "rack_instrument_param" => Ok(crate::process::ProcessTargetKind::RackSlotInstrumentParam),
+        "rack-macro-param" | "rack_macro_param" | "rack-macro" | "rack_macro" => {
+            Ok(crate::process::ProcessTargetKind::RackMacroParam)
+        }
         other => Err(format!("unknown process target kind :{other}")),
     }
 }
@@ -7462,6 +7468,24 @@ fn parse_process_target_hint(value: &EValue) -> Result<crate::process::ProcessTa
                     .ok_or_else(|| "(midi-fx-target :fx :param) expects a param".to_string())?,
             )?;
             Ok(crate::process::ProcessTargetHint::MidiFxParam { fx, param })
+        }
+        "rack-macro" => {
+            let key =
+                process_symbol_name(items.get(1).ok_or_else(|| {
+                    "(rack-macro :macro_1) expects a macro identifier".to_string()
+                })?)?;
+            let normalized = key
+                .trim_start_matches(':')
+                .replace('-', "_")
+                .to_ascii_lowercase();
+            let number = normalized
+                .strip_prefix("macro_")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| (1..=crate::sequencer::RACK_MACRO_COUNT).contains(value))
+                .ok_or_else(|| format!("unknown rack macro :{key}"))?;
+            Ok(crate::process::ProcessTargetHint::RackMacroParam {
+                macro_id: (number - 1) as u8,
+            })
         }
         other => Err(format!("unsupported process target {other}")),
     }
@@ -19234,7 +19258,12 @@ mod tests {
         let init_msg = super::build_init_message_for_voice(0, &manifest, voice_index);
         let mut state = vec![0.0_f32; super::dgen_total_state_slots(total_memory_slots)];
         unsafe {
-            super::dgenlisp_init(state.as_mut_ptr().cast(), 48_000, 128, init_msg.as_ptr().cast());
+            super::dgenlisp_init(
+                state.as_mut_ptr().cast(),
+                48_000,
+                128,
+                init_msg.as_ptr().cast(),
+            );
         }
 
         assert_eq!(state[1] as usize, total_memory_slots);
@@ -26813,6 +26842,18 @@ mod tests {
         assert!(
             report.rms > 0.001,
             "expected audible rms, got report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn process_target_parser_accepts_stable_rack_macro_identifier() {
+        let target = super::process_list([
+            super::EValue::Symbol("rack-macro".to_string()),
+            super::EValue::Keyword("macro_1".to_string()),
+        ]);
+        assert_eq!(
+            super::parse_process_target_hint(&target).unwrap(),
+            crate::process::ProcessTargetHint::RackMacroParam { macro_id: 0 }
         );
     }
 }

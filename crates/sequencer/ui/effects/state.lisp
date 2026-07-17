@@ -11,6 +11,7 @@
 (defstate instrument-key-lock-audition true)
 (defstate rack-panel-slot-list-open true)
 (defstate rack-panel-selected-chain-open true)
+(defstate rack-panel-macros-open false)
 (defstate effect-mods-open false)
 (defstate effect-mods-chain "audio")
 (defstate effect-mods-track -1)

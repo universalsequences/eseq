@@ -730,16 +730,19 @@
     (h-stack :gap 0.35
       (button (str (+ i 1))
         :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
         :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
         :color (if muted :dim :black)
         :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-mute i))))
       (button "S"
         :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
         :background-color (mixer-v2-button-bg (nth SEQ.track-solos i))
         :color (if (nth SEQ.track-solos i) :black :dim)
         :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-solo i))))
       (button "R"
         :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
         :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
         :color (if (nth SEQ.record-armed i) :black :dim)
         :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))))
@@ -942,11 +945,13 @@
           (button (mixer-v2-bus-mute-label i)
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if (nth SEQ.bus-mutes i) :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
+        :border-color :transparent
             :color (if (nth SEQ.bus-mutes i) :dim :black)
             :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.bus-solos i))
+        :border-color :transparent
             :color (if (nth SEQ.bus-solos i) :black :dim)
             :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-solo i))))
           (box :width 2.1 :height 1.0))

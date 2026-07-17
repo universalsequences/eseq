@@ -143,6 +143,7 @@ pub enum ProcessTargetHint {
     InstrumentParam { param: String },
     EffectParam { effect: String, param: String },
     MidiFxParam { fx: String, param: String },
+    RackMacroParam { macro_id: u8 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +157,7 @@ pub enum ProcessTargetKind {
     ProcessInlet,
     RackSlotParam,
     RackSlotInstrumentParam,
+    RackMacroParam,
 }
 
 impl ProcessTargetKind {
@@ -169,6 +171,7 @@ impl ProcessTargetKind {
             Self::ProcessInlet => "process-inlet",
             Self::RackSlotParam => "rack-slot-param",
             Self::RackSlotInstrumentParam => "rack-slot-instrument-param",
+            Self::RackMacroParam => "rack-macro-param",
         }
     }
 
@@ -187,6 +190,7 @@ impl ProcessTargetKind {
             Self::MidiFxParam => matches!(hint, ProcessTargetHint::MidiFxParam { .. }),
             Self::ProcessInlet => false,
             Self::RackSlotParam | Self::RackSlotInstrumentParam => false,
+            Self::RackMacroParam => matches!(hint, ProcessTargetHint::RackMacroParam { .. }),
         }
     }
 
@@ -207,6 +211,7 @@ impl ProcessTargetKind {
             Self::RackSlotInstrumentParam => {
                 matches!(target, ParamTarget::RackSlotInstrumentParam { .. })
             }
+            Self::RackMacroParam => matches!(target, ParamTarget::RackMacroParam { .. }),
         }
     }
 }
@@ -219,6 +224,7 @@ impl ProcessTargetHint {
             Self::InstrumentParam { .. } => ProcessTargetKind::InstrumentParam,
             Self::EffectParam { .. } => ProcessTargetKind::EffectParam,
             Self::MidiFxParam { .. } => ProcessTargetKind::MidiFxParam,
+            Self::RackMacroParam { .. } => ProcessTargetKind::RackMacroParam,
         }
     }
 }
@@ -361,6 +367,9 @@ pub enum ParamTarget {
         slot: usize,
         param: String,
         param_id: Option<ParamNodeId>,
+    },
+    RackMacroParam {
+        macro_id: u8,
     },
 }
 

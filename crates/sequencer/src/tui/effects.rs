@@ -3133,6 +3133,24 @@ impl App {
         if !updated {
             return Err("Failed to update rack-slot FX state".to_string());
         }
+        self.state
+            .update_rack_macros_for_all_pattern_snapshots(track, |macros| {
+                for mapping in macros
+                    .iter_mut()
+                    .flat_map(|rack_macro| &mut rack_macro.mappings)
+                {
+                    if let crate::sequencer::RackMacroTarget::SlotEffectParam {
+                        slot,
+                        effect_slot,
+                        ..
+                    } = &mut mapping.target
+                    {
+                        if *slot == rack_slot && *effect_slot >= target_slot {
+                            *effect_slot += 1;
+                        }
+                    }
+                }
+            });
         let new_host = self.fx_chain_host(locator)?;
         {
             let _batch = FxGraphEditBatch::new(self.graph.lg.0);
@@ -3325,6 +3343,20 @@ impl App {
                     slot.custom_effect_names.remove(effect_slot);
                     slot.custom_effect_names.push(None);
                 });
+        if updated {
+            self.state.update_rack_macros_for_all_pattern_snapshots(track, |macros| {
+                for rack_macro in macros {
+                    rack_macro.mappings.retain(|mapping| !matches!(mapping.target,
+                        crate::sequencer::RackMacroTarget::SlotEffectParam { slot, effect_slot: mapped, .. }
+                        if slot == rack_slot && mapped == effect_slot));
+                    for mapping in &mut rack_macro.mappings {
+                        if let crate::sequencer::RackMacroTarget::SlotEffectParam { slot, effect_slot: mapped, .. } = &mut mapping.target {
+                            if *slot == rack_slot && *mapped > effect_slot { *mapped -= 1; }
+                        }
+                    }
+                }
+            });
+        }
         updated
             .then_some(())
             .ok_or_else(|| "Failed to update rack-slot FX state".to_string())
@@ -3362,6 +3394,39 @@ impl App {
         if !updated {
             return Err("Failed to move rack-slot effect state".to_string());
         }
+        self.state
+            .update_rack_macros_for_all_pattern_snapshots(track, |macros| {
+                for mapping in macros
+                    .iter_mut()
+                    .flat_map(|rack_macro| &mut rack_macro.mappings)
+                {
+                    if let crate::sequencer::RackMacroTarget::SlotEffectParam {
+                        slot,
+                        effect_slot,
+                        ..
+                    } = &mut mapping.target
+                    {
+                        if *slot != rack_slot {
+                            continue;
+                        }
+                        *effect_slot = if *effect_slot == source_slot {
+                            target_slot
+                        } else if source_slot < target_slot
+                            && *effect_slot > source_slot
+                            && *effect_slot <= target_slot
+                        {
+                            *effect_slot - 1
+                        } else if target_slot < source_slot
+                            && *effect_slot >= target_slot
+                            && *effect_slot < source_slot
+                        {
+                            *effect_slot + 1
+                        } else {
+                            *effect_slot
+                        };
+                    }
+                }
+            });
         let new_host = self.fx_chain_host(locator)?;
         {
             let _batch = FxGraphEditBatch::new(self.graph.lg.0);
@@ -3424,6 +3489,38 @@ impl App {
             node_param_idx,
             node_param_span,
             stored_value,
+        );
+        Ok(())
+    }
+
+    pub fn send_rack_slot_effect_param(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let descriptor = rack
+            .effect_descriptors
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+        let param = descriptor
+            .params
+            .get(param_idx)
+            .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+        let effect = rack
+            .effect_slots
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect state is out of range".to_string())?;
+        push_fx_param(
+            self.graph.lg.0,
+            effect.node_id,
+            effect.modulator_node_id,
+            param.node_param_idx,
+            param.node_param_span.max(1),
+            value.clamp(param.min, param.max),
         );
         Ok(())
     }

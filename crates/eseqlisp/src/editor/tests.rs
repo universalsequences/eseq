@@ -9094,6 +9094,30 @@ fn ui_only_nested_scroll_content_does_not_inflate_outer_horizontal_scroll() {
 }
 
 #[test]
+fn widget_scroll_limit_cache_recomputes_after_layout_revision_changes() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport_exact(10.0, 8.0);
+    editor
+        .runtime
+        .eval_str("(effect (box :width 40 :height 20))")
+        .unwrap();
+
+    let first = editor.clamp_widget_scroll_offsets();
+    assert!(first.0 > 0.0 && first.1 > 0.0, "first limits={first:?}");
+    assert!(editor.active_leaf().widget_scroll_limits_cache.is_some());
+
+    editor
+        .runtime
+        .eval_str("(effect (box :width 12 :height 9))")
+        .unwrap();
+    let second = editor.clamp_widget_scroll_offsets();
+    assert!(second.0 < first.0, "first={first:?} second={second:?}");
+    assert!(second.1 < first.1, "first={first:?} second={second:?}");
+}
+
+#[test]
 fn touchpad_scroll_rematerializes_virtual_stack_on_next_frame() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

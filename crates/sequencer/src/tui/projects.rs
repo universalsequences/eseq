@@ -500,8 +500,7 @@ fn legacy_dgen_header_delta() -> u32 {
 }
 
 fn shifted_legacy_dgen_node_index(idx: u32) -> Option<u32> {
-    (idx >= LEGACY_DGEN_HEADER_SLOTS
-        && idx < crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
+    (idx >= LEGACY_DGEN_HEADER_SLOTS && idx < crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
         .then(|| idx + legacy_dgen_header_delta())
 }
 
@@ -597,15 +596,18 @@ fn migrate_legacy_dgen_param_node_indices(project: &mut ProjectFile) {
         > = std::collections::HashMap::new();
 
         for (track, slot) in pattern.instrument_slots.iter_mut().enumerate() {
-            if custom_instrument_tracks.get(track).copied().unwrap_or(false) {
+            if custom_instrument_tracks
+                .get(track)
+                .copied()
+                .unwrap_or(false)
+            {
                 instrument_shifted.insert(track, migrate_legacy_dgen_effect_slot(slot));
             }
         }
         for (track, slots) in pattern.effect_slots.iter_mut().enumerate() {
             for (slot_idx, slot) in slots.iter_mut().enumerate() {
                 if slot_name_is_dgen(track_effect_names.get(track), slot_idx) {
-                    effect_shifted
-                        .insert((track, slot_idx), migrate_legacy_dgen_effect_slot(slot));
+                    effect_shifted.insert((track, slot_idx), migrate_legacy_dgen_effect_slot(slot));
                 }
             }
         }
@@ -619,10 +621,7 @@ fn migrate_legacy_dgen_param_node_indices(project: &mut ProjectFile) {
         }
         for rack in pattern.rack_tracks.iter_mut().flatten() {
             for slot in &mut rack.slots {
-                if matches!(
-                    slot.instrument_type,
-                    project::ProjectInstrumentType::Custom
-                ) {
+                if matches!(slot.instrument_type, project::ProjectInstrumentType::Custom) {
                     migrate_legacy_dgen_effect_slot(&mut slot.instrument_slot);
                 }
                 let names = slot.custom_effects.clone();
@@ -1507,6 +1506,7 @@ impl App {
                     crate::project::ProjectRackTrackPattern {
                         routing: crate::project::ProjectRackRouting::Broadcast,
                         slots: vec![slot],
+                        macros: crate::project::default_project_rack_macros(),
                     },
                 )
             }
@@ -1558,6 +1558,7 @@ impl App {
                     crate::project::ProjectRackTrackPattern {
                         routing: crate::project::ProjectRackRouting::Broadcast,
                         slots: vec![slot],
+                        macros: crate::project::default_project_rack_macros(),
                     },
                 )
             }
@@ -3566,12 +3567,7 @@ mod tests {
             )]),
             tensor_params: Vec::new(),
             // enabled param (4), two dgen cells (6, 9), one modulator param.
-            param_node_indices: vec![
-                4,
-                6,
-                9,
-                crate::voice_modulator::MOD_PARAM_BASE + 3,
-            ],
+            param_node_indices: vec![4, 6, 9, crate::voice_modulator::MOD_PARAM_BASE + 3],
             param_node_spans: vec![1; 4],
             ir: None,
         };

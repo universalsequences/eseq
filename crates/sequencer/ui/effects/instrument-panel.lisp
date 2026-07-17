@@ -5,18 +5,41 @@
 (def rack-panel-toggle-selected-chain ()
   (set! rack-panel-selected-chain-open (not rack-panel-selected-chain-open)))
 
+(def rack-panel-toggle-macros ()
+  (do
+    (set! rack-panel-macros-open (not rack-panel-macros-open))
+    (if (not rack-panel-macros-open) (rack-macro-clear-mapping-arm) false)))
+
+(defwidget rack-macro-view-icon
+  :width 2.25 :height 1.05 :paint-margin 0.15 :state (active)
+  :shader
+  (let ((disc-color (if (= active 1) (rgba 1.0 0.58 0.25 1.0) (rgba 0.24 0.25 0.26 1.0)))
+        (glyph-color (if (= active 1) (rgba 0.10 0.10 0.11 1.0) (rgba 0.72 0.73 0.74 1.0))))
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.68) (material :color disc-color))
+      (sdf/fill (sdf/circle 0.31) (material :color glyph-color))
+      (sdf/fill (sdf/circle 0.23) (material :color disc-color))
+      (sdf/fill (sdf/translate 0.18 -0.22 (sdf/rounded-rect 0.045 0.25 0.025))
+        (material :color glyph-color)))))
+
 (defwidget rack-chain-view-icon
   :width 2.25 :height 1.05
   :paint-margin 0.15
   :state (active)
   :shader
   (let ((disc-color (if (= active 1)
-                      (rgba 1.0 0.58 0.25 1.0)
-                      (rgba 0.24 0.25 0.26 1.0)))
-        (glyph-color (if (= active 1)
-                       (rgba 0.10 0.10 0.11 1.0)
-                       (rgba 0.58 0.59 0.60 1.0))))
+          (rgba 1.0 0.58 0.25 1.0)
+          (rgba 0.24 0.25 0.26 1.0)))
+      (disc-border (if (= active 1)
+          (rgba 1.0 0.58 0.25 1.0)
+          :white
+          ))
+      (glyph-color (if (= active 1)
+          (rgba 0.10 0.10 0.11 1.0)
+          (rgba 0.58 0.59 0.60 1.0))))
     (sdf/layer
+      (sdf/fill (sdf/circle 0.72)
+        (material :color disc-border))
       (sdf/fill (sdf/circle 0.68)
         (material :color disc-color))
       (sdf/fill (sdf/rounded-rect 0.50 0.12 0.05)
@@ -27,13 +50,20 @@
   :paint-margin 0.15
   :state (active)
   :shader
-  (let ((disc-color (if (= active 1)
-                      (rgba 1.0 0.58 0.25 1.0)
-                      (rgba 0.24 0.25 0.26 1.0)))
-        (glyph-color (if (= active 1)
-                       (rgba 0.10 0.10 0.11 1.0)
-                       (rgba 0.58 0.59 0.60 1.0))))
+  (let (
+      (disc-border (if (= active 1)
+          (rgba 1.0 0.58 0.25 1.0)
+          :white
+          ))
+      (disc-color (if (= active 1)
+          (rgba 1.0 0.58 0.25 1.0)
+          (rgba 0.24 0.25 0.26 1.0)))
+      (glyph-color (if (= active 1)
+          (rgba 0.10 0.10 0.11 1.0)
+          (rgba 0.58 0.59 0.60 1.0))))
     (sdf/layer
+      (sdf/fill (sdf/circle 0.72)
+        (material :color disc-border))
       (sdf/fill (sdf/circle 0.68)
         (material :color disc-color))
       (sdf/fill (sdf/translate -0.39 -0.32 (sdf/circle 0.055))
@@ -51,9 +81,9 @@
 
 (def rack-panel-view-toolbar ()
   (box :debug-name "rack-view-toolbar"
-    :width 2.35 :height 9.7
+    :width 2.85 :height 9.7
     :padding 0.2 :h-align :center :v-align :start
-    (v-stack :width 2.35 :height :fill :gap 0.18 :align :center
+    (v-stack :width 2.85 :height :fill :gap 0.18 :align :center
       (box :width 2.35 :height 0.18)
       (rack-chain-view-icon
         :key "rack-chain-view-toggle"
@@ -64,8 +94,92 @@
         :key "rack-slot-list-view-toggle"
         :debug-name "rack-slot-list-view-toggle"
         :active (if rack-panel-slot-list-open 1 0)
-        :on-click |x y r| (rack-panel-toggle-slot-list)))
+        :on-click |x y r| (rack-panel-toggle-slot-list))
+      (rack-macro-view-icon
+        :key "rack-macro-view-toggle"
+        :debug-name "rack-macro-view-toggle"
+        :active (if rack-panel-macros-open 1 0)
+        :on-click |x y r| (rack-panel-toggle-macros)))
     ))
+
+(def rack-macro-set (track macro value)
+  (host-command (if (seq-has-selection?) "set-rack-macro-plock" "set-rack-macro-value")
+    (dict :track track :id (get macro :id) :value value)))
+
+(def rack-macro-plock-row (macro)
+  (nth (filter |row|
+    (and (= (get row :target) "rack-macro")
+         (= (get row :param-idx) (get macro :id)))
+    SEQ.track-plocks) 0))
+
+(def rack-macro-display-value (macro)
+  (if (get macro :value-field)
+    (bind-seq (get macro :value-field))
+    (get macro :value)))
+
+(def rack-macro-plock-active (macro)
+  (if (get macro :plock-active-field)
+    (bind-seq (get macro :plock-active-field))
+    0))
+
+(def rack-macro-plock-default (macro)
+  (if (get macro :plock-default-field)
+    (bind-seq (get macro :plock-default-field))
+    (get macro :value)))
+
+(def rack-macro-arm (macro)
+  (let ((next (if (= rack-macro-mapping-selected (get macro :id)) -1 (get macro :id))))
+    (if (< next 0)
+      (rack-macro-clear-mapping-arm)
+      (do
+        (macro-clear-mapping-arm)
+        (process-map-clear)
+        (set! instrument-mods-open false)
+        (set! effect-mods-open false)
+        (set! rack-macro-mapping-selected next)
+        (macro-mapping-sidebar-open-hook)
+        (macro-mapping-sidebar-refresh-hook)))))
+
+(def rack-macro-control (track macro)
+  (let ((plock-row (rack-macro-plock-row macro)))
+    (box :key (str "rack-macro-" (get macro :id)) :width 5.7 :height 4.35 :padding 0.18
+      :corner-radius 9
+      :background-color :mixer-strip-bg :border-color
+      (if (= rack-macro-mapping-selected (get macro :id)) (rgba 0.18 0.85 0.42 0.9) :mixer-strip-border)
+      (v-stack :gap 0.08 :align :center
+        (text-input :key (str "rack-macro-name-" (get macro :id))
+          :width 5.2 :height 0.9 :font-size 8.5 :value (get macro :name)
+          :on-change (lambda (name) (host-command "rename-rack-macro"
+              (dict :track track :id (get macro :id) :name name))))
+        (knob-number :debug-name (str "rack-macro-knob-" (get macro :id))
+          :value (rack-macro-display-value macro) :min 0 :max 1 :decimals 2
+          :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
+          :track-color '(rgba 0.4, 0.4, 0.4, 1)
+          :plock-active (rack-macro-plock-active macro)
+          :plock-default (rack-macro-plock-default macro)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
+          :on-change (lambda (value) (rack-macro-set track macro value)))
+        (button (str "map " (get macro :mapping-count)) :width 4.6 :height 0.7 :font-size 7.5
+          :active (if (= rack-macro-mapping-selected (get macro :id)) 1 0)
+          :background-color :mixer-control-bg
+          :active-background-color (rgba 0.18 0.85 0.42 1.0)
+          :border-color :transparent
+          :color :dim :active-color :black
+          :on-click (lambda (event) (rack-macro-arm macro)))))))
+
+(def rack-macro-bank (inst)
+  (let ((track (get inst :track)) (macros (get inst :macros)))
+    (box :debug-name "rack-macro-bank" :width 24 :height 9.7 :padding 0.2
+      :background-color :bg :border-color :buffer-bg :corner-radius 10
+      (v-stack :gap 0.15
+        (h-stack :gap 0.15
+          (rack-macro-control track (nth macros 0)) (rack-macro-control track (nth macros 1))
+          (rack-macro-control track (nth macros 2)) (rack-macro-control track (nth macros 3)))
+        (h-stack :gap 0.15
+          (rack-macro-control track (nth macros 4)) (rack-macro-control track (nth macros 5))
+          (rack-macro-control track (nth macros 6)) (rack-macro-control track (nth macros 7)))))))
 
 (def rack-panel-drop-on-rack (event)
   (let ((payload (get event :payload))
@@ -343,7 +457,7 @@
   (let ((delete-target (rack-slot-delete-target? slot))
       (selected (get slot :selected)))
     (box :key (str "rack-slot-row-" (get slot :idx))
-      :width 35
+      :width 34.6
       :height 1.65
       :padding 0.18
       :selected delete-target
@@ -383,9 +497,6 @@
             :active delete-target
             :active-color :white
             :bg :transparent))
-        (label (str "C " (get slot :processing-cost))
-          :font-size 8 :color (if (> (get slot :effect-count) 0) :blue :dim)
-          :width 2.8 :bg :transparent)
         
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "T" :font-size 8.2 :color :dim :bg :transparent)
@@ -517,10 +628,6 @@
             (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :center :flex 1
               (label (substring (get inst :display-name) 0 16)
                 :font-size 11 :color :white :bg :transparent)
-              (label (get inst :routing)
-                :font-size 9 :color :gray :bg :transparent)
-              (label (str "C " (get inst :processing-cost))
-                :font-size 8 :color :dim :bg :transparent)
               (box :flex 1 :height 0.15))
             (box :debug-name "rack-compact-header-content"
               :flex 1 :height 0.8 :padding 0 :h-align :center :v-align :center
@@ -539,6 +646,7 @@
         (h-stack :debug-name "rack-content-row" :gap 0.20
           :width :fill :align :stretch
           (rack-panel-view-toolbar)
+          (if rack-panel-macros-open (rack-macro-bank inst) (box :width 0 :height 0))
           (if rack-panel-slot-list-open
             (if (= (get inst :routing) "by-pitch")
               (drum-rack-pad-grid inst)
@@ -567,7 +675,7 @@
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
     :padding 0
-    :width (if rack-panel-slot-list-open 38.05 3.35)
+    :width (+ 3.35 (if rack-panel-slot-list-open 34.7 0) (if rack-panel-macros-open 24.2 0))
     :height fx-fixed-panel-height
     :selected 0))
 

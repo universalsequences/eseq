@@ -48,13 +48,7 @@ impl AdsrEnvelope {
     }
 
     fn into_value(self, active: Option<&str>) -> Value {
-        env_map(
-            self.attack,
-            self.decay,
-            self.sustain,
-            self.release,
-            active,
-        )
+        env_map(self.attack, self.decay, self.sustain, self.release, active)
     }
 }
 
@@ -391,9 +385,7 @@ impl WidgetDefinition for AdsrEditorWidget {
                     let envelope = state
                         .last_drag_envelope
                         .unwrap_or_else(|| AdsrEnvelope::from_node(node));
-                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(
-                        envelope.into_value(None),
-                    ))
+                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(envelope.into_value(None)))
                 } else {
                     MouseEventOutcome::Consume
                 }
@@ -673,7 +665,10 @@ mod tests {
                 ("decay".to_string(), Value::Number(200.0)),
                 ("sustain".to_string(), Value::Number(0.5)),
                 ("release".to_string(), Value::Number(300.0)),
-                ("on-change".to_string(), Value::Symbol("handler".to_string())),
+                (
+                    "on-change".to_string(),
+                    Value::Symbol("handler".to_string()),
+                ),
             ]),
             children: Vec::new(),
             focusable: false,

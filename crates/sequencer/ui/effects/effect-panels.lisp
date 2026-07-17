@@ -146,7 +146,10 @@
   (do
     (set! instrument-panel-tab 0)
     (if (not instrument-mods-open)
-      (do (macro-clear-mapping-arm) (process-map-clear)))
+      (do
+        (macro-clear-mapping-arm)
+        (process-map-clear)
+        (rack-macro-clear-mapping-arm)))
     (set! instrument-mods-open (not instrument-mods-open))))
 
 (def instrument-mods-toggle-button ()
@@ -173,6 +176,7 @@
       (do
         (macro-clear-mapping-arm)
         (process-map-clear)
+        (rack-macro-clear-mapping-arm)
         (set! effect-mods-open true)
         (set! effect-mods-chain chain)
         (set! effect-mods-track track)

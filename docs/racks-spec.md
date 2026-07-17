@@ -454,8 +454,8 @@ dependency order:
 5. **Sound presets are instrument-rack presets.** The Sounds tab loads racks;
    loading replaces the rack (slots + slot FX + slot mix), never the
    track-level FX chain, sends, or routing.
-6. **Rack macros are rack-scoped, not project-global.** (Locked 2026-07-15,
-   ahead of implementation.) A future rack macro bank (Ableton-style 6–8
+6. **Rack macros are rack-scoped, not project-global.** (Locked 2026-07-15;
+   implemented 2026-07-17.) Every rack owns eight macros
    knobs, the rack's public surface when collapsed) uses **rack-relative
    addressing** (slot index + param within the rack) and **serializes inside
    the rack blob / rack preset** — never as project-global
@@ -609,10 +609,8 @@ Command on any `Sampler`/`Custom` track: **"Group to Instrument Rack"**.
   p-locking a rack macro is the single highest-leverage version — one plock
   lane sweeping a whole curated sound. Design plock keys so a rack macro is
   addressable as a plock target from day one.
-- Rack macro banks (design locked in A3 #6/#7; implement when the Sounds
-  tab makes the collapsed-rack surface real product UI).
-- Macro mapping into slot FX (`ParamTarget::RackSlotParam` exists; add a
-  `RackSlotEffectParam` variant when needed — cheap after A4/A5).
+- Additional rack-macro curves/range editing beyond the persisted linear/exp/log
+  model and captured full parameter range.
 - Sidechain routing *into* slot effects (`refresh_effect_sidechain_labels`
   is track-keyed; needs a "Track N / Slot M / FX" naming scheme).
 - Per-slot sends; nested racks; drum-rack per-pad return chains.
@@ -625,3 +623,22 @@ Command on any `Sampler`/`Custom` track: **"Group to Instrument Rack"**.
 2. Does "Group to Instrument Rack" also move *builtin* mixer stages (filter/
    delay in `TrackShell`) into the slot chain, or only chain inserts? (Start:
    chain inserts only; the shell stages are per-track mixer furniture.)
+
+### A11. Rack macro bank (implemented 2026-07-17)
+
+- Every rack defaults to exactly eight macros with immutable identifiers
+  `:macro_1` through `:macro_8`; names and values are editable independently.
+- Definitions, mappings, values, and p-lock rows serialize inside
+  `ProjectRackTrackPattern`, including `.sound`/rack presets. Older racks load
+  a default eight-macro bank.
+- Rack-relative targets cover slot mixer, slot instrument, and slot FX params.
+  UI mapping intentionally exposes slot instrument and slot FX controls, never
+  track FX. Slot/effect deletion and effect insertion/reordering repair or drop
+  affected mappings transactionally.
+- Live changes push mapped values without mutating device defaults. At trigger
+  time the rack macro is the effective default beneath target p-locks.
+- `def-process` can target `(rack-macro :macro_1)`; process Set/Add values are
+  carried in scheduled events and remain transient.
+- `rack-panel-macros-open` controls the third rack-toolbar button and the 4x2
+  bank. Renaming, live values, p-lock authoring, map/unmap, and mapping ownership
+  are exposed through host commands and reactive rack state.

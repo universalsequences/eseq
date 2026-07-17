@@ -538,7 +538,7 @@
           (end (+ center (* step-w 0.46)))
           (trail-half-w (* 0.5 aspect (- end trail-start)))
           (__half_w (* 0.5 aspect (- end start)))
-          (__half_h 0.12)
+          (__half_h 0.32)
           (__radius 0.07))
       (sdf/layer
         (sdf/fill
@@ -621,7 +621,7 @@
               :offset (vec2 0 0))))
         (sdf/fill (sdf/circle 0.36)
           (material
-            :lighting (lighting :edge-min -0.35 :edge-max 0.5
+            :lighting (lighting :edge-min -0.15 :edge-max 0.5
               :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
             :color (if (= active 1)
               (aqua-color
@@ -648,17 +648,19 @@
     (seqv-track-header-body i)))
 
 (def seqv-track-volume-control (i)
-  (box
-    :key (str "seqv-track-volume-control-" i)
-    :width 8.2 :height 0.85
-    :background "seqv-track-volume-meter"
-    :level (seqv-track-peak i)
-    :volume (seqv-track-volume-binding i)
-    :track-r (seqv-track-color-r-binding i)
-    :track-g (seqv-track-color-g-binding i)
-    :track-b (seqv-track-color-b-binding i)
-    :on-click (lambda (event) (seqv-set-track-volume-from-event i event))
-    :on-drag (lambda (event) (seqv-set-track-volume-from-event i event))))
+  (v-stack (box :height 0.3 )
+    (box
+      :key (str "seqv-track-volume-control-" i)
+      :width 8.2 :height 1.25
+      :background "seqv-track-volume-meter"
+      :level (seqv-track-peak i)
+      :volume (seqv-track-volume-binding i)
+      :track-r (seqv-track-color-r-binding i)
+      :track-g (seqv-track-color-g-binding i)
+      :track-b (seqv-track-color-b-binding i)
+      :on-click (lambda (event) (seqv-set-track-volume-from-event i event))
+      :on-drag (lambda (event) (seqv-set-track-volume-from-event i event))))
+  )
 
 (def seqv-track-header-body (i)
   (let ((name (nth SEQ.track-names i)))
@@ -822,7 +824,7 @@
       (variant-g (seqv-track-step-value SEQ.track-step-variant-g track step 0))
       (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0)))
     (box
-      :width 3.05 :height 1.05
+      :width 3.05 :height 1.15
       :key (str "seqv-step-cell-" track "-" step)
       :on-mouse-down (lambda (evt)
         (if visible
@@ -845,7 +847,7 @@
       :hide (if visible 0 1)
       :background "cursor-highlight"
       (box
-        :width 3.05 :height 0.55
+        :width 3.05 :height 0.85
         :odd odd
         :active (bind-seq (str "seq-track-step-active-" track "-" step))
         :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))

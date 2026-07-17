@@ -6,17 +6,17 @@ use std::sync::atomic::Ordering;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
-    rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentSlotResetSummary,
-    InstrumentType, ModDestination, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
-    RackTrackSnapshot, TrackOutput, TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE,
-    DRUM_RACK_LAST_PAD_NOTE, DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS,
-    MAX_SAMPLER_POOLS, MAX_TRACKS,
+    BusId, CustomInstrumentRunMode, DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE,
+    DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, InstrumentSlotResetSummary, InstrumentType,
+    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS, ModDestination, RackRouting,
+    RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, TrackOutput, TrackSoundState,
+    rack_slot_pool_index,
 };
 use crate::voice::MAX_VOICES;
 
 use super::fx_chain::{
-    connect_fx_chain_gap, connect_fx_chain_host, rewire_fx_chain, ChainSuccessor, FxChainHost,
-    FxChainLocator, FxChainSlotView, FxLeaseSlotRemoval, StereoEndpoint,
+    ChainSuccessor, FxChainHost, FxChainLocator, FxChainSlotView, FxLeaseSlotRemoval,
+    StereoEndpoint, connect_fx_chain_gap, connect_fx_chain_host, rewire_fx_chain,
 };
 use super::{App, EngineDescriptor, EngineNodeIds, RackSlotNodeIds, TrackNodeIds};
 
@@ -2365,6 +2365,9 @@ impl GraphController<'_> {
         let rack_track = RackTrackSnapshot {
             routing,
             slots: rack_slot_snapshots,
+            macros: crate::sequencer::default_rack_macros(),
+            runtime_macro_values: None,
+            runtime_macro_track: 0,
         };
         self.finish_rack_track_registration(idx, track_name, shell, rack_slot_nodes, rack_track);
         self.app.sampler_paths.push(None);
@@ -7018,10 +7021,10 @@ mod tests {
     use crate::macro_engine::{MacroCurve, MacroKind, MacroMapping, MacroParamKey};
     use crate::process::ParamTarget;
     use crate::recorder::MasterRecorder;
-    use crate::sequencer::{default_empty_effect_chain, SequencerState};
+    use crate::sequencer::{SequencerState, default_empty_effect_chain};
     use crate::tui::AudioBuses;
     use std::path::PathBuf;
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
 
     struct TestLiveGraph {
         ptr: LiveGraphPtr,
@@ -7571,14 +7574,15 @@ mod tests {
                 .override_value(&MacroParamKey::Instrument { track: 0, param: 0 }),
             None
         );
-        assert!(app
-            .macro_engine
+        assert!(
+            app.macro_engine
                 .override_value(&MacroParamKey::Effect {
                     track: 0,
                     slot: 0,
                     param: 0,
                 })
-            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
+                .is_some_and(|value| (value - 0.5).abs() < 1.0e-6)
+        );
         let old_engine = app.graph.engine_node_ids[0]
             .as_ref()
             .expect("shared old engine must remain for track 2");
@@ -7659,9 +7663,11 @@ mod tests {
         assert!(app.graph.track_voice_lids[0].is_empty());
         assert_eq!(app.graph.track_buffer_ids[0], -1);
         assert_eq!(app.state.runtime.voice_counts[0].load(Ordering::Acquire), 0);
-        assert!(sampler_ids
+        assert!(
+            sampler_ids
                 .iter()
-            .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) }));
+                .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) })
+        );
         let engine = app.graph.engine_node_ids[0]
             .as_ref()
             .expect("new custom engine should remain live");
@@ -7810,9 +7816,10 @@ mod tests {
             engine_routes_before,
             "grouping should rewire the existing engine route instead of rebuilding it"
         );
-        assert!(app
-            .rack_slot_instrument_descriptor(&rack.slots[0])
-            .is_some());
+        assert!(
+            app.rack_slot_instrument_descriptor(&rack.slots[0])
+                .is_some()
+        );
         graph.process_block();
     }
 
@@ -7920,10 +7927,11 @@ mod tests {
             .expect("rack sample should load");
         app.add_builtin_rack_slot_effect_sync(0, 0, "OTT")
             .expect("rack slot should accept OTT");
-        assert!(app
-            .editor
+        assert!(
+            app.editor
                 .effect_chain_leases
-            .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
+                .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 })
+        );
 
         app.graph_controller()
             .delete_rack_slot(0, 0)
@@ -7934,10 +7942,11 @@ mod tests {
             .expect("rack container should remain");
         assert!(rack.slots.is_empty());
         assert!(app.graph.track_node_ids[0].rack_slots.is_empty());
-        assert!(!app
-            .editor
+        assert!(
+            !app.editor
                 .effect_chain_leases
-            .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
+                .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 })
+        );
         graph.process_block();
     }
 
@@ -8173,6 +8182,7 @@ mod tests {
                 collapsed: false,
             },
             rack: crate::project::ProjectRackTrackPattern {
+                macros: crate::project::default_project_rack_macros(),
                 routing: crate::project::ProjectRackRouting::Broadcast,
                 slots: vec![crate::project::ProjectRackSlotPattern {
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,

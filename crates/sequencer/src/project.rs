@@ -6,16 +6,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::macro_engine::{
-    normalize_macro_key, Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping,
-    SceneMacroConfig, StealQuantize,
+    Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping, SceneMacroConfig, StealQuantize,
+    normalize_macro_key,
 };
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
-    RackTrackSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
-    TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MAX_STEPS, MidiFxPosition,
+    ModConnection, ModDestination, NUM_PARAMS, PatternSnapshot, RackRouting, RackSlotParamPlocks,
+    RackSlotSnapshot, RackTrackSnapshot, SwingResolution, TRACK_PATTERN_WORDS, Timebase,
+    TrackOutput, TrackParamsSnapshot, TrackSendSnapshot, TrackSoundState,
 };
 use crate::track_color::TrackColor;
 
@@ -706,6 +706,70 @@ pub struct ProjectRackTrackPattern {
     pub routing: ProjectRackRouting,
     #[serde(default)]
     pub slots: Vec<ProjectRackSlotPattern>,
+    #[serde(default = "default_project_rack_macros")]
+    pub macros: Vec<ProjectRackMacro>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackMacro {
+    pub id: u8,
+    pub name: String,
+    #[serde(default)]
+    pub value: f32,
+    #[serde(default)]
+    pub mappings: Vec<ProjectRackMacroMapping>,
+    #[serde(default)]
+    pub plocks: Vec<Option<f32>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackMacroMapping {
+    pub target: ProjectRackMacroTarget,
+    pub range_min: f32,
+    pub range_max: f32,
+    #[serde(default)]
+    pub curve: ProjectRackMacroCurve,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectRackMacroTarget {
+    SlotParam {
+        slot: usize,
+        param: String,
+    },
+    SlotInstrumentParam {
+        slot: usize,
+        param: String,
+        param_index: usize,
+    },
+    SlotEffectParam {
+        slot: usize,
+        effect_slot: usize,
+        param: String,
+        param_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRackMacroCurve {
+    #[default]
+    Linear,
+    Exp,
+    Log,
+}
+
+pub(crate) fn default_project_rack_macros() -> Vec<ProjectRackMacro> {
+    (0..crate::sequencer::RACK_MACRO_COUNT)
+        .map(|id| ProjectRackMacro {
+            id: id as u8,
+            name: format!("Macro {}", id + 1),
+            value: 0.0,
+            mappings: Vec::new(),
+            plocks: vec![None; crate::sequencer::MAX_STEPS],
+        })
+        .collect()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1143,19 +1207,148 @@ impl From<RackTrackSnapshot> for ProjectRackTrackPattern {
                 .into_iter()
                 .map(ProjectRackSlotPattern::from)
                 .collect(),
+            macros: value
+                .macros
+                .into_iter()
+                .map(ProjectRackMacro::from)
+                .collect(),
         }
     }
 }
 
 impl From<ProjectRackTrackPattern> for RackTrackSnapshot {
     fn from(value: ProjectRackTrackPattern) -> Self {
-        Self {
+        let mut rack = Self {
             routing: RackRouting::from(value.routing),
             slots: value
                 .slots
                 .into_iter()
                 .map(RackSlotSnapshot::from)
                 .collect(),
+            macros: value
+                .macros
+                .into_iter()
+                .filter_map(|value| value.try_into().ok())
+                .collect(),
+            runtime_macro_values: None,
+            runtime_macro_track: 0,
+        };
+        rack.normalize_macros();
+        rack
+    }
+}
+
+impl From<crate::sequencer::RackMacro> for ProjectRackMacro {
+    fn from(value: crate::sequencer::RackMacro) -> Self {
+        Self {
+            id: value.id.index() as u8,
+            name: value.name,
+            value: value.value,
+            mappings: value
+                .mappings
+                .into_iter()
+                .map(ProjectRackMacroMapping::from)
+                .collect(),
+            plocks: value.plocks,
+        }
+    }
+}
+
+impl TryFrom<ProjectRackMacro> for crate::sequencer::RackMacro {
+    type Error = ();
+    fn try_from(value: ProjectRackMacro) -> Result<Self, Self::Error> {
+        let id = crate::sequencer::RackMacroId::from_index(value.id as usize).ok_or(())?;
+        Ok(Self {
+            id,
+            name: value.name,
+            value: value.value.clamp(0.0, 1.0),
+            mappings: value.mappings.into_iter().map(Into::into).collect(),
+            plocks: value.plocks,
+        })
+    }
+}
+
+impl From<crate::sequencer::RackMacroMapping> for ProjectRackMacroMapping {
+    fn from(value: crate::sequencer::RackMacroMapping) -> Self {
+        Self {
+            target: value.target.into(),
+            range_min: value.range_min,
+            range_max: value.range_max,
+            curve: match value.curve {
+                crate::sequencer::RackMacroCurve::Linear => ProjectRackMacroCurve::Linear,
+                crate::sequencer::RackMacroCurve::Exp => ProjectRackMacroCurve::Exp,
+                crate::sequencer::RackMacroCurve::Log => ProjectRackMacroCurve::Log,
+            },
+        }
+    }
+}
+impl From<ProjectRackMacroMapping> for crate::sequencer::RackMacroMapping {
+    fn from(value: ProjectRackMacroMapping) -> Self {
+        Self {
+            target: value.target.into(),
+            range_min: value.range_min,
+            range_max: value.range_max,
+            curve: match value.curve {
+                ProjectRackMacroCurve::Linear => crate::sequencer::RackMacroCurve::Linear,
+                ProjectRackMacroCurve::Exp => crate::sequencer::RackMacroCurve::Exp,
+                ProjectRackMacroCurve::Log => crate::sequencer::RackMacroCurve::Log,
+            },
+        }
+    }
+}
+impl From<crate::sequencer::RackMacroTarget> for ProjectRackMacroTarget {
+    fn from(value: crate::sequencer::RackMacroTarget) -> Self {
+        match value {
+            crate::sequencer::RackMacroTarget::SlotParam { slot, param } => {
+                Self::SlotParam { slot, param }
+            }
+            crate::sequencer::RackMacroTarget::SlotInstrumentParam {
+                slot,
+                param,
+                param_index,
+            } => Self::SlotInstrumentParam {
+                slot,
+                param,
+                param_index,
+            },
+            crate::sequencer::RackMacroTarget::SlotEffectParam {
+                slot,
+                effect_slot,
+                param,
+                param_index,
+            } => Self::SlotEffectParam {
+                slot,
+                effect_slot,
+                param,
+                param_index,
+            },
+        }
+    }
+}
+impl From<ProjectRackMacroTarget> for crate::sequencer::RackMacroTarget {
+    fn from(value: ProjectRackMacroTarget) -> Self {
+        match value {
+            ProjectRackMacroTarget::SlotParam { slot, param } => Self::SlotParam { slot, param },
+            ProjectRackMacroTarget::SlotInstrumentParam {
+                slot,
+                param,
+                param_index,
+            } => Self::SlotInstrumentParam {
+                slot,
+                param,
+                param_index,
+            },
+            ProjectRackMacroTarget::SlotEffectParam {
+                slot,
+                effect_slot,
+                param,
+                param_index,
+            } => Self::SlotEffectParam {
+                slot,
+                effect_slot,
+                param,
+                param_index,
+            },
         }
     }
 }
@@ -3033,6 +3226,46 @@ mod tests {
     }
 
     #[test]
+    fn rack_macro_bank_roundtrips_stable_ids_names_plocks_and_relative_targets() {
+        let mut macros = default_project_rack_macros();
+        macros[0].name = "Wonky".to_string();
+        macros[0].value = 0.4;
+        macros[0].plocks[3] = Some(0.8);
+        macros[0].mappings.push(ProjectRackMacroMapping {
+            target: ProjectRackMacroTarget::SlotEffectParam {
+                slot: 1,
+                effect_slot: 2,
+                param: "feedback".to_string(),
+                param_index: 4,
+            },
+            range_min: 0.1,
+            range_max: 0.9,
+            curve: ProjectRackMacroCurve::Exp,
+        });
+        let rack = ProjectRackTrackPattern {
+            routing: ProjectRackRouting::Broadcast,
+            slots: Vec::new(),
+            macros,
+        };
+        let json = serde_json::to_string(&rack).unwrap();
+        let restored: ProjectRackTrackPattern = serde_json::from_str(&json).unwrap();
+        let runtime = RackTrackSnapshot::from(restored);
+        assert_eq!(runtime.macros.len(), crate::sequencer::RACK_MACRO_COUNT);
+        assert_eq!(runtime.macros[0].id.stable_key(), "macro_1");
+        assert_eq!(runtime.macros[0].name, "Wonky");
+        assert_eq!(runtime.macros[0].plocks[3], Some(0.8));
+        assert!(matches!(
+            runtime.macros[0].mappings[0].target,
+            crate::sequencer::RackMacroTarget::SlotEffectParam {
+                slot: 1,
+                effect_slot: 2,
+                param_index: 4,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn sound_preset_roundtrips_rack_sources_metadata_and_slot_fx() {
         let sound = ProjectSoundPreset {
             version: project_file_version(),
@@ -3053,6 +3286,7 @@ mod tests {
                 collapsed: false,
             },
             rack: ProjectRackTrackPattern {
+                macros: default_project_rack_macros(),
                 routing: ProjectRackRouting::Broadcast,
                 slots: vec![ProjectRackSlotPattern {
                     instrument_type: ProjectInstrumentType::Sampler,
@@ -3111,6 +3345,7 @@ mod tests {
                 collapsed: false,
             },
             rack: ProjectRackTrackPattern {
+                macros: default_project_rack_macros(),
                 routing: ProjectRackRouting::Broadcast,
                 slots: Vec::new(),
             },

@@ -1191,6 +1191,7 @@ mod tests {
 
     fn test_event(track: usize) -> StepEvent {
         StepEvent {
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             track,
             samples_per_step: 12_000.0,
             resolved: ResolvedStep {

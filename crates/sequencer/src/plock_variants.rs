@@ -26,6 +26,7 @@ pub enum PlockVariantDomain {
     InstrumentTensor,
     Effect,
     EffectTensor,
+    RackMacro,
     RackSlotParam,
     RackSlotInstrument,
     RackSlotInstrumentTensor,
@@ -333,6 +334,17 @@ pub fn live_track_variant_key(
     }
 
     if let Some(Some(rack)) = state.pattern.rack_tracks.lock().unwrap().get(track) {
+        for rack_macro in &rack.macros {
+            if let Some(value) = rack_macro.plocks.get(step).copied().flatten() {
+                entries.push(PlockVariantEntry {
+                    domain: PlockVariantDomain::RackMacro,
+                    slot: 0,
+                    param: rack_macro.id.index(),
+                    cell: None,
+                    value_bits: value.to_bits(),
+                });
+            }
+        }
         for (slot_idx, slot) in rack.slots.iter().enumerate() {
             collect_rack_slot_entries(&mut entries, slot, step, slot_idx);
         }
@@ -606,14 +618,28 @@ mod tests {
     }
 
     #[test]
+    fn rack_macro_plock_defines_a_colored_variant_key() {
+        let state = SequencerState::new(1, vec![]);
+        let mut rack = crate::sequencer::RackTrackSnapshot::new(
+            crate::sequencer::RackRouting::Broadcast,
+            Vec::new(),
+            crate::sequencer::default_rack_macros(),
+        );
+        rack.macros[0].plocks[4] = Some(0.75);
+        state.pattern.rack_tracks.lock().unwrap()[0] = Some(rack);
+
+        let key = live_track_variant_key(&state, 0, 4).expect("rack macro variant key");
+        assert_eq!(key.param_count(), 1);
+        assert_eq!(key.entries[0].domain, PlockVariantDomain::RackMacro);
+        assert_eq!(key.entries[0].param, 0);
+        assert_eq!(f32::from_bits(key.entries[0].value_bits), 0.75);
+    }
+
+    #[test]
     fn recorded_step_expression_does_not_create_variants() {
         let state = SequencerState::new(1, vec![]);
         for step in 0..64 {
-            state.pattern.step_data[0].set(
-                step,
-                StepParam::Velocity,
-                0.25 + step as f32 / 256.0,
-            );
+            state.pattern.step_data[0].set(step, StepParam::Velocity, 0.25 + step as f32 / 256.0);
             state.pattern.step_data[0].set(
                 step,
                 StepParam::Duration,

@@ -40,7 +40,7 @@
         :plock-color-r (param-plock-color-r)
         :plock-color-g (param-plock-color-g)
         :plock-color-b (param-plock-color-b)
-        :width 4.35 :height 2.45 :knob-size 1.85
+        :width 5.35 :height 3.55 :knob-size 2.85
         :on-change (lambda (v) (param-set-control-value fx p v))))))
 
 (def builtin-fx-phaser-flanger-percent-knob (fx label-text p)
@@ -74,6 +74,7 @@
       :width 4.85 :height 1.15 :padding 0 :font-size 8.5
       :background-color (if selected (phaser-flanger-orange) :mixer-control-bg)
       :color (if selected :black :dim)
+    :border-color :transparent
       :plock-active (if (param-plock-active? fx p) 1 0)
       :plock-color-r (param-plock-color-r)
       :plock-color-g (param-plock-color-g)
@@ -155,8 +156,8 @@
         (builtin-fx-filter-mini-number fx "time" dbt-p)))))
 
 (def builtin-fx-phaser-flanger-mode-box (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
-  (box :width 16.0 :height 9.70 :padding 0.36
-       :background-color :fx-inner-panel-bg :corner-radius 7
+  (box :width 16.0 :height 9.55 :padding 0.36
+       :background-color :bg :corner-radius 16
     (v-stack :gap 0.16 :align :center
       (builtin-fx-phaser-flanger-display fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
       (builtin-fx-phaser-flanger-mode-row fx mode-p)
@@ -168,6 +169,7 @@
   (button "Sync"
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
     :background-color (if (> (get p :value) 0.5) (phaser-flanger-orange) :mixer-control-bg)
+    :border-color :transparent
     :color (if (> (get p :value) 0.5) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
@@ -179,6 +181,7 @@
   (button label-text
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (phaser-flanger-orange) :mixer-control-bg)
+    :border-color :transparent
     :color (if (= (get p :text-value) label-text) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
@@ -212,6 +215,7 @@
     :width 3.85 :height 0.92 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (phaser-flanger-cyan) :mixer-control-bg)
     :color (if (= (get p :text-value) label-text) :black :dim)
+    :border-color :transparent
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
@@ -226,8 +230,8 @@
     (builtin-fx-phaser-flanger-shape-button fx p "square")))
 
 (def builtin-fx-phaser-flanger-lfo-box (fx sync-p rate-p div-p shape-p)
-  (box :width 10.6 :height 8.55 :padding 0.30
-       :background-color :fx-inner-panel-bg :corner-radius 7
+  (box :width 10.6 :height 9.55 :padding 0.30
+       :background-color :bg :corner-radius 16
     (v-stack :gap 0.16 :align :center
       (label "LFO" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (builtin-fx-phaser-flanger-sync-button fx sync-p)
@@ -253,8 +257,8 @@
     :on-click |x y r| (fx-toggle-effect-value fx p)))
 
 (def builtin-fx-phaser-flanger-sweep-box (fx amount-p feedback-p invert-p stereo-p)
-  (box :width 10.0 :height 8.55 :padding 0.36
-       :background-color :fx-inner-panel-bg :corner-radius 7
+  (box :width 10.0 :height 9.55 :padding 0.36
+       :background-color :bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "SWEEP" :font-size 8.0 :width 9.0 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
@@ -268,8 +272,8 @@
 ;; ── Output section ──
 
 (def builtin-fx-phaser-flanger-out-box (fx warmth-p mix-p output-p)
-  (box :width 5.3 :height 8.55 :padding 0.30
-       :background-color :fx-inner-panel-bg :corner-radius 7
+  (box :width 5.3 :height 9.55 :padding 0.30
+       :background-color :bg :corner-radius 7
     (v-stack :gap 0.10 :align :center
       (label "OUT" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
       (builtin-fx-phaser-flanger-knob fx "output" output-p 1)

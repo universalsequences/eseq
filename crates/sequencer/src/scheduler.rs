@@ -1678,6 +1678,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     mut sampler_params: ScheduledSamplerParams,
+    rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
     let resolved =
@@ -1742,6 +1743,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                             instrument_tensor_params: instrument_tensor_params.clone(),
                             sampler_params,
                             instrument_fingerprint,
+                            rack_macro_values,
                         },
                     })
                     .is_err()
@@ -1778,6 +1780,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                 instrument_tensor_params,
                 sampler_params,
                 instrument_fingerprint,
+                rack_macro_values,
             },
         })
         .is_ok();
@@ -1819,6 +1822,7 @@ fn step_event_from_resolved(
         instrument_params,
         instrument_tensor_params,
         sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
+        rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
         source: EventSource::Step {
             track: track_idx,
             step: step_idx,
@@ -1857,6 +1861,7 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
             event.instrument_params,
             event.instrument_tensor_params,
             event.sampler_params,
+            event.rack_macro_values,
         ),
         EventSource::Network { seed, neuron, .. } => {
             normalize_network_event_destination(snapshot, neuron, seed, &mut event);
@@ -1886,6 +1891,7 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
                 event.instrument_tensor_params,
                 event.sampler_params,
                 instrument_fingerprint,
+                event.rack_macro_values,
             )
         }
     }
@@ -2282,6 +2288,7 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
         instrument_params: resolve_instrument_defaults(snapshot, track_idx),
         instrument_tensor_params: resolve_instrument_tensor_defaults(snapshot, track_idx),
         sampler_params: resolve_sampler_defaults(snapshot, track_idx),
+        rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
         source: EventSource::Network {
             seed: None,
             neuron: source.event_source_index(),
@@ -2405,6 +2412,7 @@ struct ProcessTargetOverlay {
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
     midi_fx_params: Vec<ProcessMidiFxParamOverride>,
+    rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 }
 
 impl Default for ProcessTargetOverlay {
@@ -2413,6 +2421,7 @@ impl Default for ProcessTargetOverlay {
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
             midi_fx_params: Vec::new(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
         }
     }
 }
@@ -2475,6 +2484,9 @@ fn process_target_label(target: &crate::process::ParamTarget) -> String {
         }
         crate::process::ParamTarget::RackSlotInstrumentParam { slot, param, .. } => {
             format!("rack{}:instrument:{param}", slot + 1)
+        }
+        crate::process::ParamTarget::RackMacroParam { macro_id } => {
+            format!("rack-macro:{}", macro_id + 1)
         }
     }
 }
@@ -2911,6 +2923,11 @@ fn process_resolve_hint_to_target(
             }
             None
         }
+        crate::process::ProcessTargetHint::RackMacroParam { macro_id } => ((*macro_id as usize)
+            < crate::sequencer::RACK_MACRO_COUNT)
+            .then_some(crate::process::ParamTarget::RackMacroParam {
+                macro_id: *macro_id,
+            }),
     }
 }
 
@@ -3364,6 +3381,26 @@ fn process_apply_concrete_target_write(
                 )
             });
         }
+        crate::process::ParamTarget::RackMacroParam { macro_id } => {
+            let index = *macro_id as usize;
+            let Some(rack_macro) = snapshot
+                .tracks
+                .get(track)
+                .and_then(|track| track.rack_track.as_ref())
+                .and_then(|rack| rack.macros.get(index))
+            else {
+                return;
+            };
+            let base =
+                overlay.rack_macro_values[index].unwrap_or_else(|| rack_macro.value_at(step));
+            overlay.rack_macro_values[index] = Some(
+                match write.op {
+                    crate::process::ProcessTargetOp::Set => write.value,
+                    crate::process::ProcessTargetOp::Add => base + write.value,
+                }
+                .clamp(0.0, 1.0),
+            );
+        }
     }
 }
 
@@ -3466,7 +3503,7 @@ fn step_event_with_process_overlay(
     let mut instrument_params = resolve_instrument_params(snapshot, track, step);
     upsert_effect_params(&mut effect_params, overlay.effect_params.clone());
     upsert_instrument_params(&mut instrument_params, overlay.instrument_params.clone());
-    step_event_from_resolved(
+    let mut event = step_event_from_resolved(
         snapshot,
         track,
         step,
@@ -3476,7 +3513,9 @@ fn step_event_with_process_overlay(
         effect_params,
         instrument_params,
         resolve_instrument_tensor_params(snapshot, track, step),
-    )
+    );
+    event.rack_macro_values = overlay.rack_macro_values;
+    event
 }
 
 fn clamp_ratchet_event(
@@ -4265,6 +4304,7 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     mut sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
+    rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
     let resolved =
@@ -4325,6 +4365,7 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                             instrument_tensor_params: instrument_tensor_params.clone(),
                             sampler_params,
                             instrument_fingerprint,
+                            rack_macro_values,
                         },
                     })
                     .is_err()
@@ -4362,6 +4403,7 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                 instrument_tensor_params,
                 sampler_params,
                 instrument_fingerprint,
+                rack_macro_values,
             },
         })
         .is_ok();
@@ -4396,6 +4438,7 @@ struct MidiFxEvent {
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
+    rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
     source: EventSource,
 }
 
@@ -4513,6 +4556,7 @@ fn midi_fx_event_from_step(
         instrument_params,
         instrument_tensor_params,
         sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
+        rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
         source: EventSource::Step {
             track: track_idx,
             step: step_idx,
@@ -4570,6 +4614,7 @@ fn midi_fx_event_from_step_event(
         instrument_params: event.instrument_params,
         instrument_tensor_params: event.instrument_tensor_params,
         sampler_params: event.sampler_params,
+        rack_macro_values: event.rack_macro_values,
         source: event.source,
     }
 }
@@ -4801,6 +4846,7 @@ fn midi_fx_window_events_from_step(
             instrument_params: instrument_params.clone(),
             instrument_tensor_params: instrument_tensor_params.clone(),
             sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Step {
                 track: track_idx,
                 step: step_idx,
@@ -5132,6 +5178,7 @@ fn run_midi_fx_chain_for_track_inner(
                             instrument_params,
                             instrument_tensor_params: event.instrument_tensor_params.clone(),
                             sampler_params: event.sampler_params,
+                            rack_macro_values: event.rack_macro_values,
                             source: event.source.clone(),
                         };
                         if target_track == source_track {
@@ -5272,6 +5319,7 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
                 event.instrument_tensor_params,
                 event.sampler_params,
                 instrument_fingerprint,
+                event.rack_macro_values,
             ),
             EventSource::Step { .. } => enqueue_resolved_trigger(
                 queue,
@@ -5291,6 +5339,7 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
                 event.instrument_params,
                 event.instrument_tensor_params,
                 event.sampler_params,
+                event.rack_macro_values,
             ),
         };
         if !enqueued {
@@ -5503,6 +5552,7 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                     snapshot, track_idx, step,
                 ),
                 sampler_params: resolve_sampler_params(snapshot, track_idx, step),
+                rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 source: EventSource::Step {
                     track: track_idx,
                     step,
@@ -5627,6 +5677,7 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                     snapshot, track_idx, step,
                 ),
                 sampler_params: resolve_sampler_params(snapshot, track_idx, step),
+                rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 source: EventSource::Step {
                     track: track_idx,
                     step,
@@ -6392,6 +6443,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                         trigger.track,
                                         trigger.step,
                                     ),
+                                    rack_macro_values: process_overlay.rack_macro_values,
                                     source: EventSource::Step {
                                         track: trigger.track,
                                         step: trigger.step,
@@ -6443,6 +6495,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                         trigger.track,
                                         trigger.step,
                                     ),
+                                    rack_macro_values: process_overlay.rack_macro_values,
                                     source: EventSource::Step {
                                         track: trigger.track,
                                         step: trigger.step,
@@ -7768,6 +7821,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn process_write_targets_stable_rack_macro_without_mutating_rack_state() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut macros = crate::sequencer::default_rack_macros();
+        macros[0].value = 0.25;
+        state.set_rack_track_for_all_pattern_snapshots(
+            0,
+            crate::sequencer::RackTrackSnapshot::new(
+                crate::sequencer::RackRouting::Broadcast,
+                Vec::new(),
+                macros,
+            ),
+        );
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut resolved = test_resolved_step();
+        let mut overlay = super::ProcessTargetOverlay::default();
+        super::process_apply_concrete_target_write(
+            &snapshot,
+            &[],
+            0,
+            3,
+            &mut resolved,
+            &mut overlay,
+            &crate::process::ParamTarget::RackMacroParam { macro_id: 0 },
+            &crate::process::ProcessTargetWrite {
+                port: crate::process::DEFAULT_PROCESS_PORT.to_string(),
+                target: None,
+                op: crate::process::ProcessTargetOp::Add,
+                value: 0.5,
+            },
+        );
+        assert_eq!(overlay.rack_macro_values[0], Some(0.75));
+        assert_eq!(
+            snapshot.tracks[0].rack_track.as_ref().unwrap().macros[0].value,
+            0.25
+        );
+    }
+
     fn graph_emission(
         sample_time: u64,
         node_index: usize,
@@ -7847,6 +7938,7 @@ mod tests {
                 instrument_params: ScheduledInstrumentParams::new(),
                 instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                 sampler_params: ScheduledSamplerParams::default(),
+                rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 source: EventSource::Network {
                     seed: Some((0, 0)),
                     neuron,
@@ -8008,6 +8100,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Step {
                 track: 0,
                 step: 0,
@@ -8374,6 +8467,7 @@ mod tests {
             ScheduledInstrumentParams::new(),
             ScheduledInstrumentTensorParams::new(),
             ScheduledSamplerParams::default(),
+            [None; crate::sequencer::RACK_MACRO_COUNT],
         ));
 
         let first = queue.pop().expect("first note event");
@@ -8417,6 +8511,7 @@ mod tests {
             ScheduledInstrumentParams::new(),
             ScheduledInstrumentTensorParams::new(),
             ScheduledSamplerParams::default(),
+            [None; crate::sequencer::RACK_MACRO_COUNT],
         ));
 
         let event = queue.pop().expect("global-transposed event");
@@ -8461,6 +8556,7 @@ mod tests {
             ScheduledInstrumentParams::new(),
             ScheduledInstrumentTensorParams::new(),
             ScheduledSamplerParams::default(),
+            [None; crate::sequencer::RACK_MACRO_COUNT],
         ));
 
         let event = queue.pop().expect("opted-out event");
@@ -8494,6 +8590,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -8549,6 +8646,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: None,
                 neuron: 0,
@@ -8825,6 +8923,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: resolve_sampler_params(&snapshot, 0, 0),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Step {
                 track: 0,
                 step: 0,
@@ -11214,6 +11313,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -11299,6 +11399,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -11378,6 +11479,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -11466,6 +11568,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -11563,6 +11666,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Step {
                 track: 0,
                 step: 0,
@@ -11758,6 +11862,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params,
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Step {
                 track: 0,
                 step: 0,
@@ -11902,6 +12007,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: None,
                 neuron: 0,
@@ -12017,6 +12123,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: None,
                 neuron: 0,
@@ -12127,6 +12234,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: None,
                 neuron: 0,
@@ -12252,6 +12360,7 @@ mod tests {
             instrument_params: ScheduledInstrumentParams::new(),
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,

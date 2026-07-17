@@ -31,12 +31,12 @@
         (base (sdf/rounded-rect width height 0.7))
         (growth (sdf/translate target-x 0.0
           (sdf/rounded-rect
-            (mix 0.42 0.92 amount)
-            (mix 0.48 1.20 amount)
-            (mix 0.32 0.62 amount))))
+            (mix 0.42 0.82 amount)
+            (mix 0.48 1.10 amount)
+            (mix 0.32 0.82 amount))))
         (shape (if (< push-target 0.0)
           base
-          (sdf/smooth-union (+ 0.001 (* 0.42 amount)) base growth))))
+          (sdf/smooth-union (+ 0.001 (* 1.242 amount)) base growth))))
     (sdf/layer
       (sdf/fill shape
         (material :color (rgba 0.18 0.18 0.20 1.0)

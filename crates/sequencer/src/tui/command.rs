@@ -990,9 +990,9 @@ mod tests {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         state.set_rack_track_for_all_pattern_snapshots(
             0,
-            RackTrackSnapshot {
-                routing: RackRouting::Broadcast,
-                slots: vec![RackSlotSnapshot {
+            RackTrackSnapshot::new(
+                RackRouting::Broadcast,
+                vec![RackSlotSnapshot {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
@@ -1015,7 +1015,8 @@ mod tests {
                     track_sound_state: TrackSoundState::default(),
                     sample_id: Some((1, "test.wav".to_string(), 44_100)),
                 }],
-            },
+                crate::sequencer::default_rack_macros(),
+            ),
         );
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = App::new(
@@ -1182,6 +1183,7 @@ mod tests {
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
             },
+            rack_macro_plocks: vec![Some(0.6), None],
             rack_slot_param_plocks: vec![StepSlotPlocks {
                 params: vec![Some(12.0), Some(0.4), None],
             }],
@@ -1211,6 +1213,7 @@ mod tests {
             .params
             .iter()
             .all(Option::is_none));
+        assert!(sanitized.rack_macro_plocks.iter().all(Option::is_none));
         assert!(sanitized
             .rack_slot_param_plocks
             .iter()
@@ -1241,6 +1244,7 @@ mod tests {
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
             },
+            rack_macro_plocks: vec![Some(0.6), None],
             rack_slot_param_plocks: vec![StepSlotPlocks {
                 params: vec![Some(12.0), Some(0.4), None],
             }],
@@ -1259,6 +1263,7 @@ mod tests {
             sanitized.instrument_plocks.params,
             vec![Some(0.2), Some(0.8)]
         );
+        assert_eq!(sanitized.rack_macro_plocks, vec![Some(0.6), None]);
         assert_eq!(
             sanitized.rack_slot_param_plocks[0].params,
             vec![Some(12.0), Some(0.4), None]
@@ -1817,6 +1822,77 @@ mod tests {
         app.end_scene_push();
 
         assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.2).abs() < 1.0e-6);
+        assert!(app.macro_engine.macros().is_empty());
+    }
+
+    #[test]
+    fn scene_push_interpolates_rack_macro_values_without_mutating_the_scene() {
+        let mut app = test_app_with_rack_sampler_slot();
+        let macro_id = crate::sequencer::RackMacroId::from_index(0).unwrap();
+        let capture = |app: &App| {
+            app.state.capture_current_pattern_snapshot(
+                1,
+                &[-1],
+                &[44_100],
+                &["Rack".to_string()],
+                &[InstrumentType::Rack],
+            )
+        };
+        {
+            let mut racks = app.state.pattern.rack_tracks.lock().unwrap();
+            racks[0].as_mut().unwrap().macros[0].value = 0.2;
+        }
+        let origin = capture(&app);
+        {
+            let mut racks = app.state.pattern.rack_tracks.lock().unwrap();
+            racks[0].as_mut().unwrap().macros[0].value = 0.8;
+        }
+        let target = capture(&app);
+        app.state
+            .replace_pattern_repository(vec![origin, target], 0);
+        app.state.restore_current_pattern_from_repository().unwrap();
+        {
+            let mut racks = app.state.pattern.rack_tracks.lock().unwrap();
+            racks[0].as_mut().unwrap().macros[0].plocks[3] = Some(0.35);
+        }
+
+        app.begin_scene_push(1, 1.0);
+        assert!((app.effective_rack_macro_value(0, macro_id, None).unwrap() - 0.8).abs() < 1.0e-6);
+        assert_eq!(
+            app.state.latest_scheduler_snapshot().tracks[0]
+                .rack_track
+                .as_ref()
+                .unwrap()
+                .macros[0]
+                .value,
+            0.8
+        );
+
+        app.set_scene_push_value(0.5);
+        assert!((app.effective_rack_macro_value(0, macro_id, None).unwrap() - 0.5).abs() < 1.0e-6);
+        assert_eq!(
+            app.effective_rack_macro_value(0, macro_id, Some(3)),
+            Some(0.35)
+        );
+        let scheduler_snapshot = app.state.latest_scheduler_snapshot();
+        let scheduler_macro = &scheduler_snapshot.tracks[0]
+            .rack_track
+            .as_ref()
+            .unwrap()
+            .macros[0];
+        assert_eq!(scheduler_macro.value, 0.5);
+        assert_eq!(scheduler_macro.value_at(3), 0.35);
+        assert_eq!(
+            app.state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .macros[0]
+                .value,
+            0.2
+        );
+
+        app.end_scene_push();
+        assert!((app.effective_rack_macro_value(0, macro_id, None).unwrap() - 0.2).abs() < 1.0e-6);
         assert!(app.macro_engine.macros().is_empty());
     }
 

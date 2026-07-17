@@ -195,6 +195,11 @@
 (def fx-plock-row-key (idx suffix)
   (str "track-plock-row-" idx "-" suffix))
 
+(def fx-plock-row-value (p)
+  (if (get p :value-field)
+    (bind-seq (get p :value-field))
+    (get p :value)))
+
 (def fx-plock-group-header (domain)
   (box :height 0.95
     (h-stack :gap 0.35 :align :center
@@ -233,7 +238,7 @@
               :key (fx-plock-row-key idx "lock")
               :on-change (lambda (v) (fx-plock-set-option p v))
               :width fx-plock-lock-col-width :height 0.98 :font-size 8.4)
-            (number-picker :value (get p :value)
+            (number-picker :value (fx-plock-row-value p)
               :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
               :key (fx-plock-row-key idx "lock")
               :noui true :font-size 9.2 :text-color :yellow :text-align :right
