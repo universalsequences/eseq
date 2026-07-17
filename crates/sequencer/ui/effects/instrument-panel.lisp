@@ -355,44 +355,12 @@
       (instrument-panel selected)
       (rack-empty-selected-panel inst))))
 
-(def rack-fx-param-control (inst slot fx param)
-  (v-stack :width 5.1 :height 2.0 :gap 0.05 :align :center
-    (label (substring (get param :name) 0 10)
-      :font-size 7.2 :color :dim :bg :transparent)
-    (number-picker :value (get param :value)
-      :min (get param :min) :max (get param :max) :decimals 3
-      :noui true :font-size 8.5 :width 4.8 :height 0.82
-      :on-change (lambda (v)
-        (host-command "set-rack-slot-effect-param"
-          (dict :track (get inst :track)
-                :rack-slot (get slot :idx)
-                :effect-slot (get fx :slot-idx)
-                :param (get param :idx)
-                :value v))))))
-
-(def rack-fx-enabled-param (fx)
-  (nth (filter |param| (= (get param :name) "enabled") (get fx :params)) 0))
-
-(def rack-fx-enabled-value (fx)
-  (let ((enabled (rack-fx-enabled-param fx)))
-    (if enabled (get enabled :value) 1)))
-
-(def rack-fx-move (inst slot fx delta)
+(def rack-fx-move (fx delta)
   (host-command "move-rack-slot-effect"
-    (dict :track (get inst :track)
-          :rack-slot (get slot :idx)
+    (dict :track (get fx :track-idx)
+          :rack-slot (get fx :rack-slot)
           :source-slot (get fx :slot-idx)
           :target-slot (+ (get fx :slot-idx) delta))))
-
-(def rack-fx-toggle-bypass (inst slot fx)
-  (let ((enabled (rack-fx-enabled-param fx)))
-    (if enabled
-      (host-command "set-rack-slot-effect-param"
-        (dict :track (get inst :track)
-              :rack-slot (get slot :idx)
-              :effect-slot (get fx :slot-idx)
-              :param (get enabled :idx)
-              :value (if (> (get enabled :value) 0.5) 0 1))))))
 
 (def rack-selected-fx-panel (inst)
   (let ((slot-idx (get inst :selected-slot)))
@@ -401,38 +369,11 @@
       (let ((slot (nth (get inst :slots) slot-idx)))
         (if (= (len (get slot :effects)) 0)
           (box :width 0 :height 0)
-          (box :debug-name "rack-slot-fx-panel"
-               :width 34 :height fx-fixed-panel-height
-               :background "fx-panel-bg" :padding 0
-            (v-stack :width :fill :height :fill :gap 0
-              (fx-panel-body "rack-slot-fx-content"
-                (scroll :width :fill :height :fill
-                  (v-stack :width :fill :gap 0.2
-                    (each (get slot :effects) |fx fx-idx|
-                      (v-stack :key (str "rack-fx-" (get fx :slot-idx)) :width :fill :gap 0.1
-                        (h-stack :width :fill :height 0.9 :gap 0.3 :align :center
-                          (label (get fx :name) :font-size 9 :color :white :bg :transparent)
-                          (box :flex 1 :height 0.1)
-                          (button "<" :width 1.1 :height 0.65 :font-size 8 :padding 0
-                            :disabled (not (get fx :can-move-left))
-                            :on-click |x y r| (rack-fx-move inst slot fx -1))
-                          (button ">" :width 1.1 :height 0.65 :font-size 8 :padding 0
-                            :disabled (not (get fx :can-move-right))
-                            :on-click |x y r| (rack-fx-move inst slot fx 1))
-                          (button "B" :width 1.1 :height 0.65 :font-size 8 :padding 0
-                            :background-color (if (> (rack-fx-enabled-value fx) 0.5)
-                              :mixer-control-bg
-                              '(rgba 0.95 0.48 0.18 1.0))
-                            :on-click |x y r| (rack-fx-toggle-bypass inst slot fx))
-                          (button "x" :width 1.1 :height 0.65 :font-size 8 :padding 0
-                            :on-click |x y r|
-                              (host-command "delete-rack-slot-effect"
-                                (dict :track (get inst :track)
-                                      :rack-slot (get slot :idx)
-                                      :effect-slot (get fx :slot-idx)))))
-                        (wrap :width :fill :gap 0.15 :row-gap 0.1
-                          (each (get fx :params) |param param-idx|
-                            (rack-fx-param-control inst slot fx param)))))))))))))))
+          (h-stack :debug-name "rack-slot-fx-panel"
+                   :height fx-fixed-panel-height :gap 1 :align :stretch
+            (each (get slot :effects) |fx fx-idx|
+              (subtree :key (str "rack-slot-fx-" (get fx :slot-idx) "-" (get fx :name))
+                (fx-panel (get fx :name) (get fx :params) fx)))))))))
 
 (def rack-slot-fx-drop-panel (inst)
   (let ((slot-idx (get inst :selected-slot)))

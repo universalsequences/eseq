@@ -6,6 +6,7 @@
 
 (def builtin-fx-str8-delay-live? (fx)
   (and builtin-fx-str8-delay-live-active
+       (not (get fx :rack-fx))
        (not (get fx :bus-fx))
        (not (get fx :midi-fx))
        (= builtin-fx-str8-delay-live-slot (get fx :slot-idx))))
@@ -40,7 +41,7 @@
       (set! builtin-fx-str8-delay-live-freq (get event :freq))
       (set! builtin-fx-str8-delay-live-q (get event :q))
       (set! builtin-fx-str8-delay-live-active (= (get event :type) :change-band))
-      (if (or (get fx :bus-fx) (get fx :midi-fx))
+      (if (or (get fx :rack-fx) (get fx :bus-fx) (get fx :midi-fx))
         (do
           (fx-set-effect-value fx freq-p (get event :freq))
           (fx-set-effect-value fx q-p (get event :q)))

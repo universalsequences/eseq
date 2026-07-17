@@ -20,6 +20,7 @@
 
 (def builtin-fx-filter-live? (fx)
   (and builtin-fx-filter-live-active
+       (not (get fx :rack-fx))
        (not (get fx :bus-fx))
        (not (get fx :midi-fx))
        (= builtin-fx-filter-live-slot (get fx :slot-idx))))
@@ -51,12 +52,14 @@
 (def builtin-fx-set-effect-option (fx p label)
   (do
     (fx-clear-selected-effect)
-    (host-command
+    (if (get fx :rack-fx)
+      (fx-set-effect-value fx p (custom-ui-option-index (get p :options) label))
+      (host-command
       (if (get fx :bus-fx)
         (if (seq-has-selection?) "set-bus-effect-plock-option" "set-bus-effect-param-option")
         (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option"))
       (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
-            :param-idx (get p :idx) :label label))))
+            :param-idx (get p :idx) :label label)))))
 
 (def builtin-fx-handle-filter-curve-action (fx cutoff-p resonance-p event)
   (if (or (= (get event :type) :change-band) (= (get event :type) :commit-band))
@@ -66,7 +69,7 @@
       (set! builtin-fx-filter-live-cutoff (get event :freq))
       (set! builtin-fx-filter-live-resonance (get event :q))
       (set! builtin-fx-filter-live-active (= (get event :type) :change-band))
-      (if (or (get fx :bus-fx) (get fx :midi-fx))
+      (if (or (get fx :rack-fx) (get fx :bus-fx) (get fx :midi-fx))
         (do
           (fx-set-effect-value fx cutoff-p (get event :freq))
           (fx-set-effect-value fx resonance-p (get event :q)))

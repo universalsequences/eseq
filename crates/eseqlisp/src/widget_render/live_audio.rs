@@ -12,6 +12,11 @@ pub enum LiveAudioSourceSelector {
         index: usize,
         slot: usize,
     },
+    RackEffect {
+        index: usize,
+        rack_slot: usize,
+        slot: usize,
+    },
     Bus {
         id: Option<u64>,
         index: Option<usize>,
@@ -37,6 +42,11 @@ impl LiveAudioSourceSelector {
             LiveAudioSourceSelector::TrackEffect { index, slot } => {
                 format!("track-effect:{index}:{slot}")
             }
+            LiveAudioSourceSelector::RackEffect {
+                index,
+                rack_slot,
+                slot,
+            } => format!("rack-effect:{index}:{rack_slot}:{slot}"),
             LiveAudioSourceSelector::Bus { id: Some(id), .. } => format!("bus-id:{id}"),
             LiveAudioSourceSelector::Bus {
                 id: None,
@@ -123,6 +133,18 @@ fn source_from_map(
                 .or_else(|| usize_from_map(map, "slot-idx"))
                 .unwrap_or(0);
             Some(LiveAudioSourceSelector::TrackEffect { index, slot })
+        }
+        "rack-effect" | "rack-fx" => {
+            let index = usize_from_map(map, "index")?;
+            let rack_slot = usize_from_map(map, "rack-slot")?;
+            let slot = usize_from_map(map, "slot")
+                .or_else(|| usize_from_map(map, "slot-idx"))
+                .unwrap_or(0);
+            Some(LiveAudioSourceSelector::RackEffect {
+                index,
+                rack_slot,
+                slot,
+            })
         }
         "bus" => {
             let id = u64_from_map(map, "id");

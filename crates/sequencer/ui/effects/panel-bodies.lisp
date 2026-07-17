@@ -295,12 +295,14 @@
 (def fx-panel-selected? (fx)
   (do
     SEQ.delete-target-version
-    (if (get fx :midi-fx)
+    (if (get fx :rack-fx)
+      false
+      (if (get fx :midi-fx)
       (seq-delete-target? :fx-effect (dict :chain "midi" :slot (get fx :slot-idx)))
       (if (get fx :bus-fx)
         (seq-delete-target? :fx-effect
           (dict :chain "bus" :bus (get fx :bus-idx) :slot (get fx :slot-idx)))
-        (seq-delete-target? :fx-effect (dict :chain "audio" :slot (get fx :slot-idx)))))))
+        (seq-delete-target? :fx-effect (dict :chain "audio" :slot (get fx :slot-idx))))))))
 
 (def fx-panel-header-bg (selected)
   (if selected :fx-panel-header-selected-bg :fx-panel-header-bg))

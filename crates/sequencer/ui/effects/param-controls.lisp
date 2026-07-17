@@ -272,6 +272,13 @@
 (def fx-set-effect-value (fx p v)
   (do
     (fx-clear-selected-effect)
+    (if (get fx :rack-fx)
+      (host-command "set-rack-slot-effect-param"
+        (dict :track (get fx :track-idx)
+              :rack-slot (get fx :rack-slot)
+              :effect-slot (get fx :slot-idx)
+              :param (get p :idx)
+              :value v))
     (if (get fx :bus-fx)
       (host-command (if (seq-has-selection?) "set-bus-effect-plock" "set-bus-effect-param")
         (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
@@ -283,7 +290,7 @@
       (if (seq-has-selection?)
         (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
         (host-command "set-effect-param"
-          (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v)))))))
+          (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v))))))))
 
 (def fx-toggle-instrument-value (p)
   (do
@@ -305,12 +312,19 @@
 (def fx-toggle-effect-value (fx p)
   (do
     (fx-clear-selected-effect)
-    (host-command "toggle-effect-param"
-      (dict :bus (get fx :bus-idx)
-            :bus-fx (get fx :bus-fx)
-            :midi-fx (get fx :midi-fx)
-            :slot-idx (get fx :slot-idx)
-            :param-idx (get p :idx)))))
+    (if (get fx :rack-fx)
+      (host-command "set-rack-slot-effect-param"
+        (dict :track (get fx :track-idx)
+              :rack-slot (get fx :rack-slot)
+              :effect-slot (get fx :slot-idx)
+              :param (get p :idx)
+              :value (if (fx-param-on? p) 0 1)))
+      (host-command "toggle-effect-param"
+        (dict :bus (get fx :bus-idx)
+              :bus-fx (get fx :bus-fx)
+              :midi-fx (get fx :midi-fx)
+              :slot-idx (get fx :slot-idx)
+              :param-idx (get p :idx))))))
 
 (def fx-param-has-idx? (p)
   (not (= (get p :idx) nil)))

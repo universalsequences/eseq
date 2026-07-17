@@ -477,6 +477,26 @@ mod tests {
         );
         assert!(track_request.data_key.contains("track-effect:2:5"));
 
+        let rack_props = HashMap::from([(
+            "source".to_string(),
+            map(vec![
+                ("kind", Value::Keyword("rack-effect".to_string())),
+                ("index", Value::Number(2.0)),
+                ("rack-slot", Value::Number(4.0)),
+                ("slot", Value::Number(1.0)),
+            ]),
+        )]);
+        let rack_request = request_from_props(&rack_props);
+        assert_eq!(
+            rack_request.source,
+            LiveAudioSourceSelector::RackEffect {
+                index: 2,
+                rack_slot: 4,
+                slot: 1,
+            }
+        );
+        assert!(rack_request.data_key.contains("rack-effect:2:4:1"));
+
         let bus_props = HashMap::from([(
             "source".to_string(),
             map(vec![

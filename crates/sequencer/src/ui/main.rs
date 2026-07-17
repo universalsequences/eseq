@@ -6990,6 +6990,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     editor.handle_host_event(HostEvent::Status(format!(
                                         "Error setting rack-slot effect parameter: {error}"
                                     )));
+                                } else {
+                                    refresh_instrument_panel_reactive(
+                                        &mut editor,
+                                        &app,
+                                        track,
+                                        &selected_steps,
+                                        &ui_epoch,
+                                    );
                                 }
                             }
                             _ => editor.handle_host_event(HostEvent::Status(

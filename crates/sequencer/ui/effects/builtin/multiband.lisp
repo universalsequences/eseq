@@ -14,9 +14,12 @@
 (def ott-button-on   () (rgba 0.94 0.69 0.32 1.0))
 
 (def builtin-fx-ott-source (fx)
-  (if (get fx :bus-fx)
+  (if (get fx :rack-fx)
+    (dict :kind :rack-effect :index (get fx :track-idx)
+          :rack-slot (get fx :rack-slot) :slot (get fx :slot-idx))
+    (if (get fx :bus-fx)
     (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
-    (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx))))
+    (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx)))))
 
 ;; Row height shared by every column so the three bands stay aligned with the
 ;; display rows.

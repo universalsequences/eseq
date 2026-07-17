@@ -4,4 +4,4 @@
   (track :layer-rack
     :name "Layer Rack + Slot FX"
     :samples ("../../assets/ir/lexicon-300-rich-plate.wav")
-    :rack-slot-audio-fx ("OTT")))
+    :rack-slot-audio-fx ("OTT" "filter")))

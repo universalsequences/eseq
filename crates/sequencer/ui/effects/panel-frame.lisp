@@ -14,9 +14,11 @@
   (box :width 0.4 :height 0))
 
 (def fx-effect-chain-kind (fx)
-  (if (get fx :midi-fx)
+  (if (get fx :rack-fx)
+    "rack"
+    (if (get fx :midi-fx)
     "midi"
-    (if (get fx :bus-fx) "bus" "audio")))
+    (if (get fx :bus-fx) "bus" "audio"))))
 
 (def fx-copy-values-to-all-scenes (fx)
   (host-command "copy-effect-values-to-all-scenes"
@@ -59,14 +61,17 @@
     (lambda () (instrument-copy-values-to-all-scenes inst))))
 
 (def fx-effect-drag-kind (fx)
-  (if (get fx :midi-fx)
+  (if (get fx :rack-fx)
+    "rack-effect-instance"
+    (if (get fx :midi-fx)
     "midi-effect-instance"
-    (if (get fx :bus-fx) "bus-effect-instance" "audio-effect-instance")))
+    (if (get fx :bus-fx) "bus-effect-instance" "audio-effect-instance"))))
 
 (def fx-effect-drag-payload (fx title)
   (dict :kind (fx-effect-drag-kind fx)
         :chain (fx-effect-chain-kind fx)
         :track SEQ.current-track
+        :rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1)
         :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
         :slot (get fx :slot-idx)
         :name title
@@ -76,15 +81,18 @@
   (dict :kind "fx-slot"
         :chain (fx-effect-chain-kind fx)
         :track SEQ.current-track
+        :rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1)
         :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
         :slot (get fx :slot-idx)))
 
 (def fx-effect-drop-types (fx)
-  (if (get fx :midi-fx)
+    (if (get fx :midi-fx)
     (list "midi-effect" "effect-instance")
     (if (get fx :bus-fx)
       (list "audio-effect" "effect-instance")
-      (list "audio-effect" "effect-instance"))))
+      (if (get fx :rack-fx)
+        (list)
+        (list "audio-effect" "effect-instance")))))
 
 (def fx-panel-header (title params fx)
   (box :width :fill :height 1 :padding 0 :v-align :center :h-align :start
@@ -94,9 +102,11 @@
     :on-click (lambda (info)
       (if (get fx :midi-fx)
         (fx-select-midi-effect (get fx :slot-idx))
-        (if (get fx :bus-fx)
+        (if (get fx :rack-fx)
+          false
+          (if (get fx :bus-fx)
           (fx-select-bus-effect (get fx :bus-idx) (get fx :slot-idx))
-          (fx-select-effect (get fx :slot-idx)))))
+          (fx-select-effect (get fx :slot-idx))))))
     (h-stack :gap 0.5 :align :center :width :fill
       (fx-panel-header-leading-spacer)
       (fx-enabled-toggle (enabled-param params) fx
@@ -110,8 +120,22 @@
         (effect-mods-toggle-button fx)
         (box))
       (box :flex 1 :height 0.15)
-      (fx-header-actions-menu fx)
-      (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
+      (if (get fx :rack-fx)
+        (h-stack :gap 0.2 :align :center
+          (button "<" :width 1.1 :height 0.65 :font-size 8 :padding 0
+            :disabled (not (get fx :can-move-left))
+            :on-click |x y r| (rack-fx-move fx -1))
+          (button ">" :width 1.1 :height 0.65 :font-size 8 :padding 0
+            :disabled (not (get fx :can-move-right))
+            :on-click |x y r| (rack-fx-move fx 1))
+          (button "x" :width 1.1 :height 0.65 :font-size 8 :padding 0
+            :on-click |x y r|
+              (host-command "delete-rack-slot-effect"
+                (dict :track (get fx :track-idx)
+                      :rack-slot (get fx :rack-slot)
+                      :effect-slot (get fx :slot-idx)))))
+        (fx-header-actions-menu fx))
+      (if (and (not (get fx :rack-fx)) (not (get fx :midi-fx)) (not (get fx :builtin)))
         (button "edit" :background-color :black :width 4 :height 0.75 :align :center :font-size 10
           :on-click (lambda (info)
             (do

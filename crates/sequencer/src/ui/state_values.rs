@@ -8499,27 +8499,82 @@ fn build_rack_panel_value(
                                 && !param.name.starts_with("__dgen_mod_active__")
                         })
                         .map(|(param_idx, param)| {
-                            map_value([
-                                ("idx", Value::Number(param_idx as f64)),
-                                ("name", Value::String(param.name.clone())),
-                                (
-                                    "value",
-                                    Value::Number(
-                                        snapshot
-                                            .defaults
-                                            .get(param_idx)
-                                            .copied()
-                                            .unwrap_or(param.default)
-                                            as f64,
-                                    ),
-                                ),
-                                ("min", Value::Number(param.min as f64)),
-                                ("max", Value::Number(param.max as f64)),
-                            ])
+                            let current = snapshot
+                                .defaults
+                                .get(param_idx)
+                                .copied()
+                                .unwrap_or(param.default);
+                            let mut pmap = HashMap::new();
+                            pmap.insert(
+                                "idx".to_string(),
+                                value_cell(Value::Number(param_idx as f64)),
+                            );
+                            pmap.insert(
+                                "name".to_string(),
+                                value_cell(Value::String(param.name.clone())),
+                            );
+                            pmap.insert(
+                                "value".to_string(),
+                                value_cell(Value::Number(current as f64)),
+                            );
+                            pmap.insert(
+                                "min".to_string(),
+                                value_cell(Value::Number(param.min as f64)),
+                            );
+                            pmap.insert(
+                                "max".to_string(),
+                                value_cell(Value::Number(param.max as f64)),
+                            );
+                            match &param.kind {
+                                sequencer::effects::ParamKind::Boolean => {
+                                    pmap.insert(
+                                        "boolean".to_string(),
+                                        value_cell(Value::Bool(true)),
+                                    );
+                                }
+                                sequencer::effects::ParamKind::Enum { labels } => {
+                                    let selected = labels
+                                        .get(current.round() as usize)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    pmap.insert(
+                                        "text-value".to_string(),
+                                        value_cell(Value::String(selected)),
+                                    );
+                                    pmap.insert(
+                                        "options".to_string(),
+                                        value_cell(Value::List(
+                                            labels
+                                                .iter()
+                                                .cloned()
+                                                .map(|label| value_cell(Value::String(label)))
+                                                .collect(),
+                                        )),
+                                    );
+                                }
+                                sequencer::effects::ParamKind::Continuous { .. } => {}
+                            }
+                            insert_param_ui_metadata(&mut pmap, param.ui_metadata.as_ref());
+                            Value::Map(pmap)
                         });
                     Some(map_value([
                         ("slot-idx", Value::Number(effect_idx as f64)),
                         ("name", Value::String(descriptor.name.clone())),
+                        ("track-idx", Value::Number(track as f64)),
+                        ("rack-slot", Value::Number(slot_idx as f64)),
+                        ("rack-fx", Value::Bool(true)),
+                        (
+                            "builtin",
+                            Value::Bool(
+                                sequencer::effects::EffectDescriptor::builtin_insert(
+                                    &descriptor.name,
+                                )
+                                .is_some()
+                                    || sequencer::effects::conv_reverb::is_dgen_builtin(
+                                        &descriptor.name,
+                                    ),
+                            ),
+                        ),
                         ("can-move-left", Value::Bool(effect_idx > 0)),
                         (
                             "can-move-right",
@@ -19995,6 +20050,20 @@ mod tests {
         app
     }
 
+    fn test_app_with_rack_panel_and_slot_fx() -> tui::App {
+        let app = test_app_with_rack_panel();
+        let descriptor = sequencer::effects::EffectDescriptor::builtin_ott();
+        let snapshot = sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 42);
+        assert!(app
+            .state
+            .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                slot.effect_descriptors[0] = descriptor.clone();
+                slot.effect_slots[0] = snapshot.clone();
+                slot.custom_effect_names[0] = Some("builtin:OTT".to_string());
+            },));
+        app
+    }
+
     fn test_app_with_drum_rack_panel(selected_pad_note: i32) -> tui::App {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let sampler_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
@@ -20666,7 +20735,7 @@ mod tests {
 
     #[test]
     fn metal_seq_fx_lisp_lays_out_rack_panel_chain_list() {
-        let app = test_app_with_rack_panel();
+        let app = test_app_with_rack_panel_and_slot_fx();
         let selected = Arc::new(Mutex::new(HashSet::new()));
         let rack_panel = build_instrument_panel_value(&app, 0, &selected);
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
@@ -20742,6 +20811,14 @@ mod tests {
             .unwrap_or_else(|| panic!("rack chain list; layout={layout_summaries:#?}"));
         let slot_drop = find_layout_node_by_debug_name(&layout, "rack-slot-fx-drop-panel")
             .unwrap_or_else(|| panic!("rack slot FX drop panel; layout={layout_summaries:#?}"));
+        let slot_fx_panel = find_layout_node_by_debug_name(&layout, "rack-slot-fx-panel")
+            .unwrap_or_else(|| panic!("rack slot FX panels; layout={layout_summaries:#?}"));
+        let ott_panel = find_layout_node_by_debug_name(slot_fx_panel, "audio-fx-panel-root-0-OTT")
+            .unwrap_or_else(|| panic!("rack slot OTT panel; layout={layout_summaries:#?}"));
+        let ott_meter = find_layout_node_by_widget_type(ott_panel, "multiband-meter")
+            .unwrap_or_else(|| {
+                panic!("rack slot OTT multiband meter; layout={layout_summaries:#?}")
+            });
         let chain_divider = find_layout_node_by_debug_name(&layout, "rack-slot-track-fx-divider")
             .unwrap_or_else(|| panic!("rack/track FX divider; layout={layout_summaries:#?}"));
         let track_drop = find_layout_node_by_debug_name(&layout, "fx-track-drop-placeholder-panel")
@@ -20838,6 +20915,9 @@ mod tests {
             chain_list.rect
         );
         assert_finite_nonzero_rect(slot_drop, "rack slot FX drop panel");
+        assert_finite_nonzero_rect(ott_panel, "rack slot OTT panel");
+        assert_finite_nonzero_rect(ott_meter, "rack slot OTT multiband meter");
+        assert_layout_inside(ott_meter, ott_panel, "rack slot OTT multiband meter");
         assert_finite_nonzero_rect(chain_divider, "rack/track FX divider");
         assert_finite_nonzero_rect(track_drop, "track FX drop panel");
         assert!(

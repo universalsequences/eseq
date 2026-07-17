@@ -552,6 +552,22 @@ fn resolve_effect_node(app: &tui::App, source: &LiveAudioSourceSelector) -> Opti
             .and_then(|chain| chain.get(*slot))
             .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
             .filter(|node_id| *node_id > 0),
+        LiveAudioSourceSelector::RackEffect {
+            index,
+            rack_slot,
+            slot,
+        } => app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(*index)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(*rack_slot))
+            .and_then(|rack_slot| rack_slot.effect_slots.get(*slot))
+            .map(|slot| slot.node_id as i32)
+            .filter(|node_id| *node_id > 0),
         LiveAudioSourceSelector::BusEffect {
             id: Some(bus_id),
             slot,
@@ -601,6 +617,22 @@ fn resolve_source_node(app: &tui::App, tap_key: &TapKey) -> Option<i32> {
             .get(*index)
             .and_then(|chain| chain.get(*slot))
             .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+            .filter(|node_id| *node_id > 0),
+        LiveAudioSourceSelector::RackEffect {
+            index,
+            rack_slot,
+            slot,
+        } => app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(*index)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(*rack_slot))
+            .and_then(|rack_slot| rack_slot.effect_slots.get(*slot))
+            .map(|slot| slot.node_id as i32)
             .filter(|node_id| *node_id > 0),
         LiveAudioSourceSelector::Bus {
             id: Some(bus_id), ..
