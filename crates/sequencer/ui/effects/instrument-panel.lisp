@@ -6,7 +6,7 @@
   (set! rack-panel-selected-chain-open (not rack-panel-selected-chain-open)))
 
 (defwidget rack-chain-view-icon
-  :width 1.65 :height 1.65
+  :width 2.25 :height 1.05
   :paint-margin 0.15
   :state (active)
   :shader
@@ -23,7 +23,7 @@
         (material :color glyph-color)))))
 
 (defwidget rack-slot-list-view-icon
-  :width 1.65 :height 1.65
+  :width 2.25 :height 1.05
   :paint-margin 0.15
   :state (active)
   :shader
@@ -52,7 +52,7 @@
 (def rack-panel-view-toolbar ()
   (box :debug-name "rack-view-toolbar"
     :width 2.35 :height 9.7
-    :padding 0 :h-align :center :v-align :start
+    :padding 0.2 :h-align :center :v-align :start
     (v-stack :width 2.35 :height :fill :gap 0.18 :align :center
       (box :width 2.35 :height 0.18)
       (rack-chain-view-icon
