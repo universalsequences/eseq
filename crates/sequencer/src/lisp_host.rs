@@ -2379,12 +2379,15 @@ pub fn build_init_message_for_voice(
         }
     }
 
-    let mut msg = Vec::with_capacity(6 + entries.len() * 2);
+    // Header (10) + pairs (2 * N). Instrument nodes resolve their process
+    // function through DGEN_INSTRUMENT_FNS, so the pointer chunks stay zero.
+    let mut msg = Vec::with_capacity(10 + entries.len() * 2);
     msg.push(slot_id as f32);
     msg.push(manifest.total_memory_slots as f32);
     msg.push(HEADER_CANARY);
     msg.push(manifest.n_inputs as f32);
     msg.push(1.0);
+    msg.extend([0.0; DGEN_PROCESS_FN_CHUNKS]);
     msg.push(entries.len() as f32);
     for (idx, val) in &entries {
         msg.push(*idx as f32);
@@ -2955,10 +2958,10 @@ pub fn render_loaded_instrument_for_test(
     let mut memory_write = vec![0.0f32; total_slots];
     let slot_id = options.voice_index;
     let init_msg = build_init_message_for_voice(slot_id, manifest, options.voice_index);
-    let entry_count = init_msg.get(5).copied().unwrap_or(0.0) as usize;
+    let entry_count = init_msg.get(9).copied().unwrap_or(0.0) as usize;
     for i in 0..entry_count {
-        let idx = init_msg[6 + i * 2] as usize;
-        let value = init_msg[6 + i * 2 + 1];
+        let idx = init_msg[10 + i * 2] as usize;
+        let value = init_msg[10 + i * 2 + 1];
         if idx < total_slots {
             memory_read[idx] = value;
         }
@@ -19182,7 +19185,7 @@ mod tests {
         };
 
         let init = super::build_init_message_for_voice(0, &manifest, 0);
-        let entries = init[6..]
+        let entries = init[10..]
             .chunks_exact(2)
             .map(|entry| (entry[0] as usize, entry[1]))
             .collect::<Vec<_>>();
@@ -19191,6 +19194,57 @@ mod tests {
         assert!(!entries.contains(&(5, 0.25)));
         assert!(entries.contains(&(8, 0.5)));
         assert!(entries.contains(&(11, 0.5)));
+    }
+
+    #[test]
+    fn voice_init_message_round_trips_through_dgenlisp_init() {
+        let total_memory_slots = 16;
+        let manifest = super::DGenManifest {
+            dylib_path: std::path::PathBuf::new(),
+            version: 2,
+            process_abi: "dgen-c-v2-host-sample-rate".to_string(),
+            total_memory_slots,
+            params: vec![DGenParam {
+                name: "scalar".to_string(),
+                cell_id: 4,
+                cell_span: 1,
+                default: 0.25,
+                min: 0.0,
+                max: 1.0,
+                unit: None,
+                hidden: false,
+                group: None,
+                env: None,
+                role: None,
+            }],
+            groups: Vec::new(),
+            envelopes: Vec::new(),
+            inputs: Vec::new(),
+            modulators: Vec::new(),
+            mod_outputs: Vec::new(),
+            mod_destinations: Vec::new(),
+            n_inputs: 0,
+            n_outputs: 2,
+            tensors: Vec::new(),
+            tensor_init_data: Vec::new(),
+            voice_cell_id: Some(7),
+        };
+
+        let voice_index = 3usize;
+        let init_msg = super::build_init_message_for_voice(0, &manifest, voice_index);
+        let mut state = vec![0.0_f32; super::dgen_total_state_slots(total_memory_slots)];
+        unsafe {
+            super::dgenlisp_init(state.as_mut_ptr().cast(), 48_000, 128, init_msg.as_ptr().cast());
+        }
+
+        assert_eq!(state[1] as usize, total_memory_slots);
+        assert_eq!(state[2].to_bits(), super::HEADER_CANARY.to_bits());
+        let mem = &state[super::HEADER_SLOTS..super::HEADER_SLOTS + total_memory_slots];
+        assert_eq!(mem[4], 0.25, "param default must land in its memory cell");
+        assert_eq!(
+            mem[7], voice_index as f32,
+            "voice cell must carry the voice index"
+        );
     }
 
     #[test]
