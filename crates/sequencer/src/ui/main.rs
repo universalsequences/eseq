@@ -67,8 +67,8 @@ use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
     CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
-    MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
-    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
+    MAX_STEPS, MidiFxPosition, PatternId, RackSlotParam, SYNC_RESOLUTIONS, SequencerState,
+    StepParam, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
 };
 use sequencer::tui;
 use std::sync::atomic::AtomicBool;
@@ -98,6 +98,11 @@ pub(crate) enum ActiveDeleteTarget {
         chain: FxDeleteChain,
         bus: Option<usize>,
         slot: usize,
+    },
+    RackEffect {
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
     },
     RackSlot {
         track: usize,
@@ -942,7 +947,9 @@ impl ActiveDeleteTarget {
             ActiveDeleteTarget::MixerTrack { .. }
             | ActiveDeleteTarget::TrackPattern { .. }
             | ActiveDeleteTarget::ModRoute { .. } => "*mixer*",
-            ActiveDeleteTarget::FxEffect { .. } | ActiveDeleteTarget::RackSlot { .. } => "*fx*",
+            ActiveDeleteTarget::FxEffect { .. }
+            | ActiveDeleteTarget::RackEffect { .. }
+            | ActiveDeleteTarget::RackSlot { .. } => "*fx*",
         }
     }
 }
@@ -3879,14 +3886,14 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
+        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP, Runtime, StepParam, Value,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         resolve_instrument_swap_target_index, restore_instrument_patcher_layout_source,
         should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
         show_instrument_patcher_source_layout_source, track_meter_bindings_visible,
-        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
-        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -6993,37 +7000,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let track = extract_usize_from_payload(&payload, "track");
                         let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
                         let source_slot = extract_usize_from_payload(&payload, "source-slot");
-                        let target_slot = extract_usize_from_payload(&payload, "target-slot");
-                        match (track, rack_slot, source_slot, target_slot) {
-                            (
-                                Some(track),
-                                Some(rack_slot),
-                                Some(source_slot),
-                                Some(target_slot),
-                            ) => {
-                                match app.move_rack_slot_effect_slot_sync(
-                                    track,
-                                    rack_slot,
-                                    source_slot,
-                                    target_slot,
-                                ) {
-                                    Ok(()) => {
-                                        refresh_instrument_panel_reactive(
-                                            &mut editor,
-                                            &app,
-                                            track,
-                                            &selected_steps,
-                                            &ui_epoch,
-                                        );
-                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                        let requested_target = extract_usize_from_payload(&payload, "target-slot");
+                        let position = extract_string_from_payload(&payload, "position");
+                        match (track, rack_slot, source_slot) {
+                            (Some(track), Some(rack_slot), Some(source_slot)) => {
+                                let target_slot = if position.as_deref() == Some("append") {
+                                    rack_slot_snapshot_for_host(&state, track, rack_slot).and_then(
+                                        |slot| {
+                                            slot.effect_slots
+                                                .iter()
+                                                .rposition(|effect| effect.node_id != 0)
+                                        },
+                                    )
+                                } else {
+                                    requested_target.map(|target| {
+                                        if source_slot < target {
+                                            target.saturating_sub(1)
+                                        } else {
+                                            target
+                                        }
+                                    })
+                                };
+                                if let Some(target_slot) = target_slot {
+                                    match app.move_rack_slot_effect_slot_sync(
+                                        track,
+                                        rack_slot,
+                                        source_slot,
+                                        target_slot,
+                                    ) {
+                                        Ok(()) => {
+                                            refresh_instrument_panel_reactive(
+                                                &mut editor,
+                                                &app,
+                                                track,
+                                                &selected_steps,
+                                                &ui_epoch,
+                                            );
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(error) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Error moving rack-slot effect: {error}"),
+                                        )),
                                     }
-                                    Err(error) => editor.handle_host_event(HostEvent::Status(
-                                        format!("Error moving rack-slot effect: {error}"),
-                                    )),
+                                } else {
+                                    editor.handle_host_event(HostEvent::Status(
+                                        "Rack-slot FX move is missing a destination".to_string(),
+                                    ));
                                 }
                             }
                             _ => editor.handle_host_event(HostEvent::Status(
-                                "Rack-slot effect move is incomplete".to_string(),
+                                "Rack-slot effect move is missing its source".to_string(),
                             )),
                         }
                     }

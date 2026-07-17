@@ -328,11 +328,16 @@
 
 (def rack-slot-drop-fx (slot event)
   (let ((payload (get event :payload)))
-    (host-command "add-rack-slot-effect"
-      (dict :track (get slot :track)
-            :rack-slot (get slot :idx)
-            :name (get payload :name)
-            :builtin (get payload :builtin)))))
+    (if (= (get payload :kind) "rack-effect-instance")
+      (fx-drop-existing-effect payload
+        (dict :chain "append"
+              :track (get slot :track)
+              :rack-slot (get slot :idx)))
+      (host-command "add-rack-slot-effect"
+        (dict :track (get slot :track)
+              :rack-slot (get slot :idx)
+              :name (get payload :name)
+              :builtin (get payload :builtin))))))
 
 (def rack-slot-row (slot)
   (let ((delete-target (rack-slot-delete-target? slot))
@@ -455,13 +460,6 @@
       (instrument-panel selected)
       (rack-empty-selected-panel inst))))
 
-(def rack-fx-move (fx delta)
-  (host-command "move-rack-slot-effect"
-    (dict :track (get fx :track-idx)
-          :rack-slot (get fx :rack-slot)
-          :source-slot (get fx :slot-idx)
-          :target-slot (+ (get fx :slot-idx) delta))))
-
 (def rack-selected-fx-panel (inst)
   (let ((slot-idx (get inst :selected-slot)))
     (if (< slot-idx 0)
@@ -485,8 +483,9 @@
              :corner-radius 10
              :border-color :mixer-strip-border
              :border-width 2
-             :drop-types (list "audio-effect")
+             :drop-types (list "audio-effect" "effect-instance")
              :drop-meta (dict :kind "rack-slot-fx"
+                              :chain "append"
                               :track (get inst :track)
                               :rack-slot (get slot :idx))
              :drop-hover-border-color :mixer-strip-selected-border

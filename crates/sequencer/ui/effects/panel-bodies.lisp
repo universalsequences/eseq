@@ -296,7 +296,11 @@
   (do
     SEQ.delete-target-version
     (if (get fx :rack-fx)
-      false
+      (seq-delete-target? :fx-effect
+        (dict :chain "rack"
+              :track (get fx :track-idx)
+              :rack-slot (get fx :rack-slot)
+              :effect-slot (get fx :slot-idx)))
       (if (get fx :midi-fx)
       (seq-delete-target? :fx-effect (dict :chain "midi" :slot (get fx :slot-idx)))
       (if (get fx :bus-fx)

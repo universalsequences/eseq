@@ -8575,11 +8575,6 @@ fn build_rack_panel_value(
                                     ),
                             ),
                         ),
-                        ("can-move-left", Value::Bool(effect_idx > 0)),
-                        (
-                            "can-move-right",
-                            Value::Bool(effect_idx + 1 < sequencer::lisp_host::MAX_CUSTOM_FX),
-                        ),
                         ("params", list_value(params)),
                     ]))
                 });
@@ -15568,6 +15563,14 @@ mod tests {
             )),
             "fx-effect" => {
                 let chain = test_delete_target_string(payload, "chain")?;
+                if chain == "rack" {
+                    return Some(format!(
+                        "fx-effect:rack:{}:{}:{}",
+                        test_delete_target_number(payload, "track")?,
+                        test_delete_target_number(payload, "rack-slot")?,
+                        test_delete_target_number(payload, "effect-slot")?
+                    ));
+                }
                 let slot = test_delete_target_number(payload, "slot")?;
                 if chain == "bus" {
                     Some(format!(
@@ -15713,6 +15716,7 @@ mod tests {
                                 Some("audio") => "delete-effect",
                                 Some("midi") => "delete-midi-fx",
                                 Some("bus") => "delete-bus-effect",
+                                Some("rack") => "delete-rack-slot-effect",
                                 _ => return Ok(Value::Bool(false)),
                             }
                         }
@@ -20094,13 +20098,14 @@ mod tests {
         let app = test_app_with_rack_panel();
         let descriptor = sequencer::effects::EffectDescriptor::builtin_ott();
         let snapshot = sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 42);
-        assert!(app
-            .state
-            .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
-                slot.effect_descriptors[0] = descriptor.clone();
-                slot.effect_slots[0] = snapshot.clone();
-                slot.custom_effect_names[0] = Some("builtin:OTT".to_string());
-            },));
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                    slot.effect_descriptors[0] = descriptor.clone();
+                    slot.effect_slots[0] = snapshot.clone();
+                    slot.custom_effect_names[0] = Some("builtin:OTT".to_string());
+                },)
+        );
         app
     }
 
@@ -20246,9 +20251,10 @@ mod tests {
 
         let app = test_app_with_rack_panel();
         app.state.update_live_rack_slot(0, 0, |slot| {
-            assert!(slot
-                .param_plocks
-                .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25));
+            assert!(
+                slot.param_plocks
+                    .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25)
+            );
             slot.instrument_slot.defaults[8] = 44_100.0;
             assert!(slot.instrument_slot.set_plock(3, 8, 22_050.0));
         });
@@ -20861,6 +20867,8 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!("rack slot OTT multiband meter; layout={layout_summaries:#?}")
             });
+        let ott_header = find_layout_node_by_debug_name(ott_panel, "audio-fx-panel-header")
+            .expect("rack slot OTT header");
         let chain_divider = find_layout_node_by_debug_name(&layout, "rack-slot-track-fx-divider")
             .unwrap_or_else(|| panic!("rack/track FX divider; layout={layout_summaries:#?}"));
         let track_drop = find_layout_node_by_debug_name(&layout, "fx-track-drop-placeholder-panel")
@@ -20907,6 +20915,20 @@ mod tests {
             rack_preset_button.rect.width > 0.0 && rack_preset_button.rect.height > 0.0,
             "rack preset button should have visible geometry: {:?}",
             rack_preset_button.rect
+        );
+        assert_eq!(
+            ott_header.props.get("drag-type"),
+            Some(&Value::String("effect-instance".to_string())),
+            "rack slot effects should use the normal draggable FX header"
+        );
+        assert!(
+            matches!(
+                ott_panel.props.get("drop-types"),
+                Some(Value::List(items))
+                    if items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "effect-instance"))
+            ),
+            "rack slot effect panels should accept effect-instance reorder drops: {:?}",
+            ott_panel.props.get("drop-types")
         );
         assert!(
             matches!(
@@ -21273,6 +21295,100 @@ mod tests {
                 );
             }
             other => panic!("expected delete-rack-slot host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(fx-select-rack-effect 0 0 0)")
+            .expect("select rack slot effect");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("active rack effect target kind"),
+            Some(Value::String("fx-effect".to_string()))
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(fx-delete-selected-effect)")
+            .expect("delete selected rack slot effect");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "delete-rack-slot-effect");
+                let Value::Map(payload) = payload else {
+                    panic!("delete-rack-slot-effect payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("rack-slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("effect-slot")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+            }
+            other => panic!("expected delete-rack-slot-effect command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-drop-on-effect
+                    (dict
+                      :payload (dict :kind "rack-effect-instance"
+                                     :chain "rack"
+                                     :track 0
+                                     :rack-slot 0
+                                     :slot 0
+                                     :name "OTT")
+                      :target (dict :chain "rack"
+                                    :track 0
+                                    :rack-slot 0
+                                    :slot 1)))"#,
+            )
+            .expect("drop rack slot effect before another rack slot effect");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "move-rack-slot-effect");
+                let Value::Map(payload) = payload else {
+                    panic!("move-rack-slot-effect payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("rack-slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("source-slot")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("target-slot")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("position").map(|value| value.borrow().clone()),
+                    Some(Value::String("rack".to_string()))
+                );
+            }
+            other => panic!("expected move-rack-slot-effect command, got {other:?}"),
         }
 
         editor
@@ -25233,9 +25349,12 @@ mod tests {
                 continue;
             };
             match items.as_slice() {
-                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
-                    if form == "def" && name == "script-buffer-name" =>
-                {
+                [
+                    Expression::Symbol(form),
+                    Expression::Symbol(name),
+                    Expression::String(value),
+                    ..,
+                ] if form == "def" && name == "script-buffer-name" => {
                     script_buffer_name = Some(value.clone());
                 }
                 [Expression::Symbol(form), Expression::String(target), ..]
@@ -29354,26 +29473,35 @@ mod tests {
         let _ = editor.drain_host_commands();
         editor
             .runtime_mut()
-            .invoke(on_action.clone(), vec![Value::String("Group Rack".to_string())])
+            .invoke(
+                on_action.clone(),
+                vec![Value::String("Group Rack".to_string())],
+            )
             .expect("choose Group Rack action");
         let group_commands = editor.drain_host_commands();
-        assert!(matches!(
-            group_commands.as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, payload }]
-                if name == "group-track-to-instrument-rack"
-                    && matches!(payload, Value::Map(map)
-                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0)))
-        ), "unexpected Group Rack commands: {group_commands:?}");
+        assert!(
+            matches!(
+                group_commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == "group-track-to-instrument-rack"
+                        && matches!(payload, Value::Map(map)
+                            if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0)))
+            ),
+            "unexpected Group Rack commands: {group_commands:?}"
+        );
         editor
             .runtime_mut()
             .invoke(on_action, vec![Value::String("Edit".to_string())])
             .expect("choose Edit action");
         let edit_commands = editor.drain_host_commands();
-        assert!(matches!(
-            edit_commands.as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, .. }]
-                if name == "enter-edit-instrument"
-        ), "unexpected Edit commands: {edit_commands:?}");
+        assert!(
+            matches!(
+                edit_commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, .. }]
+                    if name == "enter-edit-instrument"
+            ),
+            "unexpected Edit commands: {edit_commands:?}"
+        );
         assert!(
             matches!(
                 panel.props.get("drop-meta"),
@@ -43484,7 +43612,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
+            vec![
+                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
+            ]
         );
     }
 

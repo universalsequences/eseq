@@ -60,12 +60,25 @@
           (host-command "move-bus-effect-slot"
             (dict :bus target-bus :source-slot source-slot
                   :target-slot target-slot :position target-chain))
-          (status "Move effects within the same audio, MIDI, or bus chain"))))))
+          (if (and (= kind "rack-effect-instance") (= source-chain "rack")
+                   (or (= target-chain "rack") (= target-chain "append"))
+                   (= source-track target-track)
+                   (= (get payload :rack-slot) (get target :rack-slot)))
+            (host-command "move-rack-slot-effect"
+              (dict :track target-track
+                    :rack-slot (get target :rack-slot)
+                    :source-slot source-slot
+                    :target-slot target-slot
+                    :position target-chain))
+            (status "Move effects within the same audio, MIDI, bus, or rack-slot chain")))))))
 
 (def fx-drop-on-effect (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((kind (get payload :kind)))
-      (if (or (= kind "audio-effect-instance") (= kind "midi-effect-instance") (= kind "bus-effect-instance"))
+      (if (or (= kind "audio-effect-instance")
+              (= kind "midi-effect-instance")
+              (= kind "bus-effect-instance")
+              (= kind "rack-effect-instance"))
         (fx-drop-existing-effect payload target)
         (fx-drop-library-effect payload target)))))

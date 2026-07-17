@@ -6,16 +6,16 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::effects::{
-    EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
-    BUILTIN_SLOT_COUNT,
+    BUILTIN_SLOT_COUNT, EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor,
+    ParamKind, ParamScaling,
 };
 use crate::lisp_host::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
 use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType, RackRouting};
-use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
+use eseqlisp::vm::{Value as LispValue, format_lisp_source};
 
 use super::fx_chain::{
-    push_fx_param, rewire_fx_chain, FxChainLocator, FxGraphEditBatch, FxLeaseSlotRemoval,
+    FxChainLocator, FxGraphEditBatch, FxLeaseSlotRemoval, push_fx_param, rewire_fx_chain,
 };
 use super::{
     App, CompileTarget, EffectTab, HookCallback, HookUnit, InputMode, PendingCompile,
@@ -422,7 +422,7 @@ impl App {
                 None => {
                     return Some(Err(format!(
                         "Instrument engine {cache_idx} references missing library {lib_index}"
-                    )))
+                    )));
                 }
             };
         let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
@@ -1904,12 +1904,7 @@ impl App {
             if !disconnected {
                 eprintln!(
                     "sidechain: disconnect failed effect_node={} track={} slot={} old_track={} src_port={} dst_port={}",
-                    node_id,
-                    track,
-                    slot_idx,
-                    old_track,
-                    source_port,
-                    *input_channel as i32,
+                    node_id, track, slot_idx, old_track, source_port, *input_channel as i32,
                 );
             }
         }
@@ -1928,12 +1923,7 @@ impl App {
             if !connected {
                 eprintln!(
                     "sidechain: connect failed effect_node={} track={} slot={} new_track={} src_port={} dst_port={}",
-                    node_id,
-                    track,
-                    slot_idx,
-                    new_track,
-                    source_port,
-                    *input_channel as i32,
+                    node_id, track, slot_idx, new_track, source_port, *input_channel as i32,
                 );
             }
         }
@@ -3240,15 +3230,22 @@ impl App {
         effect_slot: usize,
     ) -> Result<(), String> {
         let locator = Self::rack_slot_fx_locator(track, rack_slot);
-        self.remove_fx_slot_node(locator, effect_slot, FxLeaseSlotRemoval::Clear)?;
-        self.write_rack_slot_effect(
-            track,
-            rack_slot,
-            effect_slot,
-            EffectDescriptor::empty_custom_slot(),
-            EffectSlotSnapshot::new_empty(),
-            None,
-        )
+        self.remove_fx_slot_node(locator, effect_slot, FxLeaseSlotRemoval::Shift)?;
+        let updated =
+            self.state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.normalize_effect_chain();
+                    slot.effect_slots.remove(effect_slot);
+                    slot.effect_slots.push(EffectSlotSnapshot::new_empty());
+                    slot.effect_descriptors.remove(effect_slot);
+                    slot.effect_descriptors
+                        .push(EffectDescriptor::empty_custom_slot());
+                    slot.custom_effect_names.remove(effect_slot);
+                    slot.custom_effect_names.push(None);
+                });
+        updated
+            .then_some(())
+            .ok_or_else(|| "Failed to update rack-slot FX state".to_string())
     }
 
     pub fn move_rack_slot_effect_slot_sync(
@@ -3822,9 +3819,9 @@ mod tests {
     use super::*;
     use crate::audiograph::LiveGraphPtr;
     use crate::recorder::MasterRecorder;
-    use crate::sequencer::{default_empty_effect_chain, SequencerState};
+    use crate::sequencer::{SequencerState, default_empty_effect_chain};
     use crate::tui::AudioBuses;
-    use std::sync::{mpsc, Mutex};
+    use std::sync::{Mutex, mpsc};
     use std::time::Duration;
 
     fn test_app_with_track_count(track_count: usize) -> App {
