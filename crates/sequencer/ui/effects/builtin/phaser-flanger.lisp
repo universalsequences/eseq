@@ -11,9 +11,12 @@
 (def phaser-flanger-cyan   () (rgba 0.45 0.78 0.95 1.0))
 
 (def builtin-fx-phaser-flanger-source (fx)
+  (if (get fx :rack-fx)
+    (dict :kind :rack-effect :index (get fx :track-idx)
+          :rack-slot (get fx :rack-slot) :slot (get fx :slot-idx))
   (if (get fx :bus-fx)
     (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
-    (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx))))
+    (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx)))))
 
 ;; Mod-wrapped knobs (same pattern as the Space Echo knobs so amount /
 ;; feedback / dry-wet pick up modulation rings and plock handling).

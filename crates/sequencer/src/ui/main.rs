@@ -7136,6 +7136,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )),
                         }
                     }
+                    "set-rack-slot-effect-plock" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
+                        let param = extract_usize_from_payload(&payload, "param");
+                        let value = extract_f32_from_payload(&payload, "value");
+                        match (track, rack_slot, effect_slot, param, value) {
+                            (
+                                Some(track),
+                                Some(rack_slot),
+                                Some(effect_slot),
+                                Some(param),
+                                Some(value),
+                            ) => {
+                                let steps: Vec<usize> =
+                                    selected_steps.lock().unwrap().iter().copied().collect();
+                                if let Err(error) = app.set_rack_slot_effect_plocks(
+                                    track,
+                                    rack_slot,
+                                    effect_slot,
+                                    &steps,
+                                    param,
+                                    value,
+                                ) {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error setting rack-slot effect parameter locks: {error}"
+                                    )));
+                                } else {
+                                    refresh_instrument_panel_reactive(
+                                        &mut editor,
+                                        &app,
+                                        track,
+                                        &selected_steps,
+                                        &ui_epoch,
+                                    );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect parameter-lock edit is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "set-rack-slot-effect-param-option" | "set-rack-slot-effect-plock-option" => {
+                        let write_plock = name == "set-rack-slot-effect-plock-option";
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
+                        let param_idx = extract_usize_from_payload(&payload, "param");
+                        let label = extract_string_from_payload(&payload, "label");
+                        match (track, rack_slot, effect_slot, param_idx, label) {
+                            (
+                                Some(track),
+                                Some(rack_slot),
+                                Some(effect_slot),
+                                Some(param_idx),
+                                Some(label),
+                            ) => {
+                                let result = if write_plock {
+                                    let steps: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    app.set_rack_slot_effect_plock_option(
+                                        track,
+                                        rack_slot,
+                                        effect_slot,
+                                        &steps,
+                                        param_idx,
+                                        &label,
+                                    )
+                                } else {
+                                    app.set_rack_slot_effect_param_option(
+                                        track,
+                                        rack_slot,
+                                        effect_slot,
+                                        param_idx,
+                                        &label,
+                                    )
+                                };
+                                match result {
+                                    Ok(()) => {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error setting rack-slot effect option: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect option edit is incomplete".to_string(),
+                            )),
+                        }
+                    }
                     "group-track-to-instrument-rack" => {
                         let track = extract_usize_from_payload(&payload, "track")
                             .or_else(|| current_track_for_app(&mut app, &current_track));
@@ -11994,6 +12095,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
+                            let rack_slot =
+                                map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
                             let param_idx =
                                 map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
@@ -12076,6 +12182,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    "rack-effect" => {
+                                        if let (
+                                            Some(rack_slot),
+                                            Some(effect_slot),
+                                            Some(param_idx),
+                                        ) = (rack_slot, slot_idx, param_idx)
+                                        {
+                                            if let Err(error) = app.set_rack_slot_effect_plocks(
+                                                track,
+                                                rack_slot,
+                                                effect_slot,
+                                                &[step],
+                                                param_idx,
+                                                value,
+                                            ) {
+                                                editor.handle_host_event(HostEvent::Status(format!(
+                                                    "Error editing rack-slot effect lock: {error}"
+                                                )));
+                                            }
+                                        }
+                                    }
                                     "midi-fx" => {
                                         if let (Some(slot_idx), Some(param_idx)) =
                                             (slot_idx, param_idx)
@@ -12122,6 +12249,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                             let slot_idx =
                                 map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let rack_slot =
+                                map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
@@ -12237,6 +12369,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    "rack-effect" => {
+                                        if let (
+                                            Some(rack_slot),
+                                            Some(effect_slot),
+                                            Some(param_idx),
+                                        ) = (rack_slot, slot_idx, param_idx)
+                                        {
+                                            if let Err(error) =
+                                                app.set_rack_slot_effect_plock_option(
+                                                    track,
+                                                    rack_slot,
+                                                    effect_slot,
+                                                    &[step],
+                                                    param_idx,
+                                                    &label,
+                                                )
+                                            {
+                                                editor.handle_host_event(HostEvent::Status(
+                                                    format!(
+                                                        "Error editing rack-slot effect lock: {error}"
+                                                    ),
+                                                ));
+                                            }
+                                        }
+                                    }
                                     "midi-fx" => {
                                         if let (Some(slot_idx), Some(param_idx)) =
                                             (slot_idx, param_idx)
@@ -12305,6 +12462,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                             let slot_idx =
                                 map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let rack_slot =
+                                map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
@@ -12381,6 +12543,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .and_then(|chain| chain.get(slot_idx))
                                             {
                                                 slot.plocks.clear_param(step, param_idx);
+                                            }
+                                        }
+                                    }
+                                    "rack-effect" => {
+                                        if let (
+                                            Some(step),
+                                            Some(rack_slot),
+                                            Some(effect_slot),
+                                            Some(param_idx),
+                                        ) = (step, rack_slot, slot_idx, param_idx)
+                                        {
+                                            changed = state.update_rack_slot_in_current_pattern(
+                                                track,
+                                                rack_slot,
+                                                |slot| {
+                                                    if let Some(effect) =
+                                                        slot.effect_slots.get_mut(effect_slot)
+                                                    {
+                                                        effect.clear_plock(step, param_idx);
+                                                    }
+                                                },
+                                            );
+                                            if changed {
+                                                state.publish_scheduler_snapshot();
                                             }
                                         }
                                     }

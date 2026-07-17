@@ -8356,6 +8356,229 @@ fn build_selected_rack_slot_instrument_value(
     Some(Rc::new(RefCell::new(Value::Map(panel_map))))
 }
 
+fn rack_effect_param_value(
+    snapshot: &sequencer::effects::EffectSlotSnapshot,
+    descriptor: &sequencer::effects::EffectDescriptor,
+    param_idx: usize,
+    selected_step: Option<usize>,
+) -> f32 {
+    let fallback = descriptor.params[param_idx].default;
+    selected_step
+        .map(|step| snapshot.resolved_param_value(step, param_idx, fallback))
+        .unwrap_or_else(|| snapshot.defaults.get(param_idx).copied().unwrap_or(fallback))
+}
+
+fn build_rack_slot_effect_value(
+    track: usize,
+    rack_slot: usize,
+    effect_slot: usize,
+    descriptor: &sequencer::effects::EffectDescriptor,
+    snapshot: &sequencer::effects::EffectSlotSnapshot,
+    selected_step: Option<usize>,
+) -> Rc<RefCell<Value>> {
+    let mut modulation_targets: HashMap<usize, Vec<RackUiModMetadata>> = HashMap::new();
+    for target in descriptor
+        .instrument_modulation_targets
+        .iter()
+        .filter_map(|target| {
+            let depth_desc = descriptor.params.get(target.depth_param_idx)?;
+            let source_current = target
+                .source_param_idx
+                .map(|source_idx| {
+                    rack_effect_param_value(snapshot, descriptor, source_idx, selected_step)
+                })
+                .unwrap_or(target.modulator_slot as f32);
+            let depth_current = rack_effect_param_value(
+                snapshot,
+                descriptor,
+                target.depth_param_idx,
+                selected_step,
+            );
+            Some((
+                target.base_param_idx,
+                RackUiModMetadata {
+                    source_param_idx: target.source_param_idx,
+                    depth_param_idx: target.depth_param_idx,
+                    source_slot: target
+                        .source_param_idx
+                        .and_then(|source_idx| {
+                            descriptor
+                                .params
+                                .get(source_idx)
+                                .map(|source| source.stored_to_user(source_current))
+                        })
+                        .unwrap_or(source_current),
+                    depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_min: target.depth_min,
+                    depth_max: target.depth_max,
+                    depth_unit: target.depth_unit.clone(),
+                },
+            ))
+        })
+    {
+        modulation_targets
+            .entry(target.0)
+            .or_default()
+            .push(target.1);
+    }
+
+    let routing_params = modulation_routing_param_indices(descriptor);
+    let params = descriptor
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(param_idx, param)| {
+            if param.node_param_idx == u32::MAX
+                || (sequencer::voice_modulator::is_source_param(param.node_param_idx)
+                    && !matches!(
+                        param.host_control,
+                        Some(sequencer::effects::HostControl::FxSidechain { .. })
+                    ))
+                || routing_params.contains(&param_idx)
+                || param.name.starts_with("__host_mod__")
+                || param.name.starts_with("__dgen_mod_active__")
+            {
+                return None;
+            }
+            let current = rack_effect_param_value(snapshot, descriptor, param_idx, selected_step);
+            let options = match &param.kind {
+                sequencer::effects::ParamKind::Enum { labels } => Some(labels),
+                _ => None,
+            };
+            let value = rack_slot_param_map(
+                track,
+                rack_slot,
+                param.name.clone(),
+                "param",
+                Some(param_idx),
+                current,
+                param.min,
+                param.max,
+                options,
+                modulation_targets.get(&param_idx),
+                param.ui_metadata.as_ref(),
+            );
+            if matches!(param.kind, sequencer::effects::ParamKind::Boolean) {
+                if let Value::Map(map) = &mut *value.borrow_mut() {
+                    map.insert("boolean".to_string(), value_cell(Value::Bool(true)));
+                }
+            }
+            Some(value)
+        })
+        .collect::<Vec<_>>();
+
+    let source_actual =
+        sequencer::voice_modulator::selected_source_param_indices(&descriptor.params, |idx, _| {
+            rack_effect_param_value(snapshot, descriptor, idx, selected_step)
+        });
+    let mut source_sections = Vec::new();
+    let mut source_names = Vec::new();
+    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+        let mut section_params = Vec::new();
+        let mut source_param = None;
+        for &param_idx in &source_actual {
+            let Some(param) = descriptor.params.get(param_idx) else {
+                continue;
+            };
+            if sequencer::voice_modulator::slot_from_param_name(&param.name) != Some(slot_number) {
+                continue;
+            }
+            let current = rack_effect_param_value(snapshot, descriptor, param_idx, selected_step);
+            let options = match &param.kind {
+                sequencer::effects::ParamKind::Enum { labels } => Some(labels),
+                _ => None,
+            };
+            let value = rack_slot_param_map(
+                track,
+                rack_slot,
+                sequencer::voice_modulator::source_param_display_name(&param.name),
+                "param",
+                Some(param_idx),
+                param.stored_to_user(current),
+                param.stored_to_user(param.min),
+                param.stored_to_user(param.max),
+                options,
+                None,
+                None,
+            );
+            if sequencer::voice_modulator::source_type_name_from_param_name(&param.name)
+                == Some("source")
+            {
+                source_param = Some(value);
+            } else {
+                section_params.push(value);
+            }
+        }
+        source_names.push(value_cell(Value::String(section_name.clone())));
+        let mut section = HashMap::new();
+        insert_string_prop(&mut section, "name", section_name);
+        section.insert(
+            "slot".to_string(),
+            value_cell(Value::Number(slot_number as f64)),
+        );
+        if let Some(source_param) = source_param {
+            section.insert("source-param".to_string(), source_param);
+        }
+        section.insert(
+            "params".to_string(),
+            value_cell(Value::List(section_params)),
+        );
+        source_sections.push(value_cell(Value::Map(section)));
+    }
+
+    let mut effect = HashMap::new();
+    effect.insert(
+        "slot-idx".to_string(),
+        value_cell(Value::Number(effect_slot as f64)),
+    );
+    insert_string_prop(&mut effect, "name", descriptor.name.clone());
+    effect.insert(
+        "track-idx".to_string(),
+        value_cell(Value::Number(track as f64)),
+    );
+    effect.insert(
+        "rack-slot".to_string(),
+        value_cell(Value::Number(rack_slot as f64)),
+    );
+    effect.insert("rack-fx".to_string(), value_cell(Value::Bool(true)));
+    effect.insert(
+        "builtin".to_string(),
+        value_cell(Value::Bool(
+            sequencer::effects::EffectDescriptor::builtin_insert(&descriptor.name).is_some()
+                || sequencer::effects::conv_reverb::is_dgen_builtin(&descriptor.name),
+        )),
+    );
+    effect.insert("params".to_string(), value_cell(Value::List(params)));
+    effect.insert(
+        "modulators".to_string(),
+        value_cell(Value::List(
+            descriptor
+                .instrument_modulators
+                .iter()
+                .map(|modulator| {
+                    let mut map = HashMap::new();
+                    map.insert(
+                        "slot".to_string(),
+                        value_cell(Value::Number(modulator.slot as f64)),
+                    );
+                    insert_string_prop(&mut map, "label", modulator.label.clone());
+                    value_cell(Value::Map(map))
+                })
+                .collect(),
+        )),
+    );
+    effect.insert(
+        "source-names".to_string(),
+        value_cell(Value::List(source_names)),
+    );
+    effect.insert(
+        "sources".to_string(),
+        value_cell(Value::List(source_sections)),
+    );
+    value_cell(Value::Map(effect))
+}
+
 fn build_rack_panel_value(
     app: &tui::App,
     track: usize,
@@ -8486,97 +8709,16 @@ fn build_rack_panel_value(
                 .zip(&slot.effect_slots)
                 .enumerate()
                 .filter_map(|(effect_idx, (descriptor, snapshot))| {
-                    if snapshot.node_id == 0 {
-                        return None;
-                    }
-                    let params = descriptor
-                        .params
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, param)| {
-                            param.node_param_idx != u32::MAX
-                                && !param.name.starts_with("__host_mod__")
-                                && !param.name.starts_with("__dgen_mod_active__")
-                        })
-                        .map(|(param_idx, param)| {
-                            let current = snapshot
-                                .defaults
-                                .get(param_idx)
-                                .copied()
-                                .unwrap_or(param.default);
-                            let mut pmap = HashMap::new();
-                            pmap.insert(
-                                "idx".to_string(),
-                                value_cell(Value::Number(param_idx as f64)),
-                            );
-                            pmap.insert(
-                                "name".to_string(),
-                                value_cell(Value::String(param.name.clone())),
-                            );
-                            pmap.insert(
-                                "value".to_string(),
-                                value_cell(Value::Number(current as f64)),
-                            );
-                            pmap.insert(
-                                "min".to_string(),
-                                value_cell(Value::Number(param.min as f64)),
-                            );
-                            pmap.insert(
-                                "max".to_string(),
-                                value_cell(Value::Number(param.max as f64)),
-                            );
-                            match &param.kind {
-                                sequencer::effects::ParamKind::Boolean => {
-                                    pmap.insert(
-                                        "boolean".to_string(),
-                                        value_cell(Value::Bool(true)),
-                                    );
-                                }
-                                sequencer::effects::ParamKind::Enum { labels } => {
-                                    let selected = labels
-                                        .get(current.round() as usize)
-                                        .cloned()
-                                        .unwrap_or_default();
-                                    pmap.insert(
-                                        "text-value".to_string(),
-                                        value_cell(Value::String(selected)),
-                                    );
-                                    pmap.insert(
-                                        "options".to_string(),
-                                        value_cell(Value::List(
-                                            labels
-                                                .iter()
-                                                .cloned()
-                                                .map(|label| value_cell(Value::String(label)))
-                                                .collect(),
-                                        )),
-                                    );
-                                }
-                                sequencer::effects::ParamKind::Continuous { .. } => {}
-                            }
-                            insert_param_ui_metadata(&mut pmap, param.ui_metadata.as_ref());
-                            Value::Map(pmap)
-                        });
-                    Some(map_value([
-                        ("slot-idx", Value::Number(effect_idx as f64)),
-                        ("name", Value::String(descriptor.name.clone())),
-                        ("track-idx", Value::Number(track as f64)),
-                        ("rack-slot", Value::Number(slot_idx as f64)),
-                        ("rack-fx", Value::Bool(true)),
-                        (
-                            "builtin",
-                            Value::Bool(
-                                sequencer::effects::EffectDescriptor::builtin_insert(
-                                    &descriptor.name,
-                                )
-                                .is_some()
-                                    || sequencer::effects::conv_reverb::is_dgen_builtin(
-                                        &descriptor.name,
-                                    ),
-                            ),
-                        ),
-                        ("params", list_value(params)),
-                    ]))
+                    (snapshot.node_id != 0).then(|| {
+                        build_rack_slot_effect_value(
+                            track,
+                            slot_idx,
+                            effect_idx,
+                            descriptor,
+                            snapshot,
+                            selected_step,
+                        )
+                    })
                 });
             let effects = effects.collect::<Vec<_>>();
             slot_map.insert(
@@ -8589,7 +8731,7 @@ fn build_rack_panel_value(
                 // available voice plus one per post-voice slot effect.
                 value_cell(Value::Number((slot.max_polyphony + effects.len()) as f64)),
             );
-            slot_map.insert("effects".to_string(), value_cell(list_value(effects)));
+            slot_map.insert("effects".to_string(), value_cell(Value::List(effects)));
             Rc::new(RefCell::new(Value::Map(slot_map)))
         })
         .collect();
@@ -9388,6 +9530,41 @@ fn plock_entry(
     )
 }
 
+fn rack_effect_plock_entry(
+    step: usize,
+    rack_slot: usize,
+    effect_slot: usize,
+    effect_name: &str,
+    param_name: &str,
+    value: f32,
+    default: f32,
+    min: f32,
+    max: f32,
+    param_idx: usize,
+    options: Option<Vec<String>>,
+) -> Rc<RefCell<Value>> {
+    let entry = plock_entry(
+        step,
+        "rack-effect",
+        effect_name,
+        param_name,
+        value,
+        default,
+        min,
+        max,
+        Some(effect_slot),
+        Some(param_idx),
+        options,
+    );
+    if let Value::Map(map) = &mut *entry.borrow_mut() {
+        map.insert(
+            "rack-slot".to_string(),
+            Rc::new(RefCell::new(Value::Number(rack_slot as f64))),
+        );
+    }
+    entry
+}
+
 fn plock_entry_with_label(
     label: &str,
     step: usize,
@@ -9536,7 +9713,7 @@ fn plock_entry_domain(target: &str) -> &'static str {
         | "rack-slot-param"
         | "rack-slot-instrument"
         | "rack-slot-instrument-tensor" => "inst",
-        "effect" | "effect-tensor" | "bus-effect" => "fx",
+        "effect" | "effect-tensor" | "bus-effect" | "rack-effect" => "fx",
         "neural-instrument" | "neural-effect" => "neural",
         _ => "seq",
     }
@@ -10276,6 +10453,48 @@ pub(crate) fn build_track_plocks_value(
             }
         }
     }
+    if let Some(Some(rack)) = state.pattern.rack_tracks.lock().unwrap().get(track) {
+        for (rack_slot_idx, rack_slot) in rack.slots.iter().enumerate() {
+            for (effect_slot_idx, (descriptor, effect_slot)) in rack_slot
+                .effect_descriptors
+                .iter()
+                .zip(&rack_slot.effect_slots)
+                .enumerate()
+            {
+                if effect_slot.node_id == 0 {
+                    continue;
+                }
+                for (param_idx, param) in descriptor.params.iter().enumerate() {
+                    let Some(value) = effect_slot
+                        .plocks
+                        .get(step)
+                        .and_then(|row| row.get(param_idx))
+                        .copied()
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    items.push(rack_effect_plock_entry(
+                        step,
+                        rack_slot_idx,
+                        effect_slot_idx,
+                        &descriptor.name,
+                        &param.name,
+                        value,
+                        effect_slot
+                            .defaults
+                            .get(param_idx)
+                            .copied()
+                            .unwrap_or(param.default),
+                        param.min,
+                        param.max,
+                        param_idx,
+                        plock_param_options(&param.kind),
+                    ));
+                }
+            }
+        }
+    }
 
     let midi_chain = tp.midi_fx_chain();
     for (slot_idx, slot) in state.pattern.midi_fx_slots[track].iter().enumerate() {
@@ -10693,6 +10912,18 @@ pub(crate) fn track_step_plock_mask(
                     .any(|value| value.is_some())
                 {
                     mask[step / 64] |= 1u64 << (step % 64);
+                }
+            }
+            for effect in &slot.effect_slots {
+                let num_params = effect.num_params as usize;
+                for step in 0..MAX_STEPS {
+                    if effect
+                        .plocks
+                        .get(step)
+                        .is_some_and(|row| row.iter().take(num_params).any(Option::is_some))
+                    {
+                        mask[step / 64] |= 1u64 << (step % 64);
+                    }
                 }
             }
         }
@@ -20867,6 +21098,8 @@ mod tests {
             });
         let ott_header = find_layout_node_by_debug_name(ott_panel, "audio-fx-panel-header")
             .expect("rack slot OTT header");
+        let ott_mods = find_layout_node_by_text(ott_header, "mods")
+            .expect("rack slot OTT modulation tab");
         let chain_divider = find_layout_node_by_debug_name(&layout, "rack-slot-track-fx-divider")
             .unwrap_or_else(|| panic!("rack/track FX divider; layout={layout_summaries:#?}"));
         let track_drop = find_layout_node_by_debug_name(&layout, "fx-track-drop-placeholder-panel")
@@ -20894,6 +21127,8 @@ mod tests {
             Some(&Value::String("reverse".to_string())),
             "sampler param 5 should remain the reverse control"
         );
+        assert_finite_nonzero_rect(ott_mods, "rack slot OTT modulation tab");
+        assert_layout_inside(ott_mods, ott_header, "rack slot OTT modulation tab");
         assert!(
             rack_panel.props.contains_key("on-drop"),
             "rack panel should expose an on-drop callback"
@@ -20929,6 +21164,30 @@ mod tests {
             "rack slot effect panels should accept audio-effect insert and effect-instance reorder drops: {:?}",
             ott_panel.props.get("drop-types")
         );
+
+        for source_fn in [
+            "builtin-fx-eq8-source",
+            "builtin-fx-phaser-flanger-source",
+        ] {
+            let source = editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "({source_fn} (dict :rack-fx true :track-idx 0 :rack-slot 2 :slot-idx 1))"
+                ))
+                .expect("build rack effect analyzer source")
+                .expect("rack effect analyzer source value");
+            let Value::Map(source) = source else {
+                panic!("rack effect analyzer source should be a map");
+            };
+            assert!(matches!(
+                source.get("kind").map(|value| value.borrow().clone()),
+                Some(Value::Keyword(kind)) if kind == "rack-effect"
+            ));
+            assert!(matches!(
+                source.get("rack-slot").map(|value| value.borrow().clone()),
+                Some(Value::Number(slot)) if slot == 2.0
+            ));
+        }
         assert!(
             matches!(
                 selected_sampler_panel.props.get("drop-types"),
@@ -21393,6 +21652,51 @@ mod tests {
         editor
             .runtime_mut()
             .eval_str(
+                r#"(param-set-option
+                    (dict :rack-fx true :track-idx 0 :rack-slot 0 :slot-idx 0)
+                    (dict :idx 1)
+                    "classic")"#,
+            )
+            .expect("set rack effect enum option");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
+                if name == "set-rack-slot-effect-param-option"
+                    && matches!(payload.get("rack-slot").map(|value| value.borrow().clone()), Some(Value::Number(slot)) if slot == 0.0)
+                    && matches!(payload.get("effect-slot").map(|value| value.borrow().clone()), Some(Value::Number(slot)) if slot == 0.0)
+        ));
+
+        editor
+            .runtime_mut()
+            .eval_str("(def seq-has-selection? () true)")
+            .expect("enable selected-step rack FX authoring");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-set-effect-value
+                    (dict :rack-fx true :track-idx 0 :rack-slot 0 :slot-idx 0)
+                    (dict :idx 2)
+                    0.75)"#,
+            )
+            .expect("set rack effect p-lock");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
+                if name == "set-rack-slot-effect-plock"
+                    && matches!(payload.get("rack-slot").map(|value| value.borrow().clone()), Some(Value::Number(slot)) if slot == 0.0)
+                    && matches!(payload.get("effect-slot").map(|value| value.borrow().clone()), Some(Value::Number(slot)) if slot == 0.0)
+                    && matches!(payload.get("param").map(|value| value.borrow().clone()), Some(Value::Number(param)) if param == 2.0)
+        ));
+        editor
+            .runtime_mut()
+            .eval_str("(def seq-has-selection? () false)")
+            .expect("restore default rack FX authoring mode");
+
+        editor
+            .runtime_mut()
+            .eval_str(
                 r#"(fx-drop-on-effect
                     (dict
                       :payload (dict :kind "builtin-audio-effect"
@@ -21596,6 +21900,45 @@ mod tests {
             }
             other => panic!("expected replace-rack-slot-sample command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rack_slot_effect_plocks_appear_in_track_rows_and_step_mask() {
+        let app = test_app_with_rack_panel_and_slot_fx();
+        assert!(app
+            .state
+            .update_rack_slot_in_current_pattern(0, 0, |slot| {
+                assert!(slot.effect_slots[0].set_plock(3, 0, 0.5));
+            }));
+        let selected = Arc::new(Mutex::new(HashSet::from([3])));
+
+        let rows = value_list_maps(&build_track_plocks_value(
+            &app,
+            &app.state,
+            0,
+            &selected,
+        ));
+        let row = rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.get("target").map(|value| value.borrow().clone()),
+                    Some(Value::String(target)) if target == "rack-effect"
+                )
+            })
+            .expect("rack effect p-lock row");
+        assert!(matches!(
+            row.get("rack-slot").map(|value| value.borrow().clone()),
+            Some(Value::Number(value)) if value == 0.0
+        ));
+        assert!(matches!(
+            row.get("slot-idx").map(|value| value.borrow().clone()),
+            Some(Value::Number(value)) if value == 0.0
+        ));
+        assert!(matches!(
+            build_step_has_plocks(&app.state, 0, &app.graph.effect_descriptors),
+            Value::List(values) if matches!(*values[3].borrow(), Value::Bool(true))
+        ));
     }
 
     #[test]

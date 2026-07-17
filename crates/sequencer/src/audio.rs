@@ -1952,27 +1952,7 @@ fn resolved_slot_param_value(
     param_idx: usize,
     default: f32,
 ) -> f32 {
-    let default_value = slot.defaults.get(param_idx).copied().unwrap_or(default);
-    let Some(plock) = slot
-        .plocks
-        .get(step_idx)
-        .and_then(|step| step.get(param_idx))
-        .copied()
-        .flatten()
-    else {
-        return default_value;
-    };
-    let raw_idx = slot
-        .param_node_indices
-        .get(param_idx)
-        .copied()
-        .unwrap_or(param_idx as u32);
-    let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
-    if plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id) {
-        plock
-    } else {
-        default_value
-    }
+    slot.resolved_param_value(step_idx, param_idx, default)
 }
 
 fn snapshot_slot_param_index_by_node_idx(
@@ -3625,7 +3605,7 @@ fn ceil_to_grid(value: f64, grid: f64) -> f64 {
     }
 }
 
-unsafe fn dispatch_bus_effect_params_at_step(
+unsafe fn dispatch_snapshot_effect_params_at_step(
     lg: *mut LiveGraph,
     effect_slots: &[EffectSlotSnapshot],
     step: usize,
@@ -3665,13 +3645,7 @@ unsafe fn dispatch_bus_effect_params_at_step(
             } else {
                 (slot.node_id as u64, idx as u64)
             };
-            let value = slot
-                .plocks
-                .get(step)
-                .and_then(|step_plocks| step_plocks.get(param_idx))
-                .copied()
-                .flatten()
-                .unwrap_or(slot.defaults[param_idx]);
+            let value = resolved_slot_param_value(slot, step, param_idx, slot.defaults[param_idx]);
             if !value.is_finite() {
                 continue;
             }
@@ -3741,7 +3715,7 @@ fn sync_bus_gate_params(data: &mut AudioCallbackData, block_start_sample: u64) {
         if clock.last_step != Some(step) {
             clock.last_step = Some(step);
             unsafe {
-                dispatch_bus_effect_params_at_step(data.lg.0, &gate.effect_slots, step);
+                dispatch_snapshot_effect_params_at_step(data.lg.0, &gate.effect_slots, step);
             }
         }
         if (clock.last_target - target).abs() <= 0.0001 {
@@ -3866,6 +3840,26 @@ fn sync_effect_modulator_transport_clock_params(
         }
     }
 
+    for track in &data.scheduler_snapshot.tracks {
+        let Some(rack) = &track.rack_track else {
+            continue;
+        };
+        for rack_slot in &rack.slots {
+            for slot in &rack_slot.effect_slots {
+                if slot.modulator_node_id == 0 {
+                    continue;
+                }
+                unsafe {
+                    dispatch_voice_modulator_transport_clock(
+                        data.lg.0,
+                        slot.modulator_node_id as u64,
+                        clock,
+                    );
+                }
+            }
+        }
+    }
+
     let Ok(gates) = data.bus_gate_runtime.try_lock() else {
         return;
     };
@@ -3907,6 +3901,28 @@ fn sync_dj_mixer_transport_phase(data: &mut AudioCallbackData, block_start_sampl
             }
             unsafe {
                 dispatch_transport_phase(data.lg.0, node_id as u64, param_idx, beat_phase);
+            }
+        }
+    }
+    for track in &data.scheduler_snapshot.tracks {
+        let Some(rack) = &track.rack_track else {
+            continue;
+        };
+        for rack_slot in &rack.slots {
+            for slot in &rack_slot.effect_slots {
+                if slot.transport_phase_param_idx == crate::effects::NO_TRANSPORT_PHASE_PARAM
+                    || slot.node_id == 0
+                {
+                    continue;
+                }
+                unsafe {
+                    dispatch_transport_phase(
+                        data.lg.0,
+                        slot.node_id as u64,
+                        slot.transport_phase_param_idx,
+                        beat_phase,
+                    );
+                }
             }
         }
     }
@@ -4764,6 +4780,24 @@ fn fire_rack_resolved(
         }
         if !rack_slot_accepts_resolved(slot_params, has_solo) {
             continue;
+        }
+        let receives_trigger = if chord.count > 0 {
+            (0..chord.count).any(|note_idx| {
+                let transpose = resolved_chord_transpose(
+                    chord.notes[note_idx],
+                    chord.step_transpose,
+                    resolved.transpose,
+                );
+                rack_slot_matches_routing(slot, rack.routing, transpose)
+            })
+        } else {
+            rack_slot_matches_routing(slot, rack.routing, resolved.transpose)
+        };
+        if !receives_trigger {
+            continue;
+        }
+        unsafe {
+            dispatch_snapshot_effect_params_at_step(data.lg.0, &slot.effect_slots, step);
         }
         let instrument_params = resolve_rack_slot_instrument_params(&slot.instrument_slot, step);
         let sampler_params = if slot.instrument_type == InstrumentType::Sampler {
@@ -6702,13 +6736,13 @@ mod tests {
         key_locked_live_instrument_params, mute_group_winner_for_block_events,
         rack_slot_matches_routing, rack_slot_playback_transpose, resolve_live_instrument_defaults,
         resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
-        resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
-        select_output_config, store_active_keyboard_note, swing_delay_samples,
-        take_active_keyboard_note, track_accepts_scheduled_trigger, ActiveKeyboardNote,
-        ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent, BlockEventKind, ChopEvent,
-        CountdownEvent, CountdownEventKind, CustomEnginePool, FreePatchTransportRouteState,
-        FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget, OutputDeviceConfig,
-        OutputFormatRange, RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
+        resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
+        select_output_channels, select_output_config, store_active_keyboard_note,
+        swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
+        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
+        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
+        FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
+        OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
     use crate::analysis::{pack_ptr, OnsetTableShared};
@@ -6730,6 +6764,18 @@ mod tests {
     ) -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
     {
         [[None; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
+    }
+
+    #[test]
+    fn rack_effect_plock_resolution_requires_matching_parameter_identity() {
+        let descriptor = EffectDescriptor::builtin_filter();
+        let mut slot = EffectSlotSnapshot::new_default(&descriptor, 42);
+        let default = slot.defaults[1];
+        assert!(slot.set_plock(3, 1, 0.75));
+        assert_eq!(resolved_slot_param_value(&slot, 3, 1, default), 0.75);
+
+        slot.plock_param_ids[3][1] = None;
+        assert_eq!(resolved_slot_param_value(&slot, 3, 1, default), default);
     }
 
     fn rack_routing_test_slot(pad_note: Option<i32>) -> RackSlotSnapshot {

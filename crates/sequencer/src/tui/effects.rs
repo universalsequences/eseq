@@ -3428,6 +3428,124 @@ impl App {
         Ok(())
     }
 
+    pub fn set_rack_slot_effect_plocks(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        steps: &[usize],
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        if steps.is_empty() {
+            return Err("No steps are selected for rack-slot effect parameter locks".to_string());
+        }
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let descriptor = rack
+            .effect_descriptors
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+        let param = descriptor
+            .params
+            .get(param_idx)
+            .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+        if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
+            return Err("Sidechain routing into rack-slot effects is not supported".to_string());
+        }
+        if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+            return Err(
+                "Rack-slot effect modulation does not support envelope sources".to_string(),
+            );
+        }
+        let effect = rack
+            .effect_slots
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+        if param_idx >= effect.num_params as usize
+            || steps
+                .iter()
+                .any(|step| *step >= crate::sequencer::MAX_STEPS)
+        {
+            return Err("Rack-slot effect parameter-lock target is out of range".to_string());
+        }
+        let stored_value = value.clamp(param.min, param.max);
+        let updated = self.state.update_rack_slot_in_current_pattern(
+            track,
+            rack_slot,
+            |rack_slot_snapshot| {
+                let effect = &mut rack_slot_snapshot.effect_slots[effect_slot];
+                for &step in steps {
+                    let wrote = effect.set_plock(step, param_idx, stored_value);
+                    debug_assert!(wrote, "validated rack-slot effect p-lock target");
+                }
+            },
+        );
+        if !updated {
+            return Err("Failed to set rack-slot effect parameter locks".to_string());
+        }
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    fn rack_slot_effect_option_value(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+        label: &str,
+    ) -> Result<f32, String> {
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let param = rack
+            .effect_descriptors
+            .get(effect_slot)
+            .and_then(|descriptor| descriptor.params.get(param_idx))
+            .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+        match &param.kind {
+            ParamKind::Enum { labels } => labels
+                .iter()
+                .position(|item| item.eq_ignore_ascii_case(label))
+                .map(|idx| idx as f32)
+                .ok_or_else(|| format!("Unknown rack-slot effect option '{label}'")),
+            ParamKind::Boolean => match label.to_ascii_lowercase().as_str() {
+                "on" => Ok(1.0),
+                "off" => Ok(0.0),
+                _ => Err(format!("Unknown rack-slot effect option '{label}'")),
+            },
+            ParamKind::Continuous { .. } => Err(format!(
+                "Rack-slot effect parameter '{}' is not an option",
+                param.name
+            )),
+        }
+    }
+
+    pub fn set_rack_slot_effect_param_option(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        let value =
+            self.rack_slot_effect_option_value(track, rack_slot, effect_slot, param_idx, label)?;
+        self.set_rack_slot_effect_param(track, rack_slot, effect_slot, param_idx, value)
+    }
+
+    pub fn set_rack_slot_effect_plock_option(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        steps: &[usize],
+        param_idx: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        let value =
+            self.rack_slot_effect_option_value(track, rack_slot, effect_slot, param_idx, label)?;
+        self.set_rack_slot_effect_plocks(track, rack_slot, effect_slot, steps, param_idx, value)
+    }
+
     pub fn push_rack_slot_effect_defaults(
         &self,
         track: usize,

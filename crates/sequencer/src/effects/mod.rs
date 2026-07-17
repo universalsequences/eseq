@@ -7796,6 +7796,31 @@ impl EffectSlotSnapshot {
         true
     }
 
+    pub fn resolved_param_value(&self, step: usize, param_idx: usize, fallback: f32) -> f32 {
+        let default = self.defaults.get(param_idx).copied().unwrap_or(fallback);
+        let Some(value) = self
+            .plocks
+            .get(step)
+            .and_then(|row| row.get(param_idx))
+            .copied()
+            .flatten()
+        else {
+            return default;
+        };
+        let expected_id = self.param_node_id(param_idx);
+        let stored_id = self
+            .plock_param_ids
+            .get(step)
+            .and_then(|row| row.get(param_idx))
+            .copied()
+            .flatten();
+        if expected_id.is_some() && stored_id == expected_id {
+            value
+        } else {
+            default
+        }
+    }
+
     pub fn clear_plock(&mut self, step: usize, param_idx: usize) -> bool {
         if step >= MAX_STEPS {
             return false;

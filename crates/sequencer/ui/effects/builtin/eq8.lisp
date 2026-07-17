@@ -2,6 +2,7 @@
 
 (defstate builtin-fx-eq8-selected-track -1)
 (defstate builtin-fx-eq8-selected-bus -1)
+(defstate builtin-fx-eq8-selected-rack-slot -1)
 (defstate builtin-fx-eq8-selected-slot -1)
 (defstate builtin-fx-eq8-selected-band 0)
 
@@ -9,11 +10,15 @@
   (if (get fx :bus-fx) -1 (get fx :track-idx)))
 
 (def builtin-fx-eq8-bus-key (fx)
-  (if (get fx :bus-fx) (get fx :bus-idx) -1))
+    (if (get fx :bus-fx) (get fx :bus-idx) -1))
+
+(def builtin-fx-eq8-rack-slot-key (fx)
+  (if (get fx :rack-fx) (get fx :rack-slot) -1))
 
 (def builtin-fx-eq8-selected-band-for (fx)
   (if (and (= builtin-fx-eq8-selected-track (builtin-fx-eq8-track-key fx))
            (= builtin-fx-eq8-selected-bus (builtin-fx-eq8-bus-key fx))
+           (= builtin-fx-eq8-selected-rack-slot (builtin-fx-eq8-rack-slot-key fx))
            (= builtin-fx-eq8-selected-slot (get fx :slot-idx)))
     builtin-fx-eq8-selected-band
     0))
@@ -22,6 +27,7 @@
   (do
     (set! builtin-fx-eq8-selected-track (builtin-fx-eq8-track-key fx))
     (set! builtin-fx-eq8-selected-bus (builtin-fx-eq8-bus-key fx))
+    (set! builtin-fx-eq8-selected-rack-slot (builtin-fx-eq8-rack-slot-key fx))
     (set! builtin-fx-eq8-selected-slot (get fx :slot-idx))
     (set! builtin-fx-eq8-selected-band band)))
 
@@ -59,9 +65,12 @@
   (map |band| (builtin-fx-eq8-band fx params band) (range 8)))
 
 (def builtin-fx-eq8-source (fx)
+  (if (get fx :rack-fx)
+    (dict :kind :rack-effect :index (get fx :track-idx)
+          :rack-slot (get fx :rack-slot) :slot (get fx :slot-idx))
   (if (get fx :bus-fx)
     (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
-    (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx))))
+    (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx)))))
 
 (def builtin-fx-eq8-set-band-values (fx params band freq gain q)
   (let ((freq-p (builtin-fx-eq8-param params band "freq"))

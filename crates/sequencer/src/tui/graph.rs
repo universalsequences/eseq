@@ -8076,6 +8076,69 @@ mod tests {
     }
 
     #[test]
+    fn rack_slot_effect_plocks_preserve_defaults_and_node_identity() {
+        let graph = TestLiveGraph::new("rack-slot-fx-plock-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("rack sample should load");
+        let effect_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "filter")
+            .expect("rack slot should accept filter");
+        let before = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state");
+        let default = before.slots[0].effect_slots[effect_slot].defaults[1];
+
+        app.set_rack_slot_effect_plocks(0, 0, effect_slot, &[2, 3], 1, 0.75)
+            .expect("selected rack effect steps should accept p-locks");
+
+        let after = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state");
+        let slot = &after.slots[0].effect_slots[effect_slot];
+        assert_eq!(slot.defaults[1], default);
+        assert_eq!(slot.plocks[2][1], Some(0.75));
+        assert_eq!(slot.plocks[3][1], Some(0.75));
+        assert!(slot.plock_param_ids[2][1].is_some());
+        graph.process_block();
+    }
+
+    #[test]
+    fn rack_slot_effect_options_resolve_descriptor_labels() {
+        let graph = TestLiveGraph::new("rack-slot-fx-option-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("rack sample should load");
+        let effect_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "Phaser-Flanger")
+            .expect("rack slot should accept Phaser-Flanger");
+        let rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state");
+        let circuit_param = rack.slots[0].effect_descriptors[effect_slot]
+            .params
+            .iter()
+            .position(|param| param.name == "phaser circuit")
+            .expect("Phaser-Flanger should expose its circuit option");
+
+        app.set_rack_slot_effect_param_option(0, 0, effect_slot, circuit_param, "stack")
+            .expect("rack option labels should route through the rack host");
+
+        let after = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state");
+        assert_eq!(
+            after.slots[0].effect_slots[effect_slot].defaults[circuit_param],
+            0.0
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn loading_sound_replaces_instrument_container_but_preserves_track_fx() {
         let graph = TestLiveGraph::new("sound-swap-preserves-track-fx-test");
         let mut app = test_app_with_track_count(&graph, 0);
