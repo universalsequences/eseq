@@ -7465,6 +7465,45 @@ mod tests {
     }
 
     #[test]
+    fn rack_preset_save_load_and_sound_promotion_preserve_slot_fx() {
+        let graph = TestLiveGraph::new("rack-preset-promotion-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("rack sample should load");
+        app.add_builtin_rack_slot_effect_sync(0, 0, "OTT")
+            .expect("rack slot should accept OTT");
+        let preset_name = format!("rack-preset-test-{}", std::process::id());
+        let preset_path = app
+            .save_rack_preset(0, &preset_name, true)
+            .expect("rack preset should save");
+        let _preset_guard = TestProjectFile(preset_path);
+
+        app.delete_rack_slot_effect_slot(0, 0, 0)
+            .expect("live rack effect should be removable");
+        app.load_rack_preset_onto_track(0, &preset_name)
+            .expect("rack preset should restore");
+        let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("restored rack state");
+        assert_eq!(restored.slots[0].effect_descriptors[0].name, "OTT");
+        assert_ne!(restored.slots[0].effect_slots[0].node_id, 0);
+
+        let sound_path = app
+            .promote_preset_to_sound(0, &preset_name)
+            .expect("rack preset should promote to Sound");
+        let _sound_guard = TestProjectFile(sound_path.clone());
+        let sound = crate::project::load_sound_preset(&sound_path)
+            .expect("promoted Sound should be readable");
+        assert_eq!(
+            sound.rack.slots[0].custom_effects[0].as_deref(),
+            Some("builtin:OTT")
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn deleting_rack_slot_with_fx_removes_chain_state_and_lease_host() {
         let graph = TestLiveGraph::new("delete-rack-slot-fx-test");
         let mut app = test_app_with_track_count(&graph, 0);

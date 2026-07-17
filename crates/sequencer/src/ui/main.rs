@@ -7848,26 +7848,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             if let Some(preset_name) = preset_name {
                                 let track = current_track.load(Ordering::Relaxed);
-                                match load_instrument_preset_into_track(
-                                    &mut app,
-                                    track,
-                                    &preset_name,
-                                ) {
+                                let is_rack = app.graph.track_instrument_types.get(track)
+                                    == Some(&sequencer::sequencer::InstrumentType::Rack);
+                                let load_result = if is_rack {
+                                    app.load_rack_preset_onto_track(track, &preset_name)
+                                } else {
+                                    load_instrument_preset_into_track(&mut app, track, &preset_name)
+                                };
+                                match load_result {
                                     Ok(()) => {
-                                        let rt = editor.runtime_mut();
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "instrument-panel",
-                                            build_instrument_panel_value(
-                                                &app,
+                                        if is_rack {
+                                            sync_after_instrument_track_apply(
+                                                &mut app,
+                                                &mut editor,
+                                                &state,
                                                 track,
+                                                &current_track,
+                                                &mut track_names,
+                                                &track_pan_ids,
+                                                &record_armed,
                                                 &selected_steps,
-                                            ),
-                                        );
-                                        sync_sidebar_browser(rt, &app, track);
-                                        rt.run_reactive_cycle();
-                                        editor.refresh_runtime_side_effects();
-                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                                &accumulator_names,
+                                                &cached_track_peak_levels,
+                                                &cached_bus_peak_levels,
+                                                &ui_epoch,
+                                                lg_raw,
+                                            );
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "instrument-panel",
+                                                build_instrument_panel_value(
+                                                    &app,
+                                                    track,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                            sync_sidebar_browser(rt, &app, track);
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
                                         editor.handle_host_event(HostEvent::Status(format!(
                                             "Loaded preset '{preset_name}'"
                                         )));
@@ -7904,15 +7927,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     let track = current_track.load(Ordering::Relaxed);
                                     app.ui.cursor_track = track;
-                                    app.save_current_track_as_preset(&name, overwrite);
+                                    let save_result =
+                                        app.save_current_track_as_preset(&name, overwrite);
                                     // Refresh sidebar presets list
                                     let rt = editor.runtime_mut();
                                     sync_sidebar_browser(rt, &app, track);
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
-                                    editor.handle_host_event(HostEvent::Status(format!(
-                                        "Saved preset '{name}'"
-                                    )));
+                                    match save_result {
+                                        Ok(()) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Saved preset '{name}'"),
+                                        )),
+                                        Err(error) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Error saving preset: {error}"),
+                                        )),
+                                    }
                                 }
                             }
                         }
@@ -8058,40 +8087,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    "save-track-as-sound" => {
-                        let track = extract_usize_from_payload(&payload, "track")
-                            .or_else(|| current_track_for_app(&mut app, &current_track));
-                        let name = extract_string_from_payload(&payload, "name");
-                        match (track, name) {
-                            (Some(track), Some(name)) if !name.trim().is_empty() => {
-                                match app.save_track_as_sound(
-                                    track,
-                                    &name,
-                                    Vec::new(),
-                                    String::new(),
-                                ) {
-                                    Ok(path) => {
-                                        let rt = editor.runtime_mut();
-                                        sync_project_state(rt, &app);
-                                        rt.run_reactive_cycle();
-                                        editor.refresh_runtime_side_effects();
-                                        editor.handle_host_event(HostEvent::Status(format!(
-                                            "Saved Sound '{}'",
-                                            path.file_stem()
-                                                .and_then(|stem| stem.to_str())
-                                                .unwrap_or(&name)
-                                        )));
-                                    }
-                                    Err(error) => editor.handle_host_event(HostEvent::Status(
-                                        format!("Error saving Sound: {error}"),
-                                    )),
-                                }
-                            }
-                            _ => editor.handle_host_event(HostEvent::Status(
-                                "Saving a Sound requires a selected track and name".to_string(),
-                            )),
-                        }
-                    }
                     "load-sound-onto-track" => {
                         let track = extract_usize_from_payload(&payload, "track")
                             .or_else(|| current_track_for_app(&mut app, &current_track));
@@ -8128,6 +8123,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             _ => editor.handle_host_event(HostEvent::Status(
                                 "Loading a Sound requires a track and path".to_string(),
+                            )),
+                        }
+                    }
+                    "promote-preset-to-sound" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let preset_name = extract_string_from_payload(&payload, "name");
+                        match (track, preset_name) {
+                            (Some(track), Some(name)) if !name.trim().is_empty() => {
+                                app.ui.cursor_track = track;
+                                match app.promote_preset_to_sound(track, &name) {
+                                    Ok(_) => {
+                                        let rt = editor.runtime_mut();
+                                        sync_project_state(rt, &app);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Added preset '{name}' to Sounds"
+                                        )));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error adding preset to Sounds: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Preset promotion requires a track and preset name".to_string(),
+                            )),
+                        }
+                    }
+                    "add-track-from-sound" => {
+                        let path = extract_path_from_payload(&payload);
+                        match path {
+                            Some(path) => match app.add_track_from_sound(Path::new(&path)) {
+                                Ok(track) => {
+                                    sync_after_instrument_track_apply(
+                                        &mut app,
+                                        &mut editor,
+                                        &state,
+                                        track,
+                                        &current_track,
+                                        &mut track_names,
+                                        &track_pan_ids,
+                                        &record_armed,
+                                        &selected_steps,
+                                        &accumulator_names,
+                                        &cached_track_peak_levels,
+                                        &cached_bus_peak_levels,
+                                        &ui_epoch,
+                                        lg_raw,
+                                    );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(
+                                        "Added track from Sound".to_string(),
+                                    ));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error adding Sound track: {error}"
+                                ))),
+                            },
+                            None => editor.handle_host_event(HostEvent::Status(
+                                "Sound drop is missing a path".to_string(),
                             )),
                         }
                     }

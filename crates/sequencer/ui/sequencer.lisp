@@ -340,23 +340,29 @@
         (status "Drop a sample file, not a folder")))))
 
 (def seqv-drop-on-track (event)
-  (if (= (get event :drag-type) "instrument")
-    (sbrowser-drop-instrument-on-track event)
-    (seqv-drop-sample-on-track event)))
+  (if (= (get event :drag-type) "sound")
+    (sbrowser-drop-sound-on-track event)
+    (if (= (get event :drag-type) "instrument")
+      (sbrowser-drop-instrument-on-track event)
+      (seqv-drop-sample-on-track event))))
 
 (def seqv-drop-new-track (event)
   (let ((payload (get event :payload)))
     (let ((path (get payload :path))
           (name (get payload :name)))
-      (if (= (get event :drag-type) "instrument")
-        (if name
-          (do
-            (set! sbrowser-loading-instrument-name name)
-            (host-command "add-track-instrument" (dict :name name)))
-          (status "Drop an instrument, not a folder"))
+      (if (= (get event :drag-type) "sound")
         (if path
-          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-          (status "Drop a sample file, not a folder"))))))
+          (host-command "add-track-from-sound" (dict :path path))
+          (status "Drop a Sound item, not a folder"))
+        (if (= (get event :drag-type) "instrument")
+          (if name
+            (do
+              (set! sbrowser-loading-instrument-name name)
+              (host-command "add-track-instrument" (dict :name name)))
+            (status "Drop an instrument, not a folder"))
+          (if path
+            (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+            (status "Drop a sample file, not a folder")))))))
 
 (defwidget seqv-track-container
   :width 1.5 :height 1.5
@@ -1411,8 +1417,8 @@
           :muted-border-color :mixer-strip-border
           :drop-hover-border-color :mixer-strip-selected-border
           :drop-types (if (seq-track-replaceable-instrument? i)
-            (list "sample" "instrument")
-            (list "sample"))
+            (list "sample" "instrument" "sound")
+            (if (seq-track-sound-replaceable? i) (list "sample" "sound") (list "sample")))
           :drop-meta (dict :kind "track" :track i)
           :on-drop (lambda (event) (seqv-drop-on-track event))
           :padding 0.0145
@@ -1439,7 +1445,7 @@
       :border-color :transparent
       :drop-hover-border-color :mixer-strip-selected-border
       :corner-radius 10
-      :drop-types (list "sample" "instrument")
+      :drop-types (list "sample" "instrument" "sound")
       :drop-meta (dict :kind "new-sample-track")
       :on-drop (lambda (event) (seqv-drop-new-track event))
       (label ""

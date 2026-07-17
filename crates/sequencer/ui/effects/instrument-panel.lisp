@@ -32,6 +32,11 @@
               (status "Drop an instrument, not a folder"))
             (status "Drop a sample or instrument")))))))
 
+(def rack-panel-drop-on-container (event)
+  (if (= (get event :drag-type) "sound")
+    (sbrowser-drop-sound-on-track event)
+    (rack-panel-drop-on-rack event)))
+
 (def rack-panel-drop-on-drum-pad (event)
   (let ((target (get event :target)))
     (rack-panel-drop-on-rack
@@ -339,13 +344,13 @@
        :selected 0
        :h-align :center
        :v-align :center
-       :drop-types (list "sample" "instrument")
+       :drop-types (list "sample" "instrument" "sound")
        :drop-meta (dict :kind "rack-empty-selected"
                         :track (get inst :track)
                         :routing (get inst :routing)
                         :pad-note (get inst :selected-pad-note))
        :drop-hover-border-color :mixer-strip-selected-border
-       :on-drop (lambda (event) (rack-panel-drop-on-rack event))
+       :on-drop (lambda (event) (rack-panel-drop-on-container event))
     (label "Drop an Instrument or Sample"
       :font-size 11 :color :dim :bg :transparent)))
 
@@ -421,11 +426,13 @@
           (label (str "C " (get inst :processing-cost))
             :font-size 8 :color :dim :bg :transparent)
           (box :flex 1 :height 0.15)
-          (button "Save Sound"
-            :width 6.4 :height 0.78 :padding 0.1 :font-size 8
-            :on-click |x y r|
-              (host-command "save-track-as-sound"
-                (dict :track (get inst :track) :name (get inst :display-name))))))
+          (box :debug-name "rack-preset-button" :padding 0 :width 2 :align :center
+            (v-stack
+              (box :width 1 :height 0.1)
+              (fx-mini-save-icon
+                :on-click |x y r| (sbrowser-enter-preset-save)
+                :active 0)))
+          (box :width 0.5)))
       (fx-panel-body "rack-content-box"
         (if (= (get inst :routing) "by-pitch")
           (drum-rack-pad-grid inst)
@@ -437,13 +444,13 @@
                 (label "Drop an Instrument or Sample"
                   :font-size 11 :color :dim :bg :transparent)))))))
     :debug-name "rack-panel"
-    :drop-types (list "sample" "instrument")
+    :drop-types (list "sample" "instrument" "sound")
     :drop-meta (dict :kind "rack-panel"
                      :track (get inst :track)
                      :routing (get inst :routing)
                      :pad-note (get inst :selected-pad-note))
     :drop-hover-border-color :mixer-strip-selected-border
-    :on-drop (lambda (event) (rack-panel-drop-on-rack event))
+    :on-drop (lambda (event) (rack-panel-drop-on-container event))
     :background "fx-panel-bg"
     :color :instrument-panel-bg
     :header :fx-panel-header-bg
@@ -519,8 +526,8 @@
           ;; Rack-slot instruments reuse this panel renderer, but the rack owns
           ;; their drop semantics.
           :drop-types (if (= (get inst :rack-slot) nil)
-            (list "sample" "instrument")
-            (list))
+            (list "sample" "instrument" "sound")
+            (list "sound"))
           :drop-meta (dict :kind "instrument-panel" :track (get inst :track))
           :drop-hover-border-color :mixer-strip-selected-border
           :on-drop (lambda (event) (sbrowser-drop-sound-on-track event))

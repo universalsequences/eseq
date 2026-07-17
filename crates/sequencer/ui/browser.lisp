@@ -782,7 +782,7 @@
   (let ((items (sbrowser-visible-sounds)))
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (if (= (len items) 0)
-        (sbrowser-empty-message "No Sounds found. Save a rack as a Sound to add one.")
+        (sbrowser-empty-message "No Sounds found. Drag an instrument preset onto the Sounds tab to add one.")
         (scroll :key "sounds-tab-scroll" :width :fill :flex 1
           (tree :key "sounds-tab-tree"
                 :width :fill
@@ -791,6 +791,15 @@
                 :focusable true
                 :drag-type "sound"
                 :on-activate (lambda (item) (sbrowser-load-sound item))))))))
+
+(def sbrowser-drop-preset-on-sounds (event)
+  (if (= (get event :drag-type) "instrument-preset")
+    (let ((name (get (get event :payload) :label)))
+      (if name
+        (host-command "promote-preset-to-sound"
+          (dict :track SEQ.sidebar-track-index :name name))
+        (status "Drop a preset item onto Sounds")))
+    false))
 
 (def sbrowser-tab-button (name label icon)
   (button label
@@ -808,6 +817,10 @@
     :highlight-color '(rgba 1 1 1 0.0)
     :shadow-color '(rgba 0 0 0 0.0)
     :corner-radius 8
+    :drop-types (if (= name "sounds") (list "instrument-preset") (list))
+    :drop-meta (dict :kind "browser-tab" :name name)
+    :drop-hover-background-color '(rgba 0.15 0.45 0.70 0.28)
+    :on-drop (lambda (event) (sbrowser-drop-preset-on-sounds event))
     :on-click |x y r| (sbrowser-select-tab name)
     :color :widget-label-fg
     :active-color :blue))
@@ -949,6 +962,7 @@
                 :selected-label SEQ.sidebar-loaded-preset
                 :expand-all false
                 :focusable true
+                :drag-type "instrument-preset"
                 :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
                 :on-activate (lambda (item) (sbrowser-load-preset (get item :label))))))))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1

@@ -8973,7 +8973,9 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &tui::App, track: usiz
         "project-instrument-engines",
         build_string_list(&project_instrument_engine_names(app)),
     );
-    if app.is_sampler_track(track) {
+    if app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Sampler)
+    {
         let selected_sample = app
             .sampler_path_for_track(track)
             .map(|path| path.to_string_lossy().to_string())
@@ -9001,7 +9003,13 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &tui::App, track: usiz
         return;
     }
 
-    let instrument_name = current_custom_instrument_name(app, track).unwrap_or_default();
+    let is_rack = app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Rack);
+    let instrument_name = if is_rack {
+        app.tracks.get(track).cloned().unwrap_or_default()
+    } else {
+        current_custom_instrument_name(app, track).unwrap_or_default()
+    };
     let loaded_preset = app
         .state
         .pattern
@@ -12734,6 +12742,38 @@ mod tests {
             rendered.contains("Wide Plate"),
             "saved Sound label should be visible; rendered:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn metal_seq_browser_promotes_dragged_instrument_preset_to_sounds() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-drop-preset-on-sounds
+                    (dict :drag-type "instrument-preset"
+                          :payload (dict :label "Wide Rack")))"#,
+            )
+            .expect("drop preset on Sounds tab");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "promote-preset-to-sound");
+                let Value::Map(payload) = payload else {
+                    panic!("promotion payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Wide Rack".to_string()))
+                );
+            }
+            other => panic!("expected preset promotion host command, got {other:?}"),
+        }
     }
 
     fn test_sample_tree() -> Value {
@@ -20799,6 +20839,8 @@ mod tests {
             .expect("rack instrument panel row layout node");
         let rack_panel =
             find_layout_node_by_debug_name(&layout, "rack-panel").expect("rack panel layout node");
+        let rack_preset_button = find_layout_node_by_debug_name(&layout, "rack-preset-button")
+            .expect("rack preset button layout node");
         let selected_sampler_panel = find_layout_node_by_debug_name(&layout, "sampler-panel")
             .expect("selected rack sampler panel layout node");
         let selected_sampler_header =
@@ -20856,9 +20898,24 @@ mod tests {
                 Some(Value::List(items))
                     if items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "sample"))
                         && items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "instrument"))
+                        && items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "sound"))
             ),
-            "rack panel should accept sample and instrument drops: {:?}",
+            "rack panel should accept sample, instrument, and Sound drops: {:?}",
             rack_panel.props.get("drop-types")
+        );
+        assert!(
+            rack_preset_button.rect.width > 0.0 && rack_preset_button.rect.height > 0.0,
+            "rack preset button should have visible geometry: {:?}",
+            rack_preset_button.rect
+        );
+        assert!(
+            matches!(
+                selected_sampler_panel.props.get("drop-types"),
+                Some(Value::List(items))
+                    if items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "sound"))
+            ),
+            "selected rack instrument should accept a Sound as a whole-container replacement: {:?}",
+            selected_sampler_panel.props.get("drop-types")
         );
         assert!(
             matches!(
@@ -25983,6 +26040,30 @@ mod tests {
                 );
             }
             other => panic!("expected add-track-instrument host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seqv-drop-new-track
+                    (dict :drag-type "sound"
+                          :payload (dict :path "sounds/wide-rack.sound")))"#,
+            )
+            .expect("drop Sound on sequencer empty space");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-from-sound");
+                let Value::Map(payload) = payload else {
+                    panic!("add-track-from-sound payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("sounds/wide-rack.sound".to_string()))
+                );
+            }
+            other => panic!("expected add-track-from-sound host command, got {other:?}"),
         }
     }
 
@@ -45575,6 +45656,30 @@ mod tests {
                 .expect("read loading instrument"),
             Some(Value::String("emulations/digitone".to_string()))
         );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-sample-new-track
+                    (dict :drag-type "sound"
+                          :payload (dict :path "sounds/wide-rack.sound")))"#,
+            )
+            .expect("drop Sound on mixer new-track zone");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-from-sound");
+                let Value::Map(payload) = payload else {
+                    panic!("add-track-from-sound payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("sounds/wide-rack.sound".to_string()))
+                );
+            }
+            other => panic!("expected add-track-from-sound host command, got {other:?}"),
+        }
 
         let layout = editor
             .runtime_mut()

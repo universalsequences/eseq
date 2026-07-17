@@ -1260,13 +1260,13 @@ impl App {
         Ok(())
     }
 
-    pub fn save_track_as_sound(
+    fn capture_track_as_container_preset(
         &mut self,
         track: usize,
         name: &str,
         tags: Vec<String>,
         author: String,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<crate::project::ProjectSoundPreset, String> {
         if track >= self.tracks.len() {
             return Err(format!("Invalid track index {}", track + 1));
         }
@@ -1399,7 +1399,7 @@ impl App {
             track: track_payload,
             rack: rack_payload,
         };
-        crate::project::save_sound_preset(name, &sound).map_err(|error| error.to_string())
+        Ok(sound)
     }
 
     pub fn load_sound_onto_track(&mut self, track: usize, path: &Path) -> Result<(), String> {
@@ -1407,12 +1407,42 @@ impl App {
             return Err(format!("Invalid track index {}", track + 1));
         }
         let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Sound");
+        self.load_container_preset_onto_track(track, sound, fallback_name)
+    }
+
+    pub fn add_track_from_sound(&mut self, path: &Path) -> Result<usize, String> {
+        // Parse and validate before changing topology. Loading samples and engines
+        // still happens after the shell exists, so roll that shell back on error.
+        crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let track = self.graph_controller().add_blank_sampler_track()?;
+        if let Err(error) = self.load_sound_onto_track(track, path) {
+            let rollback = self.graph_controller().delete_track(track);
+            return match rollback {
+                Ok(_) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "{error}; failed to roll back new track: {rollback_error}"
+                )),
+            };
+        }
+        Ok(track)
+    }
+
+    fn load_container_preset_onto_track(
+        &mut self,
+        track: usize,
+        sound: crate::project::ProjectSoundPreset,
+        fallback_name: &str,
+    ) -> Result<(), String> {
         let source_slots = match &sound.track {
             ProjectTrack::Rack { slots, .. } => slots.clone(),
-            _ => return Err("Sound preset does not contain a rack".to_string()),
+            _ => return Err("Container preset does not contain a rack".to_string()),
         };
         if source_slots.len() != sound.rack.slots.len() {
-            return Err("Sound preset source/state slot counts do not match".to_string());
+            return Err("Container preset source/state slot counts do not match".to_string());
         }
         let mut rack = RackTrackSnapshot::from(sound.rack);
         for (slot_idx, (source, slot)) in source_slots.iter().zip(&mut rack.slots).enumerate() {
@@ -1494,9 +1524,7 @@ impl App {
         }
         let display_name = sound.metadata.name.trim();
         let display_name = if display_name.is_empty() {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("Sound")
+            fallback_name
         } else {
             display_name
         };
@@ -1544,6 +1572,102 @@ impl App {
         }
         self.push_all_restored_defaults();
         Ok(())
+    }
+
+    pub fn save_rack_preset(
+        &mut self,
+        track: usize,
+        name: &str,
+        overwrite: bool,
+    ) -> Result<PathBuf, String> {
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Rack) {
+            return Err("Current track is not an instrument rack".to_string());
+        }
+        if crate::project::rack_preset_path(name).exists() && !overwrite {
+            return Err(format!("Preset '{name}' already exists"));
+        }
+        let preset =
+            self.capture_track_as_container_preset(track, name, Vec::new(), String::new())?;
+        let path =
+            crate::project::save_rack_preset(name, &preset).map_err(|error| error.to_string())?;
+        self.set_track_sound_state(track, None, Some(name.to_string()), false);
+        Ok(path)
+    }
+
+    pub fn load_rack_preset_onto_track(&mut self, track: usize, name: &str) -> Result<(), String> {
+        let preset = crate::project::load_rack_preset(name).map_err(|error| error.to_string())?;
+        self.load_container_preset_onto_track(track, preset, name)?;
+        self.set_track_sound_state(track, None, Some(name.to_string()), false);
+        Ok(())
+    }
+
+    pub fn promote_preset_to_sound(
+        &mut self,
+        track: usize,
+        preset_name: &str,
+    ) -> Result<PathBuf, String> {
+        let mut sound = match self.graph.track_instrument_types.get(track).copied() {
+            Some(InstrumentType::Rack) => {
+                crate::project::load_rack_preset(preset_name).map_err(|error| error.to_string())?
+            }
+            Some(InstrumentType::Custom) => {
+                let engine_id = self
+                    .graph
+                    .track_engine_ids
+                    .get(track)
+                    .and_then(|id| *id)
+                    .ok_or_else(|| "Current custom instrument engine is unavailable".to_string())?;
+                let instrument_name = self
+                    .editor
+                    .engine_registry
+                    .get(engine_id)
+                    .map(|engine| engine.name.clone())
+                    .ok_or_else(|| "Current custom instrument is unavailable".to_string())?;
+                let preset = crate::lisp_host::load_instrument_presets(&instrument_name)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .find(|preset| preset.name == preset_name)
+                    .ok_or_else(|| format!("Preset '{preset_name}' not found"))?;
+                let descriptor = self
+                    .graph
+                    .instrument_descriptors
+                    .get(track)
+                    .cloned()
+                    .ok_or_else(|| "Instrument descriptor unavailable".to_string())?;
+                let mut sound = self.capture_track_as_container_preset(
+                    track,
+                    preset_name,
+                    Vec::new(),
+                    String::new(),
+                )?;
+                let slot = sound
+                    .rack
+                    .slots
+                    .first_mut()
+                    .ok_or_else(|| "Captured instrument preset has no rack slot".to_string())?;
+                apply_instrument_preset_to_container_slot(
+                    &mut slot.instrument_slot,
+                    &mut slot.instrument_base_note_offset,
+                    &descriptor,
+                    &preset,
+                );
+                // Track insert FX are not part of an ordinary instrument preset.
+                // Only container presets (racks) carry their saved slot chains.
+                for effect in &mut slot.effect_slots {
+                    *effect = crate::project::ProjectEffectSlot::default();
+                }
+                slot.custom_effects.fill(None);
+                slot.track_sound_state.loaded_preset = Some(preset.name.clone());
+                slot.track_sound_state.dirty = false;
+                sound
+            }
+            Some(InstrumentType::Sampler) => {
+                return Err("Sampler tracks do not have instrument presets".to_string())
+            }
+            _ => return Err("Current track cannot promote presets to Sounds".to_string()),
+        };
+        sound.metadata.name = preset_name.to_string();
+        crate::project::save_sound_preset(preset_name, &sound).map_err(|error| error.to_string())
     }
 
     pub(super) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
@@ -3183,6 +3307,47 @@ impl App {
     }
 }
 
+fn apply_instrument_preset_to_container_slot(
+    slot: &mut crate::project::ProjectEffectSlot,
+    base_note_offset: &mut f32,
+    descriptor: &crate::effects::EffectDescriptor,
+    preset: &crate::lisp_host::InstrumentPreset,
+) {
+    *base_note_offset = preset.base_note_offset;
+    for (index, param) in descriptor.params.iter().enumerate() {
+        if index < slot.defaults.len() {
+            slot.defaults[index] = param.clamp(
+                preset
+                    .params
+                    .get(&param.name)
+                    .copied()
+                    .unwrap_or(param.default),
+            );
+        }
+    }
+    slot.key_locks.clear();
+    slot.key_lock_param_ids.clear();
+    for (&note, locks) in &preset.key_locks {
+        let mut row = vec![None; descriptor.params.len()];
+        for (param_name, value) in locks {
+            let mut matches = descriptor
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, param)| param.name == *param_name);
+            let Some((index, param)) = matches.next() else {
+                continue;
+            };
+            if matches.next().is_none() && value.is_finite() {
+                row[index] = Some(param.clamp(*value));
+            }
+        }
+        if row.iter().any(Option::is_some) {
+            slot.key_locks.insert(note, row);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3204,6 +3369,45 @@ mod tests {
             host_control: None,
             ui_metadata: None,
         }
+    }
+
+    #[test]
+    fn instrument_preset_promotion_uses_saved_values_instead_of_captured_live_defaults() {
+        let mut descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        descriptor.params = vec![
+            test_param("cutoff", 0.25, 0),
+            test_param("resonance", 0.1, 1),
+        ];
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("cutoff".to_string(), 0.8);
+        let mut note_locks = std::collections::BTreeMap::new();
+        note_locks.insert("resonance".to_string(), 0.65);
+        let mut key_locks = std::collections::BTreeMap::new();
+        key_locks.insert(60, note_locks);
+        let preset = crate::lisp_host::InstrumentPreset {
+            id: "saved".to_string(),
+            name: "Saved".to_string(),
+            base_note_offset: 7.0,
+            params,
+            key_locks,
+        };
+        let mut container_slot = crate::project::ProjectEffectSlot {
+            num_params: 2,
+            defaults: vec![0.05, 0.95],
+            ..crate::project::ProjectEffectSlot::default()
+        };
+        let mut base_note_offset = -12.0;
+
+        apply_instrument_preset_to_container_slot(
+            &mut container_slot,
+            &mut base_note_offset,
+            &descriptor,
+            &preset,
+        );
+
+        assert_eq!(container_slot.defaults, vec![0.8, 0.1]);
+        assert_eq!(container_slot.key_locks[&60], vec![None, Some(0.65)]);
+        assert_eq!(base_note_offset, 7.0);
     }
 
     #[test]

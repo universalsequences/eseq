@@ -21,6 +21,7 @@ use crate::track_color::TrackColor;
 
 const PROJECTS_DIR: &str = "projects";
 const SOUNDS_DIR: &str = "sounds";
+const RACK_PRESETS_DIR: &str = "presets/racks";
 const PROJECT_FILE_VERSION: u32 = 1;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1321,12 +1322,32 @@ pub fn load_project(name: &str) -> std::io::Result<ProjectFile> {
 }
 
 pub fn save_sound_preset(name: &str, sound: &ProjectSoundPreset) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(SOUNDS_DIR)?;
-    let path = Path::new(SOUNDS_DIR).join(format!("{}.sound", sanitize_project_name(name)));
-    let json = serde_json::to_string(sound).map_err(|error| {
+    save_container_preset(Path::new(SOUNDS_DIR), "sound", "Sound", name, sound)
+}
+
+pub fn save_rack_preset(name: &str, preset: &ProjectSoundPreset) -> std::io::Result<PathBuf> {
+    save_container_preset(
+        Path::new(RACK_PRESETS_DIR),
+        "rackpreset",
+        "rack preset",
+        name,
+        preset,
+    )
+}
+
+fn save_container_preset(
+    directory: &Path,
+    extension: &str,
+    kind: &str,
+    name: &str,
+    preset: &ProjectSoundPreset,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(directory)?;
+    let path = directory.join(format!("{}.{}", sanitize_project_name(name), extension));
+    let json = serde_json::to_string(preset).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("Failed to serialize Sound '{}': {error}", path.display()),
+            format!("Failed to serialize {kind} '{}': {error}", path.display()),
         )
     })?;
     std::fs::write(&path, json)?;
@@ -1334,20 +1355,54 @@ pub fn save_sound_preset(name: &str, sound: &ProjectSoundPreset) -> std::io::Res
 }
 
 pub fn load_sound_preset(path: &Path) -> std::io::Result<ProjectSoundPreset> {
+    load_container_preset(path, "Sound")
+}
+
+pub fn load_rack_preset(name: &str) -> std::io::Result<ProjectSoundPreset> {
+    let path = rack_preset_path(name);
+    load_container_preset(&path, "rack preset")
+}
+
+pub fn rack_preset_path(name: &str) -> PathBuf {
+    Path::new(RACK_PRESETS_DIR).join(format!("{}.rackpreset", sanitize_project_name(name)))
+}
+
+fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoundPreset> {
     let src = std::fs::read_to_string(path)?;
     let sound: ProjectSoundPreset = serde_json::from_str(&src).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Failed to parse Sound '{}': {error}", path.display()),
+            format!("Failed to parse {kind} '{}': {error}", path.display()),
         )
     })?;
     if !matches!(sound.track, ProjectTrack::Rack { .. }) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Sound '{}' does not contain a rack track", path.display()),
+            format!("{kind} '{}' does not contain a rack track", path.display()),
         ));
     }
     Ok(sound)
+}
+
+pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
+    std::fs::create_dir_all(RACK_PRESETS_DIR)?;
+    let mut names = std::fs::read_dir(RACK_PRESETS_DIR)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rackpreset"))
+        .filter_map(|path| {
+            let fallback = path.file_stem()?.to_str()?.to_owned();
+            let preset = load_container_preset(&path, "rack preset").ok()?;
+            let name = preset.metadata.name.trim();
+            Some(if name.is_empty() {
+                fallback
+            } else {
+                name.to_owned()
+            })
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names)
 }
 
 pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
@@ -3027,6 +3082,45 @@ mod tests {
             restored.rack.slots[0].custom_effects[0].as_deref(),
             Some("builtin:OTT")
         );
+    }
+
+    #[test]
+    fn container_preset_storage_roundtrips_validated_rack_payload() {
+        let directory = std::env::temp_dir().join(format!(
+            "eseq-rack-preset-storage-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let sound = ProjectSoundPreset {
+            version: project_file_version(),
+            metadata: ProjectSoundMetadata {
+                name: "Wide Rack".to_string(),
+                tags: Vec::new(),
+                author: String::new(),
+            },
+            track: ProjectTrack::Rack {
+                routing: ProjectRackRouting::Broadcast,
+                slots: Vec::new(),
+                color: None,
+                collapsed: false,
+            },
+            rack: ProjectRackTrackPattern {
+                routing: ProjectRackRouting::Broadcast,
+                slots: Vec::new(),
+            },
+        };
+
+        let path =
+            save_container_preset(&directory, "rackpreset", "rack preset", "Wide Rack", &sound)
+                .expect("save rack preset payload");
+        let restored = load_container_preset(&path, "rack preset")
+            .expect("load validated rack preset payload");
+        assert_eq!(restored.metadata.name, "Wide Rack");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("Wide-Rack.rackpreset")
+        );
+        std::fs::remove_dir_all(&directory).expect("clean rack preset test directory");
     }
 
     #[test]

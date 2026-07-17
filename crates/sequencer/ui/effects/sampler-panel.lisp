@@ -51,8 +51,8 @@
 
 (def sampler-panel-drop-types (inst)
   (if (instrument-rack-target? inst)
-    '()
-    (list "sample" "instrument")))
+    (list "sound")
+    (list "sample" "instrument" "sound")))
 
 (def sampler-panel-drop-meta (inst)
   (if (instrument-rack-target? inst)

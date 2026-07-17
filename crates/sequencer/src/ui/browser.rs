@@ -1079,6 +1079,11 @@ pub(crate) fn instrument_display_name(name: &str) -> String {
 }
 
 pub(crate) fn visible_preset_items_for_track(app: &tui::App, track: usize) -> Vec<String> {
+    if app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Rack)
+    {
+        return sequencer::project::list_rack_presets().unwrap_or_default();
+    }
     let Some(name) = current_custom_instrument_name(app, track) else {
         return Vec::new();
     };
