@@ -94,9 +94,13 @@
         (if (= (get inst :type) "rack")
           (h-stack :gap 0.2 :height fx-fixed-panel-height :align :stretch
             (instrument-panel inst)
-            (rack-selected-fx-panel inst)
-            (rack-slot-fx-drop-panel inst)
-            (rack-slot-track-fx-divider))
+            (if rack-panel-selected-chain-open
+              (h-stack :debug-name "rack-selected-chain-fx"
+                       :gap 1 :height fx-fixed-panel-height :align :stretch
+                (rack-selected-fx-panel inst)
+                (rack-slot-fx-drop-panel inst)
+                (rack-slot-track-fx-divider))
+              (box :width 0 :height 0)))
           (instrument-panel inst)))
       (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
         (midi-fx-panel (get fx :name) (get fx :params) fx))

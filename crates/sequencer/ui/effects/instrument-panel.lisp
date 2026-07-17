@@ -1,4 +1,72 @@
 ;; Instrument panel composition for sampler, rack, modulator, and synth tracks.
+(def rack-panel-toggle-slot-list ()
+  (set! rack-panel-slot-list-open (not rack-panel-slot-list-open)))
+
+(def rack-panel-toggle-selected-chain ()
+  (set! rack-panel-selected-chain-open (not rack-panel-selected-chain-open)))
+
+(defwidget rack-chain-view-icon
+  :width 1.65 :height 1.65
+  :paint-margin 0.15
+  :state (active)
+  :shader
+  (let ((disc-color (if (= active 1)
+                      (rgba 1.0 0.58 0.25 1.0)
+                      (rgba 0.24 0.25 0.26 1.0)))
+        (glyph-color (if (= active 1)
+                       (rgba 0.10 0.10 0.11 1.0)
+                       (rgba 0.58 0.59 0.60 1.0))))
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.68)
+        (material :color disc-color))
+      (sdf/fill (sdf/rounded-rect 0.50 0.12 0.05)
+        (material :color glyph-color)))))
+
+(defwidget rack-slot-list-view-icon
+  :width 1.65 :height 1.65
+  :paint-margin 0.15
+  :state (active)
+  :shader
+  (let ((disc-color (if (= active 1)
+                      (rgba 1.0 0.58 0.25 1.0)
+                      (rgba 0.24 0.25 0.26 1.0)))
+        (glyph-color (if (= active 1)
+                       (rgba 0.10 0.10 0.11 1.0)
+                       (rgba 0.58 0.59 0.60 1.0))))
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.68)
+        (material :color disc-color))
+      (sdf/fill (sdf/translate -0.39 -0.32 (sdf/circle 0.055))
+        (material :color glyph-color))
+      (sdf/fill (sdf/translate 0.12 -0.32 (sdf/rounded-rect 0.36 0.09 0.035))
+        (material :color glyph-color))
+      (sdf/fill (sdf/translate -0.39 0.0 (sdf/circle 0.055))
+        (material :color glyph-color))
+      (sdf/fill (sdf/translate 0.12 0.0 (sdf/rounded-rect 0.36 0.09 0.035))
+        (material :color glyph-color))
+      (sdf/fill (sdf/translate -0.39 0.32 (sdf/circle 0.055))
+        (material :color glyph-color))
+      (sdf/fill (sdf/translate 0.12 0.32 (sdf/rounded-rect 0.36 0.09 0.035))
+        (material :color glyph-color)))))
+
+(def rack-panel-view-toolbar ()
+  (box :debug-name "rack-view-toolbar"
+    :width 2.35 :height 9.7
+    :padding 0 :h-align :center :v-align :start
+    (v-stack :width 2.35 :height :fill :gap 0.18 :align :center
+      (box :width 2.35 :height 0.18)
+      (rack-chain-view-icon
+        :key "rack-chain-view-toggle"
+        :debug-name "rack-chain-view-toggle"
+        :active (if rack-panel-selected-chain-open 1 0)
+        :on-click |x y r| (rack-panel-toggle-selected-chain))
+      (rack-slot-list-view-icon
+        :key "rack-slot-list-view-toggle"
+        :debug-name "rack-slot-list-view-toggle"
+        :active (if rack-panel-slot-list-open 1 0)
+        :on-click |x y r| (rack-panel-toggle-slot-list)))
+    ))
+
 (def rack-panel-drop-on-rack (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
@@ -268,29 +336,29 @@
 
 (def rack-slot-row (slot)
   (let ((delete-target (rack-slot-delete-target? slot))
-        (selected (get slot :selected)))
+      (selected (get slot :selected)))
     (box :key (str "rack-slot-row-" (get slot :idx))
-         :width :fill
-         :height 1.65
-         :padding 0.18
-         :selected delete-target
-         :background-color (if selected
-                             '(rgba 0.30 0.32 0.34 1.0)
-                             '(rgba 0.06 0.065 0.074 0.0))
-         :selected-background-color :fx-panel-header-selected-bg
-         :border-width 1
-         :border-color (if selected
-                         '(rgba 0.48 0.50 0.52 1.0)
-                         '(rgba 0.16 0.17 0.19 1.0))
-         :selected-border-color :mixer-strip-selected-border
-         :corner-radius 3
-         :drop-types (list "audio-effect")
-         :drop-meta (dict :kind "rack-slot-fx"
-                          :track (get slot :track)
-                          :rack-slot (get slot :idx))
-         :drop-hover-border-color :mixer-strip-selected-border
-         :on-drop (lambda (event) (rack-slot-drop-fx slot event))
-         :on-click |x y r| (rack-slot-select slot)
+      :width 35
+      :height 1.65
+      :padding 0.18
+      :selected delete-target
+      :background-color (if selected
+        '(rgba 0.30 0.32 0.34 1.0)
+        '(rgba 0.06 0.065 0.074 0.0))
+      :selected-background-color :fx-panel-header-selected-bg
+      :border-width 1
+      :border-color (if selected
+        '(rgba 0.48 0.50 0.52 1.0)
+        '(rgba 0.16 0.17 0.19 1.0))
+      :selected-border-color :mixer-strip-selected-border
+      :corner-radius 10
+      :drop-types (list "audio-effect")
+      :drop-meta (dict :kind "rack-slot-fx"
+        :track (get slot :track)
+        :rack-slot (get slot :idx))
+      :drop-hover-border-color :mixer-strip-selected-border
+      :on-drop (lambda (event) (rack-slot-drop-fx slot event))
+      :on-click |x y r| (rack-slot-select slot)
       (h-stack :width :fill :height :fill :gap 0.15 :align :center
         (label (str (+ (get slot :idx) 1))
           :font-size 10
@@ -298,12 +366,12 @@
           :width 1.0
           :bg :transparent)
         (box :key (str "rack-slot-label-" (get slot :idx))
-             :width 9.5 :height :fill :v-align :center :padding 0
-             :selected delete-target
-             :background-color :transparent
-             :selected-background-color :fx-panel-header-selected-bg
-             :corner-radius 3
-             :on-click |x y r| (rack-slot-select-delete-target slot)
+          :width 9.5 :height :fill :v-align :center :padding 0
+          :selected delete-target
+          :background-color :transparent
+          :selected-background-color :fx-panel-header-selected-bg
+          :corner-radius 3
+          :on-click |x y r| (rack-slot-select-delete-target slot)
           (label (substring (get slot :display-name) 0 14)
             :font-size 10.5
             :color :white
@@ -313,7 +381,7 @@
         (label (str "C " (get slot :processing-cost))
           :font-size 8 :color (if (> (get slot :effect-count) 0) :blue :dim)
           :width 2.8 :bg :transparent)
-
+        
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "T" :font-size 8.2 :color :dim :bg :transparent)
           (number-picker :value (get slot :base-note)
@@ -348,11 +416,13 @@
             :on-change (lambda (v) (rack-slot-set-max-polyphony slot v))))
         (button "M"
           :width 2.0 :height 1.02 :padding 0 :font-size 9
+          :border-color :transparent
           :background-color (if (get slot :mute) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
           :color (if (get slot :mute) :black :dim)
           :on-click |x y r| (rack-slot-set-mute slot (not (get slot :mute))))
         (button "S"
           :width 2.0 :height 1.02 :padding 0 :font-size 9
+          :border-color :transparent
           :background-color (if (get slot :solo) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
           :color (if (get slot :solo) :black :dim)
           :on-click |x y r| (rack-slot-set-solo slot (not (get slot :solo))))))))
@@ -444,36 +514,53 @@
       (box :debug-name "rack-header-box" :height 1 :padding 0 :v-align :center :h-align :start :width :fill
         (h-stack :debug-name "rack-header-row" :gap 0.6 :align :center :width :fill
           (fx-panel-header-leading-spacer)
-          (label (substring (get inst :display-name) 0 16)
-            :font-size 11 :color :white :bg :transparent)
-          (label (get inst :routing)
-            :font-size 9 :color :gray :bg :transparent)
-          (label (str "C " (get inst :processing-cost))
-            :font-size 8 :color :dim :bg :transparent)
-          (box :flex 1 :height 0.15)
-          (box :debug-name "rack-preset-button" :padding 0 :width 2 :align :center
-            (v-stack
-              (box :width 1 :height 0.1)
-              (fx-mini-save-icon
-                :on-click |x y r| (sbrowser-enter-preset-save)
-                :active 0)))
+          (if rack-panel-slot-list-open
+            (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :center :flex 1
+              (label (substring (get inst :display-name) 0 16)
+                :font-size 11 :color :white :bg :transparent)
+              (label (get inst :routing)
+                :font-size 9 :color :gray :bg :transparent)
+              (label (str "C " (get inst :processing-cost))
+                :font-size 8 :color :dim :bg :transparent)
+              (box :flex 1 :height 0.15))
+            (box :debug-name "rack-compact-header-content"
+              :flex 1 :height 0.8 :padding 0 :h-align :center :v-align :center
+              (label "R" :width :fill :font-size 8 :text-align :center
+                :color :dim :bg :transparent)))
+          (if rack-panel-slot-list-open
+            (box :debug-name "rack-preset-button" :padding 0 :width 2 :align :center
+              (v-stack
+                (box :width 1 :height 0.1)
+                (fx-mini-save-icon
+                  :on-click |x y r| (sbrowser-enter-preset-save)
+                  :active 0)))
+            (box :width 0 :height 0))
           (box :width 0.5)))
       (fx-panel-body "rack-content-box"
-        (if (= (get inst :routing) "by-pitch")
-          (drum-rack-pad-grid inst)
-          (v-stack :debug-name "rack-chain-list" :gap 0.025 :height fx-panel-body-content-height :width :fill
-            (if (> (len (get inst :slots)) 0)
-              (each (get inst :slots) |slot idx|
-                (rack-slot-row slot))
-              (box :width :fill :height 9 :h-align :center :v-align :center
-                (label "Drop an Instrument or Sample"
-                  :font-size 11 :color :dim :bg :transparent)))))))
+        (h-stack :debug-name "rack-content-row" :gap 0.20
+          :width :fill :align :stretch
+          (rack-panel-view-toolbar)
+          (if rack-panel-slot-list-open
+            (if (= (get inst :routing) "by-pitch")
+              (drum-rack-pad-grid inst)
+              (box
+                :background-color :bg
+                :border-color :buffer-bg
+                :corner-radius 10
+                (v-stack :debug-name "rack-chain-list" :gap 0.025 :height 5 :width :fill
+                  (if (> (len (get inst :slots)) 0)
+                    (each (get inst :slots) |slot idx|
+                      (rack-slot-row slot))
+                    (box :width :fill :height 9 :h-align :center :v-align :center
+                      (label "Drop an Instrument or Sample"
+                        :font-size 11 :color :dim :bg :transparent))))))
+            (box :width 0 :height 0)))))
     :debug-name "rack-panel"
     :drop-types (list "sample" "instrument" "sound")
     :drop-meta (dict :kind "rack-panel"
-                     :track (get inst :track)
-                     :routing (get inst :routing)
-                     :pad-note (get inst :selected-pad-note))
+      :track (get inst :track)
+      :routing (get inst :routing)
+      :pad-note (get inst :selected-pad-note))
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (rack-panel-drop-on-container event))
     :background "fx-panel-bg"
@@ -481,7 +568,7 @@
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
     :padding 0
-    :width 35.5
+    :width (if rack-panel-slot-list-open 38.05 3.35)
     :height fx-fixed-panel-height
     :selected 0))
 
@@ -491,7 +578,9 @@
            :height fx-fixed-panel-height
            :align :stretch
     (rack-panel inst)
-    (rack-selected-instrument-panel inst)))
+    (if rack-panel-selected-chain-open
+      (rack-selected-instrument-panel inst)
+      (box :width 0 :height 0))))
 
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")

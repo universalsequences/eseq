@@ -9,6 +9,8 @@
 (defstate instrument-key-lock-octave 4)
 (defstate instrument-key-lock-selected-notes '())
 (defstate instrument-key-lock-audition true)
+(defstate rack-panel-slot-list-open true)
+(defstate rack-panel-selected-chain-open true)
 (defstate effect-mods-open false)
 (defstate effect-mods-chain "audio")
 (defstate effect-mods-slot -1)

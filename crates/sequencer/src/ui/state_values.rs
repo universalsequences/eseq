@@ -21065,6 +21065,101 @@ mod tests {
             "the sampler panel should present the semantic base-note control with its compact 'base' label"
         );
 
+        editor
+            .runtime_mut()
+            .eval_str("(rack-panel-toggle-slot-list)")
+            .expect("collapse rack slot list");
+        editor.refresh_runtime_side_effects();
+        let compact_list_layout = editor
+            .widget_layout()
+            .expect("rack layout with collapsed slot list");
+        assert_finite_layout_tree(&compact_list_layout);
+        let compact_rack = find_layout_node_by_debug_name(&compact_list_layout, "rack-panel")
+            .expect("compact rack panel");
+        let compact_toolbar =
+            find_layout_node_by_debug_name(&compact_list_layout, "rack-view-toolbar")
+                .expect("rack toolbar should remain visible when the slot list is collapsed");
+        let compact_header =
+            find_layout_node_by_debug_name(&compact_list_layout, "rack-compact-header-content")
+                .expect("compact rack header");
+        let compact_chain_toggle =
+            find_layout_node_by_debug_name(&compact_list_layout, "rack-chain-view-toggle")
+                .expect("selected-chain toggle should remain visible");
+        let compact_list_toggle =
+            find_layout_node_by_debug_name(&compact_list_layout, "rack-slot-list-view-toggle")
+                .expect("slot-list toggle should remain visible");
+        assert!(
+            find_layout_node_by_debug_name(&compact_list_layout, "rack-chain-list").is_none(),
+            "collapsed rack must not retain the slot list in its render tree"
+        );
+        assert!(
+            compact_rack.rect.width < 5.0,
+            "rack should collapse to its toolbar width, got {:?}",
+            compact_rack.rect
+        );
+        assert_finite_nonzero_rect(compact_toolbar, "compact rack toolbar");
+        assert_finite_nonzero_rect(compact_header, "compact rack header");
+        assert_finite_nonzero_rect(compact_chain_toggle, "compact selected-chain toggle");
+        assert_finite_nonzero_rect(compact_list_toggle, "compact slot-list toggle");
+        assert_layout_inside(compact_toolbar, compact_rack, "compact rack toolbar");
+        assert!(
+            find_layout_node_by_debug_name(&compact_list_layout, "sampler-panel").is_some(),
+            "collapsing the slot list must not independently hide the selected chain"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(rack-panel-toggle-selected-chain)")
+            .expect("collapse selected rack chain");
+        editor.refresh_runtime_side_effects();
+        let toolbar_only_layout = editor
+            .widget_layout()
+            .expect("rack layout with list and selected chain collapsed");
+        assert_finite_layout_tree(&toolbar_only_layout);
+        assert!(
+            find_layout_node_by_debug_name(&toolbar_only_layout, "rack-view-toolbar").is_some(),
+            "rack toolbar must remain visible when both views are collapsed"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&toolbar_only_layout, "sampler-panel").is_none()
+                && find_layout_node_by_debug_name(&toolbar_only_layout, "rack-slot-fx-panel")
+                    .is_none()
+                && find_layout_node_by_debug_name(&toolbar_only_layout, "rack-slot-fx-drop-panel")
+                    .is_none()
+                && find_layout_node_by_debug_name(
+                    &toolbar_only_layout,
+                    "rack-slot-track-fx-divider"
+                )
+                .is_none(),
+            "selected-chain toggle must hide its instrument, FX panels, drop target, and divider"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&toolbar_only_layout, "fx-track-drop-placeholder-panel")
+                .is_some(),
+            "hiding the rack slot chain must not hide the track-level FX chain"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(rack-panel-toggle-slot-list)")
+            .expect("restore rack slot list independently");
+        editor.refresh_runtime_side_effects();
+        let list_only_layout = editor
+            .widget_layout()
+            .expect("rack layout with only the slot list expanded");
+        assert_finite_layout_tree(&list_only_layout);
+        assert!(
+            find_layout_node_by_debug_name(&list_only_layout, "rack-chain-list").is_some()
+                && find_layout_node_by_debug_name(&list_only_layout, "sampler-panel").is_none(),
+            "slot-list and selected-chain visibility must remain independent"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(rack-panel-toggle-selected-chain)")
+            .expect("restore selected rack chain");
+        editor.refresh_runtime_side_effects();
+
         let _ = editor.drain_host_commands();
         editor
             .runtime_mut()
