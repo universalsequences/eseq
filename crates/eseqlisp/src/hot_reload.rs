@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
+const CWD_RELATIVE_LOAD_PREFIX: &str = "@/";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceId(pub PathBuf);
 
@@ -266,6 +268,9 @@ impl SourceManager {
         if raw.is_absolute() {
             return self.canonicalize_path(raw);
         }
+        if let Some(cwd_relative) = path.strip_prefix(CWD_RELATIVE_LOAD_PREFIX) {
+            return self.canonicalize_path(Path::new(cwd_relative));
+        }
         let base = self
             .load_stack
             .last()
@@ -491,4 +496,26 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_cwd_relative_load_ignores_the_active_module_directory() {
+        let cwd = std::env::temp_dir().join("eseqlisp-source-root");
+        let mut manager = SourceManager::new();
+        manager.cwd = cwd.clone();
+        manager.enter_module(cwd.join("ui/main.lisp"), 1);
+
+        assert_eq!(
+            manager.resolve_load_path("@/ui/themes.lisp"),
+            cwd.join("ui/themes.lisp")
+        );
+        assert_eq!(
+            manager.resolve_load_path("themes.lisp"),
+            cwd.join("ui/themes.lisp")
+        );
+    }
 }

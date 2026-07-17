@@ -1,8 +1,10 @@
-# tinyseq
+# sequencer
 
-A terminal-based step sequencer for sample playback, built in Rust with a lock-free audio engine. Inspired by hardware sequencers like the Cirklon and Elektron boxes.
+A Metal-based step sequencer and audio workstation built in Rust, ESeqLisp, and
+DGenLisp on top of a lock-free audio engine. The earlier `ratatui` interface is
+still available as the `sequencer` binary, but `metal_seq` is the active UI.
 
-![tinyseq runs in your terminal](https://img.shields.io/badge/interface-TUI-blue)
+![Metal sequencer](https://img.shields.io/badge/interface-Metal-blue)
 ![built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 
 ## Features
@@ -20,7 +22,7 @@ A terminal-based step sequencer for sample playback, built in Rust with a lock-f
 - **Lock-free audio engine** (C-based audiograph library) with real-time safe graph editing
 - **Piano keyboard visualizer** showing currently sounding notes
 - **Mouse support** for clicking steps, tracks, params, and pattern buttons
-- **ratatui TUI** that fits in any terminal
+- **Retained ratatui TUI** for the earlier terminal workflow
 
 ## Requirements
 
@@ -38,11 +40,21 @@ The audiograph C library is compiled automatically via `build.rs` + `cc`.
 
 ## Running
 
+Run the current Metal UI from the repository root:
+
 ```
-cargo run --release
+cargo run -p sequencer --bin metal_seq --release
 ```
 
-On first launch, tinyseq creates `samples/` and `effects/` directories in the working directory. Drop `.wav` files into `samples/` (nested folders are fine) and they'll appear in the sidebar browser.
+Run the retained terminal UI with:
+
+```
+cargo run -p sequencer --bin sequencer --release
+```
+
+On first launch, the app creates local `samples/` and `effects/` directories.
+Drop `.wav` files into `samples/` (nested folders are fine) and they will appear
+in the sidebar browser.
 
 ## Headless UI capture
 
@@ -51,7 +63,7 @@ Lisp-defined project fixture without opening the interactive app or an audio
 device. This is useful for visually iterating on instrument, process, effect,
 and sequencer panels. See [Metal sequencer UI capture](../../docs/metal-seq-ui-capture.md).
 
-## Quick start
+## Legacy TUI quick start
 
 1. Press **Ctrl+N** to open the sample browser
 2. Navigate folders with **Up/Down**, expand/collapse with **Enter**
@@ -60,7 +72,7 @@ and sequencer panels. See [Metal sequencer UI capture](../../docs/metal-seq-ui-c
 5. Press **Enter** to toggle steps on/off
 6. Press **Space** to play/stop
 
-## Controls
+## Legacy TUI controls
 
 ### Global
 
@@ -143,33 +155,48 @@ and sequencer panels. See [Metal sequencer UI capture](../../docs/metal-seq-ui-c
 
 ```
 src/
-  main.rs          -- startup, terminal setup, audio graph wiring
-  sequencer.rs     -- shared state (lock-free atomics), clock, pattern bank
-  audio.rs         -- cpal output stream, per-block processing
-  sampler.rs       -- sample loading, playback with envelope
-  voice.rs         -- polyphonic voice allocation pool
-  filter.rs        -- biquad filter DSP
-  delay.rs         -- delay line DSP
-  reverb.rs        -- Dattorro plate reverb
-  effects.rs       -- unified effect slot system with p-locks
-  lisp_host.rs   -- DGenLisp custom effect compilation and loading
-  audiograph.rs    -- FFI bindings to the C audiograph engine
-  ui/
-    mod.rs         -- App struct, layout, regions
-    draw.rs        -- ratatui rendering
-    input.rs       -- keyboard/mouse dispatch
-    cirklon.rs     -- step grid interaction
-    params.rs      -- track param and effect param editing
-    tracks.rs      -- track management, graph wiring
-    effects.rs     -- effect chain UI logic
-    browser.rs     -- sample folder tree browser
+  ui/               -- current Metal application, event loop, and Lisp host bindings
+  tui/              -- retained legacy ratatui interface and shared app/graph state
+  effects/          -- built-in audio effects and the effect-chain model
+  sequencer/        -- sequencer state, clock, and snapshots
+  lisp_host/        -- ESeqLisp/DGenLisp host support
+  agent/            -- agent protocol, tools, providers, and validation
+  bin/              -- focused command-line probes and migration tools
+  audio.rs          -- cpal output stream and per-block processing
+  audiograph.rs     -- FFI bindings to the C audio graph
+  project.rs        -- project persistence
+  sampler.rs        -- sample loading and playback
+  scheduler.rs      -- lookahead scheduling and event routing
+
+ui/                 -- declarative Metal UI source
+  main.lisp
+  effects/          -- effect, instrument, sampler, and process panels
+  themes/
+  capture-fixtures/
+
+effects/            -- saved custom DGenLisp effects
+instruments/        -- saved DGenLisp instruments, grouped by family
+midi-fx/            -- saved ESeqLisp MIDI effects
+defmacros/          -- reusable DGenLisp macros
+processes/          -- saved process definitions
+scripts/            -- loadable demos grouped by processes, sequencers, and UI
+audiograph/         -- lock-free C audio graph implementation and tests
+tools/              -- DGenLisp compiler and maintenance utilities
 ```
 
-The audio runs through a C-based lock-free graph engine (`audiograph/`) that supports real-time node addition, removal, and parameter changes without blocking the audio thread.
+The `metal_seq` binary is rooted at `src/ui/main.rs`; `src/tui/` is retained
+because the current app still shares parts of its state and audio-graph model.
+The audio runs through the C-based lock-free graph engine in `audiograph/`,
+which supports real-time node addition, removal, and parameter changes without
+blocking the audio thread.
 
 ## Custom effects
 
-tinyseq supports custom DSP effects written in DGenLisp, a Lisp dialect that compiles to native shared libraries. Place `.dgenlisp` source files in the `effects/` directory and load them via **Ctrl+L**. Effects are hot-compiled in a background thread and patched into the audio graph on completion.
+tinyseq supports custom DSP effects written in DGenLisp, a Lisp dialect that
+compiles to native shared libraries. Each saved effect lives in its own
+`effects/<name>/` directory with a `dsp.lisp` file and an optional `ui.lisp`.
+Effects are hot-compiled in a background thread and patched into the audio
+graph on completion.
 
 ## Instrument probe
 

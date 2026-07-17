@@ -871,7 +871,7 @@ Instrumentation additions:
 
 Files:
 
-- `metal-seq-grid.lisp`
+- `ui/main.lisp`
 
 Hot-path targets:
 
@@ -905,7 +905,7 @@ Expected payoff:
 
 Files:
 
-- `metal-seq-mixer.lisp`
+- `ui/legacy/mixer.lisp`
 
 Hot-path targets:
 
@@ -941,7 +941,7 @@ Expected payoff:
 
 Files:
 
-- `metal-seq-transport.lisp`
+- `ui/transport.lisp`
 
 Hot-path targets:
 
@@ -966,9 +966,9 @@ Files:
 
 - `../eseqlisp/src/runtime.rs`
 - `../eseqlisp/src/editor/tests.rs`
-- `metal-seq-grid.lisp`
-- `metal-seq-mixer.lisp`
-- `metal-seq-transport.lisp`
+- `ui/main.lisp`
+- `ui/legacy/mixer.lisp`
+- `ui/transport.lisp`
 
 Add tests:
 
@@ -989,7 +989,7 @@ Profiler checkpoints to capture before/after:
 
 - [ ] Commit 7: `subtree` special form + VM owner-stack plumbing
 - [ ] Commit 8: per-owner dependency capture + direct `ReplaceSubtree(...)` emission
-- [ ] Commit 9: convert `metal-seq-grid.lisp` step cells to subtree owners
+- [ ] Commit 9: convert `ui/main.lisp` step cells to subtree owners
 - [ ] Commit 10: convert mixer track rows/meters to subtree owners
 - [ ] Commit 11: convert transport playhead/meters to subtree owners
 - [ ] Commit 12: subtree relayout entry point for explicit owner updates

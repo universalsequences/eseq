@@ -740,6 +740,7 @@ mod tests {
 
     #[test]
     fn constructor_accepts_reactive_value_binding() {
+        let slots = crate::reactive::ReactiveBindingStore::default();
         let widget = crate::widgets::build_widget(
             "matrix",
             vec![
@@ -749,7 +750,7 @@ mod tests {
                     field: "weight".to_string(),
                     index: None,
                     kind: crate::vm::BindingKind::Float,
-                    slot: crate::reactive::reactive_float_slot("APP", "weight"),
+                    slot: slots.slot("APP", "weight"),
                 },
             ],
         );
@@ -1040,7 +1041,7 @@ mod tests {
             time_seconds: 0.0,
             focused_widget_id: None,
             focused_branch: false,
-            tile_content_rows: 18.0,
+            overlay_viewport_bottom: 18.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
             inherited_hover: false,
@@ -1081,7 +1082,7 @@ mod tests {
             time_seconds: 0.0,
             focused_widget_id: None,
             focused_branch: false,
-            tile_content_rows: 18.0,
+            overlay_viewport_bottom: 18.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
             inherited_hover: false,

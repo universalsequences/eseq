@@ -19,8 +19,8 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Update comments and intent near [src/ui/graph.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/graph.rs)
-- [ ] Update comments and intent near [src/bin/metal_seq.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/bin/metal_seq.rs)
+- [ ] Update comments and intent near [src/ttui/graph.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ttui/graph.rs)
+- [ ] Update comments and intent near [src/ui/main.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/main.rs)
 
 ### Checklist
 
@@ -130,7 +130,7 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Edit [src/ui/effects.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/effects.rs)
+- [ ] Edit [src/tui/effects.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/tui/effects.rs)
 - [ ] Edit [src/sequencer/state.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/sequencer/state.rs) if remap helpers belong closer to snapshots/state
 - [ ] Audit [src/accumulator.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/accumulator.rs) for raw track references
 
@@ -164,7 +164,7 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Edit [src/ui/graph.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/graph.rs)
+- [ ] Edit [src/ttui/graph.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ttui/graph.rs)
 
 ### Functions To Add Or Update
 
@@ -208,8 +208,8 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Edit [src/ui/graph.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/graph.rs)
-- [ ] Edit [src/ui/mod.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/mod.rs) if helper methods are needed
+- [ ] Edit [src/ttui/graph.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ttui/graph.rs)
+- [ ] Edit [src/tui/mod.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/tui/mod.rs) if helper methods are needed
 
 ### Collections To Compact
 
@@ -245,7 +245,7 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Edit [src/ui/graph.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/graph.rs)
+- [ ] Edit [src/ttui/graph.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ttui/graph.rs)
 - [ ] Edit [src/sequencer/state.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/sequencer/state.rs)
 
 ### Functions To Add Or Update
@@ -273,7 +273,7 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Edit [src/bin/metal_seq.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/bin/metal_seq.rs)
+- [ ] Edit [src/ui/main.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/main.rs)
 
 ### Functions To Add Or Update
 
@@ -316,7 +316,7 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Edit [src/bin/metal_seq.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/bin/metal_seq.rs)
+- [ ] Edit [src/ui/main.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/main.rs)
 
 ### Functions To Add Or Update
 
@@ -340,7 +340,7 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Edit [metal-seq-mixer.lisp](/Users/alecresende/code/learning/anthropic/sequencer/metal-seq-mixer.lisp)
+- [ ] Edit [ui/legacy/mixer.lisp](/Users/alecresende/code/learning/anthropic/sequencer/ui/legacy/mixer.lisp)
 
 ### Checklist
 
@@ -362,7 +362,7 @@ Delete one track safely while the app is running, compact all track-indexed stat
 
 ### Files
 
-- [ ] Audit [src/ui/projects.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/ui/projects.rs)
+- [ ] Audit [src/tui/projects.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/tui/projects.rs)
 - [ ] Audit [src/project.rs](/Users/alecresende/code/learning/anthropic/sequencer/src/project.rs)
 
 ### Checklist

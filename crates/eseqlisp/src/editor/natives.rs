@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::buffer::BufferTextStyle;
 use crate::runtime::{LayoutTabSpec, Runtime};
 use crate::theme;
-use crate::vm::{format_lisp_value, Value};
+use crate::vm::{Value, format_lisp_value};
 
 use super::{MAX_TEXT_ZOOM, MIN_TEXT_ZOOM};
 
@@ -1498,11 +1498,7 @@ fn describe_directory_entry_unix(
 
 #[cfg(unix)]
 fn bit(mode: u32, flag: u32, ch: char) -> char {
-    if mode & flag != 0 {
-        ch
-    } else {
-        '-'
-    }
+    if mode & flag != 0 { ch } else { '-' }
 }
 
 fn format_size(size: u64) -> String {

@@ -102,6 +102,20 @@ impl LiveGraphPtr {
     }
 }
 
+#[cfg(test)]
+pub fn initialize_engine_for_test(block_size: c_int, sample_rate: c_int) {
+    static CONFIG: std::sync::OnceLock<(c_int, c_int)> = std::sync::OnceLock::new();
+    let configured = CONFIG.get_or_init(|| {
+        unsafe { initialize_engine(block_size, sample_rate) };
+        (block_size, sample_rate)
+    });
+    assert_eq!(
+        *configured,
+        (block_size, sample_rate),
+        "all audiograph tests in one process must share the engine configuration"
+    );
+}
+
 extern "C" {
     // Engine lifecycle
     pub fn initialize_engine(block_size: c_int, sample_rate: c_int);
@@ -147,6 +161,7 @@ extern "C" {
     ) -> bool;
     pub fn begin_graph_edit_batch(lg: *mut LiveGraph);
     pub fn end_graph_edit_batch(lg: *mut LiveGraph);
+    pub fn graph_edit_queue_available(lg: *const LiveGraph) -> u32;
 
     // Buffer management
     pub fn create_buffer(

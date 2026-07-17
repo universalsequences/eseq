@@ -18,7 +18,7 @@ implementations.
     :audio-fx ("filter"))
   (track :instrument "core/drift"))
 
-(load "../scripts/process-inlet-patch-demo.lisp")
+(load "@/scripts/processes/process-inlet-patch-demo.lisp")
 (process-inlet-demo-attach-track 0)
 
 ;; Optional: runs after the project has been synchronized into SEQ.
@@ -48,7 +48,7 @@ From the repository root:
 
 ```sh
 cargo run -p sequencer --bin metal_seq -- capture \
-  --script crates/sequencer/capture-fixtures/process-panel.lisp \
+  --script crates/sequencer/ui/capture-fixtures/process-panel.lisp \
   --buffer fx \
   --track 0 \
   --width 2000 \
@@ -66,6 +66,6 @@ opening an instrument tab, or otherwise establishing UI state that depends on
 the populated `SEQ` namespace. It runs once after project/process state has
 been synchronized and before the frame is rendered.
 
-Keep durable visual fixtures in `crates/sequencer/capture-fixtures/`. Layout
+Keep durable visual fixtures in `crates/sequencer/ui/capture-fixtures/`. Layout
 tests should still assert finite, nonzero widget rectangles; PNG capture adds the
 visual review needed for spacing, typography, hierarchy, and clipping.

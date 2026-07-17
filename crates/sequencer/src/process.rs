@@ -558,6 +558,38 @@ pub fn refresh_track_process_chain_binding_param_ids(
     }
 }
 
+/// Re-resolve instrument bindings after replacing the instrument on a track.
+///
+/// Unlike project-load refresh, replacement is destructive: a binding whose
+/// parameter no longer exists must be removed. Leaving its old `ParamNodeId`
+/// in place could make the process write to an unrelated node after the graph
+/// is rebound.
+pub fn rebind_track_process_chain_instrument_param_ids(
+    chain: &mut TrackProcessChain,
+    instrument_descriptor: &EffectDescriptor,
+    instrument_slot: &EffectSlotSnapshot,
+) -> usize {
+    let mut dropped = 0;
+    for process_slot in &mut chain.slots {
+        for binding in process_slot.bindings.values_mut() {
+            let Some(ParamTarget::InstrumentParam { param, .. }) = binding.as_ref() else {
+                continue;
+            };
+            let resolved = process_param_index_by_tag_or_name(instrument_descriptor, param)
+                .and_then(|param_idx| slot_param_node_id(instrument_slot, param_idx));
+            if let Some(param_id_value) = resolved {
+                if let Some(ParamTarget::InstrumentParam { param_id, .. }) = binding.as_mut() {
+                    *param_id = Some(param_id_value);
+                }
+            } else {
+                *binding = None;
+                dropped += 1;
+            }
+        }
+    }
+    dropped
+}
+
 pub fn refresh_track_process_chain_effect_binding_param_ids_for_slot(
     chain: &mut TrackProcessChain,
     slot_idx: usize,

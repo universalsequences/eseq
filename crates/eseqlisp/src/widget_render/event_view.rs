@@ -612,7 +612,13 @@ impl WidgetDefinition for EventViewWidget {
         }
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         Some(rotation_gesture_value(get_rotation(node)))
     }
 
@@ -979,7 +985,7 @@ mod tests {
             time_seconds: 0.0,
             focused_widget_id: None,
             focused_branch: false,
-            tile_content_rows: 18.0,
+            overlay_viewport_bottom: 18.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
             inherited_hover: false,
@@ -1134,7 +1140,7 @@ mod tests {
         let before = EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport());
 
         let gesture = EVENT_VIEW_WIDGET
-            .begin_gesture(&node, 4.0, 4.0)
+            .begin_gesture(&node, 4.0, 4.0, KeyModifiers::empty())
             .expect("rotation gesture");
         assert!(matches!(
             EVENT_VIEW_WIDGET.mouse_event(

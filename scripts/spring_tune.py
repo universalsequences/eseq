@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tune the dispersive spring reverb (crates/sequencer/src/spring.rs) against
+"""Tune the dispersive spring reverb (crates/sequencer/src/effects/spring.rs) against
 a reference IR (default: spring_reverb_impulse.wav; see impulses/prepared/ for
 the other spring types).
 

@@ -198,6 +198,7 @@ fn nearest_widget_gesture_node(
     hit_node: &LayoutNode,
     local_col: f32,
     local_row: f32,
+    modifiers: KeyModifiers,
 ) -> Option<(LayoutNode, Option<Value>)> {
     let mut path = Vec::new();
     if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
@@ -217,7 +218,7 @@ fn nearest_widget_gesture_node(
         if node.widget_id != hit_node.widget_id && hit_node_handles_pointer && !is_pointer_capture {
             return None;
         }
-        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row);
+        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row, modifiers);
         if gesture_data.is_some() {
             Some((node.clone(), gesture_data))
         } else if widget_render::widget_captures_drag(&node.widget_type) {
@@ -771,15 +772,10 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> bool {
-        let Some((local_col, local_row)) =
-            hit::to_local(precise_col, precise_row, content_col, content_row)
-        else {
-            return false;
-        };
         // Overlay (dropdown menu, etc.) intercepts pointer events before normal
-        // hit-test. Do not gate this on overlay_contains: overlay geometry is
-        // visual/screen-space and may extend over widgets that should not see
-        // the same click sequence.
+        // hit-test. Compute its tile-local position directly: a frame-level
+        // overlay may legitimately extend above or left of its originating
+        // tile, where the normal content-area conversion rejects the point.
         if widget_render::overlay_widget_id().is_some()
             && matches!(
                 mouse.kind,
@@ -788,6 +784,8 @@ impl Editor {
                     | MouseEventKind::Up(MouseButton::Left)
             )
         {
+            let local_col = precise_col - content_col as f32;
+            let local_row = precise_row - content_row as f32;
             if let Some(overlay_id) = widget_render::overlay_widget_id() {
                 let Some(layout) = self.runtime.current_layout.clone() else {
                     widget_render::dropdown::close_dropdown(overlay_id);
@@ -821,6 +819,21 @@ impl Editor {
                 widget_render::clear_overlay();
                 self.mark_needs_redraw();
             }
+        }
+
+        let Some((local_col, local_row)) =
+            hit::to_local(precise_col, precise_row, content_col, content_row)
+        else {
+            if matches!(mouse.kind, MouseEventKind::Moved) {
+                widget_render::set_pointer_hover_widget(None);
+            }
+            return false;
+        };
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            widget_render::set_pointer_hover_widget(
+                self.widget_node_at_local(local_col, local_row)
+                    .map(|node| node.widget_id),
+            );
         }
 
         let gen_before = widget_render::widget_state_generation();
@@ -1234,6 +1247,7 @@ impl Editor {
         content_row: u16,
         precise_col: f32,
         precise_row: f32,
+        modifiers: KeyModifiers,
     ) {
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
@@ -1258,7 +1272,7 @@ impl Editor {
             });
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
         let gesture_node = self.runtime.current_layout.as_ref().and_then(|layout| {
-            nearest_widget_gesture_node(layout, &hit_node, scrolled_col, scrolled_row)
+            nearest_widget_gesture_node(layout, &hit_node, scrolled_col, scrolled_row, modifiers)
         });
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         if let Some((node, gesture_data)) = gesture_node {
@@ -1269,6 +1283,7 @@ impl Editor {
                 start_precise_row: precise_row,
                 drag_active: false,
                 gesture_data,
+                modifiers,
             });
         }
     }
@@ -1663,7 +1678,7 @@ impl Editor {
         content_row: u16,
         precise_col: f32,
         precise_row: f32,
-        modifiers: KeyModifiers,
+        _modifiers: KeyModifiers,
     ) -> Option<crate::widget_render::EventOutput> {
         let node = gesture.node;
         self.dispatch_widget_mouse_event(
@@ -1675,7 +1690,7 @@ impl Editor {
             precise_row,
             Some((gesture.start_precise_col, gesture.start_precise_row)),
             gesture.gesture_data.as_ref(),
-            modifiers,
+            gesture.modifiers,
         )
     }
 
@@ -2002,7 +2017,8 @@ mod pointer_capture_tests {
         );
         let root = test_node(1, "v-stack", HashMap::new(), vec![capture]);
 
-        let Some((gesture_node, gesture_data)) = nearest_widget_gesture_node(&root, &hit, 1.0, 1.0)
+        let Some((gesture_node, gesture_data)) =
+            nearest_widget_gesture_node(&root, &hit, 1.0, 1.0, KeyModifiers::empty())
         else {
             panic!("capture wrapper should create a gesture");
         };

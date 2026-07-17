@@ -5725,6 +5725,7 @@ struct SchedulerLookaheadState {
     graph_runtimes: Vec<crate::graph::GraphRuntime>,
     debug_graph_drive_chunks: u32,
     debug_accum_invocations: u64,
+    quantized_launches: crate::quantized_launch::PendingQuantizedLaunches,
 }
 
 impl SchedulerLookaheadState {
@@ -5742,6 +5743,7 @@ impl SchedulerLookaheadState {
             graph_runtimes: Vec::new(),
             debug_graph_drive_chunks: 0,
             debug_accum_invocations: 0,
+            quantized_launches: crate::quantized_launch::PendingQuantizedLaunches::default(),
         }
     }
 }
@@ -7424,6 +7426,11 @@ pub fn spawn_scheduler_thread(
                 let scheduled_ahead_beats =
                     scheduled_until_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
                 let rendered_total_beats = (lookahead_state.clock.total_beats - scheduled_ahead_beats).max(0.0);
+                state.quantized_launches().process_scheduler(
+                    &mut lookahead_state.quantized_launches,
+                    rendered_total_beats,
+                    playing,
+                );
                 if !playing {
                     let live_active = schedule_live_midi_fx(
                         scratch_runtime.as_mut(),
@@ -7624,12 +7631,13 @@ mod tests {
     use super::{
         apply_fit_to_scale_to_trigger, apply_neuron_output_overrides, delayed_step_sample_time,
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, invoke_process_cascade,
-        midi_fx_window_events_from_step, quantized_live_tick_sample, reconcile_graph_runtimes,
-        resolve_effect_params, resolve_instrument_plocks, resolve_sampler_params,
-        run_midi_fx_chain_for_track, schedule_playing_lookahead, should_reload_neural_runtime,
-        swung_network_sample_time, track_active_note_spans_at_beat, track_note_spans_for_trigger,
-        EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState,
-        SchedulerLookaheadState, SnapshotSequencerClock,
+        midi_fx_window_events_from_step, process_device_write_value, quantized_live_tick_sample,
+        reconcile_graph_runtimes, resolve_effect_params, resolve_instrument_plocks,
+        resolve_sampler_params, resolved_slot_param_value, run_midi_fx_chain_for_track,
+        schedule_playing_lookahead, should_reload_neural_runtime, swung_network_sample_time,
+        track_active_note_spans_at_beat, track_note_spans_for_trigger, EmittedNetworkEventSource,
+        LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState, SchedulerLookaheadState,
+        SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{
@@ -7674,6 +7682,90 @@ mod tests {
             pan: 0.0,
             chop: 1.0,
         }
+    }
+
+    #[test]
+    fn macro_snapshot_is_masked_by_plock_and_process_add_reads_effective_default() {
+        let descriptor = ParamDescriptor {
+            name: "cutoff".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.2,
+            kind: ParamKind::Continuous { unit: None },
+            scaling: ParamScaling::Linear,
+            node_param_idx: 7,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        };
+        let effect = EffectDescriptor {
+            name: "filter".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![descriptor.clone()],
+        };
+        let state = SequencerState::new(
+            1,
+            vec![vec![crate::effects::EffectSlotState::new(&effect, 11)]],
+        );
+        let live_slot = &state.pattern.effect_chains[0][0];
+        live_slot.set_plock(3, 0, 0.9);
+
+        let param_id = live_slot.param_node_id(0);
+        let target = crate::process::ParamTarget::EffectParam {
+            slot: 0,
+            effect: effect.name.clone(),
+            param: descriptor.name.clone(),
+            param_id,
+        };
+        let key = crate::macro_engine::MacroParamKey::for_effect(0, 0, 0, param_id);
+        let mut macros = crate::macro_engine::MacroEngine::default();
+        let macro_id = macros
+            .create_macro("push", crate::macro_engine::MacroKind::Mapped)
+            .unwrap();
+        macros
+            .add_mapping(
+                macro_id,
+                crate::macro_engine::MacroMapping::new(
+                    0,
+                    target,
+                    0.0,
+                    0.8,
+                    crate::macro_engine::MacroCurve::Linear,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        macros.set_value(macro_id, 1.0);
+        assert_eq!(macros.override_value(&key), Some(0.8));
+
+        let snapshot = state.publish_macro_overrides(macros.override_snapshot());
+        let slot = &snapshot.tracks[0].effect_slots[0];
+
+        assert_eq!(resolved_slot_param_value(&slot, 3, 0, 0.0), 0.9);
+        assert_eq!(resolved_slot_param_value(&slot, 0, 0, 0.0), 0.8);
+        assert!(
+            (process_device_write_value(
+                &descriptor,
+                resolved_slot_param_value(&slot, 0, 0, 0.0),
+                crate::process::ProcessTargetOp::Add,
+                0.1,
+            ) - 0.9)
+                .abs()
+                < 1.0e-6,
+            "scheduler Add writes must build on the macro-effective default"
+        );
+
+        macros.release(macro_id);
+        let snapshot = state.publish_macro_overrides(macros.override_snapshot());
+        assert_eq!(
+            resolved_slot_param_value(&snapshot.tracks[0].effect_slots[0], 0, 0, 0.0),
+            0.2,
+            "releasing the macro must restore the persisted default in playback snapshots"
+        );
     }
 
     fn graph_emission(
@@ -9491,7 +9583,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-project-performance-lanes-demo.lisp",
+            "{}/scripts/processes/process-project-performance-lanes-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path)
@@ -9882,7 +9974,7 @@ mod tests {
                 0,
             );
             let script_path = format!(
-                "{}/scripts/process-phase7-reads-demo.lisp",
+                "{}/scripts/processes/process-phase7-reads-demo.lisp",
                 env!("CARGO_MANIFEST_DIR")
             );
             let source = std::fs::read_to_string(&script_path).expect("read Phase 7 reads demo");
@@ -10153,7 +10245,7 @@ mod tests {
                 0,
             );
             let script_path = format!(
-                "{}/scripts/process-conductor-demo.lisp",
+                "{}/scripts/processes/process-conductor-demo.lisp",
                 env!("CARGO_MANIFEST_DIR")
             );
             let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
@@ -10772,7 +10864,7 @@ mod tests {
                     );
                     assert!(effect_params.iter().any(|param| {
                         param.logical_id == 42
-                            && param.idx == crate::filter::FILTER_PARAM_MODE as u64
+                            && param.idx == crate::effects::filter::FILTER_PARAM_MODE as u64
                             && (param.value - 3.0).abs() < 1e-6
                     }));
                 }
@@ -10830,7 +10922,7 @@ mod tests {
                 0,
             );
             let script_path = format!(
-                "{}/scripts/process-phase3a-ports-demo.lisp",
+                "{}/scripts/processes/process-phase3a-ports-demo.lisp",
                 env!("CARGO_MANIFEST_DIR")
             );
             let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");

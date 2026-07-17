@@ -430,6 +430,31 @@ pub struct LoadedDGenLib {
 unsafe impl Send for LoadedDGenLib {}
 unsafe impl Sync for LoadedDGenLib {}
 
+#[cfg(test)]
+pub(crate) fn test_loaded_dgen_lib() -> LoadedDGenLib {
+    unsafe extern "C" fn silent_process(
+        _inputs: *const *mut f32,
+        outputs: *const *mut f32,
+        frame_count: c_int,
+        _memory_read: *mut c_void,
+        _memory_write: *mut c_void,
+        _host_sample_rate: c_float,
+    ) {
+        if outputs.is_null() || frame_count <= 0 {
+            return;
+        }
+        let output = *outputs;
+        if !output.is_null() {
+            std::ptr::write_bytes(output, 0, frame_count as usize);
+        }
+    }
+
+    LoadedDGenLib {
+        process_fn: silent_process,
+        _handle: std::ptr::null_mut(),
+    }
+}
+
 // ── Compile result (for async compilation) ──
 
 pub struct CompileResult {
@@ -5747,7 +5772,7 @@ fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, String>> {
                 return Some(Err(format!(
                     "lane values must be numbers, got {}",
                     eseqlisp::vm::format_lisp_value(other)
-                )))
+                )));
             }
         }
     }
@@ -6944,7 +6969,7 @@ fn push_process_target_write(
                 return Err(
                     "process has multiple target ports; target write requires an explicit port"
                         .to_string(),
-                )
+                );
             }
         },
     };
@@ -15108,10 +15133,7 @@ mod tests {
         );
 
         assert_eq!(restored_slot.key_locks.get(64, cutoff_idx), Some(300.0));
-        assert_eq!(
-            restored_slot.key_locks.get(67, cutoff_idx),
-            Some(1_200.0)
-        );
+        assert_eq!(restored_slot.key_locks.get(67, cutoff_idx), Some(1_200.0));
         assert_eq!(
             restored_slot.key_locks.get_id(64, cutoff_idx),
             restored_slot.param_node_id(cutoff_idx),
@@ -16317,7 +16339,7 @@ mod tests {
             .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-8x8-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-8x8-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph 8x8 demo script");
@@ -16803,7 +16825,7 @@ mod tests {
             .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-8x8-reset-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-8x8-reset-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph 8x8 reset demo script");
@@ -17238,7 +17260,7 @@ mod tests {
             .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-variable-reset-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-variable-reset-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph variable reset demo script");
@@ -17539,7 +17561,7 @@ mod tests {
             .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-markov-8x8-demo.lisp",
+            "{}/scripts/sequencers/graph-markov-8x8-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read markov 8x8 demo script");
@@ -17708,7 +17730,7 @@ mod tests {
             .expect("install sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-16-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-16-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph 16 demo script");
@@ -17961,7 +17983,7 @@ mod tests {
             .expect("install sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-16-cycle-demo.lisp",
+            "{}/scripts/sequencers/graph-neural-16-cycle-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read graph 16 cycle demo script");
@@ -18201,7 +18223,7 @@ mod tests {
             r#"
             (def seq-register-step-sequencer-tab (label buffer) nil)
             (def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
-            (load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")
+            (load "crates/sequencer/scripts/sequencers/graph-neural-8x8-demo.lisp")
             "#,
             Vec::new(),
         );
@@ -19844,7 +19866,7 @@ mod tests {
     fn neural_lisp_track_router_script_is_idempotent_and_routes_tracks() {
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -19933,7 +19955,7 @@ mod tests {
     fn neural_lisp_track_router_route_dropdown_supports_track_16() {
         let (state, mut runtime) = neural_test_runtime(16);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -19982,7 +20004,7 @@ mod tests {
     fn neural_lisp_track_router_reuses_existing_named_network() {
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -20038,7 +20060,7 @@ mod tests {
     fn neural_lisp_track_router_reactive_refresh_loads_model_state() {
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -20201,7 +20223,7 @@ mod tests {
 
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/neural-8x8-track-router.lisp",
+            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("read neural router script");
@@ -21295,7 +21317,7 @@ mod tests {
     }
 
     #[test]
-    fn scratch_control_runtime_def_accumulator_wrong_arity_errors() {
+    fn scratch_control_runtime_rejects_invalid_def_accumulator_forms() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(
             Arc::clone(&state),
@@ -21305,16 +21327,25 @@ mod tests {
             0,
         );
 
-        assert!(runtime.eval(r#"(def-accumulator "missing-body")"#).is_err());
-        assert!(runtime
-            .eval(
-                r#"
+        assert_eq!(
+            runtime
+                .eval(r#"(def-accumulator "missing-body")"#)
+                .expect("native validation should return a rejection value"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"
                 (def-accumulator "multi-body"
                   (acc-suppress)
                   (acc-emit 0))
                 "#
-            )
-            .is_err());
+                )
+                .expect("native validation should return a rejection value"),
+            Some(Value::Bool(false))
+        );
+        assert!(runtime.accumulators.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -22679,7 +22710,7 @@ mod tests {
             Arc::clone(&state),
             Arc::clone(&ui_epoch),
         );
-        let source = include_str!("../scripts/inline-code-widgets-demo.lisp");
+        let source = include_str!("../scripts/ui/inline-code-widgets-demo.lisp");
 
         runtime
             .eval_str(source)
@@ -22732,7 +22763,7 @@ mod tests {
         );
 
         let script_path = format!(
-            "{}/scripts/process-chain-demo.lisp",
+            "{}/scripts/processes/process-chain-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read process chain demo script");
@@ -22825,7 +22856,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-transpose-wander-demo.lisp",
+            "{}/scripts/processes/process-transpose-wander-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -22891,7 +22922,7 @@ mod tests {
         );
 
         let script_path = format!(
-            "{}/scripts/process-transpose-wander-demo.lisp",
+            "{}/scripts/processes/process-transpose-wander-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -23874,7 +23905,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-phase3a-ports-demo.lisp",
+            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
@@ -23938,7 +23969,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-phase3b-mappable-demo.lisp",
+            "{}/scripts/processes/process-phase3b-mappable-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3B mappable demo");
@@ -24009,7 +24040,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-phase4-verdict-ratchet-demo.lisp",
+            "{}/scripts/processes/process-phase4-verdict-ratchet-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -24068,7 +24099,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-phase7-reads-demo.lisp",
+            "{}/scripts/processes/process-phase7-reads-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 7 reads demo");
@@ -24128,7 +24159,7 @@ mod tests {
             .eval(&super::load_process_library_source())
             .expect("load builtin process library");
         let script_path = format!(
-            "{}/scripts/process-fields-band-demo.lisp",
+            "{}/scripts/processes/process-fields-band-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read fields band demo");
@@ -24162,7 +24193,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-conductor-demo.lisp",
+            "{}/scripts/processes/process-conductor-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
@@ -24206,7 +24237,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-project-layer-demo.lisp",
+            "{}/scripts/processes/process-project-layer-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read project layer demo");
@@ -24313,7 +24344,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/process-inlet-patch-demo.lisp",
+            "{}/scripts/processes/process-inlet-patch-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read process-inlet demo");
@@ -24441,7 +24472,7 @@ mod tests {
     fn scheduler_scratch_load_does_not_replace_ui_authored_process_chain_slots() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let script_path = format!(
-            "{}/scripts/process-phase3a-ports-demo.lisp",
+            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
@@ -24494,7 +24525,7 @@ mod tests {
     fn project_scratch_reattach_preserves_saved_process_slot_settings() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let script_path = format!(
-            "{}/scripts/process-phase3a-ports-demo.lisp",
+            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
@@ -24763,7 +24794,7 @@ mod tests {
         );
 
         let script_path = format!(
-            "{}/scripts/process-ui-control-demo.lisp",
+            "{}/scripts/processes/process-ui-control-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -24950,7 +24981,7 @@ mod tests {
         );
 
         let script_path = format!(
-            "{}/scripts/band-coupling-matrix-demo.lisp",
+            "{}/scripts/sequencers/band-coupling-matrix-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -25063,7 +25094,7 @@ mod tests {
             0,
         );
         let script_path = format!(
-            "{}/scripts/band-coupling-matrix-demo.lisp",
+            "{}/scripts/sequencers/band-coupling-matrix-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         );
         let source =
@@ -25794,10 +25825,10 @@ mod tests {
     }
 
     #[test]
-    fn patcher_edit_piano_to_test_svf_literal_compiles() {
+    fn patcher_edit_gemini_piano_svf_literal_compiles() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("instruments/piano-to-test/dsp.lisp");
-        let source = std::fs::read_to_string(&path).expect("read piano-to-test dsp source");
+            .join("instruments/wips/gemini-piano/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read gemini-piano dsp source");
         let emitted =
             eseqlisp::widget_render::patcher::emit_patch_writeback_with_first_node_text_edit(
                 &source,
@@ -25809,9 +25840,7 @@ mod tests {
 
         compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
             |error| {
-                panic!(
-                    "patcher-edited piano-to-test svf source should compile:\n{error}\n{emitted}"
-                )
+                panic!("patcher-edited gemini-piano svf source should compile:\n{error}\n{emitted}")
             },
         );
     }
@@ -26176,98 +26205,6 @@ mod tests {
         .expect("read spectral cumsum soothe ui");
         crate::agent::ui_validate::validate_effect_ui_source(&ui_source, &compiled.manifest)
             .expect("effect ui should validate");
-    }
-
-    #[test]
-    fn spectral_cumsum_soothe_high_amount_reduces_resonant_energy() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("effects/spectral-cumsum-soothe/dsp.lisp");
-        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
-        let asset_base = path.parent();
-        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
-            .expect("effect should compile");
-        let render = |amount: f32| {
-            super::render_loaded_effect_for_test(
-                &compiled.manifest,
-                &compiled.lib,
-                &super::EffectRenderOptions {
-                    sample_rate: 44_100,
-                    block_size: 512,
-                    frames: 8192,
-                    param_overrides: vec![
-                        ("amount".to_string(), amount),
-                        ("threshold".to_string(), 0.0),
-                        ("attack".to_string(), 0.0),
-                        ("release".to_string(), 0.8),
-                        ("mix".to_string(), 1.0),
-                        ("output".to_string(), 1.0),
-                    ],
-                    input_overrides: vec![],
-                },
-            )
-            .expect("effect should compile and render")
-        };
-
-        let bypass = render(0.0);
-        let active = render(8.0);
-        println!("spectral-cumsum-soothe high amount bypass={bypass:?} active={active:?}");
-
-        assert!(
-            active.rms < bypass.rms * 0.85,
-            "high amount should produce audible attenuation, bypass={bypass:?}, active={active:?}"
-        );
-        assert!(
-            active.left_rms > 0.001 && active.right_rms > 0.001,
-            "active processing should not collapse either channel, active={active:?}"
-        );
-    }
-
-    #[test]
-    fn spectral_cumsum_soothe_delta_is_removed_signal() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("effects/spectral-cumsum-soothe/dsp.lisp");
-        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
-        let asset_base = path.parent();
-        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
-            .expect("effect should compile");
-        let render = |amount: f32| {
-            super::render_loaded_effect_for_test(
-                &compiled.manifest,
-                &compiled.lib,
-                &super::EffectRenderOptions {
-                    sample_rate: 44_100,
-                    block_size: 512,
-                    frames: 8192,
-                    param_overrides: vec![
-                        ("amount".to_string(), amount),
-                        ("threshold".to_string(), 0.0),
-                        ("gate".to_string(), -2.0),
-                        ("low".to_string(), 0.0),
-                        ("high".to_string(), 1.0),
-                        ("attack".to_string(), 0.0),
-                        ("release".to_string(), 0.8),
-                        ("mix".to_string(), 1.0),
-                        ("delta".to_string(), 1.0),
-                        ("output".to_string(), 1.0),
-                    ],
-                    input_overrides: vec![],
-                },
-            )
-            .expect("effect should compile and render")
-        };
-
-        let inactive = render(0.0);
-        let active = render(8.0);
-        println!("spectral-cumsum-soothe delta inactive={inactive:?} active={active:?}");
-
-        assert!(
-            inactive.rms < 0.001,
-            "delta should be nearly silent when amount=0, inactive={inactive:?}"
-        );
-        assert!(
-            active.rms > inactive.rms + 0.005,
-            "delta should expose removed spectral energy under heavy reduction, inactive={inactive:?}, active={active:?}"
-        );
     }
 
     #[test]

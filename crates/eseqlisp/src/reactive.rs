@@ -2,17 +2,15 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use crate::layout::LayoutNode;
 use crate::vm::ReactiveBindingKey;
 use crate::vm::Value;
 
-static REACTIVE_FLOATS: OnceLock<Mutex<HashMap<ReactiveBindingKey, Arc<AtomicU64>>>> =
-    OnceLock::new();
-
-fn reactive_floats() -> &'static Mutex<HashMap<ReactiveBindingKey, Arc<AtomicU64>>> {
-    REACTIVE_FLOATS.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Clone, Default)]
+pub struct ReactiveBindingStore {
+    slots: Arc<Mutex<HashMap<ReactiveBindingKey, Arc<AtomicU64>>>>,
 }
 
 fn numeric_value(value: &Value) -> Option<f64> {
@@ -24,24 +22,6 @@ fn numeric_value(value: &Value) -> Option<f64> {
     }
 }
 
-pub fn reactive_float_slot(namespace: &str, field: &str) -> Arc<AtomicU64> {
-    reactive_float_slot_for_key(ReactiveBindingKey::field(namespace, field))
-}
-
-pub fn reactive_indexed_float_slot(namespace: &str, field: &str, index: usize) -> Arc<AtomicU64> {
-    reactive_float_slot_for_key(ReactiveBindingKey::indexed(namespace, field, index))
-}
-
-fn reactive_float_slot_for_key(key: ReactiveBindingKey) -> Arc<AtomicU64> {
-    let mut slots = reactive_floats()
-        .lock()
-        .expect("reactive float store lock poisoned");
-    slots
-        .entry(key)
-        .or_insert_with(|| Arc::new(AtomicU64::new(0.0f64.to_bits())))
-        .clone()
-}
-
 pub fn read_float_slot(slot: &AtomicU64) -> f64 {
     f64::from_bits(slot.load(Ordering::Relaxed))
 }
@@ -50,25 +30,60 @@ fn store_float_slot(slot: &AtomicU64, value: f64) {
     slot.store(value.to_bits(), Ordering::Relaxed);
 }
 
-pub fn write_float_slot(namespace: &str, field: &str, value: f64) {
-    store_float_slot(&reactive_float_slot(namespace, field), value);
-}
+impl ReactiveBindingStore {
+    pub(crate) fn slot(&self, namespace: &str, field: &str) -> Arc<AtomicU64> {
+        self.slot_for_key(ReactiveBindingKey::field(namespace, field))
+    }
 
-fn store_float_slots(namespace: &str, field: &str, value: &Value) {
-    let Some(number) = numeric_value(value) else {
-        if let Value::List(items) = value {
-            for (index, item) in items.iter().enumerate() {
-                if let Some(number) = numeric_value(&item.borrow()) {
-                    store_float_slot(
-                        &reactive_indexed_float_slot(namespace, field, index),
-                        number,
-                    );
+    pub(crate) fn indexed_slot(
+        &self,
+        namespace: &str,
+        field: &str,
+        index: usize,
+    ) -> Arc<AtomicU64> {
+        self.slot_for_key(ReactiveBindingKey::indexed(namespace, field, index))
+    }
+
+    fn slot_for_key(&self, key: ReactiveBindingKey) -> Arc<AtomicU64> {
+        let mut slots = self
+            .slots
+            .lock()
+            .expect("reactive float store lock poisoned");
+        slots
+            .entry(key)
+            .or_insert_with(|| Arc::new(AtomicU64::new(0.0f64.to_bits())))
+            .clone()
+    }
+
+    pub fn write_float(&self, namespace: &str, field: &str, value: f64) {
+        store_float_slot(&self.slot(namespace, field), value);
+    }
+
+    pub fn seeded_float_ref(&self, namespace: &str, field: impl Into<String>, value: f64) -> Value {
+        let field = field.into();
+        self.write_float(namespace, &field, value);
+        Value::ReactiveRef {
+            namespace: namespace.to_string(),
+            field: field.clone(),
+            index: None,
+            kind: crate::vm::BindingKind::Float,
+            slot: self.slot(namespace, &field),
+        }
+    }
+
+    pub(crate) fn store_value(&self, namespace: &str, field: &str, value: &Value) {
+        let Some(number) = numeric_value(value) else {
+            if let Value::List(items) = value {
+                for (index, item) in items.iter().enumerate() {
+                    if let Some(number) = numeric_value(&item.borrow()) {
+                        store_float_slot(&self.indexed_slot(namespace, field, index), number);
+                    }
                 }
             }
-        }
-        return;
-    };
-    store_float_slot(&reactive_float_slot(namespace, field), number);
+            return;
+        };
+        store_float_slot(&self.slot(namespace, field), number);
+    }
 }
 
 fn changed_numeric_indices(previous: Option<&Value>, next: &Value) -> Vec<usize> {
@@ -103,10 +118,12 @@ fn changed_numeric_indices(previous: Option<&Value>, next: &Value) -> Vec<usize>
 
 #[derive(Clone)]
 pub struct ReactiveRegistry {
+    float_slots: ReactiveBindingStore,
     namespaces: HashMap<String, Namespace>,
     dirty: Vec<(String, String, Value)>,
     batched: Vec<(String, String, Value)>,
     field_to_widgets: HashMap<ReactiveBindingKey, HashSet<u64>>,
+    widget_bindings_revision: u64,
     batching: bool,
 }
 
@@ -127,11 +144,17 @@ pub struct ReactiveSetOutcome {
 
 impl ReactiveRegistry {
     pub fn new() -> Self {
+        Self::with_float_slots(ReactiveBindingStore::default())
+    }
+
+    pub(crate) fn with_float_slots(float_slots: ReactiveBindingStore) -> Self {
         Self {
+            float_slots,
             namespaces: HashMap::new(),
             dirty: Vec::new(),
             batched: Vec::new(),
             field_to_widgets: HashMap::new(),
+            widget_bindings_revision: 0,
             batching: false,
         }
     }
@@ -141,7 +164,7 @@ impl ReactiveRegistry {
         let mut map = HashMap::new();
 
         for (field, value) in fields {
-            store_float_slots(name, field, &value);
+            self.float_slots.store_value(name, field, &value);
             stored_fields.insert(field.to_string(), value.clone());
             map.insert(field.to_string(), Rc::new(RefCell::new(value)));
         }
@@ -201,7 +224,7 @@ impl ReactiveRegistry {
         }
 
         let key = ReactiveBindingKey::field(namespace, field);
-        store_float_slots(namespace, field, &value);
+        self.float_slots.store_value(namespace, field, &value);
         namespace_entry
             .fields
             .insert(field.to_string(), value.clone());
@@ -280,7 +303,7 @@ impl ReactiveRegistry {
 
         if let Some(number) = numeric_value(&value) {
             store_float_slot(
-                &reactive_indexed_float_slot(namespace, field, index),
+                &self.float_slots.indexed_slot(namespace, field, index),
                 number,
             );
         }
@@ -383,6 +406,7 @@ impl ReactiveRegistry {
         if let Some(layout) = layout {
             self.collect_widget_bindings(layout);
         }
+        self.bump_widget_bindings_revision();
     }
 
     pub fn replace_widget_bindings_for_layout_subtree(
@@ -398,6 +422,7 @@ impl ReactiveRegistry {
         self.field_to_widgets
             .retain(|_, widgets| !widgets.is_empty());
         self.collect_widget_bindings(new_subtree);
+        self.bump_widget_bindings_revision();
     }
 
     pub fn replace_widget_bindings_from_layouts<'a>(
@@ -408,6 +433,11 @@ impl ReactiveRegistry {
         for layout in layouts {
             self.collect_widget_bindings(layout);
         }
+        self.bump_widget_bindings_revision();
+    }
+
+    pub fn widget_bindings_revision(&self) -> u64 {
+        self.widget_bindings_revision
     }
 
     pub fn widget_bindings_snapshot(&self) -> HashMap<ReactiveBindingKey, HashSet<u64>> {
@@ -416,6 +446,11 @@ impl ReactiveRegistry {
 
     pub fn restore_widget_bindings(&mut self, bindings: HashMap<ReactiveBindingKey, HashSet<u64>>) {
         self.field_to_widgets = bindings;
+        self.bump_widget_bindings_revision();
+    }
+
+    fn bump_widget_bindings_revision(&mut self) {
+        self.widget_bindings_revision = self.widget_bindings_revision.wrapping_add(1);
     }
 
     fn collect_widget_bindings(&mut self, node: &LayoutNode) {

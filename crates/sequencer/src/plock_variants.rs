@@ -17,6 +17,11 @@ pub const VARIANT_PALETTE: [[f32; 3]; 6] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PlockVariantDomain {
+    TrackTimebase,
+    TrackSwing,
+    TrackSwingResolution,
+    MidiEffect,
+    MidiEffectTensor,
     Instrument,
     InstrumentTensor,
     Effect,
@@ -191,6 +196,46 @@ impl PlockVariantRegistry {
         self.previous_step_keys = keys.to_vec();
     }
 
+    /// Remove one or more parameter domains without discarding the identity of
+    /// unrelated locks that happen to share a composite variant key.
+    ///
+    /// A track variant can contain instrument, effect, MIDI-FX, and timing
+    /// entries in the same key. Device replacement must therefore project the
+    /// registry onto the surviving domains instead of clearing the registry.
+    /// Entries that collapse to the same projected key are deduplicated in
+    /// their existing (label) order so the oldest visible identity survives.
+    pub fn remove_domains(&mut self, domains: &[PlockVariantDomain]) {
+        fn project_key(
+            key: &PlockVariantKey,
+            domains: &[PlockVariantDomain],
+        ) -> Option<PlockVariantKey> {
+            PlockVariantKey::new(
+                key.entries
+                    .iter()
+                    .filter(|entry| !domains.contains(&entry.domain))
+                    .cloned()
+                    .collect(),
+            )
+        }
+
+        let mut projected_keys = BTreeSet::new();
+        self.entries.retain_mut(|entry| {
+            let Some(key) = project_key(&entry.key, domains) else {
+                return false;
+            };
+            if !projected_keys.insert(key.clone()) {
+                return false;
+            }
+            entry.key = key;
+            true
+        });
+        self.previous_step_keys = self
+            .previous_step_keys
+            .iter()
+            .map(|key| key.as_ref().and_then(|key| project_key(key, domains)))
+            .collect();
+    }
+
     pub fn assignment_for_label(&self, label: &str) -> Option<PlockVariantAssignment> {
         self.entries
             .iter()
@@ -250,6 +295,21 @@ pub fn live_track_variant_key(
     }
 
     let mut entries = Vec::new();
+    collect_track_entries(&mut entries, state, track, step);
+
+    if let Some(chain) = state.pattern.midi_fx_slots.get(track) {
+        for (slot_idx, slot) in chain.iter().enumerate() {
+            collect_live_slot_entries(
+                &mut entries,
+                slot,
+                step,
+                PlockVariantDomain::MidiEffect,
+                PlockVariantDomain::MidiEffectTensor,
+                slot_idx,
+            );
+        }
+    }
+
     collect_live_slot_entries(
         &mut entries,
         &state.pattern.instrument_slots[track],
@@ -279,6 +339,44 @@ pub fn live_track_variant_key(
     }
 
     PlockVariantKey::new(entries)
+}
+
+fn collect_track_entries(
+    out: &mut Vec<PlockVariantEntry>,
+    state: &SequencerState,
+    track: usize,
+    step: usize,
+) {
+    // StepParam values are note expression (velocity, duration, transpose, etc.),
+    // not p-lock identity. Live recording updates them continuously, so including
+    // them here would create a new colored variant and rebuild the strip per note.
+    if let Some(timebase) = state.pattern.timebase_plocks[track].get(step) {
+        out.push(PlockVariantEntry {
+            domain: PlockVariantDomain::TrackTimebase,
+            slot: 0,
+            param: 0,
+            cell: None,
+            value_bits: (timebase as u32 as f32).to_bits(),
+        });
+    }
+    if let Some(swing) = state.pattern.swing_plocks[track].get(step) {
+        out.push(PlockVariantEntry {
+            domain: PlockVariantDomain::TrackSwing,
+            slot: 0,
+            param: 0,
+            cell: None,
+            value_bits: swing.to_bits(),
+        });
+    }
+    if let Some(resolution) = state.pattern.swing_resolution_plocks[track].get(step) {
+        out.push(PlockVariantEntry {
+            domain: PlockVariantDomain::TrackSwingResolution,
+            slot: 0,
+            param: 0,
+            cell: None,
+            value_bits: (resolution as u32 as f32).to_bits(),
+        });
+    }
 }
 
 pub fn live_track_key_lock_variant_keys(
@@ -478,16 +576,141 @@ mod tests {
     }
 
     #[test]
-    fn variant_key_excludes_seq_domain_step_expression() {
+    fn variant_key_includes_track_locks_but_excludes_step_expression() {
         let desc = EffectDescriptor::builtin_filter();
         let state = SequencerState::new(1, vec![vec![EffectSlotState::new(&desc, 1)]]);
         state.pattern.effect_chains[0][0].set_plock(0, 0, 220.0);
         state.pattern.effect_chains[0][0].set_plock(1, 0, 220.0);
         state.pattern.step_data[0].set(1, StepParam::Velocity, 0.5);
+        state.pattern.timebase_plocks[0].set(1, crate::sequencer::Timebase::Eighth);
 
         let key_a = live_track_variant_key(&state, 0, 0).unwrap();
         let key_b = live_track_variant_key(&state, 0, 1).unwrap();
-        assert_eq!(key_a, key_b);
+        assert_ne!(key_a, key_b);
+        assert_eq!(key_b.param_count(), 2);
+        assert!(key_b
+            .entries
+            .iter()
+            .any(|entry| entry.domain == PlockVariantDomain::TrackTimebase));
         assert!(live_track_has_seq_lock(&state, 0, 1));
+    }
+
+    #[test]
+    fn timebase_only_step_gets_a_variant_key() {
+        let state = SequencerState::new(1, vec![]);
+        state.pattern.timebase_plocks[0].set(4, crate::sequencer::Timebase::Eighth);
+
+        let key = live_track_variant_key(&state, 0, 4).expect("timebase should define a variant");
+        assert_eq!(key.param_count(), 1);
+        assert_eq!(key.entries[0].domain, PlockVariantDomain::TrackTimebase);
+    }
+
+    #[test]
+    fn recorded_step_expression_does_not_create_variants() {
+        let state = SequencerState::new(1, vec![]);
+        for step in 0..64 {
+            state.pattern.step_data[0].set(
+                step,
+                StepParam::Velocity,
+                0.25 + step as f32 / 256.0,
+            );
+            state.pattern.step_data[0].set(
+                step,
+                StepParam::Duration,
+                0.5 + (step % 8) as f32 * 0.25,
+            );
+            state.pattern.step_data[0].set(
+                step,
+                StepParam::Transpose,
+                (step as i32 % 24 - 12) as f32,
+            );
+        }
+
+        let keys = live_track_variant_keys(&state, 0);
+        assert!(keys.iter().all(Option::is_none));
+        let mut registry = PlockVariantRegistry::default();
+        assert!(registry.reconcile(keys).iter().all(Option::is_none));
+        assert!(registry.entries.is_empty());
+    }
+
+    #[test]
+    fn removing_instrument_domains_preserves_effect_variant_identity() {
+        let effect_entry = PlockVariantEntry {
+            domain: PlockVariantDomain::Effect,
+            slot: 2,
+            param: 3,
+            cell: None,
+            value_bits: 0.75f32.to_bits(),
+        };
+        let instrument_entry = PlockVariantEntry {
+            domain: PlockVariantDomain::Instrument,
+            slot: 0,
+            param: 1,
+            cell: None,
+            value_bits: 0.25f32.to_bits(),
+        };
+        let composite = PlockVariantKey::new(vec![effect_entry.clone(), instrument_entry]).unwrap();
+        let effect_only = PlockVariantKey::new(vec![effect_entry]).unwrap();
+        let mut registry = PlockVariantRegistry::default();
+        let assignment = registry.reconcile(vec![Some(composite)]);
+        registry.entries[0].name = Some("bright verb".to_string());
+        let original_label = assignment[0].as_ref().unwrap().label.clone();
+        let original_color = assignment[0].as_ref().unwrap().color;
+
+        registry.remove_domains(&[
+            PlockVariantDomain::Instrument,
+            PlockVariantDomain::InstrumentTensor,
+        ]);
+
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(registry.entries[0].key, effect_only.clone());
+        assert_eq!(registry.entries[0].label, original_label);
+        assert_eq!(registry.entries[0].color, original_color);
+        assert_eq!(registry.entries[0].name.as_deref(), Some("bright verb"));
+        assert_eq!(registry.previous_step_keys, vec![Some(effect_only)]);
+    }
+
+    #[test]
+    fn removing_domains_drops_empty_and_deduplicates_collapsed_keys() {
+        let effect_entry = PlockVariantEntry {
+            domain: PlockVariantDomain::Effect,
+            slot: 0,
+            param: 0,
+            cell: None,
+            value_bits: 0.5f32.to_bits(),
+        };
+        let instrument_entry = |value: f32| PlockVariantEntry {
+            domain: PlockVariantDomain::Instrument,
+            slot: 0,
+            param: 0,
+            cell: None,
+            value_bits: value.to_bits(),
+        };
+        let first =
+            PlockVariantKey::new(vec![effect_entry.clone(), instrument_entry(0.1)]).unwrap();
+        let second =
+            PlockVariantKey::new(vec![effect_entry.clone(), instrument_entry(0.2)]).unwrap();
+        let instrument_only = PlockVariantKey::new(vec![instrument_entry(0.3)]).unwrap();
+        let mut registry = PlockVariantRegistry::default();
+        registry.reconcile(vec![Some(first), Some(second), Some(instrument_only)]);
+
+        registry.remove_domains(&[
+            PlockVariantDomain::Instrument,
+            PlockVariantDomain::InstrumentTensor,
+        ]);
+
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(
+            registry.entries[0].key,
+            PlockVariantKey::new(vec![effect_entry.clone()]).unwrap()
+        );
+        assert_eq!(
+            registry.previous_step_keys,
+            vec![
+                PlockVariantKey::new(vec![effect_entry.clone()]),
+                PlockVariantKey::new(vec![effect_entry]),
+                None,
+            ]
+        );
     }
 }

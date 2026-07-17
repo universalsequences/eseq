@@ -503,7 +503,13 @@ impl WidgetDefinition for Eq8EditorWidget {
         }
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        local_col: f32,
+        local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         let band_id = nearest_band(node, local_col, local_row)
             .or_else(|| selected_or_first_band(node, None).map(|band| band.id))?;
         Some(Value::Number(band_id as f64))
@@ -966,7 +972,7 @@ mod tests {
             time_seconds: 0.0,
             focused_widget_id: None,
             focused_branch: false,
-            tile_content_rows: 24.0,
+            overlay_viewport_bottom: 24.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
             inherited_hover: false,

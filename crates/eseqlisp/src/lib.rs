@@ -337,9 +337,16 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
 
         if last_render_at.elapsed() >= frame_interval {
             let tiled_frame = frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
-            backend.render_tiled(&tiled_frame)?;
-            editor.clear_needs_redraw();
-            last_render_at = Instant::now();
+            match backend.render_tiled(&tiled_frame)? {
+                metal_backend::TiledRenderStatus::Presented => {
+                    editor.clear_needs_redraw();
+                    last_render_at = Instant::now();
+                }
+                metal_backend::TiledRenderStatus::NotPresented => {
+                    frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
+                    last_render_at = Instant::now();
+                }
+            }
         }
 
         if editor.should_quit() {
@@ -1682,6 +1689,37 @@ mod tests {
     }
 
     #[test]
+    fn reactive_float_bindings_are_isolated_per_runtime() {
+        let mut first = Runtime::new();
+        first.register_reactive("APP", vec![("level", Value::Number(0.0))], true);
+        first
+            .eval_str(r#"(def level-ref (bind "APP" "level"))"#)
+            .expect("bind first runtime level");
+
+        let mut second = Runtime::new();
+        second.register_reactive("APP", vec![("level", Value::Number(0.0))], true);
+        second
+            .eval_str(r#"(def level-ref (bind "APP" "level"))"#)
+            .expect("bind second runtime level");
+
+        first
+            .eval_str(r#"(reactive-set "APP" "level" 0.25)"#)
+            .expect("set first runtime level");
+        second
+            .eval_str(r#"(reactive-set "APP" "level" 0.75)"#)
+            .expect("set second runtime level");
+
+        assert_eq!(
+            first.eval_str("(reactive-value level-ref)").unwrap(),
+            Some(Value::Number(0.25))
+        );
+        assert_eq!(
+            second.eval_str("(reactive-value level-ref)").unwrap(),
+            Some(Value::Number(0.75))
+        );
+    }
+
+    #[test]
     fn box_accepts_selected_and_muted_reactive_bindings() {
         let mut runtime = Runtime::new();
         runtime.register_reactive(
@@ -2093,6 +2131,23 @@ mod tests {
         assert_eq!(
             layout.children[1].props.get("value"),
             Some(&Value::Number(25.0))
+        );
+    }
+
+    #[test]
+    fn invoke_global_calls_existing_function_without_compiling_a_call_expression() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str("(def add-offset |value| (+ value 7))")
+            .unwrap();
+
+        assert_eq!(
+            runtime.invoke_global("add-offset", vec![Value::Number(5.0)]),
+            Ok(Some(Value::Number(12.0)))
+        );
+        assert_eq!(
+            runtime.invoke_global("missing-handler", Vec::new()),
+            Err(VMError::UnknownVariable("missing-handler".to_string()))
         );
     }
 
@@ -2949,7 +3004,7 @@ mod tests {
 
     /// Regression: confirm that `(h-stack ... (map fn (chunks list n)) other)`
     /// correctly flattens the mapped list of v-stacks as h-stack children.
-    /// This is the pattern used by `ui-rack` in metal-seq-fx.lisp; if the
+    /// This is the pattern used by `ui-rack` in ui/effects.lisp; if the
     /// list isn't spliced, instruments only render one column instead of
     /// multiple.
     #[test]
@@ -2999,7 +3054,7 @@ mod tests {
         );
     }
 
-    /// Verify the ui-rack pattern from metal-seq-fx.lisp produces the expected
+    /// Verify the ui-rack pattern from ui/effects.lisp produces the expected
     /// number of column children (4 panels into 2-per-column = 2 v-stacks per side).
     #[test]
     fn test_ui_rack_breathe_produces_correct_columns() {

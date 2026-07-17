@@ -4,9 +4,9 @@
 
 Make split Lisp UI modules develop like production UI modules:
 
-- evaluating a leaf buffer such as `metal-seq-fx/param-grid.lisp` updates the
+- evaluating a leaf buffer such as `ui/effects/param-grid.lisp` updates the
   live UI that depends on the changed definitions;
-- evaluating a root manifest such as `metal-seq-fx.lisp` uses unsaved edits
+- evaluating a root manifest such as `ui/effects.lisp` uses unsaved edits
   from open child buffers instead of rereading stale disk contents;
 - saved file changes from external editors or coding agents reload into the
   running app automatically;
@@ -22,13 +22,13 @@ updates without manual buffer choreography.
 current buffer are visible to the evaluator. However, `(load "path.lisp")`
 currently reads `path.lisp` from disk.
 
-After splitting large files such as `metal-seq-fx.lisp` into leaf modules, this
+After splitting large files such as `ui/effects.lisp` into leaf modules, this
 creates two bad workflows:
 
-1. Evaluating `metal-seq-fx/param-grid.lisp` mutates definitions such as
+1. Evaluating `ui/effects/param-grid.lisp` mutates definitions such as
    `fx-param-grid`, but it does not rerun the `effect-buffer "*fx*"` expression
    that previously called those functions.
-2. Evaluating `metal-seq-fx.lisp` reruns the root manifest, but all child
+2. Evaluating `ui/effects.lisp` reruns the root manifest, but all child
    `(load ...)` calls read saved files from disk, ignoring unsaved child-buffer
    edits.
 
@@ -63,12 +63,14 @@ Responsibilities:
 - track open file-backed buffers and their dirty text;
 - track disk contents and modification timestamps;
 - resolve relative loads against the current loading file;
+- resolve paths prefixed with `@/` against the process working directory when
+  a manifest needs a stable application-root path;
 - choose source text in priority order:
   1. dirty open buffer text for the canonical path;
   2. clean open buffer text for the canonical path;
   3. disk contents.
 
-`(load "metal-seq-fx/param-grid.lisp")` should ask the source manager for the
+`(load "@/ui/effects/param-grid.lisp")` should ask the source manager for the
 source instead of calling `std::fs::read_to_string` directly.
 
 ### Module Graph
@@ -78,10 +80,10 @@ The runtime records load relationships while evaluating source.
 Example:
 
 ```text
-metal-seq-fx.lisp
-  -> metal-seq-fx/state.lisp
-  -> metal-seq-fx/param-grid.lisp
-  -> metal-seq-fx/buffers.lisp
+ui/effects.lisp
+  -> ui/effects/state.lisp
+  -> ui/effects/param-grid.lisp
+  -> ui/effects/buffers.lisp
 ```
 
 Each module record should include:
@@ -239,20 +241,20 @@ State rules:
 
 ### Evaluate Root Manifest
 
-User edits `param-grid.lisp` without saving, switches to `metal-seq-fx.lisp`,
+User edits `param-grid.lisp` without saving, switches to `ui/effects.lisp`,
 and evaluates the root buffer.
 
 Expected behavior:
 
 1. Editor snapshots all open file-backed Lisp buffers.
-2. Runtime evaluates `metal-seq-fx.lisp`.
+2. Runtime evaluates `ui/effects.lisp`.
 3. Every nested `(load ...)` reads from the source manager.
 4. The unsaved `param-grid.lisp` buffer text is used.
 5. Render roots declared by the root manifest rerender.
 
 ### Evaluate Leaf Buffer
 
-User edits `metal-seq-fx/param-grid.lisp` and evaluates that buffer.
+User edits `ui/effects/param-grid.lisp` and evaluates that buffer.
 
 Expected behavior:
 
@@ -336,8 +338,8 @@ Deliverables:
 
 Acceptance:
 
-- The graph shows `metal-seq-fx.lisp -> metal-seq-fx/param-grid.lisp`.
-- Evaluating a leaf can find `metal-seq-fx.lisp` as an owning root.
+- The graph shows `ui/effects.lisp -> ui/effects/param-grid.lisp`.
+- Evaluating a leaf can find `ui/effects.lisp` as an owning root.
 - Graph updates correctly after root manifest changes.
 
 ### Phase 3: Render Root Registry
@@ -408,7 +410,7 @@ Deliverables:
 
 Acceptance:
 
-- Saving `metal-seq-fx/param-grid.lisp` from outside the app updates `*fx*`.
+- Saving `ui/effects/param-grid.lisp` from outside the app updates `*fx*`.
 - Agent-written file changes reload without restarting `metal_seq`.
 - Rapid multi-file saves produce one coherent transaction.
 - Setting `METAL_SEQ_DISABLE_LISP_HOT_RELOAD=1` before launching `metal_seq`
@@ -425,7 +427,7 @@ Unit tests:
 
 Editor/runtime integration tests:
 
-- Open `metal-seq-fx.lisp` and `param-grid.lisp`, edit the leaf without saving,
+- Open `ui/effects.lisp` and `param-grid.lisp`, edit the leaf without saving,
   evaluate the root, and assert the rendered `*fx*` tree reflects the unsaved
   leaf edit.
 - Evaluate `param-grid.lisp` directly and assert `*fx*` rerenders.

@@ -17,6 +17,8 @@ LIB_OBJECTS = $(LIB_SOURCES:.c=.o)
 
 # Common object files needed by test binaries
 TEST_OBJS = graph_engine.o graph_nodes.o graph_api.o graph_edit.o ready_queue.o hot_swap.o wrapper.o
+TEST_SOURCES := $(wildcard tests/test_*.c)
+TEST_BINARIES := $(TEST_SOURCES:.c=)
 
 # Header dependencies
 HEADERS = graph_types.h mpmc_queue.h graph_nodes.h graph_engine.h graph_api.h graph_edit.h hot_swap.h
@@ -58,7 +60,7 @@ run: $(TARGET)
 	./$(TARGET)
 
 # Clean up build artifacts
-clean:
+clean: clean_tests
 	rm -f $(TARGET) $(DYLIB_TARGET) $(OBJECTS) a.out
 	rm -rf $(TARGET).dSYM debug_iteration_* graph_test test_auto_sum test_sum_chain
 
@@ -292,11 +294,8 @@ tests/test_cycle_prevention: tests/test_cycle_prevention.c $(HEADERS) $(TEST_OBJ
 tests/test_fm_benchmark: tests/test_fm_benchmark.c $(HEADERS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -O3 -I. -o tests/test_fm_benchmark tests/test_fm_benchmark.c $(TEST_OBJS)
 
-# Clean up test artifacts
-clean: clean_tests
-
 clean_tests:
-	rm -f tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_validation tests/test_watchlist_capacity_growth tests/test_watchlist_initial_capacity tests/test_watchlist_upstream_processing tests/test_mpmc_queue tests/test_engine_workers tests/test_live_graph_multithreaded tests/test_live_graph_workers tests/test_live_graph_partial_connections tests/test_disconnect tests/test_graph_edit_queue tests/test_queue_api tests/test_deletion_safety tests/test_capacity_growth tests/test_simple_teardown tests/test_orphan_comprehensive tests/test_auto_sum tests/test_sum_behavior tests/test_sum_high_fanin tests/test_dependency_rebuild_sum tests/test_param_update_bounds tests/test_engine_workers_debug tests/test_number_node tests/test_orphan_edge_cases tests/test_new_worker_system tests/test_hot_swap tests/test_multi_port_routing tests/test_complex_topology tests/test_4_node_topology tests/test_4_node_fuzz tests/test_param_updates tests/test_stereo tests/test_patch_disconnect_orphan tests/test_indegree_unique_pred tests/test_deadlock_disconnect tests/test_scheduler_queue_saturation tests/test_polysynth_scheduler_stress tests/test_buffer_api tests/test_cycle_prevention
+	rm -f $(TEST_BINARIES)
 	rm -rf tests/*.dSYM
 
 .PHONY: all debug release lib lib-release run clean valgrind profile test clean_tests

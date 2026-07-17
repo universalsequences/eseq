@@ -9,10 +9,10 @@ eseq's own 4-slot per-param modulation system covers that ground.
 
 Builtin name: `"Roar"`. Implementation follows the builtin-effect recipe
 established by OTT/Compressor/Phaser-Flanger:
-`crates/sequencer/src/roar.rs` (vtable + state consts), descriptor in
+`crates/sequencer/src/effects/roar.rs` (vtable + state consts), descriptor in
 `src/effects.rs`, arm in `create_builtin_effect_node()`, panel in
-`metal-seq-fx/builtin/roar.lisp`, dispatcher in `builtin/audio-fx.lisp`,
-loader in `metal-seq-builtin-fx-ui.lisp`.
+`ui/effects/builtin/roar.lisp`, dispatcher in `builtin/audio-fx.lisp`,
+loader in `ui/builtin-effects.lisp`.
 
 ---
 
@@ -283,7 +283,7 @@ Reuse the OTT node-state → widget path:
    `test_roar_params()` fixture, exact-names test entry.
 5. Panel + widgets + layout test
    (`metal_seq_fx_roar_layout_contains_stage_tabs_and_shaper_display`),
-   capture fixture `capture-fixtures/roar-panel.lisp`.
+   capture fixture `ui/capture-fixtures/roar-panel.lisp`.
 6. Live meter plumbing.
 7. Ear-tuning pass against Live 12 Roar with matched material (reuse the
    reference-render workflow from the phaser work — render dry loop, process

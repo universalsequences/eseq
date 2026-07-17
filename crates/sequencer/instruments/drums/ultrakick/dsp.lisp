@@ -68,7 +68,7 @@
 
 (defmacro md-srr (x amount trig)
   (def a (clip amount 0 1))
-  (def hold_hz (exp (+ (log 300.0) (* (- 1 a) (- (log 44100.0) (log 300.0))))))
+  (def hold_hz (* samplerate (pow (/ 300.0 samplerate) a)))
   (def ph (retrig-phasor hold_hz trig))
   (make-history prev)
   (make-history held)

@@ -11,9 +11,9 @@ use crate::buffer::{BufferTextStyle, CommittedBufferUiSnapshot};
 use crate::host::{BufferId, HostCommand};
 use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{
-    LayoutEngine, LayoutNode, TextMeasurer, relayout_subtree_path_result,
-    reuse_layout_failure_reason, reuse_layout_node, reuse_layout_node_for_subtree_path_result,
-    same_layout_geometry, subtree_root_paths,
+    LayoutEngine, LayoutNode, TextMeasurer, layout_contains_widget_id,
+    relayout_subtree_path_result, reuse_layout_failure_reason, reuse_layout_node,
+    reuse_layout_node_for_subtree_path_result, same_layout_geometry, subtree_root_paths,
 };
 use crate::reactive::ReactiveRegistry;
 use crate::vm::{
@@ -1156,6 +1156,7 @@ impl Runtime {
         register_core_natives(&mut vm);
         crate::vm::register_math_natives(&mut vm);
         register_widget_natives(&mut vm);
+        let reactive_registry = ReactiveRegistry::with_float_slots(vm.reactive_float_slots.clone());
         let mut runtime = Self {
             vm,
             shared,
@@ -1164,7 +1165,7 @@ impl Runtime {
             symbol_revision: 0,
             cached_completion_symbols: None,
             cached_completion_metadata: None,
-            reactive_registry: ReactiveRegistry::new(),
+            reactive_registry,
             #[cfg(test)]
             rendered_layouts: Vec::new(),
             current_layout: None,
@@ -1196,8 +1197,9 @@ impl Runtime {
                     .map(|path| Value::String(path.display().to_string()))
                     .unwrap_or_else(|| Value::String(String::new()))
             });
-        // (load path) — read through the source manager so dirty editor overlays
-        // and load-stack-relative paths participate in normal evaluation.
+        // (load path) — read through the source manager so dirty editor overlays,
+        // load-stack-relative paths, and explicit `@/` cwd-relative paths
+        // participate in normal evaluation.
         runtime.vm.register_native_with_vm("load", |args, vm| {
             let Some(Value::String(path_str)) = args.first() else {
                 return Value::String("load: expects a string path".into());
@@ -1450,6 +1452,10 @@ impl Runtime {
         runtime
     }
 
+    pub fn reactive_binding_store(&self) -> crate::reactive::ReactiveBindingStore {
+        self.vm.reactive_float_slots.clone()
+    }
+
     pub fn set_theme_sync_enabled(&mut self, enabled: bool) {
         self.sync_theme_to_global = enabled;
     }
@@ -1616,7 +1622,11 @@ impl Runtime {
             ("vec2", "(vec2 x y)", "Return a two-number vector list."),
             ("length", "(length vec2)", "Return the length of a two-number vector."),
             ("dot", "(dot a b)", "Return the dot product of two vec2 lists."),
-            ("load", "(load path)", "Read and evaluate a Lisp file from path."),
+            (
+                "load",
+                "(load path)",
+                "Read and evaluate a Lisp file. Relative paths follow the loading file; @/ paths follow the process working directory.",
+            ),
             ("sdf->metal", "(sdf->metal sdf-expr)", "Compile a quoted SDF expression to Metal shader source."),
             ("defwidget", "(defwidget name :width w :height h :animates bool :shader expr ...)", "Register an SDF-backed widget constructor."),
             ("vec3", "(vec3 x y z)", "Return a tagged SDF vec3 expression."),
@@ -1643,6 +1653,7 @@ impl Runtime {
             "text-input",
             "number-picker",
             "dropdown",
+            "menu-button",
             "select",
             "v-stack",
             "h-stack",
@@ -2286,8 +2297,9 @@ impl Runtime {
         self.layout_cols = cols;
         self.layout_rows = rows;
         // Viewport changes invalidate layout geometry even if the widget tree is unchanged.
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.dirty_widget_ids.clear();
         self.deferred_layout_invalidated = false;
         self.relayout_current_tree();
     }
@@ -2296,8 +2308,9 @@ impl Runtime {
     /// Used when internal widget state (e.g. tree expand/collapse) changes
     /// the widget's size without changing the widget tree data.
     pub fn invalidate_layout(&mut self) {
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.dirty_widget_ids.clear();
         self.force_layout_revision_bump = true;
         self.relayout_current_tree();
     }
@@ -2310,7 +2323,8 @@ impl Runtime {
     /// expensive. This keeps the previous layout around for hit testing while
     /// marking one full relayout for the next render pass.
     pub fn invalidate_layout_deferred(&mut self) {
-        self.dirty_widget_ids.clear();
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.force_layout_revision_bump = true;
         self.deferred_layout_invalidated = true;
     }
@@ -2320,8 +2334,9 @@ impl Runtime {
             return;
         }
         self.deferred_layout_invalidated = false;
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.dirty_widget_ids.clear();
         self.relayout_current_tree();
     }
 
@@ -2340,8 +2355,9 @@ impl Runtime {
         self.layout_cell_w = cell_w;
         self.layout_cell_h = cell_h;
         // Force relayout with the new measurer.
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.dirty_widget_ids.clear();
         self.relayout_current_tree();
     }
 
@@ -2349,9 +2365,10 @@ impl Runtime {
         if self.widget_id_offset == offset {
             return;
         }
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.widget_id_offset = offset;
         self.current_layout = None;
-        self.dirty_widget_ids.clear();
         self.relayout_current_tree();
     }
 
@@ -2359,9 +2376,10 @@ impl Runtime {
         if (self.layout_aspect - aspect).abs() < f32::EPSILON {
             return;
         }
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.layout_aspect = aspect;
         self.current_layout = None;
-        self.dirty_widget_ids.clear();
         self.relayout_current_tree();
     }
 
@@ -2381,6 +2399,18 @@ impl Runtime {
             self.flush_widget_trees();
         }
         result
+    }
+
+    pub fn invoke_global(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, crate::vm::VMError> {
+        let callable = self
+            .vm
+            .global_value(name)
+            .ok_or_else(|| crate::vm::VMError::UnknownVariable(name.to_string()))?;
+        self.invoke(callable, args)
     }
 
     pub fn run_reactive_cycle(&mut self) {
@@ -2561,6 +2591,22 @@ impl Runtime {
         std::mem::take(&mut self.dirty_widget_ids)
     }
 
+    fn replace_dirty_widget_ids_for_layout(
+        &mut self,
+        previous_layout: Option<&LayoutNode>,
+        replacement: impl IntoIterator<Item = u64>,
+    ) {
+        if let Some(previous_layout) = previous_layout {
+            self.dirty_widget_ids
+                .retain(|widget_id| !layout_contains_widget_id(previous_layout, *widget_id));
+        }
+        for widget_id in replacement {
+            if !self.dirty_widget_ids.contains(&widget_id) {
+                self.dirty_widget_ids.push(widget_id);
+            }
+        }
+    }
+
     pub fn has_dirty_widget_ids(&self) -> bool {
         !self.dirty_widget_ids.is_empty()
     }
@@ -2571,6 +2617,10 @@ impl Runtime {
     ) {
         self.reactive_registry
             .replace_widget_bindings_from_layouts(layouts);
+    }
+
+    pub fn widget_bindings_revision(&self) -> u64 {
+        self.reactive_registry.widget_bindings_revision()
     }
 
     pub fn last_ui_invalidation_trace(&self) -> Option<UiInvalidationTrace> {
@@ -2892,13 +2942,14 @@ impl Runtime {
     /// Clear the current widget tree and layout without destroying reactive effects.
     /// Used when switching to a buffer/tile that has no widget tree.
     pub fn clear_current_widget_tree(&mut self) {
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_widget_tree = None;
         self.commit_current_ui_snapshot(None);
         self.current_layout = None;
         self.reactive_registry
             .replace_widget_bindings_from_layout(None);
         self.layout_revision = self.layout_revision.wrapping_add(1);
-        self.dirty_widget_ids.clear();
     }
 
     pub fn layout_rows(&self) -> u16 {
@@ -2920,9 +2971,10 @@ impl Runtime {
     pub fn set_widget_tree(&mut self, tree: Value) {
         // Replace the visual widget tree without destroying reactive effects.
         // Effects from other buffers must survive buffer switches.
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
         self.layout_revision = self.layout_revision.wrapping_add(1);
-        self.dirty_widget_ids.clear();
         self.current_widget_tree = Some(tree.deep_clone());
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
@@ -2994,11 +3046,12 @@ impl Runtime {
             })
         });
         if let Some(layout) = cached_layout {
+            let previous_layout = self.current_layout.clone();
+            self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
             self.current_layout = Some(layout);
             self.reactive_registry
                 .replace_widget_bindings_from_layout(self.current_layout.as_deref());
             self.layout_revision = layout_revision.wrapping_add(1);
-            self.dirty_widget_ids.clear();
         } else {
             self.current_layout = None;
             self.relayout_current_tree();
@@ -3210,11 +3263,12 @@ impl Runtime {
     pub fn clear_layout_effects(&mut self) {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.clear_effects_for_owner(current_buffer_id);
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
         self.reactive_registry
             .replace_widget_bindings_from_layout(None);
         self.layout_revision = self.layout_revision.wrapping_add(1);
-        self.dirty_widget_ids.clear();
         self.current_widget_tree = None;
         self.commit_current_ui_snapshot(None);
         self.shared
@@ -3460,12 +3514,13 @@ impl Runtime {
 
     fn relayout_current_tree(&mut self) {
         let relayout_started = Instant::now();
+        let previous_layout = self.current_layout.clone();
         let Some(tree) = self.current_widget_tree.as_ref() else {
-            let had_layout = self.current_layout.is_some();
+            let had_layout = previous_layout.is_some();
+            self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
             self.current_layout = None;
             self.reactive_registry
                 .replace_widget_bindings_from_layout(None);
-            self.dirty_widget_ids.clear();
             if had_layout {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
@@ -3475,7 +3530,7 @@ impl Runtime {
             return;
         };
         let mut dirty_widget_ids = Vec::new();
-        if let Some(existing) = self.current_layout.as_ref()
+        if let Some(existing) = previous_layout.as_ref()
             && let Some(updated) = reuse_layout_node(existing.as_ref(), tree, &mut dirty_widget_ids)
         {
             let geometry_changed = !same_layout_geometry(existing.as_ref(), &updated);
@@ -3485,7 +3540,7 @@ impl Runtime {
             self.current_layout = Some(Arc::new(updated));
             self.reactive_registry
                 .replace_widget_bindings_from_layout(self.current_layout.as_deref());
-            self.dirty_widget_ids = dirty_widget_ids;
+            self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), dirty_widget_ids);
             if geometry_changed || self.force_layout_revision_bump {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
@@ -3495,8 +3550,7 @@ impl Runtime {
                 .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
         }
-        let failure_reason = self
-            .current_layout
+        let failure_reason = previous_layout
             .as_ref()
             .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree));
         let engine = if let Some(measurer) = self.text_measurer.as_deref() {
@@ -3512,8 +3566,7 @@ impl Runtime {
             LayoutEngine::new_exact(self.layout_cols, self.layout_rows, self.layout_aspect)
         };
         if let Some(layout) = engine.layout_with_id_offset(tree, self.widget_id_offset) {
-            let geometry_changed = self
-                .current_layout
+            let geometry_changed = previous_layout
                 .as_ref()
                 .is_none_or(|existing| !same_layout_geometry(existing.as_ref(), &layout));
             #[cfg(test)]
@@ -3523,13 +3576,17 @@ impl Runtime {
             self.reactive_registry
                 .replace_widget_bindings_from_layout(self.current_layout.as_deref());
             if geometry_changed {
-                self.dirty_widget_ids.clear();
+                self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             } else if self.force_layout_revision_bump {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
-                self.dirty_widget_ids.clear();
+                self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
             } else if let Some(layout) = self.current_layout.as_ref() {
-                self.dirty_widget_ids = collect_shader_widget_ids(layout);
+                let shader_widget_ids = collect_shader_widget_ids(layout);
+                self.replace_dirty_widget_ids_for_layout(
+                    previous_layout.as_deref(),
+                    shader_widget_ids,
+                );
             }
             self.force_layout_revision_bump = false;
             self.update_last_trace_relayout(

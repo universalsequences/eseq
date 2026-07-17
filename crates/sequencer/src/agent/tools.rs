@@ -1,7 +1,7 @@
 use super::actions::AgentAppAction;
 use std::path::{Path, PathBuf};
 
-use super::catalog::{DgenApiCatalog, DocAttribute, DocExample, DocOperator};
+use super::catalog::{DgenApiCatalog, DocAttribute, DocExample, DocOperator, DocSpecialForm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExampleKind {
@@ -71,7 +71,7 @@ impl AgentToolRegistry {
         } else {
             normalized_queries
         };
-        let live_examples = self.live_examples_or_catalog();
+        let live_examples = self.live_examples().unwrap_or_default();
         let mut sections = Vec::new();
 
         for query in &effective_queries {
@@ -95,6 +95,19 @@ impl AgentToolRegistry {
                 })
                 .collect();
             operators.sort_by_key(|op| score_operator(op, query));
+
+            let mut special_forms: Vec<&DocSpecialForm> = self
+                .catalog
+                .special_forms()
+                .iter()
+                .filter(|form| {
+                    query.is_empty()
+                        || form.name.eq_ignore_ascii_case(query)
+                        || form.name.to_ascii_lowercase().contains(query)
+                        || form.summary.to_ascii_lowercase().contains(query)
+                })
+                .collect();
+            special_forms.sort_by_key(|form| score_special_form(form, query));
 
             let mut attributes: Vec<&DocAttribute> =
                 self.catalog
@@ -142,6 +155,18 @@ impl AgentToolRegistry {
                 lines.push(format!(
                     "operator {} [{}] - {}{}{}",
                     operator.name, operator.category, operator.summary, attrs, signatures
+                ));
+            }
+
+            for form in special_forms.into_iter().take(limit) {
+                let signatures = if form.signatures.is_empty() {
+                    String::new()
+                } else {
+                    format!(" sigs: {}", form.signatures.join(" | "))
+                };
+                lines.push(format!(
+                    "special form {} - {}{}",
+                    form.name, form.summary, signatures
                 ));
             }
 
@@ -207,7 +232,7 @@ impl AgentToolRegistry {
 
     pub fn list_examples(&self, kind: ExampleKind, limit: usize) -> ToolResult {
         let limit = limit.max(1);
-        let live_examples = self.live_examples_or_catalog();
+        let live_examples = self.live_examples().unwrap_or_default();
         let examples: Vec<&DocExample> = live_examples
             .iter()
             .filter(|example| kind.matches(&example.kind))
@@ -240,7 +265,7 @@ impl AgentToolRegistry {
 
     pub fn read_example(&self, name: &str) -> Result<ToolResult, String> {
         let name = name.trim();
-        let live_examples = self.live_examples_or_catalog();
+        let live_examples = self.live_examples()?;
         let example = live_examples
             .iter()
             .find(|example| example.name == name)
@@ -297,11 +322,6 @@ impl AgentToolRegistry {
             content,
             pending_actions: Vec::new(),
         })
-    }
-
-    fn live_examples_or_catalog(&self) -> Vec<DocExample> {
-        self.live_examples()
-            .unwrap_or_else(|_| self.catalog.examples().to_vec())
     }
 
     fn live_examples(&self) -> Result<Vec<DocExample>, String> {
@@ -444,6 +464,16 @@ fn score_operator(op: &DocOperator, query: &str) -> (u8, String) {
     }
 }
 
+fn score_special_form(form: &DocSpecialForm, query: &str) -> (u8, String) {
+    if form.name.eq_ignore_ascii_case(query) {
+        (0, form.name.clone())
+    } else if form.name.to_ascii_lowercase().contains(query) {
+        (1, form.name.clone())
+    } else {
+        (2, form.name.clone())
+    }
+}
+
 fn score_attribute(attr: &DocAttribute, query: &str) -> (u8, String) {
     if attr.name.eq_ignore_ascii_case(query) {
         (0, attr.name.clone())
@@ -487,7 +517,7 @@ mod tests {
     fn lookup_docs_finds_mod_and_preamble_envelope_helpers() {
         let tools = AgentToolRegistry::load_default().expect("load tools");
         let result = tools.lookup_dgen_docs(&["mod".to_string(), "adsr".to_string()], 3);
-        assert!(result.content.contains("operator mod"));
+        assert!(result.content.contains("special form mod"));
         assert!(result.content.contains("operator adsr"));
     }
 

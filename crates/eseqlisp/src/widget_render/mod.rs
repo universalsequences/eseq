@@ -5,6 +5,8 @@ pub mod cable;
 pub mod dropdown;
 pub mod eq8_editor;
 pub mod event_view;
+#[cfg(target_os = "macos")]
+pub mod focus_decoration;
 pub mod grid;
 pub mod hslider;
 pub mod hstack;
@@ -23,9 +25,9 @@ pub mod number_picker;
 pub mod patcher;
 pub mod phaser_notch;
 pub mod response_curve_editor;
-pub mod scope;
 pub mod roar_filter;
 pub mod roar_shaper;
+pub mod scope;
 pub mod scroll;
 pub mod sdf_widget;
 pub mod spectrogram;
@@ -42,6 +44,9 @@ pub mod vstack;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub mod wrap;
+
+#[cfg(target_os = "macos")]
+pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -68,12 +73,30 @@ use objc2_app_kit::{
 
 static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    static POINTER_HOVER_WIDGET_ID: RefCell<Option<u64>> = const { RefCell::new(None) };
+}
+
 pub fn bump_widget_state_generation() {
     WIDGET_STATE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn widget_state_generation() -> u64 {
     WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
+}
+
+pub fn set_pointer_hover_widget(widget_id: Option<u64>) {
+    POINTER_HOVER_WIDGET_ID.with(|hovered| {
+        let mut hovered = hovered.borrow_mut();
+        if *hovered != widget_id {
+            *hovered = widget_id;
+            bump_widget_state_generation();
+        }
+    });
+}
+
+pub fn pointer_hovered(widget_id: u64) -> bool {
+    POINTER_HOVER_WIDGET_ID.with(|hovered| *hovered.borrow() == Some(widget_id))
 }
 
 fn haptic_quantum(min: f32, max: f32) -> f32 {
@@ -417,9 +440,14 @@ pub struct WidgetViewport {
     pub time_seconds: f32,
     pub focused_widget_id: Option<u64>,
     pub focused_branch: bool,
-    /// Tile content area height in rows (excludes status bar).
-    /// Used by overlays (dropdowns) to clamp to the visible tile region.
-    pub tile_content_rows: f32,
+    /// Bottom edge of the frame-level overlay viewport, expressed in the
+    /// widget tree's post-scroll, tile-local row coordinates. The matching
+    /// top edge is derived from the full frame height.
+    ///
+    /// Keeping this coordinate in the viewport makes overlay geometry
+    /// independent of the tile's clip rect while ordinary widget primitives
+    /// remain clipped to their tile.
+    pub overlay_viewport_bottom: f32,
     /// Total vertical scroll already applied before tile-position offset.
     /// This includes tile-level widget scroll and any ancestor scroll widgets.
     pub scroll_top: f32,
@@ -767,7 +795,13 @@ pub trait WidgetDefinition: Sync {
         vec![]
     }
     fn tui_render(&self, _props: &HashMap<String, Value>, _rect: Rect, _buf: &mut CellBuffer) {}
-    fn begin_gesture(&self, _node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        _node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         None
     }
     fn mouse_event(
@@ -853,6 +887,12 @@ pub trait WidgetDefinition: Sync {
     fn metal_vertex_shader(&self, _widget_type: &str) -> Option<&'static str> {
         None
     }
+    /// Optional framework-rendered focus decoration. The decoration is added
+    /// after this widget's own primitives and is bounded by its measured rect.
+    #[cfg(target_os = "macos")]
+    fn metal_focus_decoration(&self, _node: &LayoutNode) -> FocusDecoration {
+        FocusDecoration::None
+    }
     #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
@@ -925,6 +965,8 @@ pub fn is_layout_widget_type(widget_type: &str) -> bool {
 
 pub fn node_handles_pointer_events(node: &LayoutNode) -> bool {
     let has_pointer_callback = node.props.contains_key("on-click")
+        || node.props.contains_key("on-press")
+        || node.props.contains_key("on-release")
         || node.props.contains_key("on-drag")
         || node.props.contains_key("on-drop")
         || node.props.contains_key("on-change")
@@ -969,10 +1011,15 @@ pub fn layout_wants_animation_frames(node: &LayoutNode) -> bool {
 }
 
 fn node_uses_animated_sdf_material(node: &LayoutNode) -> bool {
-    let Some(Value::String(shader_type)) = node.props.get(sdf_widget::SHADER_TYPE_PROP) else {
-        return false;
-    };
-    sdf_widget::sdf_widget_def(shader_type).is_some_and(|definition| definition.animates)
+    [sdf_widget::SHADER_TYPE_PROP, "background"]
+        .into_iter()
+        .filter_map(|prop| match node.props.get(prop) {
+            Some(Value::String(shader_type)) => Some(shader_type),
+            _ => None,
+        })
+        .any(|shader_type| {
+            sdf_widget::sdf_widget_def(shader_type).is_some_and(|definition| definition.animates)
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -1059,7 +1106,7 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     viewport.vp_h.to_bits().hash(&mut hasher);
     viewport.focused_widget_id.hash(&mut hasher);
     viewport.focused_branch.hash(&mut hasher);
-    viewport.tile_content_rows.to_bits().hash(&mut hasher);
+    viewport.overlay_viewport_bottom.to_bits().hash(&mut hasher);
     viewport.scroll_top.to_bits().hash(&mut hasher);
     viewport.scroll_left.to_bits().hash(&mut hasher);
     hash_props(&node.props, &mut hasher);
@@ -1223,7 +1270,14 @@ pub fn widget_primitives_for_node(
     }
 
     if let Some(definition) = widget_definition(&node.widget_type) {
-        let primitives = definition.build_metal_primitives(&node.widget_type, node, viewport);
+        let mut primitives = definition.build_metal_primitives(&node.widget_type, node, viewport);
+        if node.focusable && viewport.focused_widget_id == Some(node.widget_id) {
+            primitives.extend(
+                definition
+                    .metal_focus_decoration(node)
+                    .metal_primitives(node.rect, viewport),
+            );
+        }
         if let Some(cache_key) = cache_key {
             WIDGET_PRIMITIVE_CACHE.with(|cache| {
                 let mut cache = cache.borrow_mut();
@@ -1520,6 +1574,19 @@ fn refresh_retained_primitive_run_in_place(
 }
 
 #[cfg(target_os = "macos")]
+fn suppresses_default_focus(node: &LayoutNode) -> bool {
+    widget_definition(&node.widget_type)
+        .map(|definition| {
+            definition.renders_own_focus()
+                || !matches!(
+                    definition.metal_focus_decoration(node),
+                    FocusDecoration::None
+                )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
 fn collect_metal_primitives_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
@@ -1532,11 +1599,9 @@ fn collect_metal_primitives_recursive(
 
     // If a container node is focused, emit a background highlight rect.
     // This renders before children (correct z-order: highlight under content).
-    // Skip for widgets that render their own focus styling (e.g. text-input).
-    let renders_own_focus = widget_definition(&node.widget_type)
-        .map(WidgetDefinition::renders_own_focus)
-        .unwrap_or(false);
-    if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+    // Skip for widgets that render or opt into their own focus styling.
+    let suppresses_default_focus = suppresses_default_focus(node);
+    if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus {
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: node.rect,
             color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1625,9 +1690,7 @@ fn collect_metal_primitive_runs_recursive(
 ) {
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
     let focused_branch = viewport.focused_branch || node_is_focused;
-    let renders_own_focus = widget_definition(&node.widget_type)
-        .map(WidgetDefinition::renders_own_focus)
-        .unwrap_or(false);
+    let suppresses_default_focus = suppresses_default_focus(node);
 
     let node_viewport = WidgetViewport {
         scroll_top: _scroll_top,
@@ -1640,7 +1703,8 @@ fn collect_metal_primitive_runs_recursive(
         let offset_y = state.offset_y;
 
         let mut own = Vec::new();
-        if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+        if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus
+        {
             own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
                 color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1699,7 +1763,8 @@ fn collect_metal_primitive_runs_recursive(
             ..node_viewport
         };
         let mut own = Vec::new();
-        if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+        if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus
+        {
             own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
                 color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1742,7 +1807,7 @@ fn collect_metal_primitive_runs_recursive(
     }
 
     let mut own = Vec::new();
-    if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+    if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus {
         own.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: node.rect,
             color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1792,9 +1857,7 @@ fn collect_metal_primitive_runs_retained_recursive(
     let subtree_dirty = dirty_ancestor || node_is_dirty;
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
     let focused_branch = viewport.focused_branch || node_is_focused;
-    let renders_own_focus = widget_definition(&node.widget_type)
-        .map(WidgetDefinition::renders_own_focus)
-        .unwrap_or(false);
+    let suppresses_default_focus = suppresses_default_focus(node);
 
     let node_viewport = WidgetViewport {
         scroll_top: _scroll_top,
@@ -1817,7 +1880,9 @@ fn collect_metal_primitive_runs_retained_recursive(
             ancestor_widget_ids,
             || {
                 let mut own = Vec::new();
-                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                if node_is_focused
+                    && is_layout_widget_type(&node.widget_type)
+                    && !suppresses_default_focus
                 {
                     own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                         rect: node.rect,
@@ -1892,7 +1957,9 @@ fn collect_metal_primitive_runs_retained_recursive(
             ancestor_widget_ids,
             || {
                 let mut own = Vec::new();
-                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                if node_is_focused
+                    && is_layout_widget_type(&node.widget_type)
+                    && !suppresses_default_focus
                 {
                     own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                         rect: node.rect,
@@ -1948,7 +2015,10 @@ fn collect_metal_primitive_runs_retained_recursive(
         ancestor_widget_ids,
         || {
             let mut own = Vec::new();
-            if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+            if node_is_focused
+                && is_layout_widget_type(&node.widget_type)
+                && !suppresses_default_focus
+            {
                 own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                     rect: node.rect,
                     color: crate::theme::WIDGET_FOCUS_BG(),
@@ -1999,9 +2069,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     let subtree_dirty = dirty_ancestor || node_is_dirty;
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
     let focused_branch = viewport.focused_branch || node_is_focused;
-    let renders_own_focus = widget_definition(&node.widget_type)
-        .map(WidgetDefinition::renders_own_focus)
-        .unwrap_or(false);
+    let suppresses_default_focus = suppresses_default_focus(node);
 
     let node_viewport = WidgetViewport {
         scroll_top: _scroll_top,
@@ -2026,7 +2094,9 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             ancestor_widget_ids,
             || {
                 let mut own = Vec::new();
-                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                if node_is_focused
+                    && is_layout_widget_type(&node.widget_type)
+                    && !suppresses_default_focus
                 {
                     own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                         rect: node.rect,
@@ -2107,7 +2177,9 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             ancestor_widget_ids,
             || {
                 let mut own = Vec::new();
-                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                if node_is_focused
+                    && is_layout_widget_type(&node.widget_type)
+                    && !suppresses_default_focus
                 {
                     own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                         rect: node.rect,
@@ -2169,7 +2241,10 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
         ancestor_widget_ids,
         || {
             let mut own = Vec::new();
-            if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+            if node_is_focused
+                && is_layout_widget_type(&node.widget_type)
+                && !suppresses_default_focus
+            {
                 own.push(MetalPrimitive::Rect(MetalRectPrimitive {
                     rect: node.rect,
                     color: crate::theme::WIDGET_FOCUS_BG(),
@@ -2291,8 +2366,13 @@ pub fn widget_unclamped_drag(widget_type: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn begin_widget_gesture(node: &LayoutNode, local_col: f32, local_row: f32) -> Option<Value> {
-    widget_definition(&node.widget_type)?.begin_gesture(node, local_col, local_row)
+pub fn begin_widget_gesture(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+    modifiers: KeyModifiers,
+) -> Option<Value> {
+    widget_definition(&node.widget_type)?.begin_gesture(node, local_col, local_row, modifiers)
 }
 
 pub fn map_key_event(node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
@@ -2347,6 +2427,8 @@ pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> 
 pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -> bool {
     match props.get(key) {
         Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => *n > 0.5,
+        Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot) > 0.5,
         _ => default,
     }
 }
@@ -2613,7 +2695,7 @@ mod tests {
             time_seconds: 0.0,
             focused_widget_id: None,
             focused_branch: false,
-            tile_content_rows: 24.0,
+            overlay_viewport_bottom: 24.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
             inherited_hover: false,
@@ -2651,6 +2733,61 @@ mod tests {
         let (runs, _) = collect_metal_primitive_runs(layout, viewport, 0.0, 24);
         let flattened = flatten_metal_primitive_runs(&runs);
         assert_eq!(primitive_tokens(&flattened), primitive_tokens(&flat));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn knob_number_focus_corners_are_added_by_the_shared_primitive_pipeline() {
+        let rect = Rect {
+            row: 2.0,
+            col: 3.0,
+            width: 5.0,
+            height: 3.0,
+        };
+        let mut knob = test_node(
+            42,
+            "knob-number",
+            rect,
+            HashMap::from([
+                ("label".to_string(), Value::String("Pan".to_string())),
+                ("value".to_string(), Value::Number(0.0)),
+                ("min".to_string(), Value::Number(-1.0)),
+                ("max".to_string(), Value::Number(1.0)),
+            ]),
+            Vec::new(),
+        );
+        knob.focusable = true;
+
+        let unfocused = widget_primitives_for_node(&knob, test_viewport());
+        assert_eq!(
+            unfocused
+                .iter()
+                .filter(|primitive| matches!(primitive, MetalPrimitive::ForegroundRect(_)))
+                .count(),
+            0
+        );
+
+        let focused = widget_primitives_for_node(
+            &knob,
+            WidgetViewport {
+                focused_widget_id: Some(knob.widget_id),
+                ..test_viewport()
+            },
+        );
+        let corner_rects: Vec<Rect> = focused
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::ForegroundRect(corner) => Some(corner.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(corner_rects.len(), 8);
+        for corner in corner_rects {
+            assert!(corner.col >= rect.col);
+            assert!(corner.row >= rect.row);
+            assert!(corner.col + corner.width <= rect.col + rect.width);
+            assert!(corner.row + corner.height <= rect.row + rect.height);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -3219,6 +3356,44 @@ mod tests {
             props: HashMap::from([(
                 sdf_widget::SHADER_TYPE_PROP.to_string(),
                 Value::String("test-animated-material".to_string()),
+            )]),
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        assert!(layout_wants_animation_frames(&node));
+    }
+
+    #[test]
+    fn animated_sdf_box_background_requests_animation_frames() {
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "test-animated-background".to_string(),
+            shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0),
+            state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: true,
+        });
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "box".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 8.0,
+                height: 1.0,
+            },
+            props: HashMap::from([(
+                "background".to_string(),
+                Value::String("test-animated-background".to_string()),
             )]),
             children: Vec::new(),
             focusable: false,

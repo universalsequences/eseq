@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::graph::ProjectGraphOverrides;
+use crate::macro_engine::MacroParamKey;
 use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
@@ -98,11 +100,8 @@ impl SequencerSnapshot {
         let project_process_chain = state.project_process_chain();
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let live_process_chains = state.pattern.process_chains.lock().unwrap();
-        let live_project_lane_overrides = state
-            .pattern
-            .project_process_lane_overrides
-            .lock()
-            .unwrap();
+        let live_project_lane_overrides =
+            state.pattern.project_process_lane_overrides.lock().unwrap();
         let (effect_descriptors_by_track, instrument_descriptors) =
             state.scratch_runtime_descriptors();
 
@@ -230,6 +229,7 @@ impl SequencerSnapshot {
             });
         }
 
+        apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
         let (mod_connections, neural_networks, graph_overrides) = state.current_scene_metadata();
 
         Self {
@@ -261,7 +261,7 @@ impl SequencerSnapshot {
         };
         let (effect_descriptors_by_track, instrument_descriptors) =
             state.scratch_runtime_descriptors();
-        let tracks = tracks
+        let mut tracks: Vec<SequencerTrackSnapshot> = tracks
             .iter()
             .enumerate()
             .map(|(track_idx, data)| {
@@ -283,6 +283,8 @@ impl SequencerSnapshot {
             })
             .collect();
 
+        apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
+
         Self {
             transport,
             tracks,
@@ -290,6 +292,50 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             process_trace: state.process_trace_enabled(),
+        }
+    }
+}
+
+/// Folds the live macro layer into snapshot-local defaults. This keeps the
+/// scheduler's existing precedence model intact: an explicit p-lock still
+/// replaces the effective default, while process `Add` writes build on it.
+fn apply_macro_overrides(
+    tracks: &mut [SequencerTrackSnapshot],
+    overrides: &HashMap<MacroParamKey, f32>,
+) {
+    for (track_idx, track) in tracks.iter_mut().enumerate() {
+        apply_slot_macro_overrides(
+            &mut track.instrument_slot,
+            overrides,
+            |param_idx, param_id| MacroParamKey::for_instrument(track_idx, param_idx, param_id),
+        );
+        for (slot_idx, slot) in track.effect_slots.iter_mut().enumerate() {
+            apply_slot_macro_overrides(slot, overrides, |param_idx, param_id| {
+                MacroParamKey::for_effect(track_idx, slot_idx, param_idx, param_id)
+            });
+        }
+    }
+}
+
+fn apply_slot_macro_overrides(
+    slot: &mut EffectSlotSnapshot,
+    overrides: &HashMap<MacroParamKey, f32>,
+    key_for_param: impl Fn(usize, Option<crate::neural::ParamNodeId>) -> MacroParamKey,
+) {
+    let param_count = (slot.num_params as usize).min(slot.defaults.len());
+    for param_idx in 0..param_count {
+        let raw_idx = slot
+            .param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32);
+        let param_id = crate::neural::ParamNodeId::from_slot_param(
+            slot.node_id,
+            slot.modulator_node_id,
+            raw_idx,
+        );
+        if let Some(value) = overrides.get(&key_for_param(param_idx, param_id)) {
+            slot.defaults[param_idx] = *value;
         }
     }
 }

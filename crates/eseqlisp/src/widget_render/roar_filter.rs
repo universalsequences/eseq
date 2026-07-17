@@ -3,7 +3,7 @@
 //! Draws the selected filter type's magnitude response (type / freq / res
 //! props) on a log-frequency axis, 20 Hz .. 20.48 kHz, ±24 dB. The response
 //! math mirrors the SVF / comb / resample / dispersion kernels in
-//! `sequencer::roar` closely enough for display purposes.
+//! `sequencer::effects::roar` closely enough for display purposes.
 
 use std::collections::HashMap;
 
@@ -41,7 +41,7 @@ fn prop_num(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     props.get(key).and_then(value_num).unwrap_or(default)
 }
 
-/// Res 0..1 → Q 0.5..~12; mirror of `sequencer::roar::res_to_q`.
+/// Res 0..1 → Q 0.5..~12; mirror of `sequencer::effects::roar::res_to_q`.
 fn res_to_q(res: f32) -> f32 {
     0.5 * (24.0_f32).powf(res.clamp(0.0, 1.0))
 }
@@ -52,7 +52,9 @@ pub fn filter_magnitude(filter: usize, cutoff: f32, res: f32, freq: f32) -> f32 
     let res = res.clamp(0.0, 1.0);
     let omega = freq / cutoff;
     let k = 1.0 / res_to_q(res);
-    let denom = ((1.0 - omega * omega).powi(2) + (k * omega).powi(2)).sqrt().max(1.0e-6);
+    let denom = ((1.0 - omega * omega).powi(2) + (k * omega).powi(2))
+        .sqrt()
+        .max(1.0e-6);
     match filter {
         1 => omega / denom,                       // bp (peaks at Q)
         2 => omega * omega / denom,               // hp
@@ -81,7 +83,7 @@ pub fn filter_magnitude(filter: usize, cutoff: f32, res: f32, freq: f32) -> f32 
                 if t < 1.0e-3 { 1.0 } else { (t.sin() / t).abs() }
             }
         }
-        8 => 1.0, // dispersion: allpass, flat magnitude
+        8 => 1.0,         // dispersion: allpass, flat magnitude
         _ => 1.0 / denom, // lp
     }
 }
@@ -150,8 +152,7 @@ impl WidgetDefinition for RoarFilterWidget {
             let freq = FREQ_MIN_HZ * (t * FREQ_SPAN_OCT).exp2();
             let mag = filter_magnitude(display.filter, display.freq, display.res, freq);
             let db = (20.0 * mag.max(1.0e-6).log10()).clamp(-24.0, 24.0);
-            let row =
-                (((24.0 - db) / 48.0) * (height.saturating_sub(1)) as f32).round() as usize;
+            let row = (((24.0 - db) / 48.0) * (height.saturating_sub(1)) as f32).round() as usize;
             buf.set(
                 row_start + row.min(height - 1) as u16,
                 col_start + col as u16,
@@ -310,7 +311,10 @@ mod tests {
     fn comb_notches_between_harmonics() {
         let peak = filter_magnitude(6, 1000.0, 0.5, 1000.0);
         let notch = filter_magnitude(6, 1000.0, 0.5, 1500.0);
-        assert!(peak > notch * 3.0, "comb should alternate: {peak} vs {notch}");
+        assert!(
+            peak > notch * 3.0,
+            "comb should alternate: {peak} vs {notch}"
+        );
     }
 
     #[test]

@@ -297,7 +297,7 @@ The db is opened once per process at app start, behind a `OnceLock` or similar.
 
 ## Browser Integration
 
-`crates/sequencer/src/bin/metal_seq/browser.rs`:
+`crates/sequencer/src/ui/browser.rs`:
 
 - Add `build_sample_tree_from_db(query: &str, include_tags: &[&str], exclude_tags: &[&str]) -> Value`. Returns the same `SampleTreeNode`-shaped `Value` the Lisp UI already consumes — no UI changes required to render results.
 - Tree grouping: when no tag filters are active, group by primary-category tag (drums, instruments, manufacturers, producers, genres, fx, vocals, hardware) for parity with the current folder layout. When tag filters are active, return a flat list.

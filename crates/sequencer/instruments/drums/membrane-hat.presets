@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "engine_name": "drums/membrane-hat/",
+  "source_file": "instruments/drums/membrane-hat/.lisp",
+  "presets": [
+    {
+      "id": "Closed Tick",
+      "name": "Closed Tick",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.1,
+        "choke": 0.2,
+        "decay": 700.0,
+        "strike": 0.75,
+        "sizzle": 0.9
+      }
+    },
+    {
+      "id": "Pedal Chick",
+      "name": "Pedal Chick",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.0,
+        "strike": 0.15,
+        "stick_speed": 0.02,
+        "sizzle": 1.4,
+        "decay": 500.0
+      }
+    },
+    {
+      "id": "Quarter Open",
+      "name": "Quarter Open",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.45,
+        "choke": 0.6,
+        "decay": 1000.0,
+        "wash": 0.7
+      }
+    },
+    {
+      "id": "Open Sizzle",
+      "name": "Open Sizzle",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.9,
+        "choke": 0.8,
+        "decay": 1600.0,
+        "wash": 1.0,
+        "rattle": 1.4
+      }
+    },
+    {
+      "id": "909 Pair",
+      "name": "909 Pair",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.2,
+        "choke": 1.0,
+        "decay": 800.0,
+        "strike": 0.9,
+        "tune": 3.0,
+        "tilt": 0.7
+      }
+    },
+    {
+      "id": "Trashy Edge",
+      "name": "Trashy Edge",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.65,
+        "strike": 1.0,
+        "wash": 1.6,
+        "rattle": 2.2,
+        "scrape": 0.7,
+        "decay": 1200.0,
+        "body2_gain": 1.2
+      }
+    },
+    {
+      "id": "Dark Jazz",
+      "name": "Dark Jazz",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.35,
+        "strike": 0.2,
+        "tune": -7.0,
+        "tilt": 0.8,
+        "decay": 1100.0,
+        "stick_hard": 0.006,
+        "sizzle": 0.5,
+        "body1_freq": 2400.0
+      }
+    },
+    {
+      "id": "Alien Shaker",
+      "name": "Alien Shaker",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.28,
+        "plate_ratio": 2.4,
+        "tune": 8.0,
+        "rattle": 2.4,
+        "contact_loss": 0.03,
+        "sizzle": 1.1,
+        "decay": 600.0,
+        "scrape": 1.0
+      }
+    },
+    {
+      "id": "Crash Wash",
+      "name": "Crash Wash",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 1.0,
+        "choke": 0.0,
+        "decay": 3000.0,
+        "wash": 1.8,
+        "strike": 0.9,
+        "tilt": 0.4,
+        "rattle": 0.6,
+        "bottom_mix": 0.4
+      }
+    },
+    {
+      "id": "Foot Splash",
+      "name": "Foot Splash",
+      "base_note_offset": 0.0,
+      "params": {
+        "open": 0.55,
+        "choke": 1.0,
+        "decay": 1400.0,
+        "strike": 0.1,
+        "stick_speed": 0.015,
+        "wash": 0.9,
+        "sizzle": 1.2
+      }
+    }
+  ]
+}

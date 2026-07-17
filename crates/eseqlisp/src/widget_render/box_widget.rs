@@ -4,8 +4,8 @@ use std::rc::Rc;
 use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
 #[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalRectPrimitive, WidgetInstance, WidgetViewport, get_f32_prop, ndc_bounds,
-    resolve_named_color,
+    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPrimitive, MetalRectPrimitive,
+    WidgetInstance, WidgetViewport, get_f32_prop, ndc_bounds, resolve_named_color,
 };
 #[cfg(target_os = "macos")]
 use crate::backend::Color;
@@ -281,7 +281,7 @@ impl WidgetDefinition for BoxWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["selected", "muted"]
+        &["selected", "muted", "macro-owned"]
     }
 
     fn measure(
@@ -448,9 +448,37 @@ impl WidgetDefinition for BoxWidget {
             .collect()
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
-        if let Some(Value::String(drag_type) | Value::Keyword(drag_type)) =
-            node.props.get("drag-type")
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+        modifiers: KeyModifiers,
+    ) -> Option<Value> {
+        let drag_modifier_matches = match node.props.get("drag-modifier") {
+            None => true,
+            Some(Value::String(value) | Value::Keyword(value)) if value == "none" => {
+                modifiers.is_empty()
+            }
+            Some(Value::String(value) | Value::Keyword(value)) if value == "shift" => {
+                modifiers.contains(KeyModifiers::SHIFT)
+            }
+            Some(Value::String(value) | Value::Keyword(value)) if value == "ctrl" => {
+                modifiers.contains(KeyModifiers::CONTROL)
+            }
+            Some(Value::String(value) | Value::Keyword(value)) if value == "alt" => {
+                modifiers.contains(KeyModifiers::ALT)
+            }
+            Some(Value::String(value) | Value::Keyword(value))
+                if matches!(value.as_str(), "super" | "cmd" | "meta") =>
+            {
+                modifiers.contains(KeyModifiers::SUPER)
+            }
+            Some(_) => false,
+        };
+        if drag_modifier_matches
+            && let Some(Value::String(drag_type) | Value::Keyword(drag_type)) =
+                node.props.get("drag-type")
         {
             Some(box_drag_value(node, drag_type))
         } else if prop_truthy(&node.props, "capture-pointer")
@@ -719,6 +747,27 @@ impl WidgetDefinition for BoxWidget {
                 viewport,
                 &node.props,
             ));
+        }
+
+        if box_state_active(&node.props, "macro-owned") {
+            let outer_px = 12.0;
+            let inner_px = 8.0;
+            let margin_px = 2.5;
+            let center = [
+                node.rect.col + (margin_px + outer_px * 0.5) / viewport.cell_w.max(1.0),
+                node.rect.row + (margin_px + outer_px * 0.5) / viewport.cell_h.max(1.0),
+            ];
+            for (radius_px, color) in [
+                (outer_px * 0.5, Color::rgba(0.02, 0.04, 0.025, 1.0)),
+                (inner_px * 0.5, Color::rgba(0.12, 0.95, 0.38, 1.0)),
+            ] {
+                prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+                    center,
+                    radius_px,
+                    color,
+                    visible_half: MetalCircleVisibleHalf::Full,
+                }));
+            }
         }
 
         prims

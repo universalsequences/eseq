@@ -9,7 +9,7 @@
 //! little-endian f32 samples on stdout (fast path for the optimizer); `--wav`
 //! writes a wav file instead.
 
-use sequencer::spring::{render_impulse, SpringParams};
+use sequencer::effects::spring::{render_impulse, SpringParams};
 use std::io::Write;
 
 fn main() {

@@ -610,6 +610,7 @@ pub struct Editor {
     default_lisp_bindings: LispBindings,
     lisp_bindings: LispBindings,
     runtime: Runtime,
+    runtime_source_context_revision: Option<RuntimeSourceContextRevision>,
     needs_redraw: bool,
     should_quit: bool,
     last_exit: EditorExit,
@@ -640,6 +641,7 @@ pub struct Editor {
     remembered_split_ratios: HashMap<String, f32>,
     retained_tile_layouts: HashMap<BufferId, Vec<RetainedTileLayout>>,
     visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
+    visible_binding_registry_revision: u64,
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
     active_tab_mouse_capture: Option<TileId>,
@@ -659,6 +661,13 @@ pub struct Editor {
     inspect_source_tile_id: Option<TileId>,
     #[cfg(test)]
     test_clipboard: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeSourceContextRevision {
+    buffer_id: BufferId,
+    text_revision: u64,
+    cursor: (usize, usize),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -749,6 +758,7 @@ impl Editor {
             default_lisp_bindings: HashMap::new(),
             lisp_bindings: HashMap::new(),
             runtime,
+            runtime_source_context_revision: None,
             needs_redraw: true,
             should_quit: false,
             last_exit: EditorExit::Closed,
@@ -781,6 +791,7 @@ impl Editor {
             remembered_split_ratios: HashMap::new(),
             retained_tile_layouts: HashMap::new(),
             visible_binding_layout_signature: None,
+            visible_binding_registry_revision: 0,
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
             active_tab_mouse_capture: None,
@@ -1892,7 +1903,8 @@ impl Editor {
         if crate::widget_render::overlay_widget_id().is_some()
             && matches!(
                 mouse.kind,
-                MouseEventKind::Down(MouseButton::Left)
+                MouseEventKind::Moved
+                    | MouseEventKind::Down(MouseButton::Left)
                     | MouseEventKind::Drag(MouseButton::Left)
                     | MouseEventKind::Up(MouseButton::Left)
             )
@@ -1936,11 +1948,12 @@ impl Editor {
             }
             if matches!(
                 mouse.kind,
-                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                MouseEventKind::Moved
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
             ) {
                 return;
             }
-            self.suppress_mouse_until_left_up = false;
         }
 
         if self.handle_tile_resize_drag(mouse, precise_col, precise_row) {
@@ -3896,10 +3909,12 @@ impl Editor {
             .iter()
             .map(|(id, revision, layout)| (*id, *revision, Arc::as_ptr(layout) as usize))
             .collect::<Vec<_>>();
+        let registry_revision = self.runtime.widget_bindings_revision();
         if self
             .visible_binding_layout_signature
             .as_ref()
             .is_some_and(|cached| cached == &signature)
+            && self.visible_binding_registry_revision == registry_revision
         {
             return;
         }
@@ -3907,6 +3922,7 @@ impl Editor {
             visible_layouts.iter().map(|(_, _, layout)| layout.as_ref()),
         );
         self.visible_binding_layout_signature = Some(signature);
+        self.visible_binding_registry_revision = self.runtime.widget_bindings_revision();
     }
 
     pub fn visible_widgets_animating(&self) -> bool {
@@ -4945,6 +4961,22 @@ impl Editor {
             return;
         }
 
+        // Escape is both a local cancellation key and a commonly bound global
+        // command. When a widget has focus, let it cancel any in-progress edit,
+        // then blur it and run the direct Escape binding in the same keypress.
+        // Minibuffers, regions, Vim insert mode, and other modal contexts have
+        // already had the opportunity to consume Escape above.
+        if key.code == KeyCode::Esc
+            && key.modifiers == KeyModifiers::NONE
+            && self.active_leaf().focused_widget_id.is_some()
+        {
+            let _ = self.handle_focused_widget_key(key);
+            self.clear_focused_widget();
+            self.mark_needs_redraw();
+            let _ = self.run_direct_lisp_binding("ESC");
+            return;
+        }
+
         // Focused widget keys take priority over global bindings
         // (so Enter/arrows work in number-pickers, dropdowns, etc.)
         if self.handle_focused_widget_key(key) {
@@ -4961,18 +4993,8 @@ impl Editor {
 
         // Check direct keybinding before treating as chord prefix.
         // This allows e.g. "ESC" to fire even when "ESC ." chords exist.
-        {
-            let ks = key_str(key);
-            if let Some(handler) = self.lisp_bindings.get(&ks).cloned() {
-                if self.builtins.values().any(|cmd| cmd == &handler) {
-                    self.run_command(&handler);
-                    return;
-                } else if self.call_lisp_handler(&handler) {
-                    return;
-                } else {
-                    self.clear_minibuffer_message();
-                }
-            }
+        if self.run_direct_lisp_binding(&key_str(key)) {
+            return;
         }
 
         if self.binding_has_prefix(&key_str(key)) {
@@ -5040,6 +5062,21 @@ impl Editor {
                 self.sync_runtime_context();
             }
             _ => {}
+        }
+    }
+
+    fn run_direct_lisp_binding(&mut self, key: &str) -> bool {
+        let Some(handler) = self.lisp_bindings.get(key).cloned() else {
+            return false;
+        };
+        if self.builtins.values().any(|command| command == &handler) {
+            self.run_command(&handler);
+            true
+        } else if self.call_lisp_handler(&handler) {
+            true
+        } else {
+            self.clear_minibuffer_message();
+            false
         }
     }
 
@@ -5236,6 +5273,10 @@ impl Editor {
                 (KeyCode::Char('g'), KeyCode::Char('g')) => {
                     self.active_buffer_mut().cursor = (0, 0);
                     self.sync_text_horizontal_scroll_to_viewport();
+                    true
+                }
+                (KeyCode::Char('g'), KeyCode::Char('d')) => {
+                    self.goto_definition();
                     true
                 }
                 _ => true,
@@ -5729,7 +5770,13 @@ impl Editor {
                         );
                         return;
                     }
-                    self.begin_widget_gesture(content_col, content_row, precise_col, precise_row);
+                    self.begin_widget_gesture(
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                        mouse.modifiers,
+                    );
                     if self.try_handle_widget_mouse_precise(
                         mouse,
                         content_col,
@@ -5909,13 +5956,9 @@ impl Editor {
             MouseEventKind::Moved => {
                 // Update dropdown hover when overlay is open
                 if let Some(overlay_id) = crate::widget_render::overlay_widget_id() {
-                    if let Some((local_col, local_row)) =
-                        crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)
-                    {
-                        let _local_col = local_col;
-                        if crate::widget_render::dropdown::hover_overlay(overlay_id, local_row) {
-                            self.mark_needs_redraw();
-                        }
+                    let local_row = precise_row - content_row as f32;
+                    if crate::widget_render::dropdown::hover_overlay(overlay_id, local_row) {
+                        self.mark_needs_redraw();
                     }
                 }
                 if widgets_visible {
@@ -5936,6 +5979,7 @@ impl Editor {
                     );
                 } else {
                     self.widget_cursor = WidgetCursor::Default;
+                    crate::widget_render::set_pointer_hover_widget(None);
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -6283,17 +6327,7 @@ impl Editor {
         }
         self.sync_runtime_source_context();
         self.clear_minibuffer_message();
-        let rendered_args = args
-            .iter()
-            .map(format_lisp_value)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let code = if rendered_args.is_empty() {
-            format!("({fn_name})")
-        } else {
-            format!("({fn_name} {rendered_args})")
-        };
-        let handled = match self.runtime.eval_str(&code) {
+        let handled = match self.runtime.invoke_global(fn_name, args.to_vec()) {
             Ok(Some(Value::Bool(false))) => false,
             Ok(Some(result)) => {
                 self.show_transient_message(format_value_for_minibuffer(&result));
@@ -6485,11 +6519,31 @@ impl Editor {
     fn sync_runtime_source_context(&mut self) {
         self.sync_runtime_context();
         let active = self.active_buffer();
-        let text = active.text();
-        let sexp = sexp_at_cursor(&active.lines, active.cursor);
+        let revision = RuntimeSourceContextRevision {
+            buffer_id: active.id,
+            text_revision: active.revision,
+            cursor: active.cursor,
+        };
+        let previous = self.runtime_source_context_revision;
+        let text_changed = previous.is_none_or(|previous| {
+            previous.buffer_id != revision.buffer_id
+                || previous.text_revision != revision.text_revision
+        });
+        let cursor_changed =
+            text_changed || previous.is_none_or(|previous| previous.cursor != revision.cursor);
+        if !text_changed && !cursor_changed {
+            return;
+        }
+        let text = text_changed.then(|| active.text());
+        let sexp = cursor_changed.then(|| sexp_at_cursor(&active.lines, active.cursor));
         let mut shared = self.runtime.shared.borrow_mut();
-        shared.current_buffer_text = text;
-        shared.current_sexp = sexp;
+        if let Some(text) = text {
+            shared.current_buffer_text = text;
+        }
+        if let Some(sexp) = sexp {
+            shared.current_sexp = sexp;
+        }
+        self.runtime_source_context_revision = Some(revision);
     }
 
     fn apply_widget_tree_to_buffer(

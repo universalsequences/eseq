@@ -95,7 +95,7 @@ before shipping; the old button labels don't disambiguate which is which.
 
 ### Data (Rust)
 
-- `crates/sequencer/src/bin/metal_seq/browser.rs`
+- `crates/sequencer/src/ui/browser.rs`
   - `build_instrument_tree_value` (~line 570): currently returns only the
     scanned `instruments/` directory tree. Prepend the four builtin leaves
     (subject to the query filter) and the header items.
@@ -111,7 +111,7 @@ before shipping; the old button labels don't disambiguate which is which.
 
 ### UI (eseqlisp)
 
-- `crates/sequencer/metal-seq-browser.lisp`
+- `crates/sequencer/ui/browser.lisp`
   - `sbrowser-create-toolbar` (~line 565): delete (the four buttons move into
     the tree). Keep `sbrowser-add-*-track` functions — they become the
     activation targets.
@@ -136,7 +136,7 @@ before shipping; the old button labels don't disambiguate which is which.
 ## Tests
 
 - Update/extend the tree-building tests in
-  `crates/sequencer/src/bin/metal_seq/state_values.rs`
+  `crates/sequencer/src/ui/state_values.rs`
   (e.g. `metal_seq_audio_effect_tree_excludes_new_effect_action` ~line 10167):
   - instrument tree starts with the four builtins in the order Sampler,
     Modulator, Drum Rack, Instrument Rack, followed by headers/folders

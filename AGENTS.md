@@ -1,5 +1,41 @@
 # AGENTS.md
 
+## Test selection and runtime policy
+
+Use the narrowest test target that validates the behavior changed. Do not run a
+full package or workspace test suite as a default validation or finishing step.
+
+For a unit test in a library, select both the library target and the exact test:
+
+```sh
+cargo test -p <package> --lib <fully-qualified-test-name> -- --exact
+```
+
+For an integration test, select the integration-test binary and the exact test:
+
+```sh
+cargo test -p <package> --test <test-target> <test-name> -- --exact
+```
+
+Do not run any of the following unless the user explicitly requests exhaustive
+testing, or the change is genuinely cross-cutting and no narrower validation
+exists:
+
+```sh
+cargo test
+cargo test --workspace
+cargo test -p sequencer
+```
+
+Before starting an exhaustive suite, tell the user which suite will run and why.
+Full package and workspace suites should normally be left to CI. Do not infer
+that a full suite is required merely because a change touches the `sequencer`
+package or because the task asks you to "run tests."
+
+If a targeted test runs for more than three minutes without producing progress,
+stop it and investigate the delay. Report the command and the phase that stalled
+if the cause cannot be resolved. Do not respond by running a broader suite.
+
 ## Instrument testing
 
 Use `instrument_probe` when changing DGenLisp instruments, wavetable/tensor loading, or host-side instrument initialization. It exercises the same host compile/load/init path as the app and gives quick signal checks without launching the UI.
@@ -20,7 +56,9 @@ For saved instrument names, the probe resolves local assets from the saved instr
 When changing scheduler trigger routing, MIDI FX routing, graph-mode `def-sequencer` playback, or pattern-parameter application for neural/graph generated events, use the deterministic scheduler lookahead harness instead of loading a whole project or relying only on UI/audio behavior. The harness drives the extracted production scheduler lookahead pass directly, without instruments, DSP, project load, or UI:
 
 ```sh
-cargo test -p sequencer scheduler::tests::scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx -- --nocapture
+cargo test -p sequencer --lib \
+  scheduler::tests::scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx \
+  -- --exact --nocapture
 ```
 
 This test covers the important route:
@@ -32,7 +70,9 @@ step seed -> Lisp graph sequencer -> target track MIDI FX -> routed target event
 If scheduler-side Lisp/project scratch runtime loading changes, also run:
 
 ```sh
-cargo test -p sequencer scheduler::tests::scheduler_runtime_keeps_builtin_midi_fx_when_project_scratch_fails -- --nocapture
+cargo test -p sequencer --lib \
+  scheduler::tests::scheduler_runtime_keeps_builtin_midi_fx_when_project_scratch_fails \
+  -- --exact --nocapture
 ```
 
 That regression protects the case where project scratch source, such as a graph sequencer demo, fails in the scheduler VM but builtin MIDI FX like `arp` and `trigger-to-track` must remain registered.
@@ -51,7 +91,7 @@ Capture the process/instrument strip with the checked-in process fixture:
 
 ```sh
 cargo run -p sequencer --bin metal_seq -- capture \
-  --script crates/sequencer/capture-fixtures/process-panel.lisp \
+  --script crates/sequencer/ui/capture-fixtures/process-panel.lisp \
   --buffer fx \
   --track 0 \
   --width 2000 \
@@ -63,7 +103,7 @@ Capture a real saved custom instrument UI with:
 
 ```sh
 cargo run -p sequencer --bin metal_seq -- capture \
-  --script crates/sequencer/capture-fixtures/instrument-panel.lisp \
+  --script crates/sequencer/ui/capture-fixtures/instrument-panel.lisp \
   --buffer fx \
   --track 0 \
   --width 1800 \
@@ -79,7 +119,7 @@ Capture scripts contain exactly one declarative project form, followed by ordina
 (capture-project
   (track :sampler :name "Sampler"))
 
-(load "../scripts/process-inlet-patch-demo.lisp")
+(load "../../scripts/processes/process-inlet-patch-demo.lisp")
 (process-inlet-demo-attach-track 0)
 
 ;; Optional: runs after project/process state has populated SEQ.
@@ -87,7 +127,7 @@ Capture scripts contain exactly one declarative project form, followed by ordina
   (process-panel-select-slot (nth SEQ.process-slots 0)))
 ```
 
-Supported track kinds are `:sampler`, `:instrument`, `:modulator`, `:drum-rack`, and `:layer-rack`; tracks may also declare `:midi-fx` and built-in `:audio-fx`. Use `capture-after-sync` for UI state that depends on populated reactive data, such as selecting a process row or opening an instrument tab. Add durable fixtures under `crates/sequencer/capture-fixtures/`. Full usage is documented in `docs/metal-seq-ui-capture.md`. The capture path is macOS-only because it uses Metal.
+Supported track kinds are `:sampler`, `:instrument`, `:modulator`, `:drum-rack`, and `:layer-rack`; tracks may also declare `:midi-fx` and built-in `:audio-fx`. Use `capture-after-sync` for UI state that depends on populated reactive data, such as selecting a process row or opening an instrument tab. Add durable fixtures under `crates/sequencer/ui/capture-fixtures/`. Full usage is documented in `docs/metal-seq-ui-capture.md`. The capture path is macOS-only because it uses Metal.
 
 ### Patcher visual capture
 
@@ -118,7 +158,7 @@ cargo run -p eseqlisp --bin eseqlisp_capture -- \
 
 ## Render loop ownership
 
-When changing animation cadence, redraw scheduling, frame pacing, or FPS diagnostics, first identify which binary owns the active event/render loop. Shared backends such as `crates/eseqlisp/src/ui/metal_backend.rs` perform drawing, but app binaries may decide when drawing happens. In particular, `metal_seq` owns its render loop in `crates/sequencer/src/bin/metal_seq/main.rs`; changes to `eseqlisp::run_metal` do not affect `metal_seq`. If a backend log appears but loop-level logs or frame pacing changes do not, check for a binary-specific loop before continuing.
+When changing animation cadence, redraw scheduling, frame pacing, or FPS diagnostics, first identify which binary owns the active event/render loop. Shared backends such as `crates/eseqlisp/src/ui/metal_backend.rs` perform drawing, but app binaries may decide when drawing happens. In particular, `metal_seq` owns its render loop in `crates/sequencer/src/ui/main.rs`; changes to `eseqlisp::run_metal` do not affect `metal_seq`. If a backend log appears but loop-level logs or frame pacing changes do not, check for a binary-specific loop before continuing.
 
 >> EXTREMELY IMPORTANT <<<
 NO HACKS. The user is EXTREMELY concerned about code quality, much more so than immediate results. If they ask you to build something and, while doing so, you hit a wall, and realize that the only way to ship the requested feature is to

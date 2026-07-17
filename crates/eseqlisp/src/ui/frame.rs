@@ -650,6 +650,34 @@ pub fn build_tiled_render_frame_borderless(
     build_tiled_render_frame_impl(editor, total_width, total_height, false)
 }
 
+/// Restore per-tile widget dirtiness when a tiled frame could not be presented.
+///
+/// Frame construction transfers these IDs out of the editor so the renderer can
+/// update retained widget runs exactly once. If the platform has no drawable,
+/// the transfer must be rolled back or a later clean frame can reuse stale GPU
+/// scene data indefinitely.
+pub fn requeue_unpresented_tiled_frame(editor: &mut Editor, tiled_frame: &TiledRenderFrame) {
+    let mut restored_any = false;
+    for tile in &tiled_frame.tiles {
+        if tile.frame.dirty_widget_ids.is_empty() {
+            continue;
+        }
+        let Some(leaf) = editor.tile_root.find_leaf_mut(tile.tile_id) else {
+            continue;
+        };
+        for &widget_id in &tile.frame.dirty_widget_ids {
+            if !leaf.dirty_widget_ids.contains(&widget_id) {
+                leaf.dirty_widget_ids.push(widget_id);
+            }
+        }
+        leaf.cached_inactive_frame = None;
+        restored_any = true;
+    }
+    if restored_any {
+        editor.mark_needs_redraw();
+    }
+}
+
 fn metal_content_cells(logical_extent: f32) -> usize {
     logical_extent.max(0.0).floor() as usize
 }

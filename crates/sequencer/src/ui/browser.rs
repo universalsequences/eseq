@@ -1,1488 +1,1462 @@
-use crossterm::event::KeyCode;
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use std::time::Instant;
-use unicode_width::UnicodeWidthStr;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::rc::Rc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::draw::region_border_style;
-use super::params::draw_track_params_column;
-use super::{
-    App, BrowserState, InputMode, PresetPromptKind, Region, SidebarMode, SidebarTab, UiState,
-};
-use crate::lisp_host;
+use eseqlisp::vm::Value;
 
-// ── Sample Browser tree ──
+use sequencer::sample_db::{SampleDb, SampleRow, TagFacet};
+use sequencer::tui;
 
-pub struct BrowserEntry {
-    pub depth: usize,
-    pub is_dir: bool,
-    pub name: String,
-    pub path: std::path::PathBuf,
-    pub expanded: bool,
+use super::current_custom_instrument_name;
+use super::values::{build_icon_tree_items, list_value, map_value};
+
+pub(crate) const SAMPLE_BROWSER_MAX_RESULTS: usize = 2000;
+
+#[derive(Clone)]
+pub(crate) struct SampleTreeNode {
+    label: String,
+    label_lower: String,
+    path: Option<String>,
+    children: Vec<SampleTreeNode>,
 }
 
-pub struct BrowserNode {
-    pub name: String,
-    pub path: std::path::PathBuf,
-    pub is_dir: bool,
-    pub children: Vec<BrowserNode>,
-    pub expanded: bool,
+#[derive(Clone)]
+pub(crate) struct InstrumentTreeNode {
+    label: String,
+    name: Option<String>,
+    folder: Option<String>,
+    children: Vec<InstrumentTreeNode>,
 }
 
-impl BrowserNode {
-    /// Recursively scan a directory, including only dirs that contain .wav descendants and .wav files.
-    pub fn scan_root(root: &str) -> Vec<BrowserNode> {
-        let root_path = std::path::Path::new(root);
-        if !root_path.is_dir() {
-            return Vec::new();
-        }
-        Self::scan_dir(root_path)
-    }
-
-    fn scan_dir(dir: &std::path::Path) -> Vec<BrowserNode> {
-        let mut nodes = Vec::new();
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return nodes,
-        };
-
-        let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        entries.sort_by_key(|e| e.file_name());
-
-        for entry in entries {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-
-            if path.is_dir() {
-                let children = Self::scan_dir(&path);
-                if !children.is_empty() {
-                    nodes.push(BrowserNode {
-                        name,
-                        path,
-                        is_dir: true,
-                        children,
-                        expanded: false,
-                    });
-                }
-            } else if path
-                .extension()
-                .map(|ext| ext.to_ascii_lowercase() == "wav")
-                .unwrap_or(false)
-            {
-                nodes.push(BrowserNode {
-                    name,
-                    path,
-                    is_dir: false,
-                    children: Vec::new(),
-                    expanded: false,
-                });
-            }
-        }
-        nodes
-    }
-
-    /// Flatten the tree respecting expanded/collapsed state.
-    pub fn flatten_visible(nodes: &[BrowserNode], depth: usize) -> Vec<BrowserEntry> {
-        let mut result = Vec::new();
-        for node in nodes {
-            result.push(BrowserEntry {
-                depth,
-                is_dir: node.is_dir,
-                name: node.name.clone(),
-                path: node.path.clone(),
-                expanded: node.expanded,
-            });
-            if node.is_dir && node.expanded {
-                result.extend(Self::flatten_visible(&node.children, depth + 1));
-            }
-        }
-        result
-    }
-
-    /// Flatten with search filter — show matching .wav files with their ancestor context (auto-expanded).
-    /// Matches against both file names and folder names. When a folder name matches,
-    /// all its descendants are included.
-    pub fn flatten_filtered(
-        nodes: &[BrowserNode],
-        filter_lower: &str,
-        depth: usize,
-    ) -> Vec<BrowserEntry> {
-        let mut result = Vec::new();
-        for node in nodes {
-            if node.is_dir {
-                let dir_matches = node.name.to_lowercase().contains(filter_lower);
-                let child_results = if dir_matches {
-                    // Folder name matches — include all children
-                    Self::flatten_all(&node.children, depth + 1)
-                } else {
-                    Self::flatten_filtered(&node.children, filter_lower, depth + 1)
-                };
-                if !child_results.is_empty() {
-                    result.push(BrowserEntry {
-                        depth,
-                        is_dir: true,
-                        name: node.name.clone(),
-                        path: node.path.clone(),
-                        expanded: true,
-                    });
-                    result.extend(child_results);
-                }
-            } else if node.name.to_lowercase().contains(filter_lower) {
-                result.push(BrowserEntry {
-                    depth,
-                    is_dir: false,
-                    name: node.name.clone(),
-                    path: node.path.clone(),
-                    expanded: false,
-                });
-            }
-        }
-        result
-    }
-
-    /// Flatten all descendants (used when a parent folder matches the filter).
-    fn flatten_all(nodes: &[BrowserNode], depth: usize) -> Vec<BrowserEntry> {
-        let mut result = Vec::new();
-        for node in nodes {
-            result.push(BrowserEntry {
-                depth,
-                is_dir: node.is_dir,
-                name: node.name.clone(),
-                path: node.path.clone(),
-                expanded: node.is_dir,
-            });
-            if node.is_dir {
-                result.extend(Self::flatten_all(&node.children, depth + 1));
-            }
-        }
-        result
-    }
-
-    /// Toggle expanded state for a node at a given path in the tree.
-    pub fn toggle_expanded(nodes: &mut [BrowserNode], target_path: &std::path::Path) {
-        for node in nodes.iter_mut() {
-            if node.path == target_path && node.is_dir {
-                node.expanded = !node.expanded;
-                return;
-            }
-            if node.is_dir && node.expanded {
-                Self::toggle_expanded(&mut node.children, target_path);
-            }
-        }
-    }
-
-    /// Set expanded state for a node.
-    pub fn set_expanded(nodes: &mut [BrowserNode], target_path: &std::path::Path, expanded: bool) {
-        for node in nodes.iter_mut() {
-            if node.path == target_path && node.is_dir {
-                node.expanded = expanded;
-                return;
-            }
-            if node.is_dir {
-                Self::set_expanded(&mut node.children, target_path, expanded);
-            }
-        }
-    }
-
-    /// Expand all ancestor directories of a target file path. Returns true if found.
-    pub fn expand_to_file(nodes: &mut [BrowserNode], target_stem: &str) -> bool {
-        for node in nodes.iter_mut() {
-            if node.is_dir {
-                if Self::expand_to_file(&mut node.children, target_stem) {
-                    node.expanded = true;
-                    return true;
-                }
-            } else {
-                let stem = node.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                if stem == target_stem {
-                    return true;
-                }
-            }
-        }
-        false
-    }
+#[derive(Clone)]
+pub(crate) struct ScriptTreeNode {
+    label: String,
+    path: Option<String>,
+    children: Vec<ScriptTreeNode>,
 }
 
-impl BrowserState {
-    pub(super) fn visible_items(&self) -> Vec<BrowserEntry> {
-        if self.filter.is_empty() {
-            BrowserNode::flatten_visible(&self.tree, 0)
-        } else {
-            let filter_lower = self.filter.to_lowercase();
-            BrowserNode::flatten_filtered(&self.tree, &filter_lower, 0)
-        }
-    }
-
-    fn max_visible(&self, ui: &UiState) -> usize {
-        let h = ui.layout.sidebar_inner.height as usize;
-        if h > 1 {
-            h - 1
-        } else {
-            1
-        }
-    }
-
-    pub(super) fn sync_to_track(
-        &mut self,
-        tracks: &[String],
-        cursor_track: usize,
-        is_sampler_track: bool,
-        ui: &UiState,
-    ) {
-        if tracks.is_empty() || !is_sampler_track {
-            return;
-        }
-        let sample_name = &tracks[cursor_track];
-        if sample_name.is_empty() {
-            return;
-        }
-
-        self.filter.clear();
-        BrowserNode::expand_to_file(&mut self.tree, sample_name);
-
-        let items = self.visible_items();
-        for (i, entry) in items.iter().enumerate() {
-            if !entry.is_dir {
-                let stem = entry
-                    .path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                if stem == sample_name {
-                    self.cursor = i;
-                    let max_visible = self.max_visible(ui);
-                    self.scroll_offset = i.saturating_sub(max_visible / 2);
-                    return;
-                }
-            }
-        }
-    }
-
-    pub(super) fn handle_sidebar_input(app: &mut App, code: KeyCode) {
-        if app.ui.sidebar_tab == SidebarTab::Tools {
-            app.ui.params_column = 0;
-            app.handle_track_params_column(code);
-            return;
-        }
-        if app.ui.sidebar_tab == SidebarTab::Agent {
-            if app.agent_panel.model_dropdown_open {
-                match code {
-                    KeyCode::Up => {
-                        if app.agent_panel.model_dropdown_cursor > 0 {
-                            app.agent_panel.model_dropdown_cursor -= 1;
-                        }
-                    }
-                    KeyCode::Down => {
-                        let max = app.agent_model_options().len();
-                        if app.agent_panel.model_dropdown_cursor + 1 < max {
-                            app.agent_panel.model_dropdown_cursor += 1;
-                        }
-                    }
-                    KeyCode::Enter => {
-                        app.select_agent_model_index(app.agent_panel.model_dropdown_cursor);
-                        app.agent_panel.model_dropdown_open = false;
-                    }
-                    KeyCode::Esc => {
-                        app.agent_panel.model_dropdown_open = false;
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            match code {
-                KeyCode::Char(c) => {
-                    if app.agent_panel.pending_request.is_none() {
-                        let cursor = app
-                            .agent_panel
-                            .input_cursor
-                            .min(app.agent_panel.input_buffer.len());
-                        app.agent_panel.input_buffer.insert(cursor, c);
-                        app.agent_panel.input_cursor = cursor + 1;
-                    }
-                }
-                KeyCode::Backspace => {
-                    if app.agent_panel.pending_request.is_none() {
-                        let cursor = app
-                            .agent_panel
-                            .input_cursor
-                            .min(app.agent_panel.input_buffer.len());
-                        if cursor > 0 {
-                            app.agent_panel.input_buffer.remove(cursor - 1);
-                            app.agent_panel.input_cursor = cursor - 1;
-                        }
-                    }
-                }
-                KeyCode::Left => {
-                    if app.agent_panel.pending_request.is_none() {
-                        app.agent_panel.input_cursor =
-                            app.agent_panel.input_cursor.saturating_sub(1);
-                    }
-                }
-                KeyCode::Right => {
-                    if app.agent_panel.pending_request.is_none() {
-                        app.agent_panel.input_cursor = (app.agent_panel.input_cursor + 1)
-                            .min(app.agent_panel.input_buffer.len());
-                    }
-                }
-                KeyCode::Home => app.agent_panel.input_cursor = 0,
-                KeyCode::End => app.agent_panel.input_cursor = app.agent_panel.input_buffer.len(),
-                KeyCode::Delete => {
-                    if app.agent_panel.pending_request.is_none() {
-                        let cursor = app
-                            .agent_panel
-                            .input_cursor
-                            .min(app.agent_panel.input_buffer.len());
-                        if cursor < app.agent_panel.input_buffer.len() {
-                            app.agent_panel.input_buffer.remove(cursor);
-                        }
-                    }
-                }
-                KeyCode::Enter => {
-                    if let Err(error) = app.submit_agent_prompt() {
-                        app.editor.status_message = Some((error, Instant::now()));
-                    }
-                }
-                KeyCode::Esc => {
-                    if app.agent_panel.pending_request.is_some() {
-                        app.cancel_agent_request();
-                    } else {
-                        if !app.tracks.is_empty() {
-                            app.ui.sidebar_tab = SidebarTab::Tools;
-                        } else {
-                            app.ui.sidebar_tab = SidebarTab::Sounds;
-                        }
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        // Instrument picker mode: separate input handling
-        if app.effective_sidebar_mode() == SidebarMode::InstrumentPicker {
-            Self::handle_instrument_picker_input(app, code);
-            return;
-        }
-
-        if app.effective_sidebar_mode() == SidebarMode::Presets {
-            app.clamp_preset_browser();
-            match code {
-                KeyCode::Char(c) if app.ui.sidebar_search_focused => {
-                    app.preset_browser.filter.push(c);
-                    app.preset_browser.cursor = 0;
-                    app.preset_browser.scroll_offset = 0;
-                }
-                KeyCode::Backspace if app.ui.sidebar_search_focused => {
-                    app.preset_browser.filter.pop();
-                    app.preset_browser.cursor = 0;
-                    app.preset_browser.scroll_offset = 0;
-                }
-                KeyCode::Up => {
-                    if app.preset_browser.cursor > 0 {
-                        app.preset_browser.cursor -= 1;
-                    }
-                    app.clamp_preset_browser();
-                }
-                KeyCode::Down => {
-                    let items = app.visible_preset_items();
-                    if app.preset_browser.cursor + 1 < items.len() {
-                        app.preset_browser.cursor += 1;
-                    }
-                    app.clamp_preset_browser();
-                }
-                KeyCode::Enter => {
-                    app.load_selected_preset_into_track();
-                    app.ui.sidebar_search_focused = false;
-                }
-                KeyCode::Esc => {
-                    app.preset_browser.filter.clear();
-                    app.preset_browser.cursor = 0;
-                    app.preset_browser.scroll_offset = 0;
-                    app.ui.sidebar_search_focused = false;
-                    if !app.tracks.is_empty() {
-                        app.ui.sidebar_tab = SidebarTab::Tools;
-                    } else {
-                        app.ui.focused_region = Region::Cirklon;
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        match code {
-            KeyCode::Char(c) if app.ui.sidebar_search_focused => {
-                app.browser.filter.push(c);
-                app.browser.cursor = 0;
-                app.browser.scroll_offset = 0;
-            }
-            KeyCode::Backspace if app.ui.sidebar_search_focused => {
-                app.browser.filter.pop();
-                app.browser.cursor = 0;
-                app.browser.scroll_offset = 0;
-            }
-            KeyCode::Up => {
-                if app.browser.cursor > 0 {
-                    app.browser.cursor -= 1;
-                    if app.browser.cursor < app.browser.scroll_offset {
-                        app.browser.scroll_offset = app.browser.cursor;
-                    }
-                }
-            }
-            KeyCode::Down => {
-                let items = app.browser.visible_items();
-                if app.browser.cursor + 1 < items.len() {
-                    app.browser.cursor += 1;
-                    let max_visible = app.browser.max_visible(&app.ui);
-                    if app.browser.cursor >= app.browser.scroll_offset + max_visible {
-                        app.browser.scroll_offset = app.browser.cursor + 1 - max_visible;
-                    }
-                }
-            }
-            KeyCode::Right => {
-                let items = app.browser.visible_items();
-                if app.browser.cursor < items.len() {
-                    let item = &items[app.browser.cursor];
-                    if item.is_dir && !item.expanded {
-                        let path = item.path.clone();
-                        BrowserNode::set_expanded(&mut app.browser.tree, &path, true);
-                    }
-                }
-            }
-            KeyCode::Left => {
-                let items = app.browser.visible_items();
-                if app.browser.cursor < items.len() {
-                    let item = &items[app.browser.cursor];
-                    if item.is_dir && item.expanded {
-                        let path = item.path.clone();
-                        BrowserNode::set_expanded(&mut app.browser.tree, &path, false);
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                let items = app.browser.visible_items();
-                if app.browser.cursor < items.len() {
-                    let item = &items[app.browser.cursor];
-                    let path = item.path.clone();
-                    if item.is_dir {
-                        BrowserNode::toggle_expanded(&mut app.browser.tree, &path);
-                    } else {
-                        app.sidebar_select_file(&path);
-                        app.ui.sidebar_search_focused = false;
-                    }
-                }
-            }
-            KeyCode::Esc => {
-                app.browser.filter.clear();
-                app.browser.cursor = 0;
-                app.browser.scroll_offset = 0;
-                app.ui.sidebar_search_focused = false;
-                if !app.tracks.is_empty() {
-                    app.ui.sidebar_tab = SidebarTab::Tools;
-                    app.ui.sidebar_mode = SidebarMode::Audition;
-                } else {
-                    app.ui.focused_region = Region::Cirklon;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_instrument_picker_input(app: &mut App, code: KeyCode) {
-        use crate::sequencer::InstrumentType;
-        match code {
-            KeyCode::Up => {
-                if app.ui.instrument_picker_cursor > 0 {
-                    app.ui.instrument_picker_cursor -= 1;
-                }
-            }
-            KeyCode::Down => {
-                if app.ui.instrument_picker_cursor + 1 < InstrumentType::ADD_TRACK_TYPES.len() {
-                    app.ui.instrument_picker_cursor += 1;
-                }
-            }
-            KeyCode::Enter => {
-                match InstrumentType::ADD_TRACK_TYPES[app.ui.instrument_picker_cursor] {
-                    InstrumentType::Sampler => {
-                        app.browser.cursor = 0;
-                        app.browser.filter.clear();
-                        app.browser.scroll_offset = 0;
-                        app.ui.sidebar_mode = SidebarMode::AddTrack;
-                        app.ui.sidebar_search_focused = true;
-                    }
-                    InstrumentType::Custom => {
-                        app.editor.picker_cursor = 0;
-                        app.editor.picker_filter.clear();
-                        app.editor.picker_items = crate::lisp_host::list_saved_instruments();
-                        app.ui.input_mode = super::InputMode::InstrumentPicker;
-                    }
-                    InstrumentType::Modulator => match app.graph_controller().add_modulator_track()
-                    {
-                        Ok(_) => {
-                            app.ui.sidebar_tab = SidebarTab::Tools;
-                            app.ui.sidebar_mode = SidebarMode::Audition;
-                            app.ui.sidebar_search_focused = false;
-                        }
-                        Err(error) => {
-                            app.editor.status_message = Some((error, std::time::Instant::now()));
-                        }
-                    },
-                    InstrumentType::Rack => {
-                        unreachable!("rack is not exposed in the add-track picker")
-                    }
-                }
-            }
-            KeyCode::Esc => {
-                if !app.tracks.is_empty() {
-                    app.ui.sidebar_tab = SidebarTab::Tools;
-                    app.ui.sidebar_mode = SidebarMode::Audition;
-                } else {
-                    app.ui.focused_region = Region::Cirklon;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub(super) fn scroll(&mut self, delta: isize, ui: &UiState) {
-        let items = self.visible_items();
-        if items.is_empty() {
-            return;
-        }
-        let max_visible = self.max_visible(ui);
-        let max_scroll = items.len().saturating_sub(max_visible);
-        if delta < 0 {
-            self.scroll_offset = self.scroll_offset.saturating_sub((-delta) as usize);
-        } else {
-            self.scroll_offset = (self.scroll_offset + delta as usize).min(max_scroll);
-        }
-    }
+struct BuiltinInstrumentDescriptor {
+    label: &'static str,
+    name: &'static str,
+    icon: &'static str,
 }
 
-impl App {
-    pub(super) fn current_custom_instrument_name(&self) -> Option<&str> {
-        if self.tracks.is_empty() || self.is_sampler_track(self.ui.cursor_track) {
-            None
-        } else if let Some(Some(engine_id)) = self.graph.track_engine_ids.get(self.ui.cursor_track)
-        {
-            self.editor
-                .engine_registry
-                .get(*engine_id)
-                .map(|engine| engine.name.as_str())
-        } else {
-            self.tracks.get(self.ui.cursor_track).map(String::as_str)
-        }
-    }
+const BUILTIN_INSTRUMENTS: &[BuiltinInstrumentDescriptor] = &[
+    BuiltinInstrumentDescriptor {
+        label: "Sampler",
+        name: "sampler",
+        icon: "sampler",
+    },
+    BuiltinInstrumentDescriptor {
+        label: "Modulator",
+        name: "modulator",
+        icon: "waveform",
+    },
+    BuiltinInstrumentDescriptor {
+        label: "Drum Rack",
+        name: "rack",
+        icon: "sampler",
+    },
+    BuiltinInstrumentDescriptor {
+        label: "Instrument Rack",
+        name: "layer-rack",
+        icon: "sampler",
+    },
+];
 
-    pub(super) fn visible_preset_items(&self) -> Vec<String> {
-        let Some(name) = self.current_custom_instrument_name() else {
-            return Vec::new();
-        };
-        let mut items: Vec<String> = lisp_host::load_instrument_presets(name)
+pub(crate) fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNode> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
             .unwrap_or_default()
-            .into_iter()
-            .map(|p| p.name)
-            .collect();
-        items.sort();
-        if self.preset_browser.filter.is_empty() {
-            return items;
+            .to_string_lossy()
+            .to_string();
+        if name.starts_with('.') {
+            continue;
         }
-        let filter = self.preset_browser.filter.to_lowercase();
-        items.retain(|item| item.to_lowercase().contains(&filter));
+        if path.is_dir() {
+            dirs.push((name, path));
+        } else if let Some(ext) = path.extension() {
+            if ext.eq_ignore_ascii_case("wav") {
+                files.push((name, path.to_string_lossy().to_string()));
+            }
+        }
+    }
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+    let mut items = Vec::new();
+
+    for (label, path) in dirs {
+        let children = build_sample_tree_node(&path);
+        if children.is_empty() {
+            continue;
+        }
+        items.push(SampleTreeNode {
+            label_lower: label.to_lowercase(),
+            label,
+            path: None,
+            children,
+        });
+    }
+
+    for (label, full_path) in files {
+        items.push(SampleTreeNode {
+            label_lower: label.to_lowercase(),
+            label,
+            path: Some(full_path),
+            children: Vec::new(),
+        });
+    }
+
+    items
+}
+
+pub(crate) fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
+    Value::List(
         items
-    }
-
-    pub(super) fn current_preset_engine_name(&self) -> Option<&str> {
-        self.current_custom_instrument_name()
-    }
-
-    fn current_track_sound_state(&self) -> crate::sequencer::TrackSoundState {
-        self.state
-            .pattern
-            .track_sound_state
-            .lock()
-            .unwrap()
-            .get(self.ui.cursor_track)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    pub(super) fn set_track_sound_state(
-        &self,
-        track: usize,
-        engine_id: Option<usize>,
-        loaded_preset: Option<String>,
-        dirty: bool,
-    ) {
-        if let Some(meta) = self
-            .state
-            .pattern
-            .track_sound_state
-            .lock()
-            .unwrap()
-            .get_mut(track)
-        {
-            meta.engine_id = engine_id;
-            meta.loaded_preset = loaded_preset;
-            meta.dirty = dirty;
-        }
-    }
-
-    pub(super) fn mark_track_sound_dirty(&self, track: usize) {
-        if let Some(meta) = self
-            .state
-            .pattern
-            .track_sound_state
-            .lock()
-            .unwrap()
-            .get_mut(track)
-        {
-            meta.dirty = true;
-        }
-    }
-
-    pub(super) fn clamp_preset_browser(&mut self) {
-        let items = self.visible_preset_items();
-        if items.is_empty() {
-            self.preset_browser.cursor = 0;
-            self.preset_browser.scroll_offset = 0;
-            return;
-        }
-        self.preset_browser.cursor = self.preset_browser.cursor.min(items.len() - 1);
-        let max_visible = self.preset_max_visible();
-        let max_scroll = items.len().saturating_sub(max_visible);
-        self.preset_browser.scroll_offset = self.preset_browser.scroll_offset.min(max_scroll);
-        if self.preset_browser.cursor < self.preset_browser.scroll_offset {
-            self.preset_browser.scroll_offset = self.preset_browser.cursor;
-        } else if self.preset_browser.cursor >= self.preset_browser.scroll_offset + max_visible {
-            self.preset_browser.scroll_offset = self.preset_browser.cursor + 1 - max_visible;
-        }
-    }
-
-    pub(super) fn preset_max_visible(&self) -> usize {
-        let h = self.ui.layout.sidebar_inner.height as usize;
-        if h > 3 {
-            h - 3
-        } else {
-            1
-        }
-    }
-
-    fn selected_preset_name(&self) -> Option<String> {
-        let items = self.visible_preset_items();
-        items.get(self.preset_browser.cursor).cloned()
-    }
-
-    pub(super) fn load_selected_preset_into_track(&mut self) {
-        let Some(instrument_name) = self.current_custom_instrument_name() else {
-            return;
-        };
-        let Some(selected_name) = self.selected_preset_name() else {
-            return;
-        };
-        let presets = match lisp_host::load_instrument_presets(instrument_name) {
-            Ok(p) => p,
-            Err(e) => {
-                self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
-                return;
-            }
-        };
-        let Some(preset) = presets.into_iter().find(|p| p.name == selected_name) else {
-            return;
-        };
-        let track = self.ui.cursor_track;
-        let Some(desc) = self.current_instrument_descriptor() else {
-            return;
-        };
-        let slot = &self.state.pattern.instrument_slots[track];
-        for (idx, param) in desc.params.iter().enumerate() {
-            let value = preset
-                .params
-                .get(&param.name)
-                .copied()
-                .unwrap_or(param.default);
-            let clamped = param.clamp(value);
-            slot.defaults.set(idx, clamped);
-            self.send_instrument_param(track, idx, clamped);
-        }
-        crate::effects::restore_key_locks_by_param_name(slot, desc, &preset.key_locks);
-        self.state.pattern.instrument_base_note_offsets[track].store(
-            preset.base_note_offset.to_bits(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.state.schedule_mod_resync();
-        self.state.publish_scheduler_snapshot();
-        let engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
-        self.set_track_sound_state(track, engine_id, Some(preset.name.clone()), false);
-        self.editor.status_message =
-            Some((format!("Loaded preset '{}'", preset.name), Instant::now()));
-    }
-
-    pub fn save_current_track_as_preset(&mut self, preset_name: &str, overwrite: bool) {
-        let Some(instrument_name) = self.current_custom_instrument_name() else {
-            return;
-        };
-        let track = self.ui.cursor_track;
-        let Some(desc) = self.current_instrument_descriptor() else {
-            return;
-        };
-        let slot = &self.state.pattern.instrument_slots[track];
-        let mut params = std::collections::BTreeMap::new();
-        for (idx, param) in desc.params.iter().enumerate() {
-            params.insert(param.name.clone(), slot.defaults.get(idx));
-        }
-        let preset = lisp_host::InstrumentPreset {
-            id: preset_name.to_string(),
-            name: preset_name.to_string(),
-            base_note_offset: f32::from_bits(
-                self.state.pattern.instrument_base_note_offsets[track]
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            params,
-            key_locks: crate::effects::capture_key_locks_by_param_name(slot, desc),
-        };
-
-        let mut presets = match lisp_host::load_instrument_presets(instrument_name) {
-            Ok(p) => p,
-            Err(e) => {
-                self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
-                return;
-            }
-        };
-
-        if let Some(existing_idx) = presets.iter().position(|p| p.name == preset_name) {
-            if overwrite {
-                presets[existing_idx] = preset;
-            } else {
-                self.editor.status_message = Some((
-                    format!("Preset '{}' already exists", preset_name),
-                    Instant::now(),
-                ));
-                return;
-            }
-        } else {
-            presets.push(preset);
-            presets.sort_by(|a, b| a.name.cmp(&b.name));
-        }
-
-        match lisp_host::save_instrument_presets(instrument_name, &presets) {
-            Ok(()) => {
-                let engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
-                self.set_track_sound_state(track, engine_id, Some(preset_name.to_string()), false);
-                self.editor.status_message =
-                    Some((format!("Saved preset '{}'", preset_name), Instant::now()));
-                self.clamp_preset_browser();
-            }
-            Err(e) => {
-                self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
-            }
-        }
-    }
-
-    pub fn overwrite_loaded_preset(&mut self) {
-        let meta = self.current_track_sound_state();
-        let Some(name) = meta.loaded_preset else {
-            self.editor.status_message =
-                Some(("No loaded preset to overwrite".to_string(), Instant::now()));
-            return;
-        };
-        self.save_current_track_as_preset(&name, true);
-    }
-
-    pub(super) fn revert_loaded_preset(&mut self) {
-        let meta = self.current_track_sound_state();
-        if let Some(name) = meta.loaded_preset {
-            let items = self.visible_preset_items();
-            if let Some(idx) = items.iter().position(|item| item == &name) {
-                self.preset_browser.cursor = idx;
-            }
-            self.load_selected_preset_into_track();
-        } else {
-            self.editor.status_message =
-                Some(("No loaded preset to revert".to_string(), Instant::now()));
-        }
-    }
-
-    pub(super) fn handle_preset_name_entry(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Char(c) => self.ui.value_buffer.push(c),
-            KeyCode::Backspace => {
-                self.ui.value_buffer.pop();
-            }
-            KeyCode::Enter => {
-                let name = self.ui.value_buffer.trim().to_string();
-                if !name.is_empty() {
-                    match self.ui.preset_prompt_kind {
-                        PresetPromptKind::SaveNew => {
-                            self.save_current_track_as_preset(&name, false)
-                        }
-                    }
+            .iter()
+            .map(|item| {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "label".to_string(),
+                    Rc::new(RefCell::new(Value::String(item.label.clone()))),
+                );
+                if !item.children.is_empty() {
+                    map.insert(
+                        "children".to_string(),
+                        Rc::new(RefCell::new(sample_tree_nodes_to_value(&item.children))),
+                    );
                 }
-                self.ui.value_buffer.clear();
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Esc => {
-                self.ui.value_buffer.clear();
-                self.ui.input_mode = InputMode::Normal;
-            }
-            _ => {}
+                if let Some(path) = &item.path {
+                    map.insert(
+                        "path".to_string(),
+                        Rc::new(RefCell::new(Value::String(path.clone()))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_sample_tree_nodes_from_db(
+    db: &SampleDb,
+    query: &str,
+    include_tags: &[&str],
+    exclude_tags: &[&str],
+) -> rusqlite::Result<Vec<SampleTreeNode>> {
+    let query = query.trim();
+    let rows = db.query(
+        include_tags,
+        exclude_tags,
+        (!query.is_empty()).then_some(query),
+        false,
+    )?;
+    let grouped = query.is_empty() && include_tags.is_empty() && exclude_tags.is_empty();
+    Ok(sample_rows_to_tree_nodes(rows, grouped))
+}
+
+pub(crate) fn build_sample_tree_value_from_db(
+    db: &SampleDb,
+    query: &str,
+    include_tags: &[&str],
+    exclude_tags: &[&str],
+) -> rusqlite::Result<Value> {
+    let nodes = build_sample_tree_nodes_from_db(db, query, include_tags, exclude_tags)?;
+    Ok(sample_tree_nodes_to_value(&nodes))
+}
+
+pub(crate) fn build_sample_browser_value_from_db(
+    db: &SampleDb,
+    query: &str,
+    selected_tags: &[&str],
+) -> rusqlite::Result<Value> {
+    let query = query.trim();
+    let has_active_filter =
+        !query.is_empty() || selected_tags.iter().any(|tag| !tag.trim().is_empty());
+    let tags = if has_active_filter {
+        db.adjacent_tags(selected_tags, (!query.is_empty()).then_some(query), 32)?
+    } else {
+        default_sample_tag_facets(db, 16)?
+    };
+    let items = if has_active_filter {
+        let rows = db.query_samples_for_browser_limited(
+            selected_tags,
+            (!query.is_empty()).then_some(query),
+            SAMPLE_BROWSER_MAX_RESULTS,
+        )?;
+        sample_tree_nodes_to_value(&sample_rows_to_tree_nodes(rows, false))
+    } else {
+        Value::List(vec![])
+    };
+    Ok(map_value([
+        ("tags", tag_facets_to_value(&tags)),
+        ("items", items),
+    ]))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SampleBrowserRequest {
+    query: String,
+    selected_tags: Vec<String>,
+}
+
+impl SampleBrowserRequest {
+    fn new(query: &str, selected_tags: &[&str]) -> Self {
+        Self {
+            query: query.trim().to_string(),
+            selected_tags: selected_tags
+                .iter()
+                .map(|tag| tag.trim().to_string())
+                .filter(|tag| !tag.is_empty())
+                .collect(),
         }
     }
 
-    /// Execute the sidebar action for a file selection (Enter or click).
-    pub(super) fn sidebar_select_file(&mut self, path: &std::path::Path) {
-        match self.effective_sidebar_mode() {
-            SidebarMode::InstrumentPicker => return, // no file selection in picker
-            SidebarMode::AddTrack => match self.graph_controller().add_track(path) {
-                Ok(idx) => {
-                    self.ui.cursor_track = idx;
-                    self.editor.status_message =
-                        Some((format!("Added track {}", idx + 1), Instant::now()));
-                }
-                Err(e) => {
-                    self.editor.status_message = Some((format!("Error: {}", e), Instant::now()));
-                }
-            },
-            SidebarMode::Audition => {
-                if self.tracks.is_empty() || self.ui.cursor_track >= self.tracks.len() {
-                    return;
-                }
-                match crate::sampler::load_wav_buffer(self.graph.lg.0, path) {
-                    Ok(loaded) => {
-                        self.submit_sample_analysis(&loaded);
-                        let new_buffer_id = loaded.buffer_id;
-                        let sample_rate = loaded.sample_rate;
-                        let new_name = crate::sample_db::display_title_for_sample_path(path)
-                            .unwrap_or(loaded.name);
-                        let track = self.ui.cursor_track;
-                        self.graph_controller().send_sample_to_all_voices(
-                            track,
-                            new_buffer_id,
-                            sample_rate,
-                        );
-                        self.graph.track_buffer_ids[track] = new_buffer_id;
-                        self.graph.track_sample_rates[track] = sample_rate;
-                        self.tracks[track] = new_name.clone();
-                        self.register_loaded_sample_path(
-                            &new_name,
-                            new_buffer_id,
-                            path.to_path_buf(),
-                        );
-                        if track < self.sampler_paths.len() {
-                            self.sampler_paths[track] = Some(path.to_path_buf());
-                        }
-                        self.reset_sampler_bpm_for_analysis(track);
-                        self.publish_sampler_analysis_runtime(track);
-                        self.editor.status_message =
-                            Some((format!("Swapped: {}", new_name), Instant::now()));
-                    }
-                    Err(e) => {
-                        self.editor.status_message =
-                            Some((format!("Error: {}", e), Instant::now()));
-                    }
-                }
-            }
-            SidebarMode::Presets => {}
-        }
+    fn selected_tag_refs(&self) -> Vec<&str> {
+        self.selected_tags.iter().map(String::as_str).collect()
     }
 }
 
-// ── Drawing ──
+pub(crate) struct DebouncedSampleBrowser {
+    db: Rc<SampleDb>,
+    debounce: Duration,
+    last_requested: Option<SampleBrowserRequest>,
+    last_request_at: Option<Instant>,
+    last_executed: Option<SampleBrowserRequest>,
+    cached_value: Option<Value>,
+    pending_text_query: bool,
+}
 
-pub(super) fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let focused = app.ui.focused_region == Region::Sidebar;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(region_border_style(app, Region::Sidebar));
-    let block_inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if block_inner.height < 2 || block_inner.width < 4 {
-        app.ui.layout.sidebar_tabs = block_inner;
-        app.ui.layout.sidebar_inner = Rect::new(block_inner.x, block_inner.y, block_inner.width, 0);
-        return;
-    }
-
-    let tabs_area = Rect::new(block_inner.x, block_inner.y, block_inner.width, 1);
-    let inner = Rect::new(
-        block_inner.x,
-        block_inner.y + 1,
-        block_inner.width,
-        block_inner.height.saturating_sub(1),
-    );
-
-    app.ui.layout.sidebar_tabs = tabs_area;
-    app.ui.layout.sidebar_inner = inner;
-
-    if inner.height < 2 || inner.width < 4 {
-        return;
-    }
-
-    let tools_selected = app.ui.sidebar_tab == SidebarTab::Tools;
-    let agent_selected = app.ui.sidebar_tab == SidebarTab::Agent;
-    let sounds_selected = app.ui.sidebar_tab == SidebarTab::Sounds;
-    let tools_style = if tools_selected && focused {
-        Style::default().fg(Color::Black).bg(Color::White).bold()
-    } else if tools_selected {
-        Style::default().fg(Color::Black).bg(Color::Rgb(90, 90, 90))
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let agent_style = if agent_selected && focused {
-        Style::default().fg(Color::Black).bg(Color::White).bold()
-    } else if agent_selected {
-        Style::default().fg(Color::Black).bg(Color::Rgb(90, 90, 90))
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let sounds_style = if sounds_selected && focused {
-        Style::default().fg(Color::Black).bg(Color::White).bold()
-    } else if sounds_selected {
-        Style::default().fg(Color::Black).bg(Color::Rgb(90, 90, 90))
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" Tools ", tools_style),
-            Span::raw(" "),
-            Span::styled(" Agent ", agent_style),
-            Span::raw(" "),
-            Span::styled(" Sounds ", sounds_style),
-        ])),
-        tabs_area,
-    );
-
-    if app.ui.sidebar_tab == SidebarTab::Tools {
-        draw_track_params_column(frame, app, inner, focused);
-        return;
-    }
-
-    if app.ui.sidebar_tab == SidebarTab::Agent {
-        draw_agent_sidebar(frame, app, inner, focused);
-        return;
-    }
-
-    // Clear the entire inner area first to prevent stale content
-    let buf = frame.buffer_mut();
-    for y in inner.y..(inner.y + inner.height) {
-        for x in inner.x..(inner.x + inner.width) {
-            buf[(x, y)].reset();
+impl DebouncedSampleBrowser {
+    pub(crate) fn new(db: Rc<SampleDb>, debounce: Duration) -> Self {
+        Self {
+            db,
+            debounce,
+            last_requested: None,
+            last_request_at: None,
+            last_executed: None,
+            cached_value: None,
+            pending_text_query: false,
         }
     }
 
-    // Instrument picker mode: draw simple list instead of browser
-    if app.effective_sidebar_mode() == SidebarMode::InstrumentPicker && focused {
-        for (i, inst) in crate::sequencer::InstrumentType::ALL.iter().enumerate() {
-            let label = inst.label();
-            if i as u16 >= inner.height {
-                break;
-            }
-            let is_cursor = i == app.ui.instrument_picker_cursor;
-            let style = if is_cursor {
-                Style::default().fg(Color::Black).bg(Color::White)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            let text = format!("  {} ", label);
-            let buf = frame.buffer_mut();
-            buf.set_string(inner.x, inner.y + i as u16, &text, style);
-            let text_width = UnicodeWidthStr::width(text.as_str());
-            let remaining = (inner.width as usize).saturating_sub(text_width);
-            if remaining > 0 {
-                buf.set_string(
-                    inner.x + text_width as u16,
-                    inner.y + i as u16,
-                    &" ".repeat(remaining),
-                    style,
-                );
-            }
-        }
-        return;
+    pub(crate) fn query(&mut self, query: &str, selected_tags: &[&str]) -> rusqlite::Result<Value> {
+        self.query_at(query, selected_tags, Instant::now())
     }
 
-    if app.effective_sidebar_mode() == SidebarMode::Presets {
-        app.clamp_preset_browser();
-        let items = app.visible_preset_items();
-        let max_visible = (inner.height as usize).saturating_sub(3);
-        let meta = app.current_track_sound_state();
-        let engine_name = app.current_preset_engine_name().unwrap_or("None");
-        let engine_header = format!(" engine: {}", engine_name);
-        let loaded = meta
-            .loaded_preset
-            .clone()
-            .unwrap_or_else(|| "None".to_string());
-        let header = format!(" preset: {}{}", loaded, if meta.dirty { " *" } else { "" });
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                engine_header,
-                Style::default().fg(Color::Cyan),
-            ))),
-            Rect::new(inner.x, inner.y, inner.width, 1),
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                header,
-                Style::default().fg(Color::White),
-            ))),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
-        );
-        let filter_text = if focused {
-            format!("> {}\u{2588}", app.preset_browser.filter)
-        } else {
-            format!("> {}", app.preset_browser.filter)
+    pub(crate) fn poll_ready(&mut self) -> rusqlite::Result<bool> {
+        let Some(request) = self.last_requested.clone() else {
+            return Ok(false);
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                filter_text,
-                Style::default().fg(Color::White),
-            ))),
-            Rect::new(inner.x, inner.y + 2, inner.width, 1),
-        );
-        let list_start_y = inner.y + 3;
-        let scroll = app.preset_browser.scroll_offset;
-        for (vi, i) in (scroll..items.len()).enumerate() {
-            if vi >= max_visible {
-                break;
-            }
-            let row_y = list_start_y + vi as u16;
-            if row_y >= inner.y + inner.height {
-                break;
-            }
-            let item = &items[i];
-            let is_cursor = focused && i == app.preset_browser.cursor;
-            let is_loaded = meta
-                .loaded_preset
-                .as_ref()
-                .map(|p| p == item)
-                .unwrap_or(false);
-            let style = if is_cursor {
-                Style::default().fg(Color::Black).bg(Color::White)
-            } else if is_loaded {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            let text = format!("  {}", item);
-            let buf = frame.buffer_mut();
-            buf.set_string(inner.x, row_y, &text, style);
-            let text_width = UnicodeWidthStr::width(text.as_str());
-            let remaining = (inner.width as usize).saturating_sub(text_width);
-            if remaining > 0 {
-                buf.set_string(
-                    inner.x + text_width as u16,
-                    row_y,
-                    &" ".repeat(remaining),
-                    style,
-                );
+        if !self.pending_text_query || self.last_executed.as_ref() == Some(&request) {
+            return Ok(false);
+        }
+        let ready_at = self.last_request_at.unwrap_or_else(Instant::now) + self.debounce;
+        if Instant::now() < ready_at {
+            return Ok(false);
+        }
+        match self.execute_request(request) {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                self.pending_text_query = false;
+                Err(error)
             }
         }
-        return;
     }
 
-    let items = app.browser.visible_items();
-    let max_visible = (inner.height as usize).saturating_sub(1); // 1 row for filter
+    fn query_at(
+        &mut self,
+        query: &str,
+        selected_tags: &[&str],
+        now: Instant,
+    ) -> rusqlite::Result<Value> {
+        let request = SampleBrowserRequest::new(query, selected_tags);
+        let previous_request = self.last_requested.as_ref();
+        let request_changed = previous_request != Some(&request);
+        let query_changed =
+            previous_request.is_some_and(|previous| previous.query != request.query);
 
-    let filter_text = if app.ui.sidebar_search_focused {
-        format!("> {}\u{2588}", app.browser.filter)
-    } else {
-        format!("> {}", app.browser.filter)
-    };
-    let filter_line = Line::from(Span::styled(filter_text, Style::default().fg(Color::White)));
-    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    frame.render_widget(Paragraph::new(filter_line), filter_area);
-
-    let list_start_y = inner.y + 1;
-    let list_max = max_visible;
-    let scroll = app.browser.scroll_offset;
-
-    for (vi, i) in (scroll..items.len()).enumerate() {
-        if vi >= list_max {
-            break;
-        }
-        let row_y = list_start_y + vi as u16;
-        if row_y >= inner.y + inner.height {
-            break;
+        if request_changed {
+            self.pending_text_query = query_changed && !request.query.is_empty();
+            self.last_requested = Some(request.clone());
+            self.last_request_at = Some(now);
         }
 
-        let entry = &items[i];
-        let is_cursor = focused && i == app.browser.cursor;
-        let is_current_sample = !entry.is_dir
-            && !app.tracks.is_empty()
-            && entry
-                .path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s == app.tracks[app.ui.cursor_track])
-                .unwrap_or(false);
-
-        let indent = "  ".repeat(entry.depth);
-        let icon = if entry.is_dir {
-            if entry.expanded {
-                "\u{25bc} "
-            } else {
-                "\u{25b6} "
+        if self.last_executed.as_ref() == Some(&request) {
+            if let Some(value) = &self.cached_value {
+                return Ok(value.deep_clone());
             }
-        } else {
-            "  "
-        };
+        }
 
-        let prefix_width = UnicodeWidthStr::width(indent.as_str()) + UnicodeWidthStr::width(icon);
-        let max_name_width = (inner.width as usize).saturating_sub(prefix_width);
-        // Truncate name by display width
-        let mut truncated = String::new();
-        let mut w = 0;
-        for ch in entry.name.chars() {
-            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if w + cw > max_name_width {
-                break;
+        if self.pending_text_query {
+            let ready_at = self.last_request_at.unwrap_or(now) + self.debounce;
+            if now < ready_at {
+                return Ok(self
+                    .cached_value
+                    .as_ref()
+                    .map(Value::deep_clone)
+                    .unwrap_or_else(empty_sample_browser_value));
             }
-            truncated.push(ch);
-            w += cw;
         }
-        let text = format!("{}{}{}", indent, icon, truncated);
 
-        let style = if is_cursor {
-            Style::default().fg(Color::Black).bg(Color::White)
-        } else if is_current_sample {
-            Style::default().fg(Color::Yellow)
-        } else if entry.is_dir {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
+        self.execute_request(request)
+    }
 
-        // Write directly to the buffer for guaranteed cell coverage
-        let buf = frame.buffer_mut();
-        buf.set_string(inner.x, row_y, &text, style);
-        // Fill remaining cells with spaces in the same style
-        let text_width = UnicodeWidthStr::width(text.as_str());
-        let remaining = (inner.width as usize).saturating_sub(text_width);
-        if remaining > 0 {
-            buf.set_string(
-                inner.x + text_width as u16,
-                row_y,
-                &" ".repeat(remaining),
-                style,
-            );
-        }
+    fn execute_request(&mut self, request: SampleBrowserRequest) -> rusqlite::Result<Value> {
+        let selected_tag_refs = request.selected_tag_refs();
+        let value =
+            build_sample_browser_value_from_db(&self.db, &request.query, &selected_tag_refs)?;
+        self.last_executed = Some(request);
+        self.cached_value = Some(value.deep_clone());
+        self.pending_text_query = false;
+        Ok(value)
     }
 }
 
-fn draw_agent_sidebar(frame: &mut Frame, app: &mut App, area: Rect, focused: bool) {
-    let provider_state = &app.agent_panel.provider_state;
-    let selected_provider = provider_state
-        .providers
+fn empty_sample_browser_value() -> Value {
+    map_value([
+        ("tags", Value::List(vec![])),
+        ("items", Value::List(vec![])),
+    ])
+}
+
+fn default_sample_tag_facets(db: &SampleDb, max_tags: usize) -> rusqlite::Result<Vec<TagFacet>> {
+    let global = db.adjacent_tags(&[], None, 256)?;
+    let mut by_name: HashMap<String, TagFacet> = global
         .iter()
-        .find(|entry| entry.provider == provider_state.selected_provider);
-
-    let model_label = selected_provider
-        .map(|provider| provider.selected_model.as_str())
-        .unwrap_or("unavailable");
-    let focus_mark = if focused { " <" } else { "" };
-    let pending = app.agent_panel.pending_request.is_some();
-    let elapsed = app
-        .agent_panel
-        .pending_request
-        .as_ref()
-        .map(|pending| pending.started_at.elapsed())
-        .unwrap_or_default();
-    let input_lines = build_agent_input_lines(app, focused, pending);
-    let input_height = input_lines.len().max(1) as u16;
-    let header_height = if selected_provider
-        .map(|provider| !provider.api_key_present)
-        .unwrap_or(app.agent_panel.load_error.is_some())
-    {
-        2
-    } else {
-        1
-    };
-    let status_height = if pending { 1 } else { 0 };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header_height),
-            Constraint::Min(1),
-            Constraint::Length(status_height),
-            Constraint::Length(input_height),
-        ])
-        .split(area);
-
-    let mut header_lines = vec![Line::from(Span::styled(
-        format!("model: {model_label}{focus_mark}"),
-        Style::default().fg(Color::Cyan),
-    ))];
-    if let Some(provider) = selected_provider {
-        if !provider.api_key_present {
-            header_lines.push(Line::from(Span::styled(
-                format!("error: missing {}", provider.provider.api_key_env()),
-                Style::default().fg(Color::LightRed),
-            )));
+        .cloned()
+        .map(|facet| (facet.name.to_lowercase(), facet))
+        .collect();
+    let mut tags = Vec::new();
+    for name in DEFAULT_SAMPLE_BROWSER_TAGS {
+        if let Some(facet) = by_name.remove(*name) {
+            tags.push(facet);
         }
-    } else if let Some(error) = app.agent_panel.load_error.as_ref() {
-        header_lines.push(Line::from(Span::styled(
-            format!("error: {error}"),
-            Style::default().fg(Color::LightRed),
-        )));
+        if tags.len() >= max_tags {
+            return Ok(tags);
+        }
     }
-    frame.render_widget(Paragraph::new(header_lines), chunks[0]);
-    draw_agent_model_dropdown(frame, app, chunks[0]);
-
-    let transcript_lines = build_agent_transcript_lines(app);
-    let visible_height = chunks[1].height as usize;
-    let total_lines = transcript_lines.len();
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll = app.agent_panel.scroll_offset.min(max_scroll);
-    let start = total_lines.saturating_sub(visible_height + scroll);
-    let end = total_lines.saturating_sub(scroll);
-    let visible = if start < end {
-        transcript_lines[start..end].to_vec()
-    } else {
-        Vec::new()
-    };
-    frame.render_widget(
-        Paragraph::new(visible).wrap(Wrap { trim: false }),
-        chunks[1],
-    );
-
-    if pending {
-        frame.render_widget(Paragraph::new(build_agent_status_line(elapsed)), chunks[2]);
+    for facet in global {
+        if tags
+            .iter()
+            .any(|tag| tag.name.eq_ignore_ascii_case(&facet.name))
+        {
+            continue;
+        }
+        tags.push(facet);
+        if tags.len() >= max_tags {
+            break;
+        }
     }
-
-    frame.render_widget(Paragraph::new(input_lines), chunks[3]);
+    Ok(tags)
 }
 
-fn build_agent_transcript_lines(app: &App) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let wrap_width = app.ui.layout.sidebar_inner.width.saturating_sub(2).max(8) as usize;
-    for entry in &app.agent_panel.transcript {
-        let (label_style, text_style) = match entry.role.as_str() {
-            "user" => (
-                Style::default().fg(Color::Cyan),
-                Style::default().fg(Color::White),
-            ),
-            "assistant" => (
-                Style::default().fg(Color::Yellow),
-                Style::default().fg(Color::Gray),
-            ),
-            "tool" => (
-                Style::default().fg(Color::LightBlue),
-                Style::default().fg(Color::Gray),
-            ),
-            "error" => (
-                Style::default().fg(Color::LightRed),
-                Style::default().fg(Color::LightRed),
-            ),
-            _ => (
-                Style::default().fg(Color::DarkGray),
-                Style::default().fg(Color::Gray),
-            ),
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{}:", entry.role),
-            label_style.bold(),
-        )));
-        for part in entry.text.lines() {
-            for wrapped in wrap_agent_text(part, wrap_width) {
-                lines.push(Line::from(Span::styled(wrapped, text_style)));
+fn tag_facets_to_value(tags: &[TagFacet]) -> Value {
+    list_value(tags.iter().map(|tag| {
+        map_value([
+            ("name", Value::String(tag.name.clone())),
+            ("count", Value::Number(tag.count as f64)),
+            ("selected", Value::Bool(tag.selected)),
+        ])
+    }))
+}
+
+const DEFAULT_SAMPLE_BROWSER_TAGS: &[&str] = &[
+    "kick", "snare", "clap", "hat", "hi-hat", "break", "breaks", "bass", "keys", "synth", "pad",
+    "vocals", "fx", "808", "909", "misc",
+];
+
+fn sample_rows_to_tree_nodes(rows: Vec<SampleRow>, grouped: bool) -> Vec<SampleTreeNode> {
+    let mut leaves: Vec<(String, SampleTreeNode)> = rows
+        .into_iter()
+        .map(|row| {
+            let label = row
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or(&row.hash)
+                .to_string();
+            let category = primary_category(&row.tags);
+            let node = SampleTreeNode {
+                label_lower: label.to_lowercase(),
+                label,
+                path: Some(format!("samples/{}.wav", row.hash)),
+                children: Vec::new(),
+            };
+            (category.to_string(), node)
+        })
+        .collect();
+
+    leaves.sort_by(|a, b| {
+        a.1.label_lower
+            .cmp(&b.1.label_lower)
+            .then_with(|| a.1.path.cmp(&b.1.path))
+    });
+
+    if !grouped {
+        return leaves.into_iter().map(|(_, node)| node).collect();
+    }
+
+    let mut grouped_nodes = Vec::new();
+    for category in SAMPLE_CATEGORY_ORDER {
+        let children: Vec<SampleTreeNode> = leaves
+            .iter()
+            .filter(|(row_category, _)| row_category == category)
+            .map(|(_, node)| node.clone())
+            .collect();
+        if children.is_empty() {
+            continue;
+        }
+        grouped_nodes.push(SampleTreeNode {
+            label: (*category).to_string(),
+            label_lower: (*category).to_string(),
+            path: None,
+            children,
+        });
+    }
+    grouped_nodes
+}
+
+const SAMPLE_CATEGORY_ORDER: &[&str] = &[
+    "drums",
+    "instruments",
+    "manufacturers",
+    "producers",
+    "genres",
+    "fx",
+    "vocals",
+    "hardware",
+    "other",
+];
+
+fn primary_category(tags: &[String]) -> &'static str {
+    for category in SAMPLE_CATEGORY_ORDER.iter().copied() {
+        if category == "other" {
+            continue;
+        }
+        if tags.iter().any(|tag| tag.eq_ignore_ascii_case(category)) {
+            return category;
+        }
+    }
+    "other"
+}
+
+fn build_instrument_tree_nodes(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<InstrumentTreeNode> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            dirs.push((name, path));
+        } else if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
+            let label = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if matches!(label.as_str(), "dsp" | "ui" | "presets") {
+                continue;
+            }
+            if let Ok(rel) = path.strip_prefix(root) {
+                let instrument_name = rel.with_extension("").to_string_lossy().replace('\\', "/");
+                files.push((label, instrument_name));
             }
         }
-        lines.push(Line::from(""));
     }
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Describe a synth or effect and press Enter.",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    lines
-}
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
 
-fn wrap_agent_text(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut out = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            if word.len() <= width {
-                current.push_str(word);
-            } else {
-                for chunk in word.as_bytes().chunks(width.max(1)) {
-                    out.push(String::from_utf8_lossy(chunk).to_string());
-                }
+    let mut items = Vec::new();
+    for (label, path) in dirs {
+        if path.join("dsp.lisp").exists() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                let instrument_name = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
+                items.push(InstrumentTreeNode {
+                    label,
+                    name: Some(instrument_name),
+                    folder: None,
+                    children: Vec::new(),
+                });
             }
             continue;
         }
 
-        if current.len() + 1 + word.len() <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            out.push(current);
-            if word.len() <= width {
-                current = word.to_string();
-            } else {
-                current = String::new();
-                for chunk in word.as_bytes().chunks(width.max(1)) {
-                    out.push(String::from_utf8_lossy(chunk).to_string());
-                }
-            }
+        let children = build_instrument_tree_nodes(&path, root);
+        if !children.is_empty() {
+            let folder = path
+                .strip_prefix(root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .filter(|folder| !folder.is_empty());
+            items.push(InstrumentTreeNode {
+                label,
+                name: None,
+                folder,
+                children,
+            });
         }
     }
-
-    if !current.is_empty() {
-        out.push(current);
+    for (label, name) in files {
+        items.push(InstrumentTreeNode {
+            label,
+            name: Some(name),
+            folder: None,
+            children: Vec::new(),
+        });
     }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
+    items
 }
 
-fn build_agent_input_lines(app: &App, focused: bool, pending: bool) -> Vec<Line<'static>> {
-    let wrap_width = app.ui.layout.sidebar_inner.width.saturating_sub(4).max(8) as usize;
-    let text = app.agent_panel.input_buffer.clone();
+fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
+    Value::List(
+        items
+            .iter()
+            .map(|item| {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "label".to_string(),
+                    Rc::new(RefCell::new(Value::String(item.label.clone()))),
+                );
+                if let Some(name) = &item.name {
+                    map.insert(
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String(name.clone()))),
+                    );
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("instrument".to_string()))),
+                    );
+                    map.insert(
+                        "icon".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword("piano".to_string()))),
+                    );
+                } else if let Some(folder) = &item.folder {
+                    map.insert(
+                        "folder".to_string(),
+                        Rc::new(RefCell::new(Value::String(folder.clone()))),
+                    );
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("folder".to_string()))),
+                    );
+                    map.insert(
+                        "icon".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword("folder".to_string()))),
+                    );
+                }
+                if !item.children.is_empty() {
+                    map.insert(
+                        "children".to_string(),
+                        Rc::new(RefCell::new(instrument_tree_nodes_to_value(&item.children))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
 
-    let wrapped = if text.is_empty() {
-        vec![String::new()]
+fn tree_header(label: &'static str) -> Value {
+    map_value([
+        ("label", Value::String(label.to_string())),
+        ("kind", Value::String("header".to_string())),
+        ("draggable", Value::Bool(false)),
+        ("drop-target", Value::Bool(false)),
+    ])
+}
+
+fn builtin_instrument_matches(item: &BuiltinInstrumentDescriptor, query_lower: &str) -> bool {
+    query_lower.is_empty()
+        || item.label.to_lowercase().contains(query_lower)
+        || item.name.contains(query_lower)
+}
+
+fn builtin_instrument_leaf(item: &BuiltinInstrumentDescriptor) -> Value {
+    map_value([
+        ("label", Value::String(item.label.to_string())),
+        ("name", Value::String(item.name.to_string())),
+        ("kind", Value::String("builtin-instrument".to_string())),
+        ("icon", Value::Keyword(item.icon.to_string())),
+        ("draggable", Value::Bool(item.name == "sampler")),
+        ("drop-target", Value::Bool(false)),
+    ])
+}
+
+fn builtin_instrument_values(query_lower: &str) -> Vec<Value> {
+    BUILTIN_INSTRUMENTS
+        .iter()
+        .filter(|item| builtin_instrument_matches(item, query_lower))
+        .map(builtin_instrument_leaf)
+        .collect()
+}
+
+fn list_items(value: Value) -> Vec<Value> {
+    match value {
+        Value::List(items) => items
+            .into_iter()
+            .map(|item| item.borrow().clone())
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    }
+}
+
+fn append_tree_section(items: &mut Vec<Value>, label: &'static str, mut children: Vec<Value>) {
+    if children.is_empty() {
+        return;
+    }
+    items.push(tree_header(label));
+    items.append(&mut children);
+}
+
+fn filter_instrument_tree_nodes(
+    items: &[InstrumentTreeNode],
+    query_lower: &str,
+) -> Vec<InstrumentTreeNode> {
+    if query_lower.is_empty() {
+        return items.to_vec();
+    }
+
+    items
+        .iter()
+        .filter_map(|item| {
+            let children = filter_instrument_tree_nodes(&item.children, query_lower);
+            let label_matches = item.label.to_lowercase().contains(query_lower);
+            let name_matches = item
+                .name
+                .as_ref()
+                .map(|name| name.to_lowercase().contains(query_lower))
+                .unwrap_or(false);
+            if label_matches || name_matches || !children.is_empty() {
+                let mut filtered = item.clone();
+                filtered.children = children;
+                Some(filtered)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn project_engine_nodes(engine_names: &[String]) -> Vec<InstrumentTreeNode> {
+    let mut seen = HashSet::new();
+    engine_names
+        .iter()
+        .filter(|name| seen.insert((*name).clone()))
+        .map(|name| InstrumentTreeNode {
+            label: instrument_display_name(name),
+            name: Some(name.clone()),
+            folder: None,
+            children: Vec::new(),
+        })
+        .collect()
+}
+
+pub(crate) fn build_instrument_tree_value(query: &str, project_engines: &[String]) -> Value {
+    let query_lower = query.trim().to_lowercase();
+    let root = std::path::Path::new("instruments");
+    let top = build_instrument_tree_nodes(root, root);
+    let custom = list_items(instrument_tree_nodes_to_value(
+        &filter_instrument_tree_nodes(&top, &query_lower),
+    ));
+    let builtin = builtin_instrument_values(&query_lower);
+    let engines = list_items(instrument_tree_nodes_to_value(
+        &filter_instrument_tree_nodes(&project_engine_nodes(project_engines), &query_lower),
+    ));
+
+    let mut items = Vec::new();
+    if query_lower.is_empty() {
+        append_tree_section(&mut items, "Built-in", builtin);
+        append_tree_section(&mut items, "Engines", engines);
+        append_tree_section(&mut items, "Library", custom);
     } else {
-        wrap_agent_text(&text, wrap_width)
+        items.extend(builtin);
+        items.extend(engines);
+        items.extend(custom);
+    }
+    list_value(items)
+}
+
+pub(crate) fn project_instrument_engine_names(app: &tui::App) -> Vec<String> {
+    let mut engine_ids = Vec::new();
+    for engine_id in app.graph.track_engine_ids.iter().flatten().copied() {
+        if !engine_ids.contains(&engine_id) {
+            engine_ids.push(engine_id);
+        }
+    }
+    for engine_id in app
+        .graph
+        .track_node_ids
+        .iter()
+        .flat_map(|track| track.rack_slots.iter().filter_map(|slot| slot.engine_id))
+    {
+        if !engine_ids.contains(&engine_id) {
+            engine_ids.push(engine_id);
+        }
+    }
+    engine_ids
+        .into_iter()
+        .filter_map(|engine_id| {
+            app.editor
+                .engine_registry
+                .get(engine_id)
+                .map(|engine| engine.name.clone())
+        })
+        .collect()
+}
+
+pub(crate) fn script_root_dir() -> std::path::PathBuf {
+    let local = std::path::PathBuf::from("scripts");
+    if local.is_dir() {
+        local
+    } else {
+        std::path::PathBuf::from("crates/sequencer/scripts")
+    }
+}
+
+fn build_script_tree_nodes(dir: &std::path::Path, root: &std::path::Path) -> Vec<ScriptTreeNode> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
 
-    let mut rendered = Vec::new();
-    let mut absolute_offset = 0usize;
-    let cursor_offset = app
-        .agent_panel
-        .input_cursor
-        .min(app.agent_panel.input_buffer.len());
+    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            dirs.push((name, path));
+        } else if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
+            let label = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let stable_path = path
+                .strip_prefix(root)
+                .ok()
+                .map(|rel| script_root_dir().join(rel))
+                .unwrap_or_else(|| path.clone())
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((label, stable_path));
+        }
+    }
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
 
-    for (idx, line) in wrapped.into_iter().enumerate() {
-        let prefix = if idx == 0 { "> " } else { "  " };
-        let mut spans = vec![Span::styled(prefix, Style::default().fg(Color::White))];
-        let line_len = line.len();
+    let mut items = Vec::new();
+    for (label, path) in dirs {
+        let children = build_script_tree_nodes(&path, root);
+        if !children.is_empty() {
+            items.push(ScriptTreeNode {
+                label,
+                path: None,
+                children,
+            });
+        }
+    }
+    for (label, path) in files {
+        items.push(ScriptTreeNode {
+            label,
+            path: Some(path),
+            children: Vec::new(),
+        });
+    }
+    items
+}
 
-        if focused
-            && !pending
-            && cursor_offset >= absolute_offset
-            && cursor_offset <= absolute_offset + line_len
-        {
-            let local_cursor = cursor_offset.saturating_sub(absolute_offset);
-            let before = &line[..local_cursor.min(line.len())];
-            let cursor_char = line
-                .get(local_cursor..)
-                .and_then(|rest| rest.chars().next())
-                .map(|ch| ch.to_string())
-                .unwrap_or_else(|| " ".to_string());
-            let after_start = local_cursor.saturating_add(cursor_char.len());
-            let after = if after_start <= line.len() {
-                &line[after_start..]
+fn script_tree_nodes_to_value(items: &[ScriptTreeNode]) -> Value {
+    Value::List(
+        items
+            .iter()
+            .map(|item| {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "label".to_string(),
+                    Rc::new(RefCell::new(Value::String(item.label.clone()))),
+                );
+                if let Some(path) = &item.path {
+                    map.insert(
+                        "path".to_string(),
+                        Rc::new(RefCell::new(Value::String(path.clone()))),
+                    );
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("script".to_string()))),
+                    );
+                } else {
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("folder".to_string()))),
+                    );
+                }
+                if !item.children.is_empty() {
+                    map.insert(
+                        "children".to_string(),
+                        Rc::new(RefCell::new(script_tree_nodes_to_value(&item.children))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
+
+fn filter_script_tree_nodes(items: &[ScriptTreeNode], query_lower: &str) -> Vec<ScriptTreeNode> {
+    if query_lower.is_empty() {
+        return items.to_vec();
+    }
+
+    items
+        .iter()
+        .filter_map(|item| {
+            let children = filter_script_tree_nodes(&item.children, query_lower);
+            let label_matches = item.label.to_lowercase().contains(query_lower);
+            let path_matches = item
+                .path
+                .as_ref()
+                .map(|path| path.to_lowercase().contains(query_lower))
+                .unwrap_or(false);
+            if label_matches || path_matches || !children.is_empty() {
+                let mut filtered = item.clone();
+                filtered.children = children;
+                Some(filtered)
             } else {
-                ""
-            };
-
-            if !before.is_empty() {
-                spans.push(Span::styled(
-                    before.to_string(),
-                    Style::default().fg(Color::White),
-                ));
+                None
             }
-            spans.push(Span::styled(
-                cursor_char,
-                Style::default().fg(Color::Black).bg(Color::White),
-            ));
-            if !after.is_empty() {
-                spans.push(Span::styled(
-                    after.to_string(),
-                    Style::default().fg(Color::White),
-                ));
-            }
-        } else {
-            spans.push(Span::styled(line, Style::default().fg(Color::White)));
-        }
-
-        rendered.push(Line::from(spans));
-        absolute_offset += line_len;
-    }
-
-    if rendered.is_empty() {
-        rendered.push(Line::from(Span::styled(
-            "> ",
-            Style::default().fg(Color::White),
-        )));
-    }
-
-    rendered
+        })
+        .collect()
 }
 
-fn build_agent_status_line(elapsed: std::time::Duration) -> Line<'static> {
-    let label = "Working";
-    let palette = [
-        Color::Rgb(120, 208, 210),
-        Color::Rgb(132, 220, 222),
-        Color::Rgb(146, 232, 234),
-        Color::Rgb(132, 220, 222),
-    ];
-    let shift = ((elapsed.as_millis() / 140) as usize) % palette.len();
-    let mut spans = Vec::new();
-    for (idx, ch) in label.chars().enumerate() {
-        spans.push(Span::styled(
-            ch.to_string(),
-            Style::default().fg(palette[(idx + shift) % palette.len()]),
-        ));
-    }
-    spans.push(Span::styled(
-        format!(" ({:>2}s • esc to interrupt)", elapsed.as_secs()),
-        Style::default().fg(Color::DarkGray),
-    ));
-    Line::from(spans)
+pub(crate) fn build_script_tree(query: &str) -> Value {
+    let query_lower = query.trim().to_lowercase();
+    let root = script_root_dir();
+    let top = build_script_tree_nodes(&root, &root);
+    script_tree_nodes_to_value(&filter_script_tree_nodes(&top, &query_lower))
 }
 
-fn draw_agent_model_dropdown(frame: &mut Frame, app: &App, model_row: Rect) {
-    if !app.agent_panel.model_dropdown_open {
-        return;
+pub(crate) fn filter_sample_tree_nodes(
+    items: &[SampleTreeNode],
+    query_lower: &str,
+) -> Vec<SampleTreeNode> {
+    if query_lower.is_empty() {
+        return items.to_vec();
     }
 
-    let options = app.agent_model_options();
-    if options.is_empty() {
-        return;
-    }
-
-    let dropdown_x = model_row.x + 7;
-    let dropdown_width = model_row.width.saturating_sub(7).min(28).max(16);
-    let selected = app.agent_panel.model_dropdown_cursor;
-    let visible_count = options
-        .len()
-        .min(app.ui.layout.sidebar_inner.height.saturating_sub(1) as usize);
-    let scroll = selected.saturating_sub(visible_count.saturating_sub(1));
-    if visible_count == 0 {
-        return;
-    }
-
-    for vi in 0..visible_count {
-        let idx = scroll + vi;
-        if idx >= options.len() {
-            break;
+    let mut filtered = Vec::new();
+    for item in items {
+        if item.children.is_empty() {
+            if item.label_lower.contains(query_lower) {
+                filtered.push(item.clone());
+            }
+            continue;
         }
-        let y = model_row.y + 1 + vi as u16;
-        let is_cursor = idx == selected;
-        let style = if is_cursor {
-            Style::default().fg(Color::Black).bg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::White).bg(Color::Rgb(40, 40, 60))
+
+        let children = filter_sample_tree_nodes(&item.children, query_lower);
+        if !children.is_empty() {
+            filtered.push(SampleTreeNode {
+                label: item.label.clone(),
+                label_lower: item.label_lower.clone(),
+                path: None,
+                children,
+            });
+        }
+    }
+    filtered
+}
+
+pub(crate) fn build_project_tree(query: &str) -> Value {
+    let query = query.trim().to_lowercase();
+    let mut items = sequencer::project::list_project_entries().unwrap_or_default();
+    items.sort_by(|a, b| {
+        b.modified_at
+            .cmp(&a.modified_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    if !query.is_empty() {
+        items.retain(|item| item.name.to_lowercase().contains(&query));
+    }
+    list_value(items.into_iter().map(|item| {
+        map_value([
+            ("label", Value::String(item.name)),
+            (
+                "detail",
+                Value::String(format_project_recency(item.modified_at)),
+            ),
+        ])
+    }))
+}
+
+fn format_project_recency(modified_at: Option<SystemTime>) -> String {
+    format_project_recency_at(SystemTime::now(), modified_at)
+}
+
+fn format_project_recency_at(now: SystemTime, modified_at: Option<SystemTime>) -> String {
+    let Some(modified_at) = modified_at else {
+        return String::new();
+    };
+    let Ok(age) = now.duration_since(modified_at) else {
+        return "just now".to_string();
+    };
+
+    let minutes = age.as_secs() / 60;
+    if minutes < 60 {
+        return format!("{} min ago", minutes.max(1));
+    }
+
+    let hours = age.as_secs() / 3_600;
+    if hours < 48 {
+        let unit = if hours == 1 { "hour" } else { "hours" };
+        return format!("{hours} {unit} ago");
+    }
+
+    let days = age.as_secs() / 86_400;
+    if days < 30 {
+        let unit = if days == 1 { "day" } else { "days" };
+        return format!("{days} {unit} ago");
+    }
+
+    format_system_date(modified_at)
+}
+
+fn format_system_date(time: SystemTime) -> String {
+    let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
+        return String::new();
+    };
+    let days = (duration.as_secs() / 86_400) as i64;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year as i32, m as u32, d as u32)
+}
+
+pub(crate) fn build_preset_tree_from_list(items_value: Option<&Value>, query: &str) -> Value {
+    let query = query.trim().to_lowercase();
+    let mut items: Vec<String> = match items_value {
+        Some(Value::List(items)) => items
+            .iter()
+            .filter_map(|item| match &*item.borrow() {
+                Value::String(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !query.is_empty() {
+        items.retain(|item| item.to_lowercase().contains(&query));
+    }
+    build_icon_tree_items(&items, "piano")
+}
+
+fn effect_leaf(label: String, kind: &'static str) -> Value {
+    map_value([
+        ("label", Value::String(label.clone())),
+        ("name", Value::String(label)),
+        ("kind", Value::String(kind.to_string())),
+    ])
+}
+
+fn filter_effect_names(names: Vec<String>, query_lower: &str) -> Vec<String> {
+    if query_lower.is_empty() {
+        names
+    } else {
+        names
+            .into_iter()
+            .filter(|name| name.to_lowercase().contains(query_lower))
+            .collect()
+    }
+}
+
+fn build_audio_effect_tree_from_names(
+    query: &str,
+    builtin_names: Vec<String>,
+    custom_names: Vec<String>,
+) -> Value {
+    let query_lower = query.trim().to_lowercase();
+    let builtin: Vec<Value> = filter_effect_names(builtin_names, &query_lower)
+        .into_iter()
+        .map(|name| effect_leaf(name, "builtin-audio-effect"))
+        .collect();
+
+    let custom: Vec<Value> = filter_effect_names(custom_names, &query_lower)
+        .into_iter()
+        .map(|name| effect_leaf(name, "custom-audio-effect"))
+        .collect();
+
+    let mut items = Vec::new();
+    if query_lower.is_empty() {
+        append_tree_section(&mut items, "Built-in", builtin);
+        append_tree_section(&mut items, "Custom", custom);
+    } else {
+        items.extend(builtin);
+        items.extend(custom);
+    }
+    list_value(items)
+}
+
+pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
+    let mut builtin_names: Vec<String> =
+        sequencer::effects::EffectDescriptor::builtin_insert_names()
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+    // dgenlisp-backed builtins (DSP body is dgenlisp, but added via the builtin path)
+    builtin_names.push(sequencer::effects::conv_reverb::NAME.to_string());
+    build_audio_effect_tree_from_names(
+        query,
+        builtin_names,
+        sequencer::lisp_host::list_saved_effects(),
+    )
+}
+
+pub(crate) fn build_midi_effect_tree(query: &str) -> Value {
+    let query_lower = query.trim().to_lowercase();
+    let mut names: Vec<String> = sequencer::lisp_host::load_midi_fx_descriptors()
+        .into_iter()
+        .map(|desc| desc.name)
+        .collect();
+    names.sort();
+    let items: Vec<Value> = filter_effect_names(names, &query_lower)
+        .into_iter()
+        .map(|name| effect_leaf(name, "midi-effect"))
+        .collect();
+    list_value(items)
+}
+
+pub(crate) fn instrument_display_name(name: &str) -> String {
+    let trimmed = name.trim_end_matches('/');
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(trimmed)
+        .trim_end_matches(".lisp")
+        .to_string()
+}
+
+pub(crate) fn visible_preset_items_for_track(app: &tui::App, track: usize) -> Vec<String> {
+    let Some(name) = current_custom_instrument_name(app, track) else {
+        return Vec::new();
+    };
+    let mut items: Vec<String> = sequencer::lisp_host::load_instrument_presets(&name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|preset| preset.name)
+        .collect();
+    items.sort();
+    items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_project_recency_windows() {
+        let now = UNIX_EPOCH + Duration::from_secs(60 * 60 * 24 * 40);
+
+        assert_eq!(
+            format_project_recency_at(now, Some(now - Duration::from_secs(25 * 60))),
+            "25 min ago"
+        );
+        assert_eq!(
+            format_project_recency_at(now, Some(now - Duration::from_secs(5 * 60 * 60))),
+            "5 hours ago"
+        );
+        assert_eq!(
+            format_project_recency_at(now, Some(now - Duration::from_secs(12 * 86_400))),
+            "12 days ago"
+        );
+        assert_eq!(
+            format_project_recency_at(now, Some(UNIX_EPOCH)),
+            "1970-01-01"
+        );
+    }
+
+    fn sample_browser_db() -> Rc<SampleDb> {
+        let db = Rc::new(SampleDb::open_in_memory().expect("open db"));
+        db.connection()
+            .execute(
+                "INSERT INTO samples(hash, title) VALUES ('aaa111', 'Kick 808')",
+                [],
+            )
+            .expect("sample");
+        db.connection()
+            .execute(
+                "INSERT INTO samples(hash, title) VALUES ('bbb222', 'Kick 909')",
+                [],
+            )
+            .expect("sample");
+        db.connection()
+            .execute(
+                "INSERT INTO samples(hash, title) VALUES ('ccc333', 'Snare')",
+                [],
+            )
+            .expect("sample");
+        db.add_tag("aaa111", "kick").expect("tag");
+        db.add_tag("aaa111", "808").expect("tag");
+        db.add_tag("bbb222", "kick").expect("tag");
+        db.add_tag("bbb222", "909").expect("tag");
+        db.add_tag("ccc333", "snare").expect("tag");
+        db
+    }
+
+    fn sample(hash: &str, title: Option<&str>, tags: &[&str]) -> SampleRow {
+        SampleRow {
+            hash: hash.to_string(),
+            title: title.map(str::to_string),
+            favorited: false,
+            tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+        }
+    }
+
+    fn sample_browser_item_labels(value: &Value) -> Vec<String> {
+        let Value::Map(result) = value else {
+            panic!("browser result should be a map");
         };
-        let text = format!(
-            " {:<width$}",
-            options[idx].1,
-            width = dropdown_width.saturating_sub(2) as usize
+        let items = result.get("items").expect("items").borrow();
+        let Value::List(items) = &*items else {
+            panic!("items should be a list");
+        };
+        items
+            .iter()
+            .filter_map(|item| {
+                let item = item.borrow();
+                let Value::Map(map) = &*item else {
+                    return None;
+                };
+                map.get("label").and_then(|label| match &*label.borrow() {
+                    Value::String(label) => Some(label.clone()),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    fn top_level_tree_labels(value: &Value) -> Vec<String> {
+        let Value::List(items) = value else {
+            panic!("tree should be a list");
+        };
+        items
+            .iter()
+            .filter_map(|item| {
+                let item = item.borrow();
+                let Value::Map(map) = &*item else {
+                    return None;
+                };
+                map.get("label").and_then(|label| match &*label.borrow() {
+                    Value::String(label) => Some(label.clone()),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn instrument_tree_places_unique_project_engines_between_builtins_and_library() {
+        let tree = build_instrument_tree_value(
+            "",
+            &["drums/3d-drum/".to_string(), "drums/3d-drum/".to_string()],
         );
-        frame.render_widget(Clear, Rect::new(dropdown_x, y, dropdown_width, 1));
-        frame.render_widget(
-            Paragraph::new(text).style(style),
-            Rect::new(dropdown_x, y, dropdown_width, 1),
+        let labels = top_level_tree_labels(&tree);
+
+        assert_eq!(
+            &labels[..7],
+            &[
+                "Built-in",
+                "Sampler",
+                "Modulator",
+                "Drum Rack",
+                "Instrument Rack",
+                "Engines",
+                "3d-drum",
+            ]
         );
+        assert_eq!(labels.iter().filter(|label| *label == "3d-drum").count(), 1);
+    }
+
+    #[test]
+    fn instrument_tree_assigns_piano_and_folder_icons() {
+        let value = instrument_tree_nodes_to_value(&[
+            InstrumentTreeNode {
+                label: "Folder".to_string(),
+                name: None,
+                folder: Some("folder".to_string()),
+                children: Vec::new(),
+            },
+            InstrumentTreeNode {
+                label: "My Instrument".to_string(),
+                name: Some("folder/my-instrument/".to_string()),
+                folder: None,
+                children: Vec::new(),
+            },
+        ]);
+        let Value::List(items) = value else {
+            panic!("instrument tree should be a list");
+        };
+        let folder = items[0].borrow();
+        let instrument = items[1].borrow();
+        let Value::Map(folder) = &*folder else {
+            panic!("folder should be a map");
+        };
+        let Value::Map(instrument) = &*instrument else {
+            panic!("instrument should be a map");
+        };
+
+        assert_eq!(
+            folder.get("icon").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("folder".to_string()))
+        );
+        assert_eq!(
+            instrument.get("icon").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("piano".to_string()))
+        );
+    }
+
+    #[test]
+    fn preset_tree_assigns_piano_icons_to_filtered_rows() {
+        let presets = list_value([
+            Value::String("Brutal Fifths".to_string()),
+            Value::String("Galactic Pad".to_string()),
+        ]);
+        let tree = build_preset_tree_from_list(Some(&presets), "brutal");
+        let Value::List(items) = tree else {
+            panic!("preset tree should be a list");
+        };
+        assert_eq!(items.len(), 1);
+        let item = items[0].borrow();
+        let Value::Map(item) = &*item else {
+            panic!("preset row should be a map");
+        };
+
+        assert_eq!(
+            item.get("icon").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("piano".to_string()))
+        );
+    }
+
+    #[test]
+    fn audio_effect_tree_omits_empty_custom_header() {
+        let tree = build_audio_effect_tree_from_names("", vec!["EQ8".to_string()], Vec::new());
+        assert_eq!(top_level_tree_labels(&tree), vec!["Built-in", "EQ8"]);
+    }
+
+    #[test]
+    fn db_sample_tree_groups_by_primary_category_with_other_fallback() {
+        let nodes = sample_rows_to_tree_nodes(
+            vec![
+                sample("ccc333", Some("Pad"), &["instruments"]),
+                sample("aaa111", Some("Kick"), &["drums", "dark"]),
+                sample("bbb222", Some("Texture"), &["weird"]),
+            ],
+            true,
+        );
+
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].label, "drums");
+        assert_eq!(nodes[0].children[0].label, "Kick");
+        assert_eq!(nodes[1].label, "instruments");
+        assert_eq!(nodes[1].children[0].label, "Pad");
+        assert_eq!(nodes[2].label, "other");
+        assert_eq!(
+            nodes[2].children[0].path.as_deref(),
+            Some("samples/bbb222.wav")
+        );
+    }
+
+    #[test]
+    fn db_sample_tree_flattened_results_use_hash_when_title_is_empty() {
+        let nodes = sample_rows_to_tree_nodes(
+            vec![
+                sample("bbb222", Some("  "), &["drums"]),
+                sample("aaa111", Some("Alpha"), &["drums"]),
+            ],
+            false,
+        );
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].label, "Alpha");
+        assert_eq!(nodes[0].path.as_deref(), Some("samples/aaa111.wav"));
+        assert_eq!(nodes[1].label, "bbb222");
+        assert_eq!(nodes[1].path.as_deref(), Some("samples/bbb222.wav"));
+    }
+
+    #[test]
+    fn db_sample_browser_returns_flat_items_and_adjacent_tag_chips() {
+        let db = sample_browser_db();
+
+        let Value::Map(result) =
+            build_sample_browser_value_from_db(&db, "", &["kick"]).expect("browser")
+        else {
+            panic!("browser result should be a map");
+        };
+        let tags = result.get("tags").expect("tags").borrow();
+        let Value::List(tags) = &*tags else {
+            panic!("tags should be a list");
+        };
+        let tag_names: Vec<String> = tags
+            .iter()
+            .filter_map(|tag| {
+                let tag = tag.borrow();
+                let Value::Map(map) = &*tag else {
+                    return None;
+                };
+                map.get("name").and_then(|name| match &*name.borrow() {
+                    Value::String(name) => Some(name.clone()),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert!(tag_names.contains(&"kick".to_string()));
+        assert!(tag_names.contains(&"808".to_string()));
+        assert!(tag_names.contains(&"909".to_string()));
+
+        let items = result.get("items").expect("items").borrow();
+        let Value::List(items) = &*items else {
+            panic!("items should be a list");
+        };
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn debounced_sample_browser_waits_for_stable_text_query() {
+        let db = sample_browser_db();
+        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(100));
+        let start = Instant::now();
+
+        let initial = browser.query_at("", &[], start).expect("initial browser");
+        assert!(sample_browser_item_labels(&initial).is_empty());
+
+        let pending_first_char = browser
+            .query_at("k", &[], start + Duration::from_millis(10))
+            .expect("pending first char");
+        assert!(
+            sample_browser_item_labels(&pending_first_char).is_empty(),
+            "first text change should return cached browser state before querying"
+        );
+
+        let pending_second_char = browser
+            .query_at("ki", &[], start + Duration::from_millis(50))
+            .expect("pending second char");
+        assert!(
+            sample_browser_item_labels(&pending_second_char).is_empty(),
+            "new text should restart the debounce window"
+        );
+
+        let ready = browser
+            .query_at("ki", &[], start + Duration::from_millis(151))
+            .expect("debounced query");
+        assert_eq!(
+            sample_browser_item_labels(&ready),
+            vec!["Kick 808".to_string(), "Kick 909".to_string()]
+        );
+    }
+
+    #[test]
+    fn debounced_sample_browser_poll_ready_executes_pending_query() {
+        let db = sample_browser_db();
+        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(1));
+        let start = Instant::now();
+
+        browser.query_at("", &[], start).expect("initial browser");
+        let pending = browser
+            .query_at("ki", &[], start + Duration::from_millis(1))
+            .expect("pending query");
+        assert!(sample_browser_item_labels(&pending).is_empty());
+
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(
+            browser.poll_ready().expect("poll pending query"),
+            "poll_ready should execute a matured pending text query"
+        );
+        let cached = browser
+            .query_at("ki", &[], start + Duration::from_millis(2))
+            .expect("cached debounced query");
+        assert_eq!(
+            sample_browser_item_labels(&cached),
+            vec!["Kick 808".to_string(), "Kick 909".to_string()]
+        );
+    }
+
+    #[test]
+    fn debounced_sample_browser_applies_tag_changes_immediately() {
+        let db = sample_browser_db();
+        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(100));
+        let start = Instant::now();
+
+        browser.query_at("", &[], start).expect("initial browser");
+        let tagged = browser
+            .query_at("", &["kick"], start + Duration::from_millis(1))
+            .expect("tagged browser");
+
+        assert_eq!(
+            sample_browser_item_labels(&tagged),
+            vec!["Kick 808".to_string(), "Kick 909".to_string()]
+        );
+    }
+
+    #[test]
+    fn db_sample_browser_caps_materialized_results() {
+        let db = Rc::new(SampleDb::open_in_memory().expect("open db"));
+        for idx in 0..(SAMPLE_BROWSER_MAX_RESULTS + 25) {
+            let hash = format!("sample{idx:03}");
+            let title = format!("Kick {idx:03}");
+            db.connection()
+                .execute(
+                    "INSERT INTO samples(hash, title) VALUES (?, ?)",
+                    rusqlite::params![hash, title],
+                )
+                .expect("sample");
+            db.add_tag(&hash, "kick").expect("tag");
+        }
+
+        let labels = sample_browser_item_labels(
+            &build_sample_browser_value_from_db(&db, "", &["kick"]).expect("browser"),
+        );
+        assert_eq!(labels.len(), SAMPLE_BROWSER_MAX_RESULTS);
     }
 }

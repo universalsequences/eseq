@@ -7,7 +7,7 @@
 //! log-time axis with the sweep range behind them.
 //!
 //! The notch layout math is dual-maintained with
-//! `sequencer::phaser_flanger::notch_frequencies` — keep the two in sync.
+//! `sequencer::effects::phaser_flanger::notch_frequencies` — keep the two in sync.
 
 use std::collections::HashMap;
 
@@ -28,7 +28,7 @@ pub static PHASER_NOTCH_WIDGET: PhaserNotchWidget = PhaserNotchWidget;
 
 const MAX_NOTCHES: usize = 12;
 
-// Mirror of the DSP constants in sequencer::phaser_flanger.
+// Mirror of the DSP constants in sequencer::effects::phaser_flanger.
 const PHASER_SWEEP_OCT: f32 = 2.5;
 const PHASER_SPREAD_SWEEP: f32 = 0.5;
 const FLANGER_SWEEP_OCT: f32 = 1.0;

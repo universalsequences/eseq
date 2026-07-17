@@ -1803,22 +1803,21 @@ mod tests {
     }
 
     #[test]
-    fn knob_number_hit_test_covers_visible_mixer_send_knob_lower_half() {
+    fn knob_number_hit_test_is_bounded_by_declared_size() {
         let engine = LayoutEngine::new(80, 24, 1.0);
         let layout = engine.layout(&mixer_send_knob()).expect("knob layout");
 
         let declared_height = 1.8_f32;
-        let knob_size = 1.84_f32;
-        let top_label_band = (declared_height * 0.45).max(0.72);
-        let visible_knob_bottom = layout.rect.row + top_label_band + knob_size;
-        let hit_row = layout.rect.row + 2.2;
+        assert_f32_approx(layout.rect.height, declared_height);
+        let hit_row = layout.rect.row + declared_height - 0.01;
         let hit_col = layout.rect.col + layout.rect.width * 0.5;
-        assert!(hit_row > layout.rect.row + declared_height);
-        assert!(hit_row < visible_knob_bottom);
-
-        let hit = hit_test_layout(&layout, hit_row, hit_col)
-            .expect("visible lower half of mixer send knob should be hittable");
+        let hit = hit_test_layout(&layout, hit_row, hit_col).expect("inside knob bounds");
         assert_eq!(hit.widget_type, "knob-number");
+
+        assert!(
+            hit_test_layout(&layout, layout.rect.row + declared_height + 0.01, hit_col,).is_none(),
+            "knob interaction must not extend beyond its declared bounds"
+        );
     }
 
     /// Build a vslider: (vslider :height h)
@@ -2119,7 +2118,7 @@ mod tests {
             time_seconds: 0.0,
             focused_widget_id: None,
             focused_branch: false,
-            tile_content_rows: 24.0,
+            overlay_viewport_bottom: 24.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
             inherited_hover: false,
@@ -2548,7 +2547,7 @@ mod tests {
 
     #[test]
     fn natural_width_sequencer_layout_fits_wide_viewport() {
-        // Mirrors the full sequencer layout from metal-seq-grid.lisp
+        // Mirrors the full sequencer layout from ui/main.lisp
         // at a wide viewport (content should fit → no scroll needed)
         let transport = hstack(
             1.0,

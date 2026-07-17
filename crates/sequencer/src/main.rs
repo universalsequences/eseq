@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use sequencer::engine;
-use sequencer::ui;
+use sequencer::tui;
 
 static CRASH_LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 static CRASH_LOG_PATH: OnceLock<String> = OnceLock::new();
@@ -253,7 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = engine::init_engine()?;
     let lg_raw = lg_ptr.0;
 
-    let mut app = ui::App::new(
+    let mut app = tui::App::new(
         state.clone(),
         lg_ptr,
         sample_rate,
@@ -290,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Main loop
     loop {
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+        terminal.draw(|f| tui::draw(f, &mut app))?;
         app.handle_input()?;
         if app.ui.should_quit {
             break;
@@ -314,7 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_headless_custom_repro(app: &mut ui::App) -> Result<(), Box<dyn std::error::Error>> {
+fn run_headless_custom_repro(app: &mut tui::App) -> Result<(), Box<dyn std::error::Error>> {
     let instrument_names = sequencer::lisp_host::list_saved_instruments();
     if instrument_names.is_empty() {
         return Err("No saved instruments found in instruments/".into());

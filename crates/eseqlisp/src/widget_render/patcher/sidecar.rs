@@ -106,7 +106,7 @@ pub(super) fn apply_or_materialize_excluding_macro_scopes(
                 .macros
                 .retain(|macro_name, _| !excluded_macros.contains(macro_name));
             apply_sidecar(patch, &sidecar, false);
-            Ok(())
+            save_patch_layout(source_path, patch, "rematerialize-excluded-macro-scopes")
         }
         Ok((SidecarStatus::Missing, _)) => {
             log_layout_auto_materialize(source_path, "missing-sidecar-excluding-macros", patch);

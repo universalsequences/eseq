@@ -33,6 +33,48 @@ fn ctrl_c_ctrl_c_binding_enqueues_host_command() {
 }
 
 #[test]
+fn lisp_key_handler_source_context_tracks_buffer_revisions_and_switches() {
+    let init = r#"
+        (def capture-source ()
+          (host-command "capture-source" (current-buffer-text)))
+        (bind-key "C-k" "capture-source")
+    "#;
+    let mut editor = Editor::new(
+        Runtime::new(),
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*first*", "first");
+
+    let capture = |editor: &mut Editor| {
+        editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        let command = editor
+            .drain_host_commands()
+            .into_iter()
+            .next()
+            .expect("capture-source command");
+        match command {
+            HostCommand::Custom {
+                name,
+                payload: Value::String(source),
+            } => {
+                assert_eq!(name, "capture-source");
+                source
+            }
+            other => panic!("unexpected source capture command: {other:?}"),
+        }
+    };
+
+    assert_eq!(capture(&mut editor), "first");
+    editor.active_buffer_mut().set_text("first revised");
+    assert_eq!(capture(&mut editor), "first revised");
+    editor.open_scratch_buffer("*second*", "second");
+    assert_eq!(capture(&mut editor), "second");
+}
+
+#[test]
 fn focused_text_input_survives_on_change_rerender() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor
@@ -2093,6 +2135,29 @@ fn vim_normal_mode_supports_basic_motions() {
 }
 
 #[test]
+fn vim_gd_jumps_to_definition() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    let defs_id = editor.open_scratch_buffer("*defs*", "(def target 42)");
+    let callsite_id = editor.open_scratch_buffer("*main*", "(target)");
+    editor.set_active_buffer(callsite_id);
+    editor.active_buffer_mut().cursor = (0, 1);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().id, defs_id);
+    assert_eq!(editor.active_buffer().cursor, (0, 5));
+    assert_eq!(editor.vim_input_mode, VimInputMode::Normal);
+}
+
+#[test]
 fn vim_normal_mode_accepts_shifted_motions_without_inserting() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(
@@ -2685,12 +2750,14 @@ fn typing_exact_special_form_keeps_completion_popup_open() {
 
     assert_eq!(editor.active_buffer().text(), "(def");
     assert!(editor.completion_state().is_some());
-    assert!(editor
-        .completion_state()
-        .unwrap()
-        .items
-        .iter()
-        .any(|item| item.label == "def"));
+    assert!(
+        editor
+            .completion_state()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.label == "def")
+    );
 }
 
 #[test]
@@ -3889,6 +3956,103 @@ fn clickable_child_inside_draggable_parent_does_not_start_parent_drag() {
 }
 
 #[test]
+fn box_drag_modifier_latches_shift_pointer_mode_instead_of_drag_and_drop() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def pushed (state false))
+                (def dragged-with-shift (state false))
+                (def released (state false))
+                (def dropped (state 0))
+                (effect
+                  (box :width 20 :height 4
+                       :capture-pointer true
+                       :drag-type "scene"
+                       :drag-modifier :none
+                       :drag-payload (dict :scene 0)
+                       :drop-types '("scene")
+                       :on-drop (lambda (event) (set! dropped (+ dropped 1)))
+                       :on-mouse-down (lambda (event) (set! pushed (get event :shift)))
+                       :on-drag (lambda (event) (set! dragged-with-shift (get event :shift)))
+                       :on-mouse-up (lambda (event) (set! released true))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 8);
+
+    let shifted_down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 1,
+        modifiers: KeyModifiers::SHIFT,
+    };
+    editor.handle_mouse(shifted_down, 0, 0, 40, 8);
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 8, 3),
+        0,
+        0,
+        40,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 30, 7),
+        0,
+        0,
+        40,
+        8,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("pushed").unwrap(),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dragged-with-shift").unwrap(),
+        Some(Value::Bool(true)),
+        "the pointer-down modifier must remain latched for the whole gesture"
+    );
+    assert_eq!(
+        editor.runtime.eval_str("released").unwrap(),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap(),
+        Some(Value::Number(0.0))
+    );
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        0,
+        0,
+        40,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 8, 3),
+        0,
+        0,
+        40,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 8, 3),
+        0,
+        0,
+        40,
+        8,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap(),
+        Some(Value::Number(1.0)),
+        "an unmodified gesture must retain the original drag-and-drop mode"
+    );
+}
+
+#[test]
 fn patcher_background_double_click_consumes_local_only_event() {
     let path = temp_file_path("patcher-double-click-create");
     std::fs::write(&path, "(+ 1 2)\n").unwrap();
@@ -4821,9 +4985,11 @@ fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
         }
     }
     editor.set_text_measurer(Box::new(TestTextMeasurer), 10.0, 20.0);
+    editor.set_text_cell_dimensions(10.0, 20.0, 10.0, 20.0);
 
     let tile_id = editor.active_tile;
     if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.show_border = true;
         leaf.border_width_px = 2.0;
     }
     editor.cached_tile_rects = vec![(
@@ -4835,9 +5001,8 @@ fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
             height: 8.0,
         },
     )];
-
     let precise_col: f32 = 3.25 + 0.2 + 2.9;
-    let precise_row: f32 = 10.5 + 0.2 + 0.9;
+    let precise_row: f32 = 10.5 + 0.1 + 0.9;
     editor.handle_tiled_mouse_precise(
         mouse_event(
             MouseEventKind::Down(MouseButton::Left),
@@ -5094,6 +5259,51 @@ fn box_pointer_handlers_receive_clicks_through_noninteractive_sdf_child() {
     assert_eq!(
         editor.runtime.eval_str("toggled").unwrap(),
         Some(Value::Bool(true))
+    );
+}
+
+#[test]
+fn button_release_stays_bound_to_the_original_pressed_button() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(8, 4);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def pressed (state false))
+                (def released (state false))
+                (effect
+                  (button "hold" :width 4 :height 2
+                    :on-press (lambda (evt) (set! pressed true))
+                    :on-release (lambda (evt) (set! released true))))
+                "#,
+        )
+        .unwrap();
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        1,
+        1,
+        8,
+        4,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 7, 3),
+        1,
+        1,
+        8,
+        4,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("pressed").unwrap(),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        editor.runtime.eval_str("released").unwrap(),
+        Some(Value::Bool(true)),
+        "releasing outside the button must not leave a momentary action engaged"
     );
 }
 
@@ -5503,6 +5713,76 @@ fn editable_widget_buffers_do_not_auto_focus_widgets() {
 }
 
 #[test]
+fn focused_number_picker_escape_cancels_edit_and_runs_global_escape_binding() {
+    let init = r#"
+        (def escape-count (state 0))
+        (def handle-global-escape ()
+          (do
+            (set! escape-count (+ escape-count 1))
+            true))
+        (bind-key "ESC" "handle-global-escape")
+    "#;
+    let runtime = Runtime::with_init_source(init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.set_layout_viewport(30, 8);
+    editor.refresh_runtime_side_effects();
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+                (number-picker
+                  :key "focused-picker"
+                  :value 12
+                  :min 0
+                  :max 99
+                  :decimals 0
+                  :width 8
+                  :height 1.4)
+                "#,
+        )
+        .expect("build number picker")
+        .expect("number picker should produce a widget tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    let _ = editor.widget_layout().expect("number picker layout");
+    assert!(editor.focus_widget_by_stable_key("focused-picker", Some("number-picker")));
+    let picker_id = editor.focused_widget_id().expect("number picker focus");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+    assert!(
+        crate::widget_render::number_picker::number_picker_edit_state(picker_id).editing,
+        "numeric input should put the focused picker into edit mode"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(
+        !crate::widget_render::number_picker::number_picker_edit_state(picker_id).editing,
+        "Escape should cancel the picker edit"
+    );
+    assert_eq!(
+        editor.focused_widget_id(),
+        None,
+        "Escape should blur the picker"
+    );
+    assert_eq!(
+        editor.runtime_mut().eval_str("escape-count").unwrap(),
+        Some(Value::Number(1.0)),
+        "the same Escape keypress should continue to the global binding"
+    );
+}
+
+#[test]
 fn editable_buffers_keep_text_navigation_when_widget_is_unfocused() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -5710,6 +5990,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         vec![
             ("base", Value::Number(0.0)),
             ("depth-1", Value::Number(0.5)),
+            ("origin", Value::Number(0.0)),
         ],
         true,
     );
@@ -5722,6 +6003,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
             (effect-buffer "*controls*"
               (knob-number :label "cut"
                 :value 0 :min -1 :max 1 :decimals 2
+                :origin (bind "APP" "origin")
                 :base-value (bind "APP" "base") :base-min -1 :base-max 1
                 :selected-mod-slot 1
                 :mod-range-0-slot 1
@@ -5750,6 +6032,11 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         knob.props.get("mod-ranges")
     );
     assert!(
+        matches!(knob.props.get("origin"), Some(Value::ReactiveRef { .. })),
+        "reactive origin should be accepted by knob-number: {:?}",
+        knob.props.get("origin")
+    );
+    assert!(
         matches!(
             knob.props.get("mod-range-0-depth"),
             Some(Value::ReactiveRef { .. })
@@ -5766,7 +6053,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         time_seconds: 0.0,
         focused_widget_id: None,
         focused_branch: false,
-        tile_content_rows: 16.0,
+        overlay_viewport_bottom: 16.0,
         scroll_top: 0.0,
         scroll_left: 0.0,
         inherited_hover: false,
@@ -6495,7 +6782,7 @@ fn inspect_source_span_opens_sampler_base_knob_fixture() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../sequencer/metal-seq-fx/sampler-panel.lisp")
+        .join("../sequencer/ui/effects/sampler-panel.lisp")
         .canonicalize()
         .unwrap();
     let source = std::fs::read_to_string(&path).unwrap();
@@ -7100,6 +7387,181 @@ fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn dropdown_overlay_captures_move_and_mouse_up_without_selecting_the_tile_below() {
+    fn find_widget<'a>(
+        node: &'a crate::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def underlay-clicked (state false))
+            (effect-buffer "*transport*"
+              (dropdown
+                :width 6
+                :height 1
+                :options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar")
+                :value "off"
+                :on-change (lambda (value) (host-command "overlay-selected" value))))
+            (effect-buffer "*sequencer*"
+              (button "underlay"
+                :width 60
+                :height 20
+                :on-click (lambda (event) (set! underlay-clicked true))))
+            (set-layout
+              (list :rows :gap 0
+                0.1 (list :buf "*transport*" :hide-status true)
+                0.9 (list :buf "*sequencer*" :hide-status true)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    let transport_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*transport*")
+        .unwrap();
+    let sequencer_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*sequencer*")
+        .unwrap();
+    let transport_tile = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(transport_idx)
+        .unwrap()
+        .id;
+    let sequencer_tile = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(sequencer_idx)
+        .unwrap()
+        .id;
+    let (transport_col, transport_row, _, transport_height) = editor
+        .tile_content_area(transport_tile, 0)
+        .expect("transport content area");
+    let transport_layout = editor
+        .tile_root
+        .find_leaf(transport_tile)
+        .and_then(|leaf| leaf.cached_layout.clone())
+        .expect("transport layout");
+    let dropdown = find_widget(&transport_layout, "dropdown")
+        .expect("transport dropdown")
+        .clone();
+
+    let trigger_col = transport_col as f32 + dropdown.rect.col + dropdown.rect.width * 0.5;
+    let trigger_row = transport_row as f32 + dropdown.rect.row + dropdown.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, trigger_col.floor() as u16, trigger_row.floor() as u16),
+            trigger_col,
+            trigger_row,
+            0,
+        );
+    }
+
+    assert_eq!(editor.active_tile, transport_tile);
+    let _ = crate::widget_render::collect_metal_primitives(
+        &transport_layout,
+        crate::widget_render::WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 600.0,
+            vp_h: 400.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 20.0 - transport_row as f32,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        0.0,
+        transport_height,
+    );
+    let menu = crate::widget_render::get_overlay_rect().expect("open dropdown overlay");
+    // Select 1/8 (third row). This point is below the two-row transport tile.
+    let item_col = transport_col as f32 + menu.col + menu.width * 0.5;
+    let item_row = transport_row as f32 + menu.row + 0.3 + 2.0 * 1.4 + 0.7;
+    assert!(
+        item_row >= editor.tile_rect(sequencer_tile).unwrap().row,
+        "test click must visibly overlap the sequencer tile"
+    );
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            item_col.floor() as u16,
+            item_row.floor() as u16,
+        ),
+        item_col,
+        item_row,
+        0,
+    );
+    let commands = editor.drain_host_commands();
+    assert!(
+        matches!(
+            commands.as_slice(),
+            [HostCommand::Custom { name, payload: Value::String(value) }]
+                if name == "overlay-selected" && value == "1/8"
+        ),
+        "menu={menu:?}, item=({item_col}, {item_row}), commands={commands:?}"
+    );
+    assert_eq!(editor.active_tile, transport_tile);
+    // AppKit commonly emits a move between the item mouse-down and the
+    // matching mouse-up. That move must not release overlay pointer capture.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Moved,
+            item_col.floor() as u16,
+            item_row.floor() as u16,
+        ),
+        item_col,
+        item_row,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            item_col.floor() as u16,
+            item_row.floor() as u16,
+        ),
+        item_col,
+        item_row,
+        0,
+    );
+
+    assert_eq!(editor.active_tile, transport_tile);
+    assert_eq!(
+        editor
+            .runtime
+            .eval_str("underlay-clicked")
+            .unwrap()
+            .unwrap(),
+        Value::Bool(false),
+        "the same click must not reach the buffer beneath the menu"
+    );
+    crate::widget_render::clear_overlay();
+}
+
 #[test]
 fn clicking_folder_tab_close_invokes_callback_without_selecting_tab() {
     let mut editor = editor_with_tabbed_buffers();
@@ -7363,16 +7825,22 @@ fn visible_inactive_tile_binding_write_marks_editor_for_redraw() {
         .expect("meter layout should be cached for visible inactive tile")
         .widget_id;
 
+    // Relaying out the active tree replaces the runtime's widget-binding map.
+    // The editor must immediately restore the union of all visible layouts,
+    // even though their cached layout identities have not changed.
+    editor.set_layout_viewport(61, 12);
+
     editor.clear_needs_redraw();
     let _ = editor.take_dirty_widget_ids();
 
     editor
         .runtime_mut()
         .set_reactive("APP", "peak", Value::Number(0.7));
+    editor.set_layout_viewport(62, 12);
 
     assert!(
         editor.needs_redraw(),
-        "binding-only writes in inactive visible tiles must schedule a render"
+        "binding-only writes in inactive visible tiles must survive an active-tree relayout and schedule a render"
     );
     assert_eq!(editor.take_dirty_widget_ids(), vec![widget_id]);
 }
@@ -7435,6 +7903,85 @@ fn tiled_frame_routes_binding_dirty_ids_to_inactive_tile() {
         .find(|tile| tile.tile_id == meters_tile_id)
         .expect("meters tile should be in tiled frame");
     assert_eq!(meters_tile.frame.dirty_widget_ids, vec![widget_id]);
+}
+
+#[test]
+fn unpresented_tiled_frame_requeues_inactive_tile_widget_dirtiness() {
+    let mut runtime = Runtime::new();
+    runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+    editor.update_tile_rects(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*meters*"
+              (mixer-meter
+                :level-l (bind "APP" "peak")
+                :level-r 0.0
+                :width 2.22
+                :height 4.24))
+            (split-window-right "*meters*")
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 12);
+    editor.sync_reactive_bindings_for_visible_layouts();
+
+    let meters_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*meters*")
+        .unwrap();
+    let meters_tile_id = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| {
+            editor
+                .tile_root
+                .find_leaf(*tile_id)
+                .is_some_and(|leaf| leaf.buffer_idx == meters_idx)
+        })
+        .unwrap();
+    let widget_id = editor
+        .tile_root
+        .find_leaf(meters_tile_id)
+        .and_then(|leaf| leaf.cached_layout.as_ref())
+        .expect("meter layout should be cached")
+        .widget_id;
+
+    let _ = editor.take_dirty_widget_ids();
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "peak", Value::Number(0.7));
+
+    let unpresented = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);
+    let first_dirty = unpresented
+        .tiles
+        .iter()
+        .find(|tile| tile.tile_id == meters_tile_id)
+        .expect("meters tile should be visible")
+        .frame
+        .dirty_widget_ids
+        .clone();
+    assert_eq!(first_dirty, vec![widget_id]);
+
+    crate::ui::frame::requeue_unpresented_tiled_frame(&mut editor, &unpresented);
+    assert!(editor.needs_redraw());
+
+    let retry = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);
+    let retried_dirty = &retry
+        .tiles
+        .iter()
+        .find(|tile| tile.tile_id == meters_tile_id)
+        .expect("meters tile should remain visible")
+        .frame
+        .dirty_widget_ids;
+    assert_eq!(retried_dirty, &first_dirty);
 }
 
 #[test]
@@ -10311,10 +10858,12 @@ fn inline_widget_snapshot_sync_preserves_code_and_inline_layout() {
     let mut expected = source.to_string();
     expected.insert_str(source.find("12").unwrap(), "        ");
     assert_eq!(rendered_source.trim_end(), expected);
-    assert!(frame.widget_layout.as_ref().is_some_and(|layout| layout
-        .children
-        .iter()
-        .any(|node| node.widget_type == "hslider")));
+    assert!(frame.widget_layout.as_ref().is_some_and(|layout| {
+        layout
+            .children
+            .iter()
+            .any(|node| node.widget_type == "hslider")
+    }));
 }
 
 #[test]

@@ -83,6 +83,12 @@ mod inner {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum TiledRenderStatus {
+        Presented,
+        NotPresented,
+    }
+
     // ── Shader source ─────────────────────────────────────────────────────────
     //
     // Buffer-based vertex input: no vertex descriptor needed.
@@ -2003,7 +2009,7 @@ fragment float4 live_spectrogram_frag(
         cell_h_bits: u32,
         vp_w_bits: u32,
         vp_h_bits: u32,
-        tile_content_rows_bits: u32,
+        overlay_viewport_bottom_bits: u32,
     }
 
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET: &str = "agent-instrument-stub-bg";
@@ -2483,7 +2489,7 @@ fragment float4 live_spectrogram_frag(
                 cell_h_bits: viewport.cell_h.to_bits(),
                 vp_w_bits: viewport.vp_w.to_bits(),
                 vp_h_bits: viewport.vp_h.to_bits(),
-                tile_content_rows_bits: viewport.tile_content_rows.to_bits(),
+                overlay_viewport_bottom_bits: viewport.overlay_viewport_bottom.to_bits(),
             }
         }
 
@@ -3769,7 +3775,7 @@ fragment float4 live_spectrogram_frag(
                             time_seconds,
                             focused_widget_id: frame.focused_widget_id,
                             focused_branch: false,
-                            tile_content_rows: max_rows_exact,
+                            overlay_viewport_bottom: max_rows_exact,
                             scroll_top: frame.widget_scroll_top + frame.text_scroll_top as f32,
                             scroll_left: frame.widget_layout_scroll_left,
                             inherited_hover: false,
@@ -4810,7 +4816,10 @@ fragment float4 live_spectrogram_frag(
         }
 
         /// Render a tiled frame with per-tile scissor clipping.
-        pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
+        pub fn render_tiled(
+            &mut self,
+            tiled: &TiledRenderFrame,
+        ) -> Result<TiledRenderStatus, BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
@@ -4823,7 +4832,7 @@ fragment float4 live_spectrogram_frag(
             self.drain_decoded_images(2);
 
             let Some(pipeline) = self.pipeline.clone() else {
-                return Ok(());
+                return Ok(TiledRenderStatus::NotPresented);
             };
             let Some((cell_w, cell_h, atlas_texture)) = self.atlas.as_ref().map(|atlas| {
                 (
@@ -4832,10 +4841,10 @@ fragment float4 live_spectrogram_frag(
                     atlas.texture.clone(),
                 )
             }) else {
-                return Ok(());
+                return Ok(TiledRenderStatus::NotPresented);
             };
             let Some(drawable) = self.layer.nextDrawable() else {
-                return Ok(());
+                return Ok(TiledRenderStatus::NotPresented);
             };
             let texture = drawable.texture();
             let vp_w = texture.width() as f32;
@@ -5055,7 +5064,10 @@ fragment float4 live_spectrogram_frag(
                         time_seconds,
                         focused_widget_id: tile.frame.focused_widget_id,
                         focused_branch: false,
-                        tile_content_rows: inner_rows_exact,
+                        // Global overlays use the full frame rather than this
+                        // tile's content clip. Express the frame bottom in the
+                        // tile-local coordinates consumed by widget rendering.
+                        overlay_viewport_bottom: vp_h / cell_h - content_row,
                         scroll_top: combined_scroll,
                         scroll_left: tile.frame.widget_layout_scroll_left,
                         inherited_hover: false,
@@ -6062,7 +6074,7 @@ fragment float4 live_spectrogram_frag(
             self.upload_arena.finish_frame(cmdbuf.clone());
             self.stats
                 .note_frame(0, 0, 0, widget_scene_build_time, metal_prep_time);
-            Ok(())
+            Ok(TiledRenderStatus::Presented)
         }
     }
 
@@ -6674,7 +6686,7 @@ fragment float4 live_spectrogram_frag(
                             time_seconds,
                             focused_widget_id: frame.focused_widget_id,
                             focused_branch: false,
-                            tile_content_rows: max_rows_exact,
+                            overlay_viewport_bottom: max_rows_exact,
                             scroll_top: frame.widget_scroll_top + frame.text_scroll_top as f32,
                             scroll_left: frame.widget_layout_scroll_left,
                             inherited_hover: false,
@@ -7104,7 +7116,7 @@ fragment float4 live_spectrogram_frag(
                 || previous.cell_h_bits != current.cell_h_bits
                 || previous.vp_w_bits != current.vp_w_bits
                 || previous.vp_h_bits != current.vp_h_bits
-                || previous.tile_content_rows_bits != current.tile_content_rows_bits
+                || previous.overlay_viewport_bottom_bits != current.overlay_viewport_bottom_bits
             {
                 self.widget_scene_miss_viewport += 1;
             }
@@ -10403,7 +10415,7 @@ fragment float4 live_spectrogram_frag(
                 time_seconds: 0.0,
                 focused_widget_id: None,
                 focused_branch: false,
-                tile_content_rows: 24.0,
+                overlay_viewport_bottom: 24.0,
                 scroll_top: 0.0,
                 scroll_left: 0.0,
                 inherited_hover: false,
@@ -10772,4 +10784,4 @@ fragment float4 live_spectrogram_frag(
 }
 
 #[cfg(target_os = "macos")]
-pub use inner::MetalBackend;
+pub use inner::{MetalBackend, TiledRenderStatus};

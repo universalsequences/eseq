@@ -219,6 +219,7 @@ bool graph_connect(LiveGraph *lg, int src_node, int src_port, int dst_node,
                    int dst_port);
 void begin_graph_edit_batch(LiveGraph *lg);
 void end_graph_edit_batch(LiveGraph *lg);
+uint32_t graph_edit_queue_available(const LiveGraph *lg);
 bool graph_disconnect(LiveGraph *lg, int src_node, int src_port, int dst_node,
                       int dst_port);
 

@@ -57,7 +57,6 @@
 
 ; output
 (param volume_db @default -8 @min -60 @max 6 @unit dB @mod true @mod-mode additive)
-(param vel_sens  @default 0.6 @min 0 @max 1)
 
 (defmacro db_gain (db)
   (pow 10 (/ db 20)))
@@ -118,6 +117,5 @@
   (clip (+ (mod cutoff) (* pitch keytrack) (* filt_env filter_env_amt)) 40 16000))
 (def filtered (svf mix filter_cutoff (clip (mod resonance) 0.5 6) (clip (floor filter_mode) 0 2)))
 
-(def vel_amp (+ (- 1 vel_sens) (* vel_sens velocity)))
 (def master (db_gain (clip (mod volume_db) -60 6)))
-(out (* filtered amp_env vel_amp master) 1 @name audio)
+(out (* filtered amp_env master) 1 @name audio)

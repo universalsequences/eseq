@@ -873,7 +873,13 @@ impl WidgetDefinition for TreeWidget {
         }
     }
 
-    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        node: &LayoutNode,
+        _local_col: f32,
+        local_row: f32,
+        _modifiers: KeyModifiers,
+    ) -> Option<Value> {
         let drag_type = get_string_prop(&node.props, "drag-type")?;
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);

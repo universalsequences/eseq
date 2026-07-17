@@ -246,6 +246,7 @@ pub fn register_graph_authoring_natives(
     );
 
     let state_for_bind_graph = Arc::clone(&state);
+    let bindings_for_bind_graph = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "bind-graph",
         "(bind-graph sequencer node-index :delay [options])",
@@ -278,6 +279,7 @@ pub fn register_graph_authoring_natives(
                 }
             };
             Ok(graph_seeded_reactive_ref(
+                &bindings_for_bind_graph,
                 graph_node_reactive_field(manifest.id, instance, &field),
                 value,
             ))
@@ -307,6 +309,7 @@ pub fn register_graph_authoring_natives(
     );
 
     let state_for_bind_graph_edge = Arc::clone(&state);
+    let bindings_for_bind_graph_edge = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "bind-graph-edge",
         "(bind-graph-edge sequencer from to :weight)",
@@ -342,6 +345,7 @@ pub fn register_graph_authoring_natives(
             )?)
             .ok_or_else(|| format!("bind-graph-edge param :{param} is not numeric"))?;
             Ok(graph_seeded_reactive_ref(
+                &bindings_for_bind_graph_edge,
                 graph_edge_reactive_field(manifest.id, from, to, &param),
                 value,
             ))
@@ -426,6 +430,7 @@ pub fn register_graph_authoring_natives(
     );
 
     let state_for_bind_graph_config = Arc::clone(&state);
+    let bindings_for_bind_graph_config = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "bind-graph-config",
         "(bind-graph-config sequencer :reset-bars [options])",
@@ -451,6 +456,7 @@ pub fn register_graph_authoring_natives(
                 }
             };
             Ok(graph_seeded_reactive_ref(
+                &bindings_for_bind_graph_config,
                 graph_config_reactive_field(manifest.id, &field),
                 value,
             ))
@@ -591,16 +597,12 @@ fn graph_edge_reactive_field(manifest_id: u64, from: usize, to: usize, param: &s
 /// dirty bound widgets — safe to call during render) and return a reactive handle
 /// pointing at the same slot. Re-running the producing lisp on a pattern switch
 /// re-seeds the slot; live edits keep it current via `reactive-set`.
-fn graph_seeded_reactive_ref(field: String, value: f64) -> EValue {
-    eseqlisp::reactive::write_float_slot(GRAPH_REACTIVE_NS, &field, value);
-    let slot = eseqlisp::reactive::reactive_float_slot(GRAPH_REACTIVE_NS, &field);
-    EValue::ReactiveRef {
-        namespace: GRAPH_REACTIVE_NS.to_string(),
-        field,
-        index: None,
-        kind: eseqlisp::vm::BindingKind::Float,
-        slot,
-    }
+fn graph_seeded_reactive_ref(
+    bindings: &eseqlisp::reactive::ReactiveBindingStore,
+    field: String,
+    value: f64,
+) -> EValue {
+    bindings.seeded_float_ref(GRAPH_REACTIVE_NS, field, value)
 }
 
 /// Resolve a node field to a single float for `bind-graph`. `delay` is an

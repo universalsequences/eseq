@@ -94,7 +94,7 @@ Labels stay title case, full words ("Instruments", not "INSTR").
   their own headers).
 
 ### ⚠️ Stable-key contract (Rust side)
-`src/bin/metal_seq/input.rs` focuses the search field by stable key
+`src/ui/input.rs` focuses the search field by stable key
 `"sbrowser-search-input"` (~lines 182, 212, 819–825: tab-cycling preserves
 search focus). The relocated field **must keep** `:key "sbrowser-search-input"`
 and there must be exactly **one** widget with that key in the non-editor
@@ -117,7 +117,7 @@ layout, or that logic silently breaks. There are tests around this in
 
 ## Code seams
 
-All in `crates/sequencer/metal-seq-browser.lisp` unless noted:
+All in `crates/sequencer/ui/browser.lisp` unless noted:
 
 - `sbrowser-tab-button` (~line 618): the whole restyle happens here — every
   tab renders through this one function. Rewrite as a source-list row
@@ -134,7 +134,7 @@ All in `crates/sequencer/metal-seq-browser.lisp` unless noted:
 - `sbrowser-select-tab` (~line 311): add filter clearing.
 - `sbrowser-create-search-bar` / its use in the instruments panel (~lines
   576, 601): delete.
-- `src/bin/metal_seq/input.rs`: verify focus/tab-cycle behavior still passes;
+- `src/ui/input.rs`: verify focus/tab-cycle behavior still passes;
   add Cmd+F binding if not present.
 
 ## Tests

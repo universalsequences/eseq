@@ -33,6 +33,9 @@ const SCROLLBAR_WIDTH: f32 = 0.4;
 const SCROLLBAR_MARGIN: f32 = 0.15;
 /// Approximate cell width per character for proportional text width estimation.
 const APPROX_CHAR_WIDTH: f32 = 0.55;
+// Round action-menu glyphs sit optically below the midpoint when placed at
+// the font baseline's mathematical center.
+const ACTION_MENU_ICON_OPTICAL_OFFSET: f32 = -0.08;
 
 // ── Internal state ──────────────────────────────────────────────────────────
 
@@ -210,6 +213,27 @@ fn get_selected(props: &HashMap<String, Value>) -> String {
     }
 }
 
+fn is_action_menu(props: &HashMap<String, Value>) -> bool {
+    matches!(props.get("action-menu"), Some(Value::Bool(true)))
+}
+
+fn action_menu_icon(props: &HashMap<String, Value>) -> String {
+    match props.get("icon") {
+        Some(Value::String(icon)) => icon.clone(),
+        Some(Value::Keyword(icon)) => icon.clone(),
+        _ => "•••".to_string(),
+    }
+}
+
+fn trigger_text_row(props: &HashMap<String, Value>, rect: Rect) -> f32 {
+    let centered = rect.row + (rect.height - 1.0) * 0.5;
+    if is_action_menu(props) {
+        centered + ACTION_MENU_ICON_OPTICAL_OFFSET
+    } else {
+        centered
+    }
+}
+
 fn props_from_node(node: &Value) -> HashMap<String, Value> {
     let Some(map) = get_map(node) else {
         return HashMap::new();
@@ -293,6 +317,28 @@ fn selected_index(options: &[String], selected: &str) -> Option<usize> {
     options.iter().position(|o| o == selected)
 }
 
+fn initial_mouse_hovered_index(
+    props: &HashMap<String, Value>,
+    options: &[String],
+) -> Option<usize> {
+    if is_action_menu(props) {
+        None
+    } else {
+        selected_index(options, &get_selected(props))
+    }
+}
+
+fn initial_keyboard_hovered_index(
+    props: &HashMap<String, Value>,
+    options: &[String],
+) -> Option<usize> {
+    if is_action_menu(props) {
+        (!options.is_empty()).then_some(0)
+    } else {
+        selected_index(options, &get_selected(props))
+    }
+}
+
 /// Computed menu placement and sizing.
 struct MenuGeometry {
     /// Top of the visible menu in layout-space rows.
@@ -305,31 +351,37 @@ struct MenuGeometry {
     max_scroll: f32,
 }
 
-/// Compute menu placement relative to trigger, clamping to viewport.
+/// Compute menu placement relative to trigger, clamping to the frame-level
+/// overlay viewport.
 /// When the menu doesn't fit below or above, it extends to fill the full
 /// viewport height (covering the trigger), matching native macOS behavior.
 fn compute_menu_geometry(
     trigger_row: f32,
     trigger_height: f32,
     option_count: usize,
-    viewport_rows: f32,
+    viewport_top: f32,
+    viewport_bottom: f32,
 ) -> MenuGeometry {
     let content_height = option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
     let gap = 0.15;
-    // Reserve space for the border so it isn't clipped by the tile scissor
+    // Reserve space for the border so it isn't clipped by the frame edge.
     let border_inset = 0.1;
     let below_top = trigger_row + trigger_height + gap;
 
-    let (menu_top, visible_height) = if below_top + content_height + border_inset <= viewport_rows {
+    let (menu_top, visible_height) = if below_top + content_height + border_inset <= viewport_bottom
+    {
         // Fits below trigger
         (below_top, content_height)
-    } else if trigger_row - content_height - gap >= border_inset {
+    } else if trigger_row - content_height - gap >= viewport_top + border_inset {
         // Fits above trigger
         (trigger_row - content_height - gap, content_height)
     } else {
         // Doesn't fit either way — fill viewport minus border insets
-        let h = (viewport_rows - border_inset * 2.0).min(content_height);
-        (border_inset, h)
+        let viewport_height = (viewport_bottom - viewport_top).max(0.0);
+        let h = (viewport_height - border_inset * 2.0)
+            .max(0.0)
+            .min(content_height);
+        (viewport_top + border_inset, h)
     };
 
     let max_scroll = (content_height - visible_height).max(0.0);
@@ -368,7 +420,7 @@ pub static DROPDOWN_WIDGET: DropdownWidget = DropdownWidget;
 
 impl WidgetDefinition for DropdownWidget {
     fn names(&self) -> &'static [&'static str] {
-        &["dropdown", "dropdown-chevron"]
+        &["dropdown", "menu-button", "dropdown-chevron"]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -380,6 +432,7 @@ impl WidgetDefinition for DropdownWidget {
             "width",
             "height",
             "font-size",
+            "icon",
         ]
     }
 
@@ -411,6 +464,7 @@ impl WidgetDefinition for DropdownWidget {
             .map(f64_to_f32)
             .unwrap_or(ctx.inherited_font_size);
         let props = props_from_node(node);
+        let action_menu = is_action_menu(&props);
         let selected = get_selected(&props);
         let options = get_options(&props);
         if ctx.text_measurer.is_some() {
@@ -421,9 +475,17 @@ impl WidgetDefinition for DropdownWidget {
                 cache_text_widths(&option, font_size, ctx);
             }
         }
-        let height = get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.5);
+        let height = get_prop_num(node, "height")
+            .map(f64_to_f32)
+            .unwrap_or(if action_menu { 1.1 } else { 1.5 });
         let explicit_width = get_prop_num(node, "width").map(f64_to_f32);
-        let width = explicit_width.unwrap_or(10.0);
+        let width = explicit_width.unwrap_or(if action_menu { 2.2 } else { 10.0 });
+        if action_menu {
+            if ctx.text_measurer.is_some() {
+                cache_text_widths(&action_menu_icon(&props), font_size, ctx);
+            }
+            return Some(Size { width, height });
+        }
         let selected_width = if props.contains_key("value-index") {
             options
                 .iter()
@@ -522,7 +584,7 @@ impl WidgetDefinition for DropdownWidget {
             // Open the dropdown
             close_other_dropdowns(node.widget_id);
             state.open = true;
-            state.hovered_idx = selected_index(&options, &get_selected(&node.props));
+            state.hovered_idx = initial_mouse_hovered_index(&node.props, &options);
             state.ignore_opening_mouse_up = true;
             state.scroll_offset = 0.0;
             set_state(node.widget_id, state);
@@ -537,8 +599,6 @@ impl WidgetDefinition for DropdownWidget {
             return None;
         }
 
-        let selected = get_selected(&node.props);
-
         if !state.open {
             // When closed: only Enter opens the menu.
             // Up/Down are NOT consumed — they fall through to focus navigation.
@@ -546,7 +606,7 @@ impl WidgetDefinition for DropdownWidget {
                 KeyCode::Enter => {
                     close_other_dropdowns(node.widget_id);
                     state.open = true;
-                    state.hovered_idx = selected_index(&options, &selected);
+                    state.hovered_idx = initial_keyboard_hovered_index(&node.props, &options);
                     set_state(node.widget_id, state);
                     return Some(WidgetEvent::Custom(Value::Nil));
                 }
@@ -624,8 +684,11 @@ impl WidgetDefinition for DropdownWidget {
     }
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
-        let selected = get_selected(props);
-        let text = format!("{} ▾", selected);
+        let text = if is_action_menu(props) {
+            action_menu_icon(props)
+        } else {
+            format!("{} ▾", get_selected(props))
+        };
         let fg = resolve_named_color(props, "text-color", theme::DROPDOWN_FG());
         let row = rect.row.round() as u16;
         let col_start = rect.col.round() as u16 + 1;
@@ -642,7 +705,7 @@ impl WidgetDefinition for DropdownWidget {
     #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
         match widget_type {
-            "dropdown" => Some(super::ROUNDED_RECT_SHADER),
+            "dropdown" | "menu-button" => Some(super::ROUNDED_RECT_SHADER),
             "dropdown-chevron" => Some(DROPDOWN_CHEVRON_SHADER),
             _ => None,
         }
@@ -657,6 +720,7 @@ impl WidgetDefinition for DropdownWidget {
     ) -> Vec<MetalPrimitive> {
         let selected = get_selected(&node.props);
         let options = get_options(&node.props);
+        let action_menu = is_action_menu(&node.props);
         let mut state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
 
@@ -686,7 +750,7 @@ impl WidgetDefinition for DropdownWidget {
         let mut prims = Vec::new();
 
         // ── Focus ring ──
-        if is_focused {
+        if is_focused && (!action_menu || !state.open) {
             let ring_v = 0.15_f32;
             let ring_h = ring_v * viewport.cell_h / viewport.cell_w;
             let ring_rect = Rect {
@@ -733,36 +797,51 @@ impl WidgetDefinition for DropdownWidget {
             height: ch_h,
         };
 
-        // ── Selected text ──
-        let text_col = node.rect.col + PADDING_H;
-        let text_row = node.rect.row + (node.rect.height - 1.0) * 0.5;
-        let text_clip_rect = Rect {
-            row: node.rect.row + 0.08,
-            col: text_col,
-            width: (ch_rect.col - TEXT_CHEVRON_GAP - text_col).max(0.0),
-            height: (node.rect.height - 0.16).max(0.0),
-        };
-        let selected_display = truncate_text_to_width(&selected, text_clip_rect.width, font_size);
-        if !selected_display.is_empty() && text_clip_rect.width > 0.0 {
-            prims.push(MetalPrimitive::PushClipRect(text_clip_rect));
+        let text_row = trigger_text_row(&node.props, node.rect);
+        if action_menu {
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
                     row: text_row,
-                    col: text_col,
-                    align_width: 0.0,
-                    h_align: 0.0,
-                    text: selected_display,
+                    col: node.rect.col,
+                    align_width: node.rect.width,
+                    h_align: 0.5,
+                    text: action_menu_icon(&node.props),
                     font_size,
                     scale: 1.0,
                     fg: text_color,
                     bg: transparent,
                 },
             ));
-            prims.push(MetalPrimitive::PopClipRect);
-        }
+        } else {
+            // ── Selected text ──
+            let text_col = node.rect.col + PADDING_H;
+            let text_clip_rect = Rect {
+                row: node.rect.row + 0.08,
+                col: text_col,
+                width: (ch_rect.col - TEXT_CHEVRON_GAP - text_col).max(0.0),
+                height: (node.rect.height - 0.16).max(0.0),
+            };
+            let selected_display =
+                truncate_text_to_width(&selected, text_clip_rect.width, font_size);
+            if !selected_display.is_empty() && text_clip_rect.width > 0.0 {
+                prims.push(MetalPrimitive::PushClipRect(text_clip_rect));
+                prims.push(MetalPrimitive::ProportionalText(
+                    MetalProportionalTextPrimitive {
+                        row: text_row,
+                        col: text_col,
+                        align_width: 0.0,
+                        h_align: 0.0,
+                        text: selected_display,
+                        font_size,
+                        scale: 1.0,
+                        fg: text_color,
+                        bg: transparent,
+                    },
+                ));
+                prims.push(MetalPrimitive::PopClipRect);
+            }
 
-        // ── Chevron badge + arrows ──
-        {
+            // ── Chevron badge + arrows ──
             // Badge background behind chevrons
             let badge_color =
                 resolve_named_color(&node.props, "badge-color", theme::DROPDOWN_BADGE_BG());
@@ -809,10 +888,17 @@ impl WidgetDefinition for DropdownWidget {
         if state.open && !options.is_empty() {
             let screen_col = node.rect.col - viewport.scroll_left;
             let screen_row = node.rect.row - viewport.scroll_top;
-            let viewport_rows = viewport.tile_content_rows;
+            let viewport_rows = viewport.vp_h / viewport.cell_h.max(1.0);
+            let viewport_bottom = viewport.overlay_viewport_bottom;
+            let viewport_top = viewport_bottom - viewport_rows;
 
-            let geo =
-                compute_menu_geometry(screen_row, node.rect.height, options.len(), viewport_rows);
+            let geo = compute_menu_geometry(
+                screen_row,
+                node.rect.height,
+                options.len(),
+                viewport_top,
+                viewport_bottom,
+            );
 
             // Persist geometry so key_event/scroll can operate correctly
             state.visible_height = geo.visible_height;
@@ -824,7 +910,7 @@ impl WidgetDefinition for DropdownWidget {
 
             // Menu width: at least trigger width, expanded to fit longest option
             let needs_scrollbar = geo.content_height > geo.visible_height;
-            let check_col_width = 1.5; // space for ✓ mark
+            let check_col_width = if action_menu { 0.0 } else { 1.5 }; // space for ✓ mark
             let text_left_pad = PADDING_H + check_col_width;
             let scrollbar_pad = if needs_scrollbar {
                 SCROLLBAR_WIDTH + SCROLLBAR_MARGIN * 2.0
@@ -838,9 +924,17 @@ impl WidgetDefinition for DropdownWidget {
             let content_width = text_left_pad + max_option_width + PADDING_H + scrollbar_pad;
             let menu_width = content_width.max(node.rect.width);
 
+            let viewport_cols = viewport.vp_w / viewport.cell_w.max(1.0);
+            let menu_col = if action_menu {
+                (screen_col + node.rect.width - menu_width)
+                    .max(0.0)
+                    .min((viewport_cols - menu_width).max(0.0))
+            } else {
+                screen_col
+            };
             let menu_rect = Rect {
                 row: geo.menu_top,
-                col: screen_col,
+                col: menu_col,
                 width: menu_width,
                 height: geo.visible_height,
             };
@@ -874,10 +968,10 @@ impl WidgetDefinition for DropdownWidget {
             // Menu items — only emit those within the visible scroll window
             let sel_idx = selected_index(&options, &selected);
             let scroll_off = state.scroll_offset;
-            let label_col = screen_col + PADDING_H;
-            let item_text_col = label_col + 1.5;
+            let label_col = menu_col + PADDING_H;
+            let item_text_col = label_col + check_col_width;
             let item_text_width =
-                (menu_width - (item_text_col - screen_col) - PADDING_H - scrollbar_pad).max(0.0);
+                (menu_width - (item_text_col - menu_col) - PADDING_H - scrollbar_pad).max(0.0);
             for (i, option) in options.iter().enumerate() {
                 // Item position in content space (relative to menu content start)
                 let content_y = MENU_PADDING_V + i as f32 * MENU_ROW_HEIGHT;
@@ -896,7 +990,7 @@ impl WidgetDefinition for DropdownWidget {
                 if is_hovered {
                     let hl_rect = Rect {
                         row: item_y,
-                        col: screen_col + 0.15,
+                        col: menu_col + 0.15,
                         width: menu_width - 0.3,
                         height: MENU_ROW_HEIGHT,
                     };
@@ -904,7 +998,7 @@ impl WidgetDefinition for DropdownWidget {
                 }
 
                 // Check mark for selected item
-                if sel_idx == Some(i) {
+                if !action_menu && sel_idx == Some(i) {
                     super::push_overlay_primitive(MetalPrimitive::ProportionalText(
                         MetalProportionalTextPrimitive {
                             row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
@@ -944,7 +1038,7 @@ impl WidgetDefinition for DropdownWidget {
             // Scrollbar indicator (when content is taller than visible area)
             if needs_scrollbar {
                 let track_margin = SCROLLBAR_MARGIN;
-                let bar_col = screen_col + menu_width - SCROLLBAR_WIDTH - track_margin;
+                let bar_col = menu_col + menu_width - SCROLLBAR_WIDTH - track_margin;
                 let track_top = geo.menu_top + track_margin;
                 let track_height = geo.visible_height - track_margin * 2.0;
                 let thumb_ratio = (geo.visible_height / geo.content_height).clamp(0.05, 1.0);
@@ -1135,8 +1229,9 @@ mod tests {
 
     #[test]
     fn selected_label_can_follow_reactive_index_value() {
-        let slot = crate::reactive::reactive_float_slot("TEST_DROPDOWN", "wave");
-        crate::reactive::write_float_slot("TEST_DROPDOWN", "wave", 1.0);
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let slot = slots.slot("TEST_DROPDOWN", "wave");
+        slots.write_float("TEST_DROPDOWN", "wave", 1.0);
 
         let mut props = HashMap::new();
         props.insert("options".to_string(), string_list(&["saw", "pulse", "tri"]));
@@ -1152,7 +1247,7 @@ mod tests {
         );
 
         assert_eq!(get_selected(&props), "pulse");
-        crate::reactive::write_float_slot("TEST_DROPDOWN", "wave", 2.0);
+        slots.write_float("TEST_DROPDOWN", "wave", 2.0);
         assert_eq!(get_selected(&props), "tri");
     }
 
@@ -1173,8 +1268,110 @@ mod tests {
     }
 
     #[test]
+    fn menu_geometry_uses_space_below_short_originating_tile() {
+        // The trigger lives in a two-row transport tile, but the frame-level
+        // overlay viewport continues for another eighteen rows.
+        let geometry = compute_menu_geometry(0.25, 1.0, 5, 0.0, 20.0);
+
+        assert_eq!(geometry.visible_height, geometry.content_height);
+        assert!(geometry.menu_top > 1.0);
+        assert!(geometry.menu_top + geometry.visible_height > 2.0);
+        assert!(geometry.menu_top + geometry.visible_height <= 20.0);
+    }
+
+    #[test]
+    fn menu_geometry_can_open_above_its_originating_tile() {
+        // Negative local rows represent frame space above a lower tile.
+        let geometry = compute_menu_geometry(1.0, 1.0, 5, -12.0, 8.0);
+
+        assert_eq!(geometry.visible_height, geometry.content_height);
+        assert!(geometry.menu_top < 0.0);
+        assert!(geometry.menu_top >= -12.0);
+    }
+
+    #[test]
+    fn oversized_menu_scrolls_within_the_frame_overlay_viewport() {
+        let geometry = compute_menu_geometry(2.0, 1.0, 100, -3.0, 7.0);
+
+        assert!(geometry.visible_height <= 10.0);
+        assert_eq!(geometry.menu_top, -2.9);
+        assert!(geometry.max_scroll > 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_menu_emits_a_finite_overlay_beyond_a_short_tile() {
+        let widget_id = 91_337;
+        let mut props = HashMap::new();
+        props.insert(
+            "options".to_string(),
+            string_list(&["off", "1/16", "1/8", "1/4", "1/2", "1 bar"]),
+        );
+        props.insert("value".to_string(), Value::String("off".to_string()));
+        let node = LayoutNode {
+            widget_id,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "dropdown".to_string(),
+            rect: Rect {
+                row: 0.25,
+                col: 8.0,
+                width: 6.0,
+                height: 1.0,
+            },
+            props,
+            children: Vec::new(),
+            focusable: true,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 800.0,
+            vp_h: 400.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 20.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+
+        super::super::clear_overlay();
+        set_state(widget_id, DropdownState::default());
+        let outcome = DROPDOWN_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            node.rect.col,
+            node.rect.row,
+            None,
+            None,
+            KeyModifiers::NONE,
+            viewport.cell_w,
+            viewport.cell_h,
+        );
+        assert!(matches!(outcome, MouseEventOutcome::Consume));
+
+        let (_tile_primitives, overlay_primitives) =
+            crate::widget_render::collect_metal_primitives(&node, viewport, 0.0, 2);
+        let overlay_rect =
+            super::super::get_overlay_rect().expect("open dropdown should register hit bounds");
+
+        assert!(!overlay_primitives.is_empty());
+        assert!(overlay_rect.width.is_finite() && overlay_rect.width > 0.0);
+        assert!(overlay_rect.height.is_finite() && overlay_rect.height > 0.0);
+        assert!(overlay_rect.row + overlay_rect.height > 2.0);
+
+        set_state(widget_id, DropdownState::default());
+        super::super::clear_overlay();
+    }
+
+    #[test]
     fn value_index_accepts_reactive_binding_at_widget_construction() {
-        let slot = crate::reactive::reactive_float_slot("TEST_DROPDOWN", "wave_construct");
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let slot = slots.slot("TEST_DROPDOWN", "wave_construct");
         let widget = crate::widgets::build_widget(
             "dropdown",
             vec![
@@ -1196,5 +1393,50 @@ mod tests {
         };
         assert!(props.contains_key("type"));
         assert!(props.contains_key("value-index"));
+    }
+
+    #[test]
+    fn menu_button_constructor_marks_an_icon_only_focusable_action_menu() {
+        let widget = crate::widgets::build_widget(
+            "menu-button",
+            vec![
+                Value::Keyword("options".to_string()),
+                string_list(&["Copy current values to all scenes"]),
+            ],
+        );
+        let Value::Map(map) = widget else {
+            panic!("menu-button should construct a widget map");
+        };
+        assert!(matches!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword(kind)) if kind == "menu-button"
+        ));
+        assert!(matches!(
+            map.get("action-menu").map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        ));
+        assert!(matches!(
+            map.get("focusable").map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        ));
+        let props = props_from_node(&Value::Map(map));
+        assert!(is_action_menu(&props));
+        assert_eq!(
+            initial_mouse_hovered_index(&props, &get_options(&props)),
+            None,
+            "mouse activation should not preselect an action"
+        );
+        assert_eq!(
+            initial_keyboard_hovered_index(&props, &get_options(&props)),
+            Some(0),
+            "keyboard activation should focus the first action immediately"
+        );
+        let rect = Rect {
+            row: 2.0,
+            col: 0.0,
+            width: 2.25,
+            height: 0.7,
+        };
+        assert!((trigger_text_row(&props, rect) - 1.77).abs() < f32::EPSILON);
     }
 }
