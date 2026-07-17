@@ -10438,6 +10438,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "select-bus-step" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let step = map_number(map, "step").map(|value| value as usize);
+                            if let (Some(bus_idx), Some(step)) = (bus_idx, step) {
+                                if let Some(bus) = app.buses.get(bus_idx) {
+                                    let num_steps = bus.gate_sequence.num_steps.max(1);
+                                    let step = step.min(num_steps - 1);
+                                    {
+                                        let mut set = selected_steps.lock().unwrap();
+                                        if !set.insert(step) {
+                                            set.remove(&step);
+                                        }
+                                    }
+                                    editor.runtime_mut().set_reactive(
+                                        "SEQ",
+                                        "selected-steps",
+                                        build_selection_value(&selected_steps),
+                                    );
+                                    editor.runtime_mut().run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
                     "select-all-bus-steps" => {
                         if let Value::Map(ref map) = payload {
                             let bus_idx = map_number(map, "bus").map(|value| value as usize);

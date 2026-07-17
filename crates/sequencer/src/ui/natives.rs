@@ -1746,6 +1746,16 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(true))
     });
 
+    // now-ms — wall-clock milliseconds for gesture timing (hold-to-select)
+    runtime.register_native("now-ms", |_args, _ctx| {
+        Ok(Value::Number(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+        ))
+    });
+
     // seq-toggle-step — toggle step on current track
     let st = state.clone();
     let ct = current_track.clone();

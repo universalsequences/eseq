@@ -491,8 +491,9 @@ enum ChainSuccessor {
 
 - Port the track chain and bus chain onto `FxChainHost`: one implementation
   each of add / move / delete / param-push / predecessor-successor search,
-  parameterized by host. The 16 bus-specific functions in `ui/effects.rs`
+  parameterized by host. The 16 bus-specific functions in `tui/effects.rs`
   collapse into the shared impl.
+  	* this would be a good opportunity to organize that file better / place it somewhere else
 - `connect_custom_effect_gap` grows a `ChainSuccessor::MonoPair` arm: last
   effect out ch0 → `l`, ch1 → `r` (mono effect out fans to both).
 - Lease storage unifies to one keyed map or a per-host row, replacing the

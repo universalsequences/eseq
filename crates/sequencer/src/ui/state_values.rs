@@ -11365,8 +11365,28 @@ mod tests {
         selected: Arc<Mutex<Vec<bool>>>,
         toggles: Arc<Mutex<Vec<usize>>>,
         moves: Arc<Mutex<Vec<(usize, usize)>>>,
+        ranges: Arc<Mutex<Vec<(usize, usize)>>>,
+        picks: Arc<Mutex<Vec<usize>>>,
+        clock: Arc<Mutex<f64>>,
     ) {
         runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+
+        {
+            let clock = clock.clone();
+            runtime.register_native("now-ms", move |_args, _ctx| {
+                Ok(Value::Number(*clock.lock().unwrap()))
+            });
+        }
+        {
+            let clock = clock.clone();
+            runtime.register_native("test-set-now-ms", move |args, _ctx| {
+                let Some(Value::Number(ms)) = args.first() else {
+                    return Err("test-set-now-ms: expected milliseconds".into());
+                };
+                *clock.lock().unwrap() = *ms;
+                Ok(Value::Nil)
+            });
+        }
 
         let selected_for_has_selection = selected.clone();
         runtime.register_native("seq-has-selection?", move |_args, _ctx| {
@@ -11416,26 +11436,66 @@ mod tests {
             Ok(Value::Bool(true))
         });
 
-        runtime.register_native("seq-select-step-range", |_args, _ctx| Ok(Value::Nil));
+        let ranges_for_select = ranges.clone();
+        let selected_for_range = selected.clone();
+        runtime.register_native("seq-select-step-range", move |args, _ctx| {
+            let (Some(Value::Number(start)), Some(Value::Number(end))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("seq-select-step-range: expected start and end".into());
+            };
+            let start = *start as usize;
+            let end = *end as usize;
+            ranges_for_select.lock().unwrap().push((start, end));
+            let mut selected = selected_for_range.lock().unwrap();
+            let (lo, hi) = (start.min(end), start.max(end));
+            for (index, slot) in selected.iter_mut().enumerate() {
+                *slot = index >= lo && index <= hi;
+            }
+            Ok(Value::Nil)
+        });
+
+        let picks_for_select = picks.clone();
+        let selected_for_pick = selected.clone();
+        runtime.register_native("seq-select-step", move |args, _ctx| {
+            let Some(Value::Number(step)) = args.first() else {
+                return Err("seq-select-step: expected step".into());
+            };
+            let step = *step as usize;
+            picks_for_select.lock().unwrap().push(step);
+            let mut selected = selected_for_pick.lock().unwrap();
+            selected[step] = !selected[step];
+            Ok(Value::Bool(selected[step]))
+        });
+    }
+
+    struct StepGestureHarness {
+        runtime: Runtime,
+        steps: Arc<Mutex<Vec<bool>>>,
+        toggles: Arc<Mutex<Vec<usize>>>,
+        moves: Arc<Mutex<Vec<(usize, usize)>>>,
+        ranges: Arc<Mutex<Vec<(usize, usize)>>>,
+        picks: Arc<Mutex<Vec<usize>>>,
     }
 
     fn step_gesture_runtime(
         initial_steps: &[bool],
         selected_steps: &[bool],
-    ) -> (
-        Runtime,
-        Arc<Mutex<Vec<bool>>>,
-        Arc<Mutex<Vec<usize>>>,
-        Arc<Mutex<Vec<(usize, usize)>>>,
-    ) {
+    ) -> StepGestureHarness {
         let steps = Arc::new(Mutex::new(initial_steps.to_vec()));
         let selected = Arc::new(Mutex::new(selected_steps.to_vec()));
         let toggles = Arc::new(Mutex::new(Vec::new()));
         let moves = Arc::new(Mutex::new(Vec::new()));
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let picks = Arc::new(Mutex::new(Vec::new()));
+        let clock = Arc::new(Mutex::new(0.0f64));
         let mut runtime = Runtime::new();
         runtime
             .eval_str("(defstate cursor-step 0)")
             .expect("define cursor step");
+        runtime
+            .eval_str("(defstate step-key-select-anchor nil)")
+            .expect("define keyboard anchor");
         runtime
             .eval_str(&format!(
                 "(def SEQ (dict :current-track 0 :selected-steps '{}))",
@@ -11448,9 +11508,19 @@ mod tests {
             selected,
             toggles.clone(),
             moves.clone(),
+            ranges.clone(),
+            picks.clone(),
+            clock,
         );
         load_step_gesture_source(&mut runtime);
-        (runtime, steps, toggles, moves)
+        StepGestureHarness {
+            runtime,
+            steps,
+            toggles,
+            moves,
+            ranges,
+            picks,
+        }
     }
 
     fn track_qualified_step_gesture_runtime() -> (
@@ -11476,7 +11546,9 @@ mod tests {
         runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
         runtime.register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
         runtime.register_native("seq-select-step-range", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("seq-select-step", |_args, _ctx| Ok(Value::Nil));
         runtime.register_native("seq-move-step-drag", |_args, _ctx| Ok(Value::Bool(true)));
+        runtime.register_native("now-ms", |_args, _ctx| Ok(Value::Number(0.0)));
         {
             let current_track = current_track.clone();
             runtime.register_native("seq-set-track", move |args, _ctx| {
@@ -11531,73 +11603,234 @@ mod tests {
 
     #[test]
     fn empty_step_drag_paints_steps_on_without_starting_move_drag() {
-        let (mut runtime, steps, toggles, moves) =
-            step_gesture_runtime(&[false, false, false, false, false], &[false; 5]);
+        let mut h = step_gesture_runtime(&[false, false, false, false, false], &[false; 5]);
 
-        runtime
+        h.runtime
             .eval_str("(step-pointer-down 1 (dict))")
             .expect("pointer down");
-        runtime
+        h.runtime
             .eval_str("(step-select-drag-over 2 (dict))")
             .expect("drag over step 2");
-        runtime
+        h.runtime
             .eval_str("(step-select-drag-over 3 (dict))")
             .expect("drag over step 3");
-        runtime
+        h.runtime
             .eval_str("(step-pointer-up 3 (dict))")
             .expect("pointer up");
 
-        assert_eq!(*steps.lock().unwrap(), vec![false, true, true, true, false]);
-        assert_eq!(*toggles.lock().unwrap(), vec![1, 2, 3]);
-        assert!(moves.lock().unwrap().is_empty());
+        assert_eq!(*h.steps.lock().unwrap(), vec![false, true, true, true, false]);
+        assert_eq!(*h.toggles.lock().unwrap(), vec![1, 2, 3]);
+        assert!(h.moves.lock().unwrap().is_empty());
     }
 
     #[test]
     fn active_step_drag_moves_without_toggling_clicked_step_off() {
-        let (mut runtime, steps, toggles, moves) =
-            step_gesture_runtime(&[false, false, true, false, false], &[false; 5]);
+        let mut h = step_gesture_runtime(&[false, false, true, false, false], &[false; 5]);
 
-        runtime
+        h.runtime
             .eval_str("(step-pointer-down 2 (dict))")
             .expect("pointer down");
-        runtime
+        h.runtime
             .eval_str("(step-select-drag-over 3 (dict))")
             .expect("drag over step 3");
-        runtime
+        h.runtime
             .eval_str("(step-pointer-up 3 (dict))")
             .expect("pointer up");
 
         assert_eq!(
-            *steps.lock().unwrap(),
+            *h.steps.lock().unwrap(),
             vec![false, false, true, false, false]
         );
-        assert!(toggles.lock().unwrap().is_empty());
-        assert_eq!(*moves.lock().unwrap(), vec![(2, 3)]);
+        assert!(h.toggles.lock().unwrap().is_empty());
+        assert_eq!(*h.moves.lock().unwrap(), vec![(2, 3)]);
     }
 
     #[test]
-    fn selected_empty_step_drag_uses_move_drag_instead_of_painting() {
-        let (mut runtime, steps, toggles, moves) = step_gesture_runtime(
+    fn plain_click_on_active_step_selects_without_toggling_off() {
+        let mut h = step_gesture_runtime(&[false, false, true, false, false], &[false; 5]);
+
+        h.runtime
+            .eval_str("(step-pointer-down 2 (dict))")
+            .expect("pointer down");
+        h.runtime
+            .eval_str("(step-pointer-up 2 (dict))")
+            .expect("pointer up");
+
+        assert_eq!(
+            *h.steps.lock().unwrap(),
+            vec![false, false, true, false, false]
+        );
+        assert!(h.toggles.lock().unwrap().is_empty());
+        assert!(h.moves.lock().unwrap().is_empty());
+        assert_eq!(*h.ranges.lock().unwrap(), vec![(2, 2)]);
+    }
+
+    #[test]
+    fn plain_click_on_selected_empty_step_toggles_it_on() {
+        let mut h = step_gesture_runtime(
             &[false, false, false, false, false],
             &[false, false, true, false, false],
         );
 
-        runtime
+        h.runtime
             .eval_str("(step-pointer-down 2 (dict))")
             .expect("pointer down");
-        runtime
+        h.runtime
+            .eval_str("(step-pointer-up 2 (dict))")
+            .expect("pointer up");
+
+        assert_eq!(
+            *h.steps.lock().unwrap(),
+            vec![false, false, true, false, false]
+        );
+        assert_eq!(*h.toggles.lock().unwrap(), vec![2]);
+        assert!(h.moves.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn selected_empty_step_drag_uses_move_drag_instead_of_painting() {
+        let mut h = step_gesture_runtime(
+            &[false, false, false, false, false],
+            &[false, false, true, false, false],
+        );
+
+        h.runtime
+            .eval_str("(step-pointer-down 2 (dict))")
+            .expect("pointer down");
+        h.runtime
             .eval_str("(step-select-drag-over 4 (dict))")
             .expect("drag over step 4");
-        runtime
+        h.runtime
             .eval_str("(step-pointer-up 4 (dict))")
             .expect("pointer up");
 
         assert_eq!(
-            *steps.lock().unwrap(),
+            *h.steps.lock().unwrap(),
             vec![false, false, false, false, false]
         );
-        assert!(toggles.lock().unwrap().is_empty());
-        assert_eq!(*moves.lock().unwrap(), vec![(2, 4)]);
+        assert!(h.toggles.lock().unwrap().is_empty());
+        assert_eq!(*h.moves.lock().unwrap(), vec![(2, 4)]);
+    }
+
+    #[test]
+    fn hold_then_drag_sweeps_selection_instead_of_moving() {
+        let mut h = step_gesture_runtime(&[false, false, true, false, false], &[false; 5]);
+
+        h.runtime
+            .eval_str("(test-set-now-ms 1000)")
+            .expect("set clock");
+        h.runtime
+            .eval_str("(step-pointer-down 2 (dict))")
+            .expect("pointer down");
+        h.runtime
+            .eval_str("(test-set-now-ms 1400)")
+            .expect("advance clock past hold threshold");
+        h.runtime
+            .eval_str("(step-select-drag-over 4 (dict))")
+            .expect("drag over step 4 after hold");
+        h.runtime
+            .eval_str("(step-pointer-up 4 (dict))")
+            .expect("pointer up");
+
+        assert_eq!(
+            *h.steps.lock().unwrap(),
+            vec![false, false, true, false, false]
+        );
+        assert!(h.toggles.lock().unwrap().is_empty());
+        assert!(
+            h.moves.lock().unwrap().is_empty(),
+            "hold-then-drag must sweep selection, not move the step"
+        );
+        assert_eq!(*h.ranges.lock().unwrap(), vec![(2, 4)]);
+    }
+
+    #[test]
+    fn immediate_drag_still_moves_even_past_hold_threshold() {
+        let mut h = step_gesture_runtime(&[false, false, true, false, false], &[false; 5]);
+
+        h.runtime
+            .eval_str("(test-set-now-ms 1000)")
+            .expect("set clock");
+        h.runtime
+            .eval_str("(step-pointer-down 2 (dict))")
+            .expect("pointer down");
+        h.runtime
+            .eval_str("(test-set-now-ms 1100)")
+            .expect("advance clock a little");
+        h.runtime
+            .eval_str("(step-select-drag-over 3 (dict))")
+            .expect("drag before hold threshold");
+        h.runtime
+            .eval_str("(test-set-now-ms 1600)")
+            .expect("advance clock past hold threshold");
+        h.runtime
+            .eval_str("(step-select-drag-over 4 (dict))")
+            .expect("keep dragging after threshold");
+        h.runtime
+            .eval_str("(step-pointer-up 4 (dict))")
+            .expect("pointer up");
+
+        assert_eq!(
+            *h.moves.lock().unwrap(),
+            vec![(2, 3), (3, 4)],
+            "a drag that starts moving before the hold threshold stays a move"
+        );
+        assert!(h.ranges.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn shift_click_extends_selection_from_cursor_anchor() {
+        let mut h = step_gesture_runtime(&[false, true, false, false, false, true], &[false; 6]);
+
+        h.runtime
+            .eval_str("(step-pointer-down 1 (dict))")
+            .expect("plain click active step 1");
+        h.runtime
+            .eval_str("(step-pointer-up 1 (dict))")
+            .expect("release selects step 1");
+        h.runtime
+            .eval_str("(step-pointer-down 5 (dict :shift true))")
+            .expect("shift click step 5");
+        h.runtime
+            .eval_str("(step-pointer-up 5 (dict :shift true))")
+            .expect("release shift click");
+
+        assert_eq!(
+            *h.ranges.lock().unwrap(),
+            vec![(1, 1), (1, 5)],
+            "shift-click should extend the range from the previously selected step"
+        );
+        assert!(h.toggles.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cmd_click_toggles_single_step_selection_membership() {
+        let mut h = step_gesture_runtime(&[false, true, false, false, false, true], &[false; 6]);
+
+        h.runtime
+            .eval_str("(step-pointer-down 1 (dict))")
+            .expect("plain click active step 1");
+        h.runtime
+            .eval_str("(step-pointer-up 1 (dict))")
+            .expect("release selects step 1");
+        h.runtime
+            .eval_str("(step-pointer-down 5 (dict :cmd true))")
+            .expect("cmd click step 5");
+        h.runtime
+            .eval_str("(step-pointer-up 5 (dict :cmd true))")
+            .expect("release cmd click");
+
+        assert_eq!(
+            *h.ranges.lock().unwrap(),
+            vec![(1, 1)],
+            "cmd-click must not replace the selection with a range"
+        );
+        assert_eq!(
+            *h.picks.lock().unwrap(),
+            vec![5],
+            "cmd-click should toggle just the clicked step into the selection"
+        );
+        assert!(h.toggles.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -11731,14 +11964,13 @@ mod tests {
             .eval_str("(step-pointer-up 1 (dict))")
             .expect("pointer up on clicked step");
 
-        assert_eq!(
-            *toggles.lock().unwrap(),
-            vec![(0, 1)],
-            "a plain click on an active step in another track should toggle exactly once"
+        assert!(
+            toggles.lock().unwrap().is_empty(),
+            "a plain click on an active step should select it, not toggle it off"
         );
         assert!(
-            !steps.lock().unwrap()[0][1],
-            "the clicked active step should end off"
+            steps.lock().unwrap()[0][1],
+            "the clicked active step should stay on"
         );
     }
 

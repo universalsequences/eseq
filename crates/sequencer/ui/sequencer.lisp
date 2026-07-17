@@ -779,6 +779,11 @@
           (seqv-set-duration-from-drag track step step))
         (step-pointer-down-for-track track step evt use-selection)))))
 
+(def seqv-step-double-click (track step evt)
+  (do
+    (seq-set-track track)
+    (step-double-click-for-track track step evt)))
+
 (def seqv-step-pointer-up (track step evt)
   (do
     (if (and (= seqv-drag-track track) (= seqv-duration-drag-source nil))
@@ -824,6 +829,10 @@
       :on-mouse-up (lambda (evt)
         (if visible
           (seqv-step-pointer-up track step evt)
+          nil))
+      :on-double-click (lambda (evt)
+        (if visible
+          (seqv-step-double-click track step evt)
           nil))
       :active (seqv-cursor-highlight-binding track step)
       :selected (seqv-track-selected-binding track)
@@ -1038,6 +1047,17 @@
   (let ((step (seqv-slot-step-index-value track-id slot)))
     (if (>= step 0)
       (seqv-expanded-step-pointer-up track track-id step evt)
+      nil)))
+
+(def seqv-expanded-step-double-click (track track-id step evt)
+  (do
+    (seqv-activate-track-for-edit track)
+    (step-double-click-for-track track step evt)))
+
+(def seqv-expanded-slot-double-click (track track-id slot evt)
+  (let ((step (seqv-slot-step-index-value track-id slot)))
+    (if (>= step 0)
+      (seqv-expanded-step-double-click track track-id step evt)
       nil)))
 
 (def seqv-set-expanded-slot-param (track track-id slot mode slider-value)
@@ -1325,6 +1345,8 @@
                           (seqv-expanded-slot-drag track track-id i evt))
                         :on-mouse-up (lambda (evt)
                           (seqv-expanded-slot-pointer-up track track-id i evt))
+                        :on-double-click (lambda (evt)
+                          (seqv-expanded-slot-double-click track track-id i evt))
                         (metal-track-tick
                           :active active-ref
                           :plocked plocked-ref

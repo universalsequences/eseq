@@ -11,7 +11,7 @@
   (if (= hide 1)
     (rgba 0 0 0 0)
     (sdf/layer
-      (sdf/stroke (sdf/rounded-rect (* width 0.94) (* height 0.99) 0.30)
+      (sdf/stroke (sdf/rounded-rect (* width 0.94) (* height 0.93) 0.30)
         0.055
         (rgba 0.72 0.76 0.84 (* 0.95 active selected))))))
 
