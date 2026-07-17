@@ -486,6 +486,179 @@ fn migrate_dgen_builtin_effect_names(project: &mut ProjectFile) {
     }
 }
 
+/// Version-1 project files were saved when dgenlisp node state used a 6-slot
+/// header. Version 2 grew the header to 10 slots (the node-owned process
+/// identity refactor), which shifted every dgen param's node-state index by
+/// +4. The migration below rewrites saved indices for dgen-hosted slots so
+/// they address the same memory cells under the new layout. Native builtin
+/// effects (filter, OTT, DJ mixer, EQ8, …) and MIDI FX own their layouts,
+/// which did not change, and are left untouched.
+const LEGACY_DGEN_HEADER_SLOTS: u32 = 6;
+
+fn legacy_dgen_header_delta() -> u32 {
+    crate::lisp_host::HEADER_SLOTS as u32 - LEGACY_DGEN_HEADER_SLOTS
+}
+
+fn shifted_legacy_dgen_node_index(idx: u32) -> Option<u32> {
+    (idx >= LEGACY_DGEN_HEADER_SLOTS
+        && idx < crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
+        .then(|| idx + legacy_dgen_header_delta())
+}
+
+/// Shift a legacy dgen slot's saved node indices to the 10-slot header
+/// layout. Returns the set of pre-migration indices that were shifted so
+/// callers can rebase saved `ParamNodeId`s referencing this slot.
+fn migrate_legacy_dgen_effect_slot(
+    slot: &mut project::ProjectEffectSlot,
+) -> std::collections::BTreeSet<u32> {
+    let shifted_sources: std::collections::BTreeSet<u32> = slot
+        .param_node_indices
+        .iter()
+        .copied()
+        .filter(|&idx| shifted_legacy_dgen_node_index(idx).is_some())
+        .collect();
+    for idx in &mut slot.param_node_indices {
+        if let Some(shifted) = shifted_legacy_dgen_node_index(*idx) {
+            *idx = shifted;
+        }
+    }
+    fn migrate_param_id(
+        shifted_sources: &std::collections::BTreeSet<u32>,
+        param_id: &mut Option<ParamNodeId>,
+    ) {
+        if let Some(param_id) = param_id {
+            if shifted_sources.contains(&param_id.node_param_idx) {
+                param_id.node_param_idx += legacy_dgen_header_delta();
+            }
+        }
+    }
+    for row in &mut slot.plock_param_ids {
+        for param_id in row {
+            migrate_param_id(&shifted_sources, param_id);
+        }
+    }
+    for row in slot.key_lock_param_ids.values_mut() {
+        for param_id in row {
+            migrate_param_id(&shifted_sources, param_id);
+        }
+    }
+    shifted_sources
+}
+
+/// True when a saved effect-chain slot name refers to a dgenlisp-hosted
+/// effect: any custom (non-builtin) effect, or a dgenlisp-backed builtin.
+fn project_effect_name_is_dgen_hosted(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    match crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name) {
+        Some(builtin) => crate::effects::conv_reverb::is_dgen_builtin(builtin),
+        None => true,
+    }
+}
+
+fn migrate_legacy_dgen_param_node_indices(project: &mut ProjectFile) {
+    let custom_instrument_tracks: Vec<bool> = project
+        .tracks
+        .iter()
+        .map(|track| matches!(track, project::ProjectTrack::Custom { .. }))
+        .collect();
+    let track_effect_names = project.custom_effects.clone();
+    let bus_effect_names: std::collections::HashMap<u64, Vec<Option<String>>> = project
+        .buses
+        .iter()
+        .map(|bus| (bus.id, bus.custom_effects.clone()))
+        .collect();
+    let slot_name_is_dgen = |names: Option<&Vec<Option<String>>>, slot_idx: usize| {
+        project_effect_name_is_dgen_hosted(
+            names
+                .and_then(|names| names.get(slot_idx))
+                .and_then(|name| name.as_deref()),
+        )
+    };
+
+    for bus in &mut project.buses {
+        let names = bus.custom_effects.clone();
+        for (slot_idx, slot) in bus.effect_slots.iter_mut().enumerate() {
+            if slot_name_is_dgen(Some(&names), slot_idx) {
+                migrate_legacy_dgen_effect_slot(slot);
+            }
+        }
+    }
+
+    for pattern in &mut project.patterns {
+        let mut instrument_shifted: std::collections::HashMap<
+            usize,
+            std::collections::BTreeSet<u32>,
+        > = std::collections::HashMap::new();
+        let mut effect_shifted: std::collections::HashMap<
+            (usize, usize),
+            std::collections::BTreeSet<u32>,
+        > = std::collections::HashMap::new();
+
+        for (track, slot) in pattern.instrument_slots.iter_mut().enumerate() {
+            if custom_instrument_tracks.get(track).copied().unwrap_or(false) {
+                instrument_shifted.insert(track, migrate_legacy_dgen_effect_slot(slot));
+            }
+        }
+        for (track, slots) in pattern.effect_slots.iter_mut().enumerate() {
+            for (slot_idx, slot) in slots.iter_mut().enumerate() {
+                if slot_name_is_dgen(track_effect_names.get(track), slot_idx) {
+                    effect_shifted
+                        .insert((track, slot_idx), migrate_legacy_dgen_effect_slot(slot));
+                }
+            }
+        }
+        for bus_pattern in &mut pattern.bus_patterns {
+            let names = bus_effect_names.get(&bus_pattern.id);
+            for (slot_idx, slot) in bus_pattern.effect_slots.iter_mut().enumerate() {
+                if slot_name_is_dgen(names, slot_idx) {
+                    migrate_legacy_dgen_effect_slot(slot);
+                }
+            }
+        }
+        for rack in pattern.rack_tracks.iter_mut().flatten() {
+            for slot in &mut rack.slots {
+                if matches!(
+                    slot.instrument_type,
+                    project::ProjectInstrumentType::Custom
+                ) {
+                    migrate_legacy_dgen_effect_slot(&mut slot.instrument_slot);
+                }
+                let names = slot.custom_effects.clone();
+                for (fx_idx, fx_slot) in slot.effect_slots.iter_mut().enumerate() {
+                    if slot_name_is_dgen(Some(&names), fx_idx) {
+                        migrate_legacy_dgen_effect_slot(fx_slot);
+                    }
+                }
+            }
+        }
+
+        for network in &mut pattern.neural_networks {
+            for neuron in &mut network.neurons {
+                for override_param in &mut neuron.output_overrides.instrument {
+                    if let Some(shifted_sources) =
+                        instrument_shifted.get(&override_param.target_track)
+                    {
+                        if shifted_sources.contains(&override_param.param_id.node_param_idx) {
+                            override_param.param_id.node_param_idx += legacy_dgen_header_delta();
+                        }
+                    }
+                }
+                for override_param in &mut neuron.output_overrides.effects {
+                    if let Some(shifted_sources) = effect_shifted
+                        .get(&(override_param.target_track, override_param.slot_index))
+                    {
+                        if shifted_sources.contains(&override_param.param_id.node_param_idx) {
+                            override_param.param_id.node_param_idx += legacy_dgen_header_delta();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn resolve_project_current_track(
     saved_current_track: Option<usize>,
     track_count: usize,
@@ -1114,11 +1287,14 @@ impl App {
             project.patterns.len(),
             project.custom_effects.len()
         );
-        if project.version != project::project_file_version() {
+        if project.version > project::project_file_version() {
             return Err(format!("Unsupported project version {}", project.version));
         }
         migrate_legacy_default_track_effects(&mut project);
         migrate_dgen_builtin_effect_names(&mut project);
+        if project.version < 2 {
+            migrate_legacy_dgen_param_node_indices(&mut project);
+        }
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
             name: name.to_string(),
@@ -3351,6 +3527,95 @@ fn apply_instrument_preset_to_container_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_dgen_slot_migration_shifts_only_header_relative_indices() {
+        let mut slot = project::ProjectEffectSlot {
+            num_params: 4,
+            defaults: vec![1.0, 0.5, 0.25, 0.7],
+            plocks: vec![vec![None; 4]; 2],
+            plock_param_ids: vec![
+                vec![
+                    None,
+                    Some(ParamNodeId {
+                        logical_id: 11,
+                        node_param_idx: 6,
+                    }),
+                    None,
+                    // Modulator-relative index that happens to be small but
+                    // does not match any effect-node index in this slot.
+                    Some(ParamNodeId {
+                        logical_id: 12,
+                        node_param_idx: 64,
+                    }),
+                ],
+                vec![None; 4],
+            ],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::from([(
+                60,
+                vec![
+                    Some(ParamNodeId {
+                        logical_id: 11,
+                        node_param_idx: 9,
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
+            )]),
+            tensor_params: Vec::new(),
+            // enabled param (4), two dgen cells (6, 9), one modulator param.
+            param_node_indices: vec![
+                4,
+                6,
+                9,
+                crate::voice_modulator::MOD_PARAM_BASE + 3,
+            ],
+            param_node_spans: vec![1; 4],
+            ir: None,
+        };
+
+        migrate_legacy_dgen_effect_slot(&mut slot);
+
+        assert_eq!(
+            slot.param_node_indices,
+            vec![4, 10, 13, crate::voice_modulator::MOD_PARAM_BASE + 3]
+        );
+        assert_eq!(
+            slot.plock_param_ids[0][1],
+            Some(ParamNodeId {
+                logical_id: 11,
+                node_param_idx: 10,
+            })
+        );
+        assert_eq!(
+            slot.plock_param_ids[0][3],
+            Some(ParamNodeId {
+                logical_id: 12,
+                node_param_idx: 64,
+            }),
+            "modulator-relative param id must not shift"
+        );
+        assert_eq!(
+            slot.key_lock_param_ids[&60][0],
+            Some(ParamNodeId {
+                logical_id: 11,
+                node_param_idx: 13,
+            })
+        );
+    }
+
+    #[test]
+    fn dgen_hosted_effect_name_classification() {
+        assert!(project_effect_name_is_dgen_hosted(Some("my-custom-fx")));
+        assert!(project_effect_name_is_dgen_hosted(Some(
+            "builtin:Convolution Reverb"
+        )));
+        assert!(!project_effect_name_is_dgen_hosted(Some("builtin:EQ8")));
+        assert!(!project_effect_name_is_dgen_hosted(Some("builtin:OTT")));
+        assert!(!project_effect_name_is_dgen_hosted(None));
+    }
 
     fn test_param(
         name: &str,

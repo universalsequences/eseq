@@ -22,7 +22,13 @@ use crate::track_color::TrackColor;
 const PROJECTS_DIR: &str = "projects";
 const SOUNDS_DIR: &str = "sounds";
 const RACK_PRESETS_DIR: &str = "presets/racks";
-const PROJECT_FILE_VERSION: u32 = 1;
+// Version history:
+//   1 — original format; dgenlisp node-state header was 6 slots, so saved
+//       `param_node_indices` for dgen slots are `6 + cell_id`.
+//   2 — dgenlisp header grew to 10 slots (node-owned process identity);
+//       dgen `param_node_indices` are `10 + cell_id`. Version-1 files are
+//       migrated on load (see `migrate_legacy_dgen_param_node_indices`).
+const PROJECT_FILE_VERSION: u32 = 2;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
