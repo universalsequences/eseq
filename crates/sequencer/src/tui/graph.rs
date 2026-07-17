@@ -108,7 +108,7 @@ fn validate_rack_build_slot_pad_map(
     Ok(())
 }
 
-fn preserve_rack_slot_controls(
+fn preserve_rack_slot_configuration(
     mut replacement: RackSlotSnapshot,
     existing: &RackSlotSnapshot,
 ) -> RackSlotSnapshot {
@@ -121,6 +121,9 @@ fn preserve_rack_slot_controls(
     replacement.solo = existing.solo;
     replacement.max_polyphony = existing.max_polyphony;
     replacement.param_plocks = existing.param_plocks.clone();
+    replacement.effect_slots = existing.effect_slots.clone();
+    replacement.effect_descriptors = existing.effect_descriptors.clone();
+    replacement.custom_effect_names = existing.custom_effect_names.clone();
     replacement
 }
 
@@ -3119,6 +3122,163 @@ impl GraphController<'_> {
         Ok(slot_idx)
     }
 
+    fn replace_layer_rack_slot_source(
+        &mut self,
+        track_idx: usize,
+        slot_idx: usize,
+        replacement: RackSlotSnapshot,
+    ) -> Result<(), String> {
+        if self.app.graph.track_instrument_types.get(track_idx) != Some(&InstrumentType::Rack) {
+            return Err("Current track is not a rack".to_string());
+        }
+        let mut rack = self
+            .app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track_idx)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| "Rack track has no rack metadata".to_string())?;
+        if rack.routing != RackRouting::Broadcast {
+            return Err("Replace drum rack instruments on their pad".to_string());
+        }
+        let existing = rack
+            .slots
+            .get(slot_idx)
+            .cloned()
+            .ok_or_else(|| "Invalid rack layer".to_string())?;
+        rack.slots[slot_idx] = preserve_rack_slot_configuration(replacement, &existing);
+
+        let bindings = self.rebuild_rack_slot_graph(track_idx, &mut rack)?;
+        if !self.app.state.replace_rack_slot_source_in_current_pattern(
+            track_idx,
+            slot_idx,
+            rack.slots[slot_idx].clone(),
+        ) {
+            return Err("Failed to replace rack layer source".to_string());
+        }
+        if !self
+            .app
+            .state
+            .sync_rack_slot_instrument_bindings_for_current_pattern(track_idx, &bindings)
+        {
+            return Err("Failed to sync rack layer bindings to current pattern".to_string());
+        }
+        self.app.set_rack_selected_slot(track_idx, slot_idx);
+        self.app.state.schedule_mod_resync();
+        self.app.state.request_all_accumulator_resets();
+        self.app.state.publish_scheduler_snapshot();
+        self.app.push_all_restored_defaults();
+        self.app
+            .state
+            .transport
+            .topology_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app
+            .state
+            .transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn replace_rack_slot_with_sampler(
+        &mut self,
+        track_idx: usize,
+        slot_idx: usize,
+        wav_path: &Path,
+    ) -> Result<(), String> {
+        if self.app.graph.track_instrument_types.get(track_idx) != Some(&InstrumentType::Rack) {
+            return Err("Current track is not a rack".to_string());
+        }
+        let rack = self
+            .app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track_idx)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| "Rack track has no rack metadata".to_string())?;
+        if rack.routing != RackRouting::Broadcast || rack.slots.get(slot_idx).is_none() {
+            return Err("Invalid instrument rack layer".to_string());
+        }
+
+        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        self.app.submit_sample_analysis(&loaded);
+        let sample_name =
+            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
+        let replacement = RackSlotSnapshot {
+            instrument_type: InstrumentType::Sampler,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: 0.0,
+            pad_note: None,
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            max_polyphony: MAX_VOICES,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: EffectSlotSnapshot::new_empty(),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: Some((loaded.buffer_id, sample_name.clone(), loaded.sample_rate)),
+        };
+        self.replace_layer_rack_slot_source(track_idx, slot_idx, replacement)?;
+        self.app.register_loaded_sample_path(
+            &sample_name,
+            loaded.buffer_id,
+            wav_path.to_path_buf(),
+        );
+        Ok(())
+    }
+
+    pub fn replace_rack_slot_with_custom(
+        &mut self,
+        track_idx: usize,
+        slot_idx: usize,
+        instrument_name: &str,
+        engine_id: usize,
+        manifest: &DGenManifest,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Result<(), String> {
+        let descriptor = lisp_host::instrument_descriptor_from_manifest(instrument_name, manifest);
+        let replacement = RackSlotSnapshot {
+            instrument_type: InstrumentType::Custom,
+            instrument_run_mode: run_mode,
+            instrument_base_note_offset: 0.0,
+            pad_note: None,
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            max_polyphony: MAX_VOICES,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: EffectSlotSnapshot::new_default_with_modulator(
+                &descriptor, 0, 0,
+            ),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
+            track_sound_state: TrackSoundState {
+                engine_id: Some(engine_id),
+                loaded_preset: Some(instrument_name.to_string()),
+                dirty: false,
+            },
+            sample_id: None,
+        };
+        self.replace_layer_rack_slot_source(track_idx, slot_idx, replacement)
+    }
+
     fn add_or_replace_drum_rack_slot_source(
         &mut self,
         track_idx: usize,
@@ -3152,7 +3312,7 @@ impl GraphController<'_> {
             .position(|slot| slot.pad_note == Some(pad_note));
         let slot_idx = if let Some(slot_idx) = replacing_slot_idx {
             let existing = rack.slots[slot_idx].clone();
-            rack.slots[slot_idx] = preserve_rack_slot_controls(replacement, &existing);
+            rack.slots[slot_idx] = preserve_rack_slot_configuration(replacement, &existing);
             slot_idx
         } else {
             if rack.slots.len() >= MAX_RACK_SLOTS {
@@ -7645,6 +7805,65 @@ mod tests {
             "grouping should rewire the existing engine route instead of rebuilding it"
         );
         assert!(app.rack_slot_instrument_descriptor(&rack.slots[0]).is_some());
+        graph.process_block();
+    }
+
+    #[test]
+    fn replacing_expanded_rack_instrument_preserves_slot_fx_and_retires_old_engine() {
+        let graph = TestLiveGraph::new("rack-slot-instrument-replacement-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 0);
+        let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+            name: "test-synth".to_string(),
+            source: "test-synth.lisp".to_string(),
+            manifest: manifest.clone(),
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        app.graph_controller()
+            .add_custom_track(
+                "test-synth",
+                engine_id,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("custom track should be created");
+        app.graph_controller()
+            .group_track_to_instrument_rack(0)
+            .expect("custom track should group");
+        let effect_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "OTT")
+            .expect("rack slot should accept OTT");
+        let effect_node = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .expect("rack state")
+            .slots[0]
+            .effect_slots[effect_slot]
+            .node_id;
+
+        app.graph_controller()
+            .replace_rack_slot_with_sampler(
+                0,
+                0,
+                Path::new("assets/ir/lexicon-300-rich-plate.wav"),
+            )
+            .expect("expanded rack instrument should be replaceable");
+
+        let rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state should remain published");
+        assert_eq!(rack.slots.len(), 1, "replacement must not append a layer");
+        assert_eq!(rack.slots[0].instrument_type, InstrumentType::Sampler);
+        assert_eq!(rack.slots[0].effect_slots[effect_slot].node_id, effect_node);
+        assert_eq!(rack.slots[0].effect_descriptors[effect_slot].name, "OTT");
+        assert_eq!(app.graph.track_node_ids[0].rack_slots.len(), 1);
+        assert_eq!(app.graph.track_node_ids[0].rack_slots[0].engine_id, None);
+        assert!(
+            app.graph.engine_node_ids[engine_id].is_none(),
+            "the replaced dedicated instrument runtime should be retired"
+        );
         graph.process_block();
     }
 

@@ -37,6 +37,31 @@
     (sbrowser-drop-sound-on-track event)
     (rack-panel-drop-on-rack event)))
 
+(def rack-selected-instrument-drop (event)
+  (let ((payload (get event :payload))
+        (target (get event :target))
+        (drag-type (get event :drag-type)))
+    (if (= drag-type "sound")
+      (sbrowser-drop-sound-on-track event)
+      (if (= drag-type "instrument")
+        (let ((name (get payload :name)))
+          (if name
+            (host-command "replace-rack-slot-instrument"
+              (dict :track (get target :track)
+                    :slot (get target :slot)
+                    :name name))
+            (status "Drop an instrument, not a folder")))
+        (if (= drag-type "sample")
+          (let ((path (get payload :path)))
+            (if path
+              (host-command "replace-rack-slot-sample"
+                (dict :track (get target :track)
+                      :slot (get target :slot)
+                      :path path
+                      :preserve-browser-context true))
+              (status "Drop a sample file, not a folder")))
+          (status "Drop a sample or instrument"))))))
+
 (def rack-panel-drop-on-drum-pad (event)
   (let ((target (get event :target)))
     (rack-panel-drop-on-rack
@@ -509,10 +534,17 @@
           ;; their drop semantics.
           :drop-types (if (= (get inst :rack-slot) nil)
             (list "sample" "instrument" "sound")
-            (list "sound"))
-          :drop-meta (dict :kind "instrument-panel" :track (get inst :track))
+            (list "sample" "instrument" "sound"))
+          :drop-meta (if (= (get inst :rack-slot) nil)
+            (dict :kind "instrument-panel" :track (get inst :track))
+            (dict :kind "rack-selected-instrument"
+                  :track (get inst :rack-track)
+                  :slot (get inst :rack-slot)))
           :drop-hover-border-color :mixer-strip-selected-border
-          :on-drop (lambda (event) (sbrowser-drop-sound-on-track event))
+          :on-drop (lambda (event)
+            (if (= (get inst :rack-slot) nil)
+              (sbrowser-drop-sound-on-track event)
+              (rack-selected-instrument-drop event)))
           :padding 0
           :height fx-fixed-panel-height
           :selected 0)))))

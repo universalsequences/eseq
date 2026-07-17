@@ -10,7 +10,7 @@ use crate::effects::{
     BUILTIN_SLOT_COUNT,
 };
 use crate::lisp_host::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
-use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType};
+use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType, RackRouting};
 use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
 
@@ -320,6 +320,40 @@ impl App {
                 prepared.run_mode,
             )
         }
+    }
+
+    pub fn replace_rack_slot_with_saved_instrument_sync(
+        &mut self,
+        track: usize,
+        slot: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Rack) {
+            return Err("Current track is not a rack".to_string());
+        }
+        let rack = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| "Rack track has no rack metadata".to_string())?;
+        if rack.routing != RackRouting::Broadcast || rack.slots.get(slot).is_none() {
+            return Err("Invalid instrument rack layer".to_string());
+        }
+
+        let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
+        self.graph_controller().replace_rack_slot_with_custom(
+            track,
+            slot,
+            &prepared.name,
+            prepared.engine_id,
+            &prepared.manifest,
+            prepared.run_mode,
+        )
     }
 
     pub fn add_saved_instrument_slot_to_drum_rack_pad_sync(

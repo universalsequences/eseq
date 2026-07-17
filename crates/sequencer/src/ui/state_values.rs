@@ -20912,10 +20912,22 @@ mod tests {
             matches!(
                 selected_sampler_panel.props.get("drop-types"),
                 Some(Value::List(items))
-                    if items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "sound"))
+                    if items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "sample"))
+                        && items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "instrument"))
+                        && items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "sound"))
             ),
-            "selected rack instrument should accept a Sound as a whole-container replacement: {:?}",
+            "selected rack instrument should accept source replacement drops and Sounds: {:?}",
             selected_sampler_panel.props.get("drop-types")
+        );
+        assert!(
+            matches!(
+                selected_sampler_panel.props.get("drop-meta"),
+                Some(Value::Map(map))
+                    if map.get("track").is_some_and(|value| matches!(*value.borrow(), Value::Number(0.0)))
+                        && map.get("slot").is_some_and(|value| matches!(*value.borrow(), Value::Number(0.0)))
+            ),
+            "selected rack instrument drop metadata should identify its stable rack destination: {:?}",
+            selected_sampler_panel.props.get("drop-meta")
         );
         assert!(
             matches!(
@@ -21266,6 +21278,68 @@ mod tests {
                 );
             }
             other => panic!("expected add-rack-instrument-slot host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(rack-selected-instrument-drop
+                    (dict :drag-type "instrument"
+                          :payload (dict :name "synths/wavetable")
+                          :target (dict :track 0 :slot 1)))"#,
+            )
+            .expect("drop instrument on expanded rack layer");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "replace-rack-slot-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("replace-rack-slot-instrument payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("synths/wavetable".to_string()))
+                );
+            }
+            other => panic!("expected replace-rack-slot-instrument command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(rack-selected-instrument-drop
+                    (dict :drag-type "sample"
+                          :payload (dict :path "samples/kick.wav")
+                          :target (dict :track 0 :slot 1)))"#,
+            )
+            .expect("drop sample on expanded rack layer");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "replace-rack-slot-sample");
+                let Value::Map(payload) = payload else {
+                    panic!("replace-rack-slot-sample payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected replace-rack-slot-sample command, got {other:?}"),
         }
     }
 

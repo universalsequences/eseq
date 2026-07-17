@@ -6768,6 +6768,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "replace-rack-slot-sample" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let preserve_browser_context =
+                            extract_bool_from_payload(&payload, "preserve-browser-context");
+                        match (track, slot, path_str) {
+                            (Some(track), Some(slot), Some(path_str)) => {
+                                if preserve_browser_context {
+                                    preserve_sample_browser_context_for_loaded_sample(
+                                        &mut editor,
+                                        &path_str,
+                                    );
+                                }
+                                match app.graph_controller().replace_rack_slot_with_sampler(
+                                    track,
+                                    slot,
+                                    Path::new(&path_str),
+                                ) {
+                                    Ok(()) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Replaced rack layer {} with sample",
+                                            slot + 1
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        if preserve_browser_context {
+                                            preserve_sample_browser_context_for_loaded_sample(
+                                                &mut editor,
+                                                "",
+                                            );
+                                        }
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error replacing rack layer: {error}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack layer replacement is missing a track, slot, or sample path"
+                                    .to_string(),
+                            )),
+                        }
+                    }
                     "add-rack-sample-pad" => {
                         let path_str = extract_path_from_payload(&payload);
                         let track = extract_usize_from_payload(&payload, "track")
@@ -7086,6 +7147,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .to_string(),
                                 ));
                             }
+                        }
+                    }
+                    "replace-rack-slot-instrument" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let name = extract_string_from_payload(&payload, "name");
+                        match (track, slot, name) {
+                            (Some(track), Some(slot), Some(name)) => {
+                                match app.replace_rack_slot_with_saved_instrument_sync(
+                                    track, slot, &name,
+                                ) {
+                                    Ok(()) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Replaced rack layer {} with {}",
+                                            slot + 1,
+                                            name
+                                        )));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error replacing rack instrument layer: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack instrument replacement is missing a track, slot, or instrument name"
+                                    .to_string(),
+                            )),
                         }
                     }
                     "add-rack-instrument-pad" => {
