@@ -1315,6 +1315,12 @@ fn build_init_message(
 
 // ── Add effect to track's audio chain ──
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectChainSuccessor {
+    StereoNode { node_id: i32, input_channels: usize },
+    MonoPair { left: i32, right: i32 },
+}
+
 /// Remove an effect from the chain and reconnect predecessor → successor.
 pub unsafe fn remove_effect_from_chain(
     lg: *mut LiveGraph,
@@ -1322,11 +1328,38 @@ pub unsafe fn remove_effect_from_chain(
     predecessor_id: i32,
     successor_id: i32,
 ) {
+    remove_effect_from_chain_at_successor(
+        lg,
+        effect_node_id,
+        predecessor_id,
+        EffectChainSuccessor::StereoNode {
+            node_id: successor_id,
+            input_channels: 2,
+        },
+    );
+}
+
+pub unsafe fn remove_effect_from_chain_at_successor(
+    lg: *mut LiveGraph,
+    effect_node_id: i32,
+    predecessor_id: i32,
+    successor: EffectChainSuccessor,
+) {
     for src_port in 0..2 {
         for dst_port in 0..2 {
             audiograph::graph_disconnect(lg, predecessor_id, src_port, effect_node_id, dst_port);
-            audiograph::graph_disconnect(lg, effect_node_id, src_port, successor_id, dst_port);
-            audiograph::graph_disconnect(lg, predecessor_id, src_port, successor_id, dst_port);
+            match successor {
+                EffectChainSuccessor::StereoNode { node_id, .. } => {
+                    audiograph::graph_disconnect(lg, effect_node_id, src_port, node_id, dst_port);
+                    audiograph::graph_disconnect(lg, predecessor_id, src_port, node_id, dst_port);
+                }
+                EffectChainSuccessor::MonoPair { left, right } => {
+                    audiograph::graph_disconnect(lg, effect_node_id, src_port, left, 0);
+                    audiograph::graph_disconnect(lg, effect_node_id, src_port, right, 0);
+                    audiograph::graph_disconnect(lg, predecessor_id, src_port, left, 0);
+                    audiograph::graph_disconnect(lg, predecessor_id, src_port, right, 0);
+                }
+            }
         }
     }
     audiograph::delete_node(lg, effect_node_id);
@@ -1338,10 +1371,22 @@ pub unsafe fn remove_effect_modulator(lg: *mut LiveGraph, modulator_node_id: i32
     }
 }
 
-unsafe fn disconnect_direct_chain(lg: *mut LiveGraph, predecessor_id: i32, successor_id: i32) {
+unsafe fn disconnect_direct_chain(
+    lg: *mut LiveGraph,
+    predecessor_id: i32,
+    successor: EffectChainSuccessor,
+) {
     for src_port in 0..2 {
         for dst_port in 0..2 {
-            audiograph::graph_disconnect(lg, predecessor_id, src_port, successor_id, dst_port);
+            match successor {
+                EffectChainSuccessor::StereoNode { node_id, .. } => {
+                    audiograph::graph_disconnect(lg, predecessor_id, src_port, node_id, dst_port);
+                }
+                EffectChainSuccessor::MonoPair { left, right } => {
+                    audiograph::graph_disconnect(lg, predecessor_id, src_port, left, 0);
+                    audiograph::graph_disconnect(lg, predecessor_id, src_port, right, 0);
+                }
+            }
         }
     }
 }
@@ -1370,8 +1415,7 @@ unsafe fn connect_effect_chain(
     effect_id: i32,
     effect_inputs: usize,
     effect_outputs: usize,
-    successor_id: i32,
-    successor_inputs: usize,
+    successor: EffectChainSuccessor,
 ) -> Result<(), String> {
     if effect_inputs <= 1 {
         let pred_channels = predecessor_outputs.max(1).min(2);
@@ -1399,28 +1443,44 @@ unsafe fn connect_effect_chain(
         }
     }
 
-    if effect_outputs <= 1 {
-        let succ_channels = successor_inputs.max(1).min(2);
-        for dst_port in 0..succ_channels {
-            connect_effect_port(
-                lg,
-                effect_id,
-                0,
-                successor_id,
-                dst_port as i32,
-                "connect effect output",
-            )?;
+    match successor {
+        EffectChainSuccessor::StereoNode {
+            node_id,
+            input_channels,
+        } => {
+            if effect_outputs <= 1 {
+                for dst_port in 0..input_channels.max(1).min(2) {
+                    connect_effect_port(
+                        lg,
+                        effect_id,
+                        0,
+                        node_id,
+                        dst_port as i32,
+                        "connect effect output",
+                    )?;
+                }
+            } else {
+                for ch in 0..input_channels.max(1).min(2).min(effect_outputs) {
+                    connect_effect_port(
+                        lg,
+                        effect_id,
+                        ch as i32,
+                        node_id,
+                        ch as i32,
+                        "connect effect output",
+                    )?;
+                }
+            }
         }
-    } else {
-        let succ_channels = successor_inputs.max(1).min(2);
-        for ch in 0..succ_channels.min(effect_outputs).min(2) {
+        EffectChainSuccessor::MonoPair { left, right } => {
+            connect_effect_port(lg, effect_id, 0, left, 0, "connect effect left output")?;
             connect_effect_port(
                 lg,
                 effect_id,
-                ch as i32,
-                successor_id,
-                ch as i32,
-                "connect effect output",
+                if effect_outputs > 1 { 1 } else { 0 },
+                right,
+                0,
+                "connect effect right output",
             )?;
         }
     }
@@ -1439,6 +1499,38 @@ pub unsafe fn add_effect_to_chain_at(
     predecessor_outputs: usize,
     successor_id: i32,
     successor_inputs: usize,
+    existing_effect: Option<i32>,
+    existing_modulator: Option<i32>,
+    ext_mod_input_nodes: Option<&[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]>,
+) -> Result<EffectGraphNodeIds, String> {
+    add_effect_to_chain_at_successor(
+        lg,
+        slot_id,
+        manifest,
+        lib,
+        predecessor_id,
+        predecessor_outputs,
+        EffectChainSuccessor::StereoNode {
+            node_id: successor_id,
+            input_channels: successor_inputs,
+        },
+        existing_effect,
+        existing_modulator,
+        ext_mod_input_nodes,
+    )
+}
+
+/// Add a DGenLisp effect between a predecessor and an explicitly shaped
+/// successor. Rack slots terminate at independent mono voice-sum nodes, while
+/// ordinary track and bus chains terminate at a stereo node.
+pub unsafe fn add_effect_to_chain_at_successor(
+    lg: *mut LiveGraph,
+    slot_id: usize,
+    manifest: &DGenManifest,
+    lib: &LoadedDGenLib,
+    predecessor_id: i32,
+    predecessor_outputs: usize,
+    successor: EffectChainSuccessor,
     existing_effect: Option<i32>,
     existing_modulator: Option<i32>,
     ext_mod_input_nodes: Option<&[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]>,
@@ -1501,8 +1593,7 @@ pub unsafe fn add_effect_to_chain_at(
         node_id,
         manifest.n_inputs,
         manifest.n_outputs,
-        successor_id,
-        successor_inputs,
+        successor,
     );
     if let Err(error) = connect_result {
         audiograph::delete_node(lg, node_id);
@@ -1553,9 +1644,9 @@ pub unsafe fn add_effect_to_chain_at(
     }
 
     if let Some(old_id) = existing_effect {
-        remove_effect_from_chain(lg, old_id, predecessor_id, successor_id);
+        remove_effect_from_chain_at_successor(lg, old_id, predecessor_id, successor);
     } else {
-        disconnect_direct_chain(lg, predecessor_id, successor_id);
+        disconnect_direct_chain(lg, predecessor_id, successor);
     }
     if let Some(old_mod_id) = existing_modulator {
         remove_effect_modulator(lg, old_mod_id);

@@ -30,6 +30,7 @@ impl Drop for FxGraphEditBatch {
 pub(super) enum FxChainLocator {
     Track(usize),
     Bus(BusId),
+    RackSlot { track: usize, slot: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,7 +91,7 @@ impl FxChainLeaseStore {
             FxChainLocator::Track(_) => slot_idx
                 .checked_sub(crate::effects::BUILTIN_SLOT_COUNT)
                 .ok_or_else(|| "Built-in track FX slots do not own dynamic-library leases".into()),
-            FxChainLocator::Bus(_) => Ok(slot_idx),
+            FxChainLocator::Bus(_) | FxChainLocator::RackSlot { .. } => Ok(slot_idx),
         }
     }
 
@@ -228,7 +229,12 @@ impl FxChainLeaseStore {
             .rows
             .keys()
             .copied()
-            .filter(|locator| matches!(locator, FxChainLocator::Track(_)))
+            .filter(|locator| {
+                matches!(
+                    locator,
+                    FxChainLocator::Track(_) | FxChainLocator::RackSlot { .. }
+                )
+            })
             .collect::<Vec<_>>();
         for locator in tracks {
             self.retire_host(locator, retire_after)?;
@@ -245,6 +251,12 @@ impl FxChainLeaseStore {
                     FxChainLocator::Track(track) if track > deleted_track => {
                         FxChainLocator::Track(track - 1)
                     }
+                    FxChainLocator::RackSlot { track, slot } if track > deleted_track => {
+                        FxChainLocator::RackSlot {
+                            track: track - 1,
+                            slot,
+                        }
+                    }
                     other => other,
                 };
                 (locator, row)
@@ -252,8 +264,78 @@ impl FxChainLeaseStore {
             .collect();
     }
 
+    pub fn reindex_rack_slots_after_delete(&mut self, track: usize, deleted_slot: usize) {
+        let rows = std::mem::take(&mut self.rows);
+        self.rows = rows
+            .into_iter()
+            .map(|(locator, row)| {
+                let locator = match locator {
+                    FxChainLocator::RackSlot { track: owner, slot }
+                        if owner == track && slot > deleted_slot =>
+                    {
+                        FxChainLocator::RackSlot {
+                            track: owner,
+                            slot: slot - 1,
+                        }
+                    }
+                    other => other,
+                };
+                (locator, row)
+            })
+            .collect();
+    }
+
+    pub fn move_rack_slot_host(&mut self, track: usize, source_slot: usize, target_slot: usize) {
+        if source_slot == target_slot {
+            return;
+        }
+        let rows = std::mem::take(&mut self.rows);
+        self.rows = rows
+            .into_iter()
+            .map(|(locator, row)| {
+                let locator = match locator {
+                    FxChainLocator::RackSlot { track: owner, slot } if owner == track => {
+                        let slot = if slot == source_slot {
+                            target_slot
+                        } else if source_slot < target_slot
+                            && (source_slot + 1..=target_slot).contains(&slot)
+                        {
+                            slot - 1
+                        } else if target_slot < source_slot
+                            && (target_slot..source_slot).contains(&slot)
+                        {
+                            slot + 1
+                        } else {
+                            slot
+                        };
+                        FxChainLocator::RackSlot { track: owner, slot }
+                    }
+                    other => other,
+                };
+                (locator, row)
+            })
+            .collect();
+    }
+
+    pub fn move_host(
+        &mut self,
+        source: FxChainLocator,
+        target: FxChainLocator,
+    ) -> Result<(), String> {
+        if source == target {
+            return Ok(());
+        }
+        if self.rows.contains_key(&target) {
+            return Err(format!("FX lease target host {target:?} already exists"));
+        }
+        if let Some(row) = self.rows.remove(&source) {
+            self.rows.insert(target, row);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
-    fn contains_host(&self, locator: FxChainLocator) -> bool {
+    pub(super) fn contains_host(&self, locator: FxChainLocator) -> bool {
         self.rows.contains_key(&locator)
     }
 }
@@ -397,6 +479,11 @@ impl App {
                 .iter()
                 .find(|nodes| nodes.id == bus_id)
                 .map(|nodes| nodes.mod_in_clip_ids),
+            FxChainLocator::RackSlot { track, .. } => self
+                .graph
+                .track_node_ids
+                .get(track)
+                .map(|nodes| nodes.mod_in_clip_ids),
         }
     }
 
@@ -501,7 +588,102 @@ impl App {
                         .collect(),
                 })
             }
+            FxChainLocator::RackSlot { track, slot } => {
+                let track_nodes = self
+                    .graph
+                    .track_node_ids
+                    .get(track)
+                    .ok_or_else(|| format!("Track {} graph nodes not found", track + 1))?;
+                let slot_nodes = track_nodes.rack_slots.get(slot).ok_or_else(|| {
+                    format!(
+                        "Track {} rack slot {} graph nodes not found",
+                        track + 1,
+                        slot + 1
+                    )
+                })?;
+                let rack_tracks = self.state.pattern.rack_tracks.lock().unwrap();
+                let rack_slot = rack_tracks
+                    .get(track)
+                    .and_then(Option::as_ref)
+                    .and_then(|rack| rack.slots.get(slot))
+                    .ok_or_else(|| {
+                        format!("Track {} rack slot {} not found", track + 1, slot + 1)
+                    })?;
+                if rack_slot.effect_slots.len() != rack_slot.effect_descriptors.len() {
+                    return Err(format!(
+                        "Track {} rack slot {} FX state is misaligned: {} slots, {} descriptors",
+                        track + 1,
+                        slot + 1,
+                        rack_slot.effect_slots.len(),
+                        rack_slot.effect_descriptors.len()
+                    ));
+                }
+                Ok(FxChainHost {
+                    locator,
+                    label: format!("Track {} Rack Slot {}", track + 1, slot + 1),
+                    predecessor: StereoEndpoint {
+                        node_id: slot_nodes.slot_pan_id,
+                        channels: 2,
+                    },
+                    successor: ChainSuccessor::MonoPair {
+                        left: track_nodes.voice_sum_id,
+                        right: track_nodes.voice_sum_r_id,
+                    },
+                    slots: rack_slot
+                        .effect_slots
+                        .iter()
+                        .zip(&rack_slot.effect_descriptors)
+                        .map(|(effect, descriptor)| FxChainSlotView {
+                            node_id: effect.node_id as i32,
+                            modulator_node_id: effect.modulator_node_id as i32,
+                            input_channels: descriptor.input_channels,
+                            output_channels: descriptor.output_channels,
+                        })
+                        .collect(),
+                })
+            }
         }
+    }
+
+    fn fx_slot_identity(&self, locator: FxChainLocator, slot_idx: usize) -> Result<usize, String> {
+        let (tag, payload) = match locator {
+            FxChainLocator::Track(track) => {
+                let effect_slot = slot_idx
+                    .checked_sub(crate::effects::BUILTIN_SLOT_COUNT)
+                    .ok_or_else(|| {
+                        "Built-in track FX slots are not chain-host slots".to_string()
+                    })?;
+                let payload = track
+                    .checked_mul(lisp_host::MAX_CUSTOM_FX)
+                    .and_then(|base| base.checked_add(effect_slot))
+                    .ok_or_else(|| "Track FX slot identity overflow".to_string())?;
+                (0usize, payload)
+            }
+            FxChainLocator::Bus(bus_id) => {
+                let bus = usize::try_from(bus_id.0)
+                    .map_err(|_| format!("Bus id {} is too large for this platform", bus_id.0))?;
+                let payload = bus
+                    .checked_mul(lisp_host::MAX_CUSTOM_FX)
+                    .and_then(|base| base.checked_add(slot_idx))
+                    .ok_or_else(|| {
+                        format!("Effect slot identity overflow for bus id {}", bus_id.0)
+                    })?;
+                (1usize, payload)
+            }
+            FxChainLocator::RackSlot { track, slot } => {
+                let payload = track
+                    .checked_mul(crate::sequencer::MAX_RACK_SLOTS)
+                    .and_then(|base| base.checked_add(slot))
+                    .and_then(|host| host.checked_mul(lisp_host::MAX_CUSTOM_FX))
+                    .and_then(|base| base.checked_add(slot_idx))
+                    .ok_or_else(|| "Rack-slot FX identity overflow".to_string())?;
+                (2usize, payload)
+            }
+        };
+        payload
+            .checked_mul(3)
+            .and_then(|value| value.checked_add(tag))
+            .ok_or_else(|| "FX slot identity overflow".to_string())
     }
 
     pub(super) fn resolve_fx_slot(
@@ -509,28 +691,7 @@ impl App {
         locator: FxChainLocator,
         slot_idx: usize,
     ) -> Result<(usize, i32, usize, i32, usize, Option<i32>), String> {
-        let host_slot = match locator {
-            FxChainLocator::Track(track) => slot_idx
-                .checked_sub(crate::effects::BUILTIN_SLOT_COUNT)
-                .ok_or_else(|| "Built-in track FX slots are not chain-host slots".to_string())?
-                .checked_add(
-                    track
-                        .checked_mul(lisp_host::MAX_CUSTOM_FX)
-                        .ok_or_else(|| "Track FX slot identity overflow".to_string())?,
-                )
-                .ok_or_else(|| "Track FX slot identity overflow".to_string())?,
-            FxChainLocator::Bus(bus_id) => {
-                let bus_identity = usize::try_from(bus_id.0)
-                    .map_err(|_| format!("Bus id {} is too large for this platform", bus_id.0))?;
-                crate::sequencer::MAX_TRACKS
-                    .checked_add(bus_identity)
-                    .and_then(|identity| identity.checked_mul(lisp_host::MAX_CUSTOM_FX))
-                    .and_then(|base| base.checked_add(slot_idx))
-                    .ok_or_else(|| {
-                        format!("Effect slot identity overflow for bus id {}", bus_id.0)
-                    })?
-            }
-        };
+        let host_slot = self.fx_slot_identity(locator, slot_idx)?;
         let wiring = self.fx_chain_host(locator)?.wiring_for(slot_idx)?;
         let successor = wiring.stereo_successor()?;
         Ok((
@@ -561,19 +722,23 @@ impl App {
         let batch = FxGraphEditBatch::new(self.graph.lg.0);
         if slot.node_id > 0 {
             unsafe {
-                match wiring.successor {
+                let successor = match wiring.successor {
                     ChainSuccessor::StereoNode(successor) => {
-                        lisp_host::remove_effect_from_chain(
-                            self.graph.lg.0,
-                            slot.node_id,
-                            wiring.predecessor.node_id,
-                            successor.node_id,
-                        );
+                        lisp_host::EffectChainSuccessor::StereoNode {
+                            node_id: successor.node_id,
+                            input_channels: successor.channels,
+                        }
                     }
-                    ChainSuccessor::MonoPair { .. } => {
-                        crate::audiograph::delete_node(self.graph.lg.0, slot.node_id);
+                    ChainSuccessor::MonoPair { left, right } => {
+                        lisp_host::EffectChainSuccessor::MonoPair { left, right }
                     }
-                }
+                };
+                lisp_host::remove_effect_from_chain_at_successor(
+                    self.graph.lg.0,
+                    slot.node_id,
+                    wiring.predecessor.node_id,
+                    successor,
+                );
                 if slot.modulator_node_id > 0 {
                     lisp_host::remove_effect_modulator(self.graph.lg.0, slot.modulator_node_id);
                 }
@@ -610,25 +775,34 @@ impl App {
             lib,
             lease,
         } = result;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_fx_slot(locator, slot_idx)?;
-        let existing_modulator = self
-            .fx_chain_host(locator)?
+        let slot_id = self.fx_slot_identity(locator, slot_idx)?;
+        let host = self.fx_chain_host(locator)?;
+        let wiring = host.wiring_for(slot_idx)?;
+        let existing = wiring.existing_node_id;
+        let existing_modulator = host
             .slots
             .get(slot_idx)
             .map(|slot| slot.modulator_node_id)
             .filter(|node_id| *node_id > 0);
         let ext_mod_inputs = self.fx_ext_mod_input_nodes(locator);
+        let successor = match wiring.successor {
+            ChainSuccessor::StereoNode(successor) => lisp_host::EffectChainSuccessor::StereoNode {
+                node_id: successor.node_id,
+                input_channels: successor.channels,
+            },
+            ChainSuccessor::MonoPair { left, right } => {
+                lisp_host::EffectChainSuccessor::MonoPair { left, right }
+            }
+        };
         let node_ids = unsafe {
-            lisp_host::add_effect_to_chain_at(
+            lisp_host::add_effect_to_chain_at_successor(
                 self.graph.lg.0,
                 slot_id,
                 &manifest,
                 &lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
+                wiring.predecessor.node_id,
+                wiring.predecessor.channels,
+                successor,
                 existing,
                 existing_modulator,
                 ext_mod_inputs.as_ref(),
@@ -656,9 +830,10 @@ impl App {
         slot_idx: usize,
         desc: &crate::effects::EffectDescriptor,
     ) -> Result<(i32, Option<i32>), String> {
-        let (slot_id, _, _, _, _, existing) = self.resolve_fx_slot(locator, slot_idx)?;
+        let slot_id = self.fx_slot_identity(locator, slot_idx)?;
         let host = self.fx_chain_host(locator)?;
         let wiring = host.wiring_for(slot_idx)?;
+        let existing = wiring.existing_node_id;
         let existing_modulator = host
             .slots
             .get(slot_idx)
@@ -674,22 +849,29 @@ impl App {
         };
         unsafe {
             if let Some(old_id) = existing {
-                match wiring.successor {
-                    ChainSuccessor::StereoNode(successor) => lisp_host::remove_effect_from_chain(
-                        self.graph.lg.0,
-                        old_id,
-                        wiring.predecessor.node_id,
-                        successor.node_id,
-                    ),
-                    ChainSuccessor::MonoPair { .. } => {
-                        crate::audiograph::delete_node(self.graph.lg.0, old_id);
+                let successor = match wiring.successor {
+                    ChainSuccessor::StereoNode(successor) => {
+                        lisp_host::EffectChainSuccessor::StereoNode {
+                            node_id: successor.node_id,
+                            input_channels: successor.channels,
+                        }
                     }
-                }
+                    ChainSuccessor::MonoPair { left, right } => {
+                        lisp_host::EffectChainSuccessor::MonoPair { left, right }
+                    }
+                };
+                lisp_host::remove_effect_from_chain_at_successor(
+                    self.graph.lg.0,
+                    old_id,
+                    wiring.predecessor.node_id,
+                    successor,
+                );
                 crate::effects::conv_reverb::clear_instance(old_id);
             }
             if let Some(old_modulator) = existing_modulator {
                 lisp_host::remove_effect_modulator(self.graph.lg.0, old_modulator);
             }
+            disconnect_fx_chain_gap(self.graph.lg.0, wiring.predecessor, wiring.successor);
             connect_fx_chain_gap(
                 self.graph.lg.0,
                 wiring.predecessor,
@@ -867,6 +1049,14 @@ pub(super) fn rewire_fx_chain(
     }
 }
 
+pub(super) fn connect_fx_chain_host(lg: *mut crate::audiograph::LiveGraph, host: &FxChainHost) {
+    disconnect_fx_chain_gap(lg, host.predecessor, host.successor);
+    for (predecessor, successor) in host.connections() {
+        disconnect_fx_chain_gap(lg, predecessor, successor);
+        connect_fx_chain_gap(lg, predecessor, successor);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,6 +1134,74 @@ mod tests {
             })
         );
         assert_eq!(wiring.existing_node_id, None);
+    }
+
+    #[test]
+    fn rack_slot_host_terminates_stereo_chain_at_independent_mono_sums() {
+        let host = FxChainHost {
+            locator: FxChainLocator::RackSlot { track: 2, slot: 3 },
+            label: "rack slot".to_string(),
+            predecessor: StereoEndpoint {
+                node_id: 10,
+                channels: 2,
+            },
+            successor: ChainSuccessor::MonoPair {
+                left: 20,
+                right: 21,
+            },
+            slots: vec![slot(30, 2, 2), slot(0, 2, 2), slot(40, 1, 1)],
+        };
+        assert_eq!(
+            host.connections(),
+            vec![
+                (
+                    StereoEndpoint {
+                        node_id: 10,
+                        channels: 2
+                    },
+                    ChainSuccessor::StereoNode(StereoEndpoint {
+                        node_id: 30,
+                        channels: 2
+                    })
+                ),
+                (
+                    StereoEndpoint {
+                        node_id: 30,
+                        channels: 2
+                    },
+                    ChainSuccessor::StereoNode(StereoEndpoint {
+                        node_id: 40,
+                        channels: 1
+                    })
+                ),
+                (
+                    StereoEndpoint {
+                        node_id: 40,
+                        channels: 1
+                    },
+                    ChainSuccessor::MonoPair {
+                        left: 20,
+                        right: 21
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn rack_slot_lease_hosts_follow_delete_and_reorder() {
+        let mut store = FxChainLeaseStore::default();
+        store.row_mut(FxChainLocator::RackSlot { track: 1, slot: 0 });
+        store.row_mut(FxChainLocator::RackSlot { track: 1, slot: 1 });
+        store.row_mut(FxChainLocator::RackSlot { track: 1, slot: 2 });
+        store.reindex_rack_slots_after_delete(1, 1);
+        assert!(store.contains_host(FxChainLocator::RackSlot { track: 1, slot: 0 }));
+        assert!(store.contains_host(FxChainLocator::RackSlot { track: 1, slot: 1 }));
+        assert!(!store.contains_host(FxChainLocator::RackSlot { track: 1, slot: 2 }));
+
+        store.move_rack_slot_host(1, 0, 1);
+        assert!(store.contains_host(FxChainLocator::RackSlot { track: 1, slot: 0 }));
+        assert!(store.contains_host(FxChainLocator::RackSlot { track: 1, slot: 1 }));
     }
 
     #[test]

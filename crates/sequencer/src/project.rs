@@ -3,24 +3,42 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::effects::{EffectSlotSnapshot, TensorParamSnapshot};
+use crate::effects::{EffectDescriptor, EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::macro_engine::{
-    Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping, SceneMacroConfig, StealQuantize,
-    normalize_macro_key,
+    normalize_macro_key, Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping,
+    SceneMacroConfig, StealQuantize,
 };
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MAX_STEPS, MidiFxPosition,
-    ModConnection, ModDestination, NUM_PARAMS, PatternSnapshot, RackRouting, RackSlotParamPlocks,
-    RackSlotSnapshot, RackTrackSnapshot, SwingResolution, TRACK_PATTERN_WORDS, Timebase,
-    TrackOutput, TrackParamsSnapshot, TrackSendSnapshot, TrackSoundState,
+    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
+    ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
+    TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 
 const PROJECTS_DIR: &str = "projects";
+const SOUNDS_DIR: &str = "sounds";
 const PROJECT_FILE_VERSION: u32 = 1;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectSoundPreset {
+    pub version: u32,
+    pub metadata: ProjectSoundMetadata,
+    pub track: ProjectTrack,
+    pub rack: ProjectRackTrackPattern,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ProjectSoundMetadata {
+    pub name: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub author: String,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectFile {
@@ -709,6 +727,10 @@ pub struct ProjectRackSlotPattern {
     #[serde(default)]
     pub instrument_slot: ProjectEffectSlot,
     #[serde(default)]
+    pub effect_slots: Vec<ProjectEffectSlot>,
+    #[serde(default)]
+    pub custom_effects: Vec<Option<String>>,
+    #[serde(default)]
     pub track_sound_state: ProjectTrackSoundState,
     #[serde(default)]
     pub sample_path: Option<String>,
@@ -1150,6 +1172,12 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
             max_polyphony: value.max_polyphony,
             param_plocks: value.param_plocks.rows,
             instrument_slot: ProjectEffectSlot::from(&value.instrument_slot),
+            effect_slots: value
+                .effect_slots
+                .iter()
+                .map(ProjectEffectSlot::from)
+                .collect(),
+            custom_effects: value.custom_effect_names,
             track_sound_state: ProjectTrackSoundState::from(value.track_sound_state),
             sample_path,
             sample_name,
@@ -1163,7 +1191,7 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             .sample_name
             .filter(|name| !name.trim().is_empty())
             .map(|name| (-1, name, 44_100));
-        Self {
+        let mut slot = Self {
             instrument_type: InstrumentType::from(value.instrument_type),
             instrument_run_mode: CustomInstrumentRunMode::from(value.instrument_run_mode),
             instrument_base_note_offset: value.instrument_base_note_offset,
@@ -1176,9 +1204,18 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             max_polyphony: value.max_polyphony.clamp(1, crate::voice::MAX_VOICES),
             param_plocks: RackSlotParamPlocks::from_rows(value.param_plocks),
             instrument_slot: value.instrument_slot.into_snapshot_with_node_ids(0, 0),
+            effect_slots: value
+                .effect_slots
+                .into_iter()
+                .map(|slot| slot.into_snapshot_with_node_ids(0, 0))
+                .collect(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: value.custom_effects,
             track_sound_state: value.track_sound_state.into_track_sound_state(None),
             sample_id,
-        }
+        };
+        slot.normalize_effect_chain();
+        slot
     }
 }
 
@@ -1281,6 +1318,47 @@ pub fn load_project(name: &str) -> std::io::Result<ProjectFile> {
             format!("Failed to parse project '{}': {error}", path.display()),
         )
     })
+}
+
+pub fn save_sound_preset(name: &str, sound: &ProjectSoundPreset) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(SOUNDS_DIR)?;
+    let path = Path::new(SOUNDS_DIR).join(format!("{}.sound", sanitize_project_name(name)));
+    let json = serde_json::to_string(sound).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to serialize Sound '{}': {error}", path.display()),
+        )
+    })?;
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
+pub fn load_sound_preset(path: &Path) -> std::io::Result<ProjectSoundPreset> {
+    let src = std::fs::read_to_string(path)?;
+    let sound: ProjectSoundPreset = serde_json::from_str(&src).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Failed to parse Sound '{}': {error}", path.display()),
+        )
+    })?;
+    if !matches!(sound.track, ProjectTrack::Rack { .. }) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Sound '{}' does not contain a rack track", path.display()),
+        ));
+    }
+    Ok(sound)
+}
+
+pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(SOUNDS_DIR)?;
+    let mut paths = std::fs::read_dir(SOUNDS_DIR)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sound"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
 }
 
 pub fn sanitize_project_name(name: &str) -> String {
@@ -2736,6 +2814,8 @@ mod tests {
                         "pan": -0.25,
                         "max_polyphony": 3,
                         "instrument_slot": {"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]},
+                        "effect_slots": [{"num_params":1,"defaults":[0.75],"plocks":[],"param_node_indices":[4]}],
+                        "custom_effects": ["builtin:OTT"],
                         "track_sound_state": {"loaded_preset":"wide","dirty":true}
                     }]
                 }]
@@ -2767,6 +2847,22 @@ mod tests {
             Some("wide")
         );
         assert!(rack.slots[0].track_sound_state.dirty);
+        assert_eq!(rack.slots[0].effect_slots.len(), 1);
+        assert_eq!(rack.slots[0].effect_slots[0].defaults, vec![0.75]);
+        assert_eq!(
+            rack.slots[0].custom_effects,
+            vec![Some("builtin:OTT".to_string())]
+        );
+        let runtime_slot = RackSlotSnapshot::from(rack.slots[0].clone());
+        assert_eq!(
+            runtime_slot.effect_slots.len(),
+            crate::lisp_host::MAX_CUSTOM_FX
+        );
+        assert_eq!(runtime_slot.effect_slots[0].defaults, vec![0.75]);
+        assert_eq!(
+            runtime_slot.custom_effect_names[0].as_deref(),
+            Some("builtin:OTT")
+        );
     }
 
     #[test]
@@ -2873,6 +2969,64 @@ mod tests {
         assert_eq!(restored_rack.routing, ProjectRackRouting::ByPitch);
         assert_eq!(restored_rack.slots[0].pad_note, Some(0));
         assert_eq!(restored_rack.slots[1].pad_note, Some(2));
+    }
+
+    #[test]
+    fn sound_preset_roundtrips_rack_sources_metadata_and_slot_fx() {
+        let sound = ProjectSoundPreset {
+            version: project_file_version(),
+            metadata: ProjectSoundMetadata {
+                name: "Wide Plate".to_string(),
+                tags: vec!["pad".to_string(), "wide".to_string()],
+                author: "Test".to_string(),
+            },
+            track: ProjectTrack::Rack {
+                routing: ProjectRackRouting::Broadcast,
+                slots: vec![ProjectRackTrackSlot {
+                    instrument_type: ProjectInstrumentType::Sampler,
+                    sample_path: Some("samples/pad.wav".to_string()),
+                    sample_name: Some("pad".to_string()),
+                    instrument_name: None,
+                }],
+                color: None,
+                collapsed: false,
+            },
+            rack: ProjectRackTrackPattern {
+                routing: ProjectRackRouting::Broadcast,
+                slots: vec![ProjectRackSlotPattern {
+                    instrument_type: ProjectInstrumentType::Sampler,
+                    instrument_run_mode: ProjectCustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 4,
+                    param_plocks: Vec::new(),
+                    instrument_slot: ProjectEffectSlot::default(),
+                    effect_slots: vec![ProjectEffectSlot {
+                        num_params: 1,
+                        defaults: vec![0.42],
+                        ..ProjectEffectSlot::default()
+                    }],
+                    custom_effects: vec![Some("builtin:OTT".to_string())],
+                    track_sound_state: ProjectTrackSoundState::default(),
+                    sample_path: Some("samples/pad.wav".to_string()),
+                    sample_name: Some("pad".to_string()),
+                }],
+            },
+        };
+        let json = serde_json::to_string(&sound).expect("serialize Sound preset");
+        let restored: ProjectSoundPreset =
+            serde_json::from_str(&json).expect("deserialize Sound preset");
+        assert_eq!(restored.metadata.tags, vec!["pad", "wide"]);
+        assert_eq!(restored.rack.slots[0].effect_slots[0].defaults, vec![0.42]);
+        assert_eq!(
+            restored.rack.slots[0].custom_effects[0].as_deref(),
+            Some("builtin:OTT")
+        );
     }
 
     #[test]

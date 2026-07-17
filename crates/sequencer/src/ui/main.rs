@@ -67,8 +67,8 @@ use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
     CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
-    MAX_STEPS, MidiFxPosition, PatternId, RackSlotParam, SYNC_RESOLUTIONS, SequencerState,
-    StepParam, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
+    MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
+    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::tui;
 use std::sync::atomic::AtomicBool;
@@ -3879,14 +3879,14 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
-        FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP, Runtime, StepParam, Value,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         resolve_instrument_swap_target_index, restore_instrument_patcher_layout_source,
         should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
         show_instrument_patcher_source_layout_source, track_meter_bindings_visible,
+        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
+        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -6864,6 +6864,177 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )),
                         }
                     }
+                    "add-rack-slot-effect" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let name = extract_string_from_payload(&payload, "name");
+                        let builtin = extract_bool_from_payload(&payload, "builtin");
+                        match (track, rack_slot, name) {
+                            (Some(track), Some(rack_slot), Some(name)) => {
+                                let is_builtin = builtin
+                                    || sequencer::effects::EffectDescriptor::builtin_insert(&name)
+                                        .is_some()
+                                    || sequencer::effects::conv_reverb::is_dgen_builtin(&name);
+                                let result = if is_builtin {
+                                    app.add_builtin_rack_slot_effect_sync(track, rack_slot, &name)
+                                } else {
+                                    app.add_rack_slot_effect_sync(track, rack_slot, &name)
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error adding rack-slot effect: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect drop is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "delete-rack-slot-effect" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
+                        match (track, rack_slot, effect_slot) {
+                            (Some(track), Some(rack_slot), Some(effect_slot)) => match app
+                                .delete_rack_slot_effect_slot(track, rack_slot, effect_slot)
+                            {
+                                Ok(()) => {
+                                    refresh_instrument_panel_reactive(
+                                        &mut editor,
+                                        &app,
+                                        track,
+                                        &selected_steps,
+                                        &ui_epoch,
+                                    );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error deleting rack-slot effect: {error}"
+                                ))),
+                            },
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect deletion is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "move-rack-slot-effect" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let source_slot = extract_usize_from_payload(&payload, "source-slot");
+                        let target_slot = extract_usize_from_payload(&payload, "target-slot");
+                        match (track, rack_slot, source_slot, target_slot) {
+                            (
+                                Some(track),
+                                Some(rack_slot),
+                                Some(source_slot),
+                                Some(target_slot),
+                            ) => {
+                                match app.move_rack_slot_effect_slot_sync(
+                                    track,
+                                    rack_slot,
+                                    source_slot,
+                                    target_slot,
+                                ) {
+                                    Ok(()) => {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error moving rack-slot effect: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect move is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "set-rack-slot-effect-param" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
+                        let param = extract_usize_from_payload(&payload, "param");
+                        let value = extract_f32_from_payload(&payload, "value");
+                        match (track, rack_slot, effect_slot, param, value) {
+                            (
+                                Some(track),
+                                Some(rack_slot),
+                                Some(effect_slot),
+                                Some(param),
+                                Some(value),
+                            ) => {
+                                if let Err(error) = app.set_rack_slot_effect_param(
+                                    track,
+                                    rack_slot,
+                                    effect_slot,
+                                    param,
+                                    value,
+                                ) {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error setting rack-slot effect parameter: {error}"
+                                    )));
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect parameter edit is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "group-track-to-instrument-rack" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        match track {
+                            Some(track) => {
+                                match app.graph_controller().group_track_to_instrument_rack(track) {
+                                    Ok(()) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(
+                                            "Grouped track to Instrument Rack".to_string(),
+                                        ));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Could not group track: {error}"),
+                                    )),
+                                }
+                            }
+                            None => editor.handle_host_event(HostEvent::Status(
+                                "No track selected for grouping".to_string(),
+                            )),
+                        }
+                    }
                     "add-rack-instrument-slot" => {
                         let track = extract_usize_from_payload(&payload, "track")
                             .or_else(|| current_track_for_app(&mut app, &current_track));
@@ -7877,6 +8048,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "Error saving project: {error}"
                                 )));
                             }
+                        }
+                    }
+                    "save-track-as-sound" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let name = extract_string_from_payload(&payload, "name");
+                        match (track, name) {
+                            (Some(track), Some(name)) if !name.trim().is_empty() => {
+                                match app.save_track_as_sound(
+                                    track,
+                                    &name,
+                                    Vec::new(),
+                                    String::new(),
+                                ) {
+                                    Ok(path) => {
+                                        let rt = editor.runtime_mut();
+                                        sync_project_state(rt, &app);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Saved Sound '{}'",
+                                            path.file_stem()
+                                                .and_then(|stem| stem.to_str())
+                                                .unwrap_or(&name)
+                                        )));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error saving Sound: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Saving a Sound requires a selected track and name".to_string(),
+                            )),
+                        }
+                    }
+                    "load-sound-onto-track" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let path = extract_path_from_payload(&payload);
+                        match (track, path) {
+                            (Some(track), Some(path)) => {
+                                match app.load_sound_onto_track(track, Path::new(&path)) {
+                                    Ok(()) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(
+                                            "Loaded Sound".to_string(),
+                                        ));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error loading Sound: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Loading a Sound requires a track and path".to_string(),
+                            )),
                         }
                     }
                     "load-project" => {

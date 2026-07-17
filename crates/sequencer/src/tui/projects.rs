@@ -1260,6 +1260,292 @@ impl App {
         Ok(())
     }
 
+    pub fn save_track_as_sound(
+        &mut self,
+        track: usize,
+        name: &str,
+        tags: Vec<String>,
+        author: String,
+    ) -> Result<PathBuf, String> {
+        if track >= self.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        let project = self.capture_project(name)?;
+        let source_track = project.tracks[track].clone();
+        let pattern = project
+            .patterns
+            .get(project.current_pattern)
+            .ok_or_else(|| "Current pattern is missing while saving Sound".to_string())?;
+        let (track_payload, rack_payload) = match source_track {
+            ProjectTrack::Rack { .. } => {
+                let rack = pattern
+                    .rack_tracks
+                    .get(track)
+                    .cloned()
+                    .flatten()
+                    .ok_or_else(|| "Rack pattern data is missing".to_string())?;
+                (project.tracks[track].clone(), rack)
+            }
+            ProjectTrack::Sampler {
+                sample_path,
+                color,
+                collapsed,
+            } => {
+                let sample_name = pattern.sample_names.get(track).cloned();
+                let slot_source = crate::project::ProjectRackTrackSlot {
+                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                    sample_path: Some(sample_path.clone()),
+                    sample_name: sample_name.clone(),
+                    instrument_name: None,
+                };
+                let slot = crate::project::ProjectRackSlotPattern {
+                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                    instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: pattern
+                        .instrument_base_note_offsets
+                        .get(track)
+                        .copied()
+                        .unwrap_or(0.0),
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: crate::voice::MAX_VOICES,
+                    param_plocks: Vec::new(),
+                    instrument_slot: pattern.instrument_slots[track].clone(),
+                    effect_slots: pattern.effect_slots[track].clone(),
+                    custom_effects: project.custom_effects[track].clone(),
+                    track_sound_state: pattern.track_sound_states[track].clone(),
+                    sample_path: Some(sample_path),
+                    sample_name,
+                };
+                (
+                    ProjectTrack::Rack {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot_source],
+                        color,
+                        collapsed,
+                    },
+                    crate::project::ProjectRackTrackPattern {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot],
+                    },
+                )
+            }
+            ProjectTrack::Custom {
+                instrument_name,
+                color,
+                collapsed,
+            } => {
+                let slot_source = crate::project::ProjectRackTrackSlot {
+                    instrument_type: crate::project::ProjectInstrumentType::Custom,
+                    sample_path: None,
+                    sample_name: None,
+                    instrument_name: Some(instrument_name.clone()),
+                };
+                let slot = crate::project::ProjectRackSlotPattern {
+                    instrument_type: crate::project::ProjectInstrumentType::Custom,
+                    instrument_run_mode: pattern
+                        .instrument_run_modes
+                        .get(track)
+                        .copied()
+                        .unwrap_or_default(),
+                    instrument_base_note_offset: pattern
+                        .instrument_base_note_offsets
+                        .get(track)
+                        .copied()
+                        .unwrap_or(0.0),
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: crate::voice::MAX_VOICES,
+                    param_plocks: Vec::new(),
+                    instrument_slot: pattern.instrument_slots[track].clone(),
+                    effect_slots: pattern.effect_slots[track].clone(),
+                    custom_effects: project.custom_effects[track].clone(),
+                    track_sound_state: pattern.track_sound_states[track].clone(),
+                    sample_path: None,
+                    sample_name: None,
+                };
+                (
+                    ProjectTrack::Rack {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot_source],
+                        color,
+                        collapsed,
+                    },
+                    crate::project::ProjectRackTrackPattern {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot],
+                    },
+                )
+            }
+            ProjectTrack::Modulator { .. } => {
+                return Err("Modulator tracks cannot be saved as Sounds".to_string())
+            }
+        };
+        let sound = crate::project::ProjectSoundPreset {
+            version: crate::project::project_file_version(),
+            metadata: crate::project::ProjectSoundMetadata {
+                name: name.trim().to_string(),
+                tags,
+                author,
+            },
+            track: track_payload,
+            rack: rack_payload,
+        };
+        crate::project::save_sound_preset(name, &sound).map_err(|error| error.to_string())
+    }
+
+    pub fn load_sound_onto_track(&mut self, track: usize, path: &Path) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let source_slots = match &sound.track {
+            ProjectTrack::Rack { slots, .. } => slots.clone(),
+            _ => return Err("Sound preset does not contain a rack".to_string()),
+        };
+        if source_slots.len() != sound.rack.slots.len() {
+            return Err("Sound preset source/state slot counts do not match".to_string());
+        }
+        let mut rack = RackTrackSnapshot::from(sound.rack);
+        for (slot_idx, (source, slot)) in source_slots.iter().zip(&mut rack.slots).enumerate() {
+            match source.instrument_type {
+                crate::project::ProjectInstrumentType::Sampler => {
+                    let sample_path = source
+                        .sample_path
+                        .as_deref()
+                        .ok_or_else(|| format!("Sound slot {} has no sample path", slot_idx + 1))?;
+                    let loaded =
+                        crate::sampler::load_wav_buffer(self.graph.lg.0, Path::new(sample_path))
+                            .map_err(|error| {
+                                format!(
+                                    "Failed to load Sound sample '{}' for slot {}: {error}",
+                                    sample_path,
+                                    slot_idx + 1
+                                )
+                            })?;
+                    self.submit_sample_analysis(&loaded);
+                    let sample_name = source
+                        .sample_name
+                        .clone()
+                        .unwrap_or_else(|| loaded.name.clone());
+                    self.register_loaded_sample_path(
+                        &sample_name,
+                        loaded.buffer_id,
+                        PathBuf::from(sample_path),
+                    );
+                    slot.instrument_type = InstrumentType::Sampler;
+                    slot.sample_id = Some((loaded.buffer_id, sample_name, loaded.sample_rate));
+                    slot.track_sound_state.engine_id = None;
+                }
+                crate::project::ProjectInstrumentType::Custom => {
+                    let instrument_name = source.instrument_name.as_deref().ok_or_else(|| {
+                        format!("Sound slot {} has no instrument name", slot_idx + 1)
+                    })?;
+                    let prepared =
+                        self.prepare_saved_instrument_for_rack_slot_sync(instrument_name)?;
+                    slot.instrument_type = InstrumentType::Custom;
+                    slot.instrument_run_mode = prepared.run_mode;
+                    slot.track_sound_state.engine_id = Some(prepared.engine_id);
+                    slot.sample_id = None;
+                }
+                crate::project::ProjectInstrumentType::Modulator
+                | crate::project::ProjectInstrumentType::Rack => {
+                    return Err(format!(
+                        "Sound slot {} has unsupported instrument type",
+                        slot_idx + 1
+                    ));
+                }
+            }
+        }
+        let saved_effects = rack
+            .slots
+            .iter()
+            .enumerate()
+            .flat_map(|(rack_slot, slot)| {
+                slot.custom_effect_names.iter().enumerate().filter_map(
+                    move |(effect_slot, name)| {
+                        let name = name.as_ref()?.trim();
+                        if name.is_empty() {
+                            return None;
+                        }
+                        Some((
+                            rack_slot,
+                            effect_slot,
+                            name.to_string(),
+                            slot.effect_slots[effect_slot].clone(),
+                        ))
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        for slot in &mut rack.slots {
+            for effect in &mut slot.effect_slots {
+                effect.node_id = 0;
+                effect.modulator_node_id = 0;
+            }
+        }
+        let display_name = sound.metadata.name.trim();
+        let display_name = if display_name.is_empty() {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("Sound")
+        } else {
+            display_name
+        };
+        self.graph_controller()
+            .replace_track_instrument_container_with_rack(track, rack, display_name)?;
+        for (rack_slot, effect_slot, name, saved) in saved_effects {
+            if let Some(builtin_name) = project_builtin_effect_name_for_load(&name) {
+                self.load_builtin_rack_slot_effect_to_slot_sync(
+                    track,
+                    rack_slot,
+                    effect_slot,
+                    &builtin_name,
+                )?;
+            } else {
+                self.load_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, &name)?;
+            }
+            let live = self
+                .state
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(rack_slot))
+                .cloned()
+                .ok_or_else(|| "Loaded Sound rack slot disappeared".to_string())?;
+            let mut restored = saved;
+            restored.node_id = live.effect_slots[effect_slot].node_id;
+            restored.modulator_node_id = live.effect_slots[effect_slot].modulator_node_id;
+            restored.sync_to_descriptor_with_modulator(
+                &live.effect_descriptors[effect_slot],
+                restored.node_id,
+                restored.modulator_node_id,
+            );
+            if !self
+                .state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.effect_slots[effect_slot] = restored.clone()
+                })
+            {
+                return Err("Failed to restore Sound effect parameters".to_string());
+            }
+            self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
+        }
+        self.push_all_restored_defaults();
+        Ok(())
+    }
+
     pub(super) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
         let num_tracks = self.tracks.len();
         let current_pattern = self.state.current_scene_index();
@@ -1860,6 +2146,15 @@ impl App {
                                     instrument_slot: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.instrument_slot.clone()),
+                                    effect_slots: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.effect_slots.clone()),
+                                    effect_descriptors: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.effect_descriptors.clone()),
+                                    custom_effect_names: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.custom_effect_names.clone()),
                                     track_sound_state: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.track_sound_state.clone()),
@@ -1875,6 +2170,73 @@ impl App {
                                 routing,
                                 build_specs,
                             )?;
+                            let saved_rack_effects = rack_pattern
+                                .as_ref()
+                                .into_iter()
+                                .flat_map(|rack| rack.slots.iter().enumerate())
+                                .flat_map(|(rack_slot, slot)| {
+                                    slot.custom_effects.iter().enumerate().filter_map(
+                                        move |(effect_slot, name)| {
+                                            let name = name.as_ref()?.trim();
+                                            if name.is_empty() {
+                                                return None;
+                                            }
+                                            let saved = slot.effect_slots.get(effect_slot)?.clone();
+                                            Some((rack_slot, effect_slot, name.to_string(), saved))
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            for (rack_slot, effect_slot, name, saved) in saved_rack_effects {
+                                if let Some(builtin_name) =
+                                    project_builtin_effect_name_for_load(&name)
+                                {
+                                    self.load_builtin_rack_slot_effect_to_slot_sync(
+                                        track_idx,
+                                        rack_slot,
+                                        effect_slot,
+                                        &builtin_name,
+                                    )?;
+                                } else {
+                                    self.load_rack_slot_effect_to_slot_sync(
+                                        track_idx,
+                                        rack_slot,
+                                        effect_slot,
+                                        &name,
+                                    )?;
+                                }
+                                let graph_slot = self
+                                    .state
+                                    .pattern
+                                    .rack_tracks
+                                    .lock()
+                                    .unwrap()
+                                    .get(track_idx)
+                                    .and_then(Option::as_ref)
+                                    .and_then(|rack| rack.slots.get(rack_slot))
+                                    .cloned()
+                                    .ok_or_else(|| "Loaded rack slot disappeared".to_string())?;
+                                let descriptor = graph_slot.effect_descriptors[effect_slot].clone();
+                                let live_effect = &graph_slot.effect_slots[effect_slot];
+                                let restored = project_slot_into_synced_snapshot_with_modulator(
+                                    saved,
+                                    &descriptor,
+                                    live_effect.node_id,
+                                    live_effect.modulator_node_id,
+                                );
+                                if !self.state.update_rack_slot_in_current_pattern(
+                                    track_idx,
+                                    rack_slot,
+                                    |slot| slot.effect_slots[effect_slot] = restored.clone(),
+                                ) {
+                                    return Err("Failed to restore rack-slot FX state".to_string());
+                                }
+                                self.push_rack_slot_effect_defaults(
+                                    track_idx,
+                                    rack_slot,
+                                    effect_slot,
+                                );
+                            }
                         }
                     }
                     if let Some(color) = saved_color {
@@ -2341,6 +2703,26 @@ impl App {
                             }
                         }
                         InstrumentType::Modulator | InstrumentType::Rack => {}
+                    }
+                    slot.effect_descriptors = graph_slot.effect_descriptors.clone();
+                    slot.custom_effect_names = graph_slot.custom_effect_names.clone();
+                    slot.effect_slots.resize_with(
+                        crate::lisp_host::MAX_CUSTOM_FX,
+                        crate::effects::EffectSlotSnapshot::new_empty,
+                    );
+                    for effect_idx in 0..crate::lisp_host::MAX_CUSTOM_FX {
+                        let graph_effect = &graph_slot.effect_slots[effect_idx];
+                        let descriptor = &graph_slot.effect_descriptors[effect_idx];
+                        if graph_effect.node_id == 0 {
+                            slot.effect_slots[effect_idx] =
+                                crate::effects::EffectSlotSnapshot::new_empty();
+                        } else {
+                            slot.effect_slots[effect_idx].sync_to_descriptor_with_modulator(
+                                descriptor,
+                                graph_effect.node_id,
+                                graph_effect.modulator_node_id,
+                            );
+                        }
                     }
                     rebound_slots.push(slot);
                 }

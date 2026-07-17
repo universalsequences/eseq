@@ -342,6 +342,13 @@
           (instrument-synth-button)
           (instrument-mods-toggle-button)
           (box :flex 1 :height 0.15)
+          (if (= (get inst :rack-slot) nil)
+            (button "Group Rack"
+              :width 6.2 :height 0.78 :padding 0.1 :font-size 8
+              :on-click |x y r|
+                (host-command "group-track-to-instrument-rack"
+                  (dict :track (get inst :track))))
+            (box :width 0 :height 0))
           (instrument-header-actions-menu inst)
           (box :width 0.25 :height 0.1)))
       (fx-panel-body "sampler-panel-content"

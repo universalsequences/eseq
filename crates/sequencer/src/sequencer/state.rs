@@ -422,11 +422,42 @@ pub struct RackSlotSnapshot {
     pub max_polyphony: usize,
     pub param_plocks: RackSlotParamPlocks,
     pub instrument_slot: EffectSlotSnapshot,
+    pub effect_slots: Vec<EffectSlotSnapshot>,
+    pub effect_descriptors: Vec<EffectDescriptor>,
+    pub custom_effect_names: Vec<Option<String>>,
     pub track_sound_state: TrackSoundState,
     pub sample_id: Option<(i32, String, u32)>,
 }
 
 impl RackSlotSnapshot {
+    pub fn empty_effect_slots() -> Vec<EffectSlotSnapshot> {
+        (0..crate::lisp_host::MAX_CUSTOM_FX)
+            .map(|_| EffectSlotSnapshot::new_empty())
+            .collect()
+    }
+
+    pub fn empty_effect_names() -> Vec<Option<String>> {
+        vec![None; crate::lisp_host::MAX_CUSTOM_FX]
+    }
+
+    pub fn normalize_effect_chain(&mut self) {
+        self.effect_slots.resize_with(
+            crate::lisp_host::MAX_CUSTOM_FX,
+            EffectSlotSnapshot::new_empty,
+        );
+        self.effect_slots.truncate(crate::lisp_host::MAX_CUSTOM_FX);
+        self.effect_descriptors.resize_with(
+            crate::lisp_host::MAX_CUSTOM_FX,
+            EffectDescriptor::empty_custom_slot,
+        );
+        self.effect_descriptors
+            .truncate(crate::lisp_host::MAX_CUSTOM_FX);
+        self.custom_effect_names
+            .resize(crate::lisp_host::MAX_CUSTOM_FX, None);
+        self.custom_effect_names
+            .truncate(crate::lisp_host::MAX_CUSTOM_FX);
+    }
+
     pub fn param_default(&self, param: RackSlotParam) -> f32 {
         match param {
             RackSlotParam::BaseNote => self.instrument_base_note_offset,
@@ -482,6 +513,9 @@ fn replace_rack_slot_source_preserving_controls(
     let solo = slot.solo;
     let max_polyphony = slot.max_polyphony;
     let param_plocks = slot.param_plocks.clone();
+    let effect_slots = slot.effect_slots.clone();
+    let effect_descriptors = slot.effect_descriptors.clone();
+    let custom_effect_names = slot.custom_effect_names.clone();
 
     *slot = replacement.clone();
     slot.pad_note = pad_note;
@@ -493,6 +527,9 @@ fn replace_rack_slot_source_preserving_controls(
     slot.solo = solo;
     slot.max_polyphony = max_polyphony;
     slot.param_plocks = param_plocks;
+    slot.effect_slots = effect_slots;
+    slot.effect_descriptors = effect_descriptors;
+    slot.custom_effect_names = custom_effect_names;
 }
 
 #[derive(Clone)]
@@ -3822,6 +3859,123 @@ impl SequencerState {
         }
     }
 
+    pub fn replace_instrument_container_with_rack(
+        &self,
+        track: usize,
+        rack_track: RackTrackSnapshot,
+    ) -> bool {
+        if self.validate_instrument_source_reset_target(track).is_err() {
+            return false;
+        }
+        self.set_rack_track_for_all_pattern_snapshots(track, rack_track);
+        self.pattern.instrument_slots[track].clear();
+        self.pattern.instrument_run_modes[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.runtime.instrument_run_mode_flags[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.runtime.instrument_type_flags[track]
+            .store(InstrumentType::Rack.runtime_flag(), Ordering::Release);
+        self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Release);
+        true
+    }
+
+    /// Fold a flat track's instrument and insert chain into a one-slot rack in
+    /// every stored pattern. Per-pattern instrument/effect values are retained;
+    /// only their ownership moves from the track container to the rack slot.
+    pub fn group_flat_track_to_rack(
+        &self,
+        track: usize,
+        effect_descriptors: &[EffectDescriptor],
+        custom_effect_names: &[Option<String>],
+    ) -> Option<RackTrackSnapshot> {
+        self.validate_instrument_source_reset_target(track).ok()?;
+        let live_instrument =
+            EffectSlotSnapshot::capture(self.pattern.instrument_slots.get(track)?);
+        let live_effects = self
+            .pattern
+            .effect_chains
+            .get(track)?
+            .iter()
+            .map(EffectSlotSnapshot::capture)
+            .collect::<Vec<_>>();
+
+        let make_slot = |data: &TrackPatternData| {
+            let mut slot = RackSlotSnapshot {
+                instrument_type: data.instrument_type,
+                instrument_run_mode: data.instrument_run_mode,
+                instrument_base_note_offset: data.instrument_base_note_offset,
+                pad_note: None,
+                choke_group: None,
+                gain: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                max_polyphony: crate::voice::MAX_VOICES,
+                param_plocks: RackSlotParamPlocks::new(),
+                instrument_slot: data.instrument_slot.clone(),
+                effect_slots: data.effect_slots.clone(),
+                effect_descriptors: effect_descriptors.to_vec(),
+                custom_effect_names: custom_effect_names.to_vec(),
+                track_sound_state: data.track_sound_state.clone(),
+                sample_id: (data.instrument_type == InstrumentType::Sampler)
+                    .then(|| data.sample_id.clone()),
+            };
+            slot.normalize_effect_chain();
+            slot
+        };
+
+        let live_rack = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let effective_id = scenes.effective_pattern_id(track)?;
+            let pool = scenes.track_pools.get_mut(track)?;
+            let mut effective_rack = None;
+            for (pattern_id, data) in pool.patterns.iter_mut() {
+                let slot = make_slot(data);
+                if *pattern_id == effective_id {
+                    effective_rack = Some(RackTrackSnapshot {
+                        routing: RackRouting::Broadcast,
+                        slots: vec![slot.clone()],
+                    });
+                }
+                prepare_track_pattern_data_for_rack(data);
+                data.effect_slots = (0..crate::lisp_host::MAX_CUSTOM_FX)
+                    .map(|_| EffectSlotSnapshot::new_empty())
+                    .collect();
+                data.rack_track = Some(RackTrackSnapshot {
+                    routing: RackRouting::Broadcast,
+                    slots: vec![slot],
+                });
+            }
+            effective_rack?
+        };
+
+        let mut live_rack = live_rack;
+        live_rack.slots[0].instrument_slot = live_instrument;
+        live_rack.slots[0].effect_slots = live_effects;
+        live_rack.slots[0].normalize_effect_chain();
+        self.pattern.rack_tracks.lock().unwrap()[track] = Some(live_rack.clone());
+        self.pattern.instrument_slots[track].clear();
+        for slot in &self.pattern.effect_chains[track] {
+            slot.clear();
+        }
+        self.pattern.instrument_run_modes[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.runtime.instrument_run_mode_flags[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.runtime.instrument_type_flags[track]
+            .store(InstrumentType::Rack.runtime_flag(), Ordering::Release);
+        self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Release);
+        Some(live_rack)
+    }
+
     pub fn append_rack_slot_to_current_pattern(
         &self,
         track: usize,
@@ -4148,6 +4302,122 @@ impl SequencerState {
             return false;
         };
         update(slot);
+        true
+    }
+
+    /// Apply an edit to both the scheduler's live rack snapshot and the
+    /// effective pattern that owns it. Validation happens before either copy
+    /// is changed so a malformed pattern cannot leave the two views split.
+    pub fn update_rack_slot_in_current_pattern<F>(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        update: F,
+    ) -> bool
+    where
+        F: Fn(&mut RackSlotSnapshot),
+    {
+        {
+            let rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+            let Some(Some(rack)) = rack_tracks.get(track) else {
+                return false;
+            };
+            if rack.slots.get(slot_idx).is_none() {
+                return false;
+            }
+        }
+        {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(pattern_id) = scenes.effective_pattern_id(track) else {
+                return false;
+            };
+            let Some(slot) = scenes
+                .track_pools
+                .get(track)
+                .and_then(|pool| pool.get(pattern_id))
+                .and_then(|data| data.rack_track.as_ref())
+                .and_then(|rack| rack.slots.get(slot_idx))
+            else {
+                return false;
+            };
+            let _ = slot;
+        }
+
+        if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            update(&mut rack.slots[slot_idx]);
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pattern_id = scenes
+            .effective_pattern_id(track)
+            .expect("validated effective rack pattern before mutation");
+        let slot = scenes.track_pools[track]
+            .get_mut(pattern_id)
+            .and_then(|data| data.rack_track.as_mut())
+            .and_then(|rack| rack.slots.get_mut(slot_idx))
+            .expect("validated current rack slot before mutation");
+        update(slot);
+        true
+    }
+
+    /// Apply a structural rack-slot edit to the live scheduler snapshot and
+    /// every stored pattern for the track. Rack instruments and their effect
+    /// nodes are graph-owned device identity; only parameter values and locks
+    /// vary per pattern. Adding, removing, or moving a device therefore must
+    /// not leave another scene pointing at an empty or stale graph node.
+    pub fn update_rack_slot_in_all_pattern_snapshots<F>(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        update: F,
+    ) -> bool
+    where
+        F: Fn(&mut RackSlotSnapshot),
+    {
+        {
+            let rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+            let Some(Some(live_rack)) = rack_tracks.get(track) else {
+                return false;
+            };
+            if live_rack.slots.get(slot_idx).is_none() {
+                return false;
+            }
+        }
+        {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(pool) = scenes.track_pools.get(track) else {
+                return false;
+            };
+            if pool.patterns.values().any(|data| {
+                data.rack_track
+                    .as_ref()
+                    .and_then(|rack| rack.slots.get(slot_idx))
+                    .is_none()
+            }) {
+                return false;
+            }
+        }
+
+        let mut rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+        let live_slot = rack_tracks[track]
+            .as_mut()
+            .and_then(|rack| rack.slots.get_mut(slot_idx))
+            .expect("validated live rack slot before structural mutation");
+        update(live_slot);
+        drop(rack_tracks);
+
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .expect("validated rack pattern pool before structural mutation");
+        for data in pool.patterns.values_mut() {
+            let slot = data
+                .rack_track
+                .as_mut()
+                .and_then(|rack| rack.slots.get_mut(slot_idx))
+                .expect("validated stored rack slot before structural mutation");
+            update(slot);
+        }
         true
     }
 
@@ -8329,6 +8599,9 @@ mod tests {
                 max_polyphony: 3,
                 param_plocks: RackSlotParamPlocks::new(),
                 instrument_slot: sample_effect_slot_snapshot(77),
+                effect_slots: RackSlotSnapshot::empty_effect_slots(),
+                effect_descriptors: EffectDescriptor::default_full_chain(),
+                custom_effect_names: RackSlotSnapshot::empty_effect_names(),
                 track_sound_state: TrackSoundState {
                     loaded_preset: Some("rack-lead".to_string()),
                     dirty: true,
@@ -8359,6 +8632,9 @@ mod tests {
             max_polyphony: 2,
             param_plocks: RackSlotParamPlocks::new(),
             instrument_slot: sample_effect_slot_snapshot(instrument_slot_id),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
             track_sound_state: TrackSoundState::default(),
             sample_id: Some((buffer_id, sample_name.to_string(), sample_rate)),
         }
@@ -8956,6 +9232,10 @@ mod tests {
         initial.slots[0].mute = true;
         initial.slots[0].solo = false;
         initial.slots[0].max_polyphony = 6;
+        let rack_fx = EffectDescriptor::builtin_ott();
+        initial.slots[0].effect_descriptors[0] = rack_fx.clone();
+        initial.slots[0].effect_slots[0] = EffectSlotSnapshot::new_default(&rack_fx, 701);
+        initial.slots[0].custom_effect_names[0] = Some("builtin:OTT".to_string());
         assert!(initial.slots[0]
             .param_plocks
             .set(4, RackSlotParam::Gain, 0.25));
@@ -8974,6 +9254,9 @@ mod tests {
             max_polyphony: 1,
             param_plocks: RackSlotParamPlocks::new(),
             instrument_slot: sample_effect_slot_snapshot(88),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
             track_sound_state: TrackSoundState::default(),
             sample_id: Some((123, "replacement".to_string(), 48_000)),
         };
@@ -9064,6 +9347,12 @@ mod tests {
         assert!(live.slots[0].mute);
         assert!(!live.slots[0].solo);
         assert_eq!(live.slots[0].max_polyphony, 6);
+        assert_eq!(live.slots[0].effect_slots[0].node_id, 701);
+        assert_eq!(live.slots[0].effect_descriptors[0].name, "OTT");
+        assert_eq!(
+            live.slots[0].custom_effect_names[0].as_deref(),
+            Some("builtin:OTT")
+        );
         assert_eq!(
             live.slots[0].param_plocks.get(4, RackSlotParam::Gain),
             Some(0.25)

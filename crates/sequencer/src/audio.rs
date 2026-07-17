@@ -6746,6 +6746,9 @@ mod tests {
             max_polyphony: 1,
             param_plocks: RackSlotParamPlocks::new(),
             instrument_slot: EffectSlotSnapshot::new_empty(),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
             track_sound_state: TrackSoundState::default(),
             sample_id: None,
         }

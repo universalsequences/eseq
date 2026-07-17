@@ -8480,6 +8480,66 @@ fn build_rack_panel_value(
                 "selected".to_string(),
                 value_cell(Value::Bool(Some(slot_idx) == selected_slot)),
             );
+            let effects = slot
+                .effect_descriptors
+                .iter()
+                .zip(&slot.effect_slots)
+                .enumerate()
+                .filter_map(|(effect_idx, (descriptor, snapshot))| {
+                    if snapshot.node_id == 0 {
+                        return None;
+                    }
+                    let params = descriptor
+                        .params
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, param)| {
+                            param.node_param_idx != u32::MAX
+                                && !param.name.starts_with("__host_mod__")
+                                && !param.name.starts_with("__dgen_mod_active__")
+                        })
+                        .map(|(param_idx, param)| {
+                            map_value([
+                                ("idx", Value::Number(param_idx as f64)),
+                                ("name", Value::String(param.name.clone())),
+                                (
+                                    "value",
+                                    Value::Number(
+                                        snapshot
+                                            .defaults
+                                            .get(param_idx)
+                                            .copied()
+                                            .unwrap_or(param.default)
+                                            as f64,
+                                    ),
+                                ),
+                                ("min", Value::Number(param.min as f64)),
+                                ("max", Value::Number(param.max as f64)),
+                            ])
+                        });
+                    Some(map_value([
+                        ("slot-idx", Value::Number(effect_idx as f64)),
+                        ("name", Value::String(descriptor.name.clone())),
+                        ("can-move-left", Value::Bool(effect_idx > 0)),
+                        (
+                            "can-move-right",
+                            Value::Bool(effect_idx + 1 < sequencer::lisp_host::MAX_CUSTOM_FX),
+                        ),
+                        ("params", list_value(params)),
+                    ]))
+                });
+            let effects = effects.collect::<Vec<_>>();
+            slot_map.insert(
+                "effect-count".to_string(),
+                value_cell(Value::Number(effects.len() as f64)),
+            );
+            slot_map.insert(
+                "processing-cost".to_string(),
+                // A stable, inspectable work-unit estimate: one unit per
+                // available voice plus one per post-voice slot effect.
+                value_cell(Value::Number((slot.max_polyphony + effects.len()) as f64)),
+            );
+            slot_map.insert("effects".to_string(), value_cell(list_value(effects)));
             Rc::new(RefCell::new(Value::Map(slot_map)))
         })
         .collect();
@@ -8559,6 +8619,22 @@ fn build_rack_panel_value(
     panel_map.insert(
         "slots".to_string(),
         Rc::new(RefCell::new(Value::List(slots))),
+    );
+    panel_map.insert(
+        "processing-cost".to_string(),
+        value_cell(Value::Number(
+            rack.slots
+                .iter()
+                .map(|slot| {
+                    slot.max_polyphony
+                        + slot
+                            .effect_slots
+                            .iter()
+                            .filter(|effect| effect.node_id != 0)
+                            .count()
+                })
+                .sum::<usize>() as f64,
+        )),
     );
     panel_map.insert("pads".to_string(), Rc::new(RefCell::new(Value::List(pads))));
     panel_map.insert(
@@ -8657,6 +8733,30 @@ pub(crate) fn sync_project_state(rt: &mut Runtime, app: &tui::App) {
         "current-project-name",
         Value::String(app.current_project_name.clone().unwrap_or_default()),
     );
+    rt.set_reactive("SEQ", "sound-presets", build_sound_presets_value());
+}
+
+pub(crate) fn build_sound_presets_value() -> Value {
+    let sounds = sequencer::project::list_sound_presets().unwrap_or_default();
+    list_value(sounds.into_iter().filter_map(|path| {
+        let preset = sequencer::project::load_sound_preset(&path).ok()?;
+        let label = if preset.metadata.name.trim().is_empty() {
+            path.file_stem()?.to_str()?.to_string()
+        } else {
+            preset.metadata.name
+        };
+        Some(map_value([
+            ("kind", Value::String("sound".to_string())),
+            ("label", Value::String(label.clone())),
+            ("name", Value::String(label)),
+            ("path", Value::String(path.to_string_lossy().to_string())),
+            ("author", Value::String(preset.metadata.author)),
+            (
+                "tags",
+                list_value(preset.metadata.tags.into_iter().map(Value::String)),
+            ),
+        ]))
+    }))
 }
 
 pub(crate) const PROJECT_SCRATCH_BUFFER_NAME: &str = "*scratch*";
@@ -8979,6 +9079,17 @@ pub(crate) fn extract_i32_from_payload(payload: &Value, key: &str) -> Option<i32
         if let Some(cell) = map.get(key) {
             if let Value::Number(n) = &*cell.borrow() {
                 return Some(*n as i32);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_f32_from_payload(payload: &Value, key: &str) -> Option<f32> {
+    if let Value::Map(map) = payload {
+        if let Some(cell) = map.get(key) {
+            if let Value::Number(n) = &*cell.borrow() {
+                return Some(*n as f32);
             }
         }
     }
@@ -11478,10 +11589,7 @@ mod tests {
         picks: Arc<Mutex<Vec<usize>>>,
     }
 
-    fn step_gesture_runtime(
-        initial_steps: &[bool],
-        selected_steps: &[bool],
-    ) -> StepGestureHarness {
+    fn step_gesture_runtime(initial_steps: &[bool], selected_steps: &[bool]) -> StepGestureHarness {
         let steps = Arc::new(Mutex::new(initial_steps.to_vec()));
         let selected = Arc::new(Mutex::new(selected_steps.to_vec()));
         let toggles = Arc::new(Mutex::new(Vec::new()));
@@ -11618,7 +11726,10 @@ mod tests {
             .eval_str("(step-pointer-up 3 (dict))")
             .expect("pointer up");
 
-        assert_eq!(*h.steps.lock().unwrap(), vec![false, true, true, true, false]);
+        assert_eq!(
+            *h.steps.lock().unwrap(),
+            vec![false, true, true, true, false]
+        );
         assert_eq!(*h.toggles.lock().unwrap(), vec![1, 2, 3]);
         assert!(h.moves.lock().unwrap().is_empty());
     }
@@ -12427,6 +12538,15 @@ mod tests {
                 ("sidebar-instrument-name", Value::String(String::new())),
                 ("project-instrument-engines", test_list(vec![])),
                 (
+                    "sound-presets",
+                    test_list(vec![map_value([
+                        ("kind", Value::String("sound".to_string())),
+                        ("label", Value::String("Wide Plate".to_string())),
+                        ("name", Value::String("Wide Plate".to_string())),
+                        ("path", Value::String("sounds/wide-plate.sound".to_string())),
+                    ])]),
+                ),
+                (
                     "sidebar-instrument-display-name",
                     Value::String(String::new()),
                 ),
@@ -12536,6 +12656,29 @@ mod tests {
             .find(|buffer| buffer.name == "*samples*")
             .expect("browser lisp should create the *samples* buffer")
             .id
+    }
+
+    #[test]
+    fn metal_seq_browser_sounds_tab_renders_sound_presets() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"sounds\")")
+            .expect("select Sounds tab");
+        editor.refresh_runtime_side_effects();
+        let id = browser_id(&editor);
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(72, 24);
+        let layout = editor.widget_layout().expect("Sounds browser layout");
+        assert_finite_layout_tree(&layout);
+        let tree = find_layout_node_by_stable_key(&layout, "sounds-tab-tree")
+            .expect("Sounds tree should render");
+        assert!(tree.rect.width > 0.0 && tree.rect.height > 0.0);
+        let rendered = render_layout_cells(&layout, 72, 24);
+        assert!(
+            rendered.contains("Wide Plate"),
+            "saved Sound label should be visible; rendered:\n{rendered}"
+        );
     }
 
     fn test_sample_tree() -> Value {
@@ -19819,6 +19962,10 @@ mod tests {
                             0,
                             0,
                         ),
+                    effect_slots: sequencer::sequencer::RackSlotSnapshot::empty_effect_slots(),
+                    effect_descriptors: sequencer::effects::EffectDescriptor::default_full_chain(),
+                    custom_effect_names: sequencer::sequencer::RackSlotSnapshot::empty_effect_names(
+                    ),
                     track_sound_state: sequencer::sequencer::TrackSoundState::default(),
                     sample_id: Some((42, "Layer Alpha".to_string(), 48_000)),
                 }],
@@ -19873,6 +20020,10 @@ mod tests {
                             0,
                             0,
                         ),
+                    effect_slots: sequencer::sequencer::RackSlotSnapshot::empty_effect_slots(),
+                    effect_descriptors: sequencer::effects::EffectDescriptor::default_full_chain(),
+                    custom_effect_names: sequencer::sequencer::RackSlotSnapshot::empty_effect_names(
+                    ),
                     track_sound_state: sequencer::sequencer::TrackSoundState::default(),
                     sample_id: Some((42, "DS FM".to_string(), 48_000)),
                 }],
@@ -19986,10 +20137,9 @@ mod tests {
 
         let app = test_app_with_rack_panel();
         app.state.update_live_rack_slot(0, 0, |slot| {
-            assert!(
-                slot.param_plocks
-                    .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25)
-            );
+            assert!(slot
+                .param_plocks
+                .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25));
             slot.instrument_slot.defaults[8] = 44_100.0;
             assert!(slot.instrument_slot.set_plock(3, 8, 22_050.0));
         });
@@ -20590,6 +20740,12 @@ mod tests {
                 .expect("selected rack sampler action menu layout node");
         let chain_list = find_layout_node_by_debug_name(&layout, "rack-chain-list")
             .unwrap_or_else(|| panic!("rack chain list; layout={layout_summaries:#?}"));
+        let slot_drop = find_layout_node_by_debug_name(&layout, "rack-slot-fx-drop-panel")
+            .unwrap_or_else(|| panic!("rack slot FX drop panel; layout={layout_summaries:#?}"));
+        let chain_divider = find_layout_node_by_debug_name(&layout, "rack-slot-track-fx-divider")
+            .unwrap_or_else(|| panic!("rack/track FX divider; layout={layout_summaries:#?}"));
+        let track_drop = find_layout_node_by_debug_name(&layout, "fx-track-drop-placeholder-panel")
+            .unwrap_or_else(|| panic!("track FX drop panel; layout={layout_summaries:#?}"));
         let layer_label = find_layout_node_by_text(&layout, "Layer Alpha")
             .unwrap_or_else(|| panic!("rack layer label; layout={layout_summaries:#?}"));
         let sampler_small_param_row =
@@ -20680,6 +20836,26 @@ mod tests {
             chain_list.rect.width > 30.0 && chain_list.rect.height > 1.0,
             "rack chain list should have nonzero measured space, got {:?}",
             chain_list.rect
+        );
+        assert_finite_nonzero_rect(slot_drop, "rack slot FX drop panel");
+        assert_finite_nonzero_rect(chain_divider, "rack/track FX divider");
+        assert_finite_nonzero_rect(track_drop, "track FX drop panel");
+        assert!(
+            slot_drop.rect.col < chain_divider.rect.col
+                && chain_divider.rect.col < track_drop.rect.col,
+            "slot FX must precede the divider and track FX drop target; slot={:?}, divider={:?}, track={:?}",
+            slot_drop.rect,
+            chain_divider.rect,
+            track_drop.rect
+        );
+        assert!(
+            matches!(
+                slot_drop.props.get("drop-meta"),
+                Some(Value::Map(map))
+                    if map.get("rack-slot").is_some_and(|value| matches!(*value.borrow(), Value::Number(slot) if slot == 0.0))
+            ),
+            "slot FX drop target must carry the selected rack slot: {:?}",
+            slot_drop.props.get("drop-meta")
         );
         assert!(
             layer_label.rect.width > 1.0
@@ -24751,12 +24927,9 @@ mod tests {
                 continue;
             };
             match items.as_slice() {
-                [
-                    Expression::Symbol(form),
-                    Expression::Symbol(name),
-                    Expression::String(value),
-                    ..,
-                ] if form == "def" && name == "script-buffer-name" => {
+                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
+                    if form == "def" && name == "script-buffer-name" =>
+                {
                     script_buffer_name = Some(value.clone());
                 }
                 [Expression::Symbol(form), Expression::String(target), ..]
@@ -42930,9 +43103,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec![
-                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
-            ]
+            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
         );
     }
 

@@ -228,6 +228,14 @@
           :slot (get slot :idx)
           :value (rack-choke-group-label-value label))))
 
+(def rack-slot-drop-fx (slot event)
+  (let ((payload (get event :payload)))
+    (host-command "add-rack-slot-effect"
+      (dict :track (get slot :track)
+            :rack-slot (get slot :idx)
+            :name (get payload :name)
+            :builtin (get payload :builtin)))))
+
 (def rack-slot-row (slot)
   (let ((delete-target (rack-slot-delete-target? slot))
         (selected (get slot :selected)))
@@ -246,6 +254,12 @@
                          '(rgba 0.16 0.17 0.19 1.0))
          :selected-border-color :mixer-strip-selected-border
          :corner-radius 3
+         :drop-types (list "audio-effect")
+         :drop-meta (dict :kind "rack-slot-fx"
+                          :track (get slot :track)
+                          :rack-slot (get slot :idx))
+         :drop-hover-border-color :mixer-strip-selected-border
+         :on-drop (lambda (event) (rack-slot-drop-fx slot event))
          :on-click |x y r| (rack-slot-select slot)
       (h-stack :width :fill :height :fill :gap 0.15 :align :center
         (label (str (+ (get slot :idx) 1))
@@ -254,18 +268,21 @@
           :width 1.0
           :bg :transparent)
         (box :key (str "rack-slot-label-" (get slot :idx))
-             :width 13 :height :fill :v-align :center :padding 0
+             :width 9.5 :height :fill :v-align :center :padding 0
              :selected delete-target
              :background-color :transparent
              :selected-background-color :fx-panel-header-selected-bg
              :corner-radius 3
              :on-click |x y r| (rack-slot-select-delete-target slot)
-          (label (substring (get slot :display-name) 0 24)
+          (label (substring (get slot :display-name) 0 14)
             :font-size 10.5
             :color :white
             :active delete-target
             :active-color :white
             :bg :transparent))
+        (label (str "C " (get slot :processing-cost))
+          :font-size 8 :color (if (> (get slot :effect-count) 0) :blue :dim)
+          :width 2.8 :bg :transparent)
 
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "T" :font-size 8.2 :color :dim :bg :transparent)
@@ -338,6 +355,124 @@
       (instrument-panel selected)
       (rack-empty-selected-panel inst))))
 
+(def rack-fx-param-control (inst slot fx param)
+  (v-stack :width 5.1 :height 2.0 :gap 0.05 :align :center
+    (label (substring (get param :name) 0 10)
+      :font-size 7.2 :color :dim :bg :transparent)
+    (number-picker :value (get param :value)
+      :min (get param :min) :max (get param :max) :decimals 3
+      :noui true :font-size 8.5 :width 4.8 :height 0.82
+      :on-change (lambda (v)
+        (host-command "set-rack-slot-effect-param"
+          (dict :track (get inst :track)
+                :rack-slot (get slot :idx)
+                :effect-slot (get fx :slot-idx)
+                :param (get param :idx)
+                :value v))))))
+
+(def rack-fx-enabled-param (fx)
+  (nth (filter |param| (= (get param :name) "enabled") (get fx :params)) 0))
+
+(def rack-fx-enabled-value (fx)
+  (let ((enabled (rack-fx-enabled-param fx)))
+    (if enabled (get enabled :value) 1)))
+
+(def rack-fx-move (inst slot fx delta)
+  (host-command "move-rack-slot-effect"
+    (dict :track (get inst :track)
+          :rack-slot (get slot :idx)
+          :source-slot (get fx :slot-idx)
+          :target-slot (+ (get fx :slot-idx) delta))))
+
+(def rack-fx-toggle-bypass (inst slot fx)
+  (let ((enabled (rack-fx-enabled-param fx)))
+    (if enabled
+      (host-command "set-rack-slot-effect-param"
+        (dict :track (get inst :track)
+              :rack-slot (get slot :idx)
+              :effect-slot (get fx :slot-idx)
+              :param (get enabled :idx)
+              :value (if (> (get enabled :value) 0.5) 0 1))))))
+
+(def rack-selected-fx-panel (inst)
+  (let ((slot-idx (get inst :selected-slot)))
+    (if (< slot-idx 0)
+      (box :width 0 :height 0)
+      (let ((slot (nth (get inst :slots) slot-idx)))
+        (if (= (len (get slot :effects)) 0)
+          (box :width 0 :height 0)
+          (box :debug-name "rack-slot-fx-panel"
+               :width 34 :height fx-fixed-panel-height
+               :background "fx-panel-bg" :padding 0
+            (v-stack :width :fill :height :fill :gap 0
+              (box :height 1 :width :fill :padding 0.15
+                (h-stack :width :fill :height :fill :gap 0.4 :align :center
+                  (label "Slot FX" :font-size 10 :color :white :bg :transparent)
+                  (label (str "Rack slot " (+ slot-idx 1))
+                    :font-size 7 :color :dim :bg :transparent)))
+              (fx-panel-body "rack-slot-fx-content"
+                (scroll :width :fill :height :fill
+                  (v-stack :width :fill :gap 0.2
+                    (each (get slot :effects) |fx fx-idx|
+                      (v-stack :key (str "rack-fx-" (get fx :slot-idx)) :width :fill :gap 0.1
+                        (h-stack :width :fill :height 0.9 :gap 0.3 :align :center
+                          (label (get fx :name) :font-size 9 :color :white :bg :transparent)
+                          (box :flex 1 :height 0.1)
+                          (button "<" :width 1.1 :height 0.65 :font-size 8 :padding 0
+                            :disabled (not (get fx :can-move-left))
+                            :on-click |x y r| (rack-fx-move inst slot fx -1))
+                          (button ">" :width 1.1 :height 0.65 :font-size 8 :padding 0
+                            :disabled (not (get fx :can-move-right))
+                            :on-click |x y r| (rack-fx-move inst slot fx 1))
+                          (button "B" :width 1.1 :height 0.65 :font-size 8 :padding 0
+                            :background-color (if (> (rack-fx-enabled-value fx) 0.5)
+                              :mixer-control-bg
+                              '(rgba 0.95 0.48 0.18 1.0))
+                            :on-click |x y r| (rack-fx-toggle-bypass inst slot fx))
+                          (button "x" :width 1.1 :height 0.65 :font-size 8 :padding 0
+                            :on-click |x y r|
+                              (host-command "delete-rack-slot-effect"
+                                (dict :track (get inst :track)
+                                      :rack-slot (get slot :idx)
+                                      :effect-slot (get fx :slot-idx)))))
+                        (wrap :width :fill :gap 0.15 :row-gap 0.1
+                          (each (get fx :params) |param param-idx|
+                            (rack-fx-param-control inst slot fx param)))))))))))))))
+
+(def rack-slot-fx-drop-panel (inst)
+  (let ((slot-idx (get inst :selected-slot)))
+    (if (< slot-idx 0)
+      (box :width 0 :height 0)
+      (let ((slot (nth (get inst :slots) slot-idx)))
+        (box :debug-name "rack-slot-fx-drop-panel"
+             :background-color :buffer-bg
+             :corner-radius 10
+             :border-color :mixer-strip-border
+             :border-width 2
+             :drop-types (list "audio-effect")
+             :drop-meta (dict :kind "rack-slot-fx"
+                              :track (get inst :track)
+                              :rack-slot (get slot :idx))
+             :drop-hover-border-color :mixer-strip-selected-border
+             :drop-hover-background-color :mixer-control-bg
+             :on-drop (lambda (event) (rack-slot-drop-fx slot event))
+             :height fx-fixed-panel-height
+             :width 34
+             :padding 0
+             :h-align :center
+             :v-align :center
+          (v-stack :gap 0.35 :align :center
+            (label "Slot FX" :font-size 9 :color :blue :bg :transparent)
+            (label "Drop Audio Effect Here"
+              :width 30 :font-size 12 :h-align :center
+              :color :dim :bg :transparent)))))))
+
+(def rack-slot-track-fx-divider ()
+  (v-stack :debug-name "rack-slot-track-fx-divider"
+           :width 1.2 :height fx-fixed-panel-height :gap 0 :align :center
+    (label "TRACK" :font-size 6.5 :color :dim :bg :transparent)
+    (box :width 0.08 :flex 1 :background-color :mixer-strip-border)))
+
 (def rack-panel (inst)
   (box
     (v-stack :debug-name "rack-panel-vstack" :gap 0 :height :fill
@@ -348,7 +483,14 @@
             :font-size 11 :color :white :bg :transparent)
           (label (get inst :routing)
             :font-size 9 :color :gray :bg :transparent)
-          (box :flex 1 :height 0.15)))
+          (label (str "C " (get inst :processing-cost))
+            :font-size 8 :color :dim :bg :transparent)
+          (box :flex 1 :height 0.15)
+          (button "Save Sound"
+            :width 6.4 :height 0.78 :padding 0.1 :font-size 8
+            :on-click |x y r|
+              (host-command "save-track-as-sound"
+                (dict :track (get inst :track) :name (get inst :display-name))))))
       (fx-panel-body "rack-content-box"
         (if (= (get inst :routing) "by-pitch")
           (drum-rack-pad-grid inst)
@@ -404,6 +546,13 @@
                   (instrument-mods-toggle-button)
                   (instrument-keys-button))
                 (box :flex 1 :height 0.15)
+                (if (= (get inst :rack-slot) nil)
+                  (button "Group Rack"
+                    :width 6.2 :height 0.78 :padding 0.1 :font-size 8
+                    :on-click |x y r|
+                      (host-command "group-track-to-instrument-rack"
+                        (dict :track (get inst :track))))
+                  (box :width 0 :height 0))
                 (instrument-header-actions-menu inst)
                 (v-stack
                   (button "edit"

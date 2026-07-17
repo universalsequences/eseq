@@ -1232,6 +1232,7 @@ pub(crate) fn init_runtime(
                     "project-instrument-engines",
                     build_string_list(&project_instrument_engine_names(app)),
                 ),
+                ("sound-presets", build_sound_presets_value()),
                 ("current-project-name", Value::String(String::new())),
                 // Editor mode state (for inline instrument/effect creation/editing)
                 ("editor-active", Value::Bool(false)),

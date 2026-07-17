@@ -801,7 +801,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        AppCommand, apply_command, command_mutates_sequencer_state, sanitize_pasted_step_snapshot,
+        apply_command, command_mutates_sequencer_state, sanitize_pasted_step_snapshot, AppCommand,
     };
     use crate::audiograph::LiveGraphPtr;
     use crate::effects::{
@@ -815,10 +815,10 @@ mod tests {
     use crate::quantized_launch::PatternLaunchTarget;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        CustomInstrumentRunMode, InstrumentType, NUM_PARAMS, RackRouting, RackSlotParam,
-        RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, SequencerState, StepSlotPlocks,
-        StepSnapshot, SwingResolution, Timebase, TrackSendSnapshot, TrackSoundState,
-        default_empty_effect_chain,
+        default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType, RackRouting,
+        RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, SequencerState,
+        StepSlotPlocks, StepSnapshot, SwingResolution, Timebase, TrackSendSnapshot,
+        TrackSoundState, NUM_PARAMS,
     };
     use crate::tui::{App, AudioBuses};
 
@@ -1009,6 +1009,9 @@ mod tests {
                         77,
                         0,
                     ),
+                    effect_slots: RackSlotSnapshot::empty_effect_slots(),
+                    effect_descriptors: EffectDescriptor::default_full_chain(),
+                    custom_effect_names: RackSlotSnapshot::empty_effect_names(),
                     track_sound_state: TrackSoundState::default(),
                     sample_id: Some((1, "test.wav".to_string(), 44_100)),
                 }],
@@ -1198,34 +1201,26 @@ mod tests {
         assert_eq!(sanitized.timebase, Some(Timebase::Eighth));
         assert_eq!(sanitized.swing, Some(62.0));
         assert_eq!(sanitized.swing_resolution, Some(SwingResolution::Eighth));
-        assert!(
-            sanitized
-                .effect_plocks
-                .iter()
-                .flat_map(|plocks| plocks.params.iter())
-                .all(Option::is_none)
-        );
-        assert!(
-            sanitized
-                .instrument_plocks
-                .params
-                .iter()
-                .all(Option::is_none)
-        );
-        assert!(
-            sanitized
-                .rack_slot_param_plocks
-                .iter()
-                .flat_map(|plocks| plocks.params.iter())
-                .all(Option::is_none)
-        );
-        assert!(
-            sanitized
-                .rack_slot_instrument_plocks
-                .iter()
-                .flat_map(|plocks| plocks.params.iter())
-                .all(Option::is_none)
-        );
+        assert!(sanitized
+            .effect_plocks
+            .iter()
+            .flat_map(|plocks| plocks.params.iter())
+            .all(Option::is_none));
+        assert!(sanitized
+            .instrument_plocks
+            .params
+            .iter()
+            .all(Option::is_none));
+        assert!(sanitized
+            .rack_slot_param_plocks
+            .iter()
+            .flat_map(|plocks| plocks.params.iter())
+            .all(Option::is_none));
+        assert!(sanitized
+            .rack_slot_instrument_plocks
+            .iter()
+            .flat_map(|plocks| plocks.params.iter())
+            .all(Option::is_none));
     }
 
     #[test]
@@ -1785,13 +1780,12 @@ mod tests {
         assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.5).abs() < 1.0e-6);
 
         app.release_macro(id);
-        assert!(
-            app.macro_engine
-                .macro_definition(id)
-                .unwrap()
-                .mappings
-                .is_empty()
-        );
+        assert!(app
+            .macro_engine
+            .macro_definition(id)
+            .unwrap()
+            .mappings
+            .is_empty());
         assert!((app.effective_slot_param_value(0, 0, 0).unwrap() - 0.2).abs() < 1.0e-6);
     }
 
@@ -1859,16 +1853,15 @@ mod tests {
 
         app.begin_scene_push(1, 1.0);
         assert!(app.macro_engine.macros().is_empty());
-        assert!(
-            app.macro_engine
-                .override_snapshot()
-                .keys()
-                .any(|key| matches!(
-                    key,
-                    crate::macro_engine::MacroParamKey::BusEffect { bus, .. }
-                        if *bus == app.buses[0].id
-                ))
-        );
+        assert!(app
+            .macro_engine
+            .override_snapshot()
+            .keys()
+            .any(|key| matches!(
+                key,
+                crate::macro_engine::MacroParamKey::BusEffect { bus, .. }
+                    if *bus == app.buses[0].id
+            )));
         assert!((app.effective_bus_slot_param_value(0, 0, 0).unwrap() - 0.8).abs() < 1.0e-6);
         {
             let runtime = app.graph.bus_gate_runtime.lock().unwrap();

@@ -137,6 +137,7 @@ struct CaptureTrackSpec {
     samples: Vec<String>,
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
+    rack_slot_audio_fx: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +268,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     let mut samples = Vec::new();
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
+    let mut rack_slot_audio_fx = Vec::new();
     while cursor < items.len() {
         let option = expression_name(items.get(cursor))
             .ok_or_else(|| format!("expected a track option at item {}", cursor + 1))?;
@@ -294,6 +296,9 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
             "samples" => samples = expression_string_list(value, ":samples")?,
             "midi-fx" => midi_fx = expression_string_list(value, ":midi-fx")?,
             "audio-fx" => audio_fx = expression_string_list(value, ":audio-fx")?,
+            "rack-slot-audio-fx" => {
+                rack_slot_audio_fx = expression_string_list(value, ":rack-slot-audio-fx")?
+            }
             other => return Err(format!("unsupported track option :{other}")),
         }
         cursor += 2;
@@ -310,6 +315,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         samples,
         midi_fx,
         audio_fx,
+        rack_slot_audio_fx,
     })
 }
 
@@ -394,6 +400,21 @@ fn apply_capture_project(app: &mut tui::App, project: &CaptureProjectSpec) -> Re
                 .map_err(|error| {
                     format!(
                         "failed to add audio FX {effect:?} to track {}: {error}",
+                        track + 1
+                    )
+                })?;
+        }
+        for effect in &spec.rack_slot_audio_fx {
+            if spec.kind != CaptureTrackKind::LayerRack || spec.samples.is_empty() {
+                return Err(format!(
+                    "track {} needs a populated layer rack for :rack-slot-audio-fx",
+                    spec_index + 1
+                ));
+            }
+            app.add_builtin_rack_slot_effect_sync(track, 0, effect)
+                .map_err(|error| {
+                    format!(
+                        "failed to add rack-slot Audio FX {effect:?} to track {}: {error}",
                         track + 1
                     )
                 })?;
@@ -638,6 +659,7 @@ mod tests {
                 samples: vec![],
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],
+                rack_slot_audio_fx: vec![],
             }
         );
         assert_eq!(
@@ -685,10 +707,10 @@ mod tests {
             parse_capture_source("(capture-project (track :sampler :samples (\"kick.wav\")))")
                 .is_err()
         );
-        assert!(
-            parse_capture_source("(capture-project (track :layer-rack :samples (\"kick.wav\")))")
-                .is_ok()
-        );
+        assert!(parse_capture_source(
+            "(capture-project (track :layer-rack :samples (\"kick.wav\")))"
+        )
+        .is_ok());
     }
 
     #[test]

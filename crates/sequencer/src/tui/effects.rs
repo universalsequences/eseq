@@ -1610,6 +1610,23 @@ impl App {
         self.apply_conv_reverb_ir_to_node(node_id, abs_path, reference)
     }
 
+    pub fn set_conv_reverb_ir_rack_slot(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        abs_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        let node_id = self
+            .rack_slot_effect_snapshot(track, rack_slot)?
+            .effect_slots
+            .get(effect_slot)
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Rack-slot effect not found".to_string())?;
+        self.apply_conv_reverb_ir_to_node(node_id, abs_path, reference)
+    }
+
     pub fn add_builtin_effect_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {
         if track >= self.tracks.len() {
             return Err("Invalid track index".to_string());
@@ -2960,6 +2977,361 @@ impl App {
                 param.node_param_idx,
                 slot.defaults[param_idx],
             ) {
+                continue;
+            }
+            push_fx_param(
+                self.graph.lg.0,
+                slot.node_id,
+                slot.modulator_node_id,
+                param.node_param_idx,
+                param.node_param_span,
+                slot.defaults[param_idx],
+            );
+        }
+    }
+
+    fn rack_slot_fx_locator(track: usize, rack_slot: usize) -> FxChainLocator {
+        FxChainLocator::RackSlot {
+            track,
+            slot: rack_slot,
+        }
+    }
+
+    fn rack_slot_effect_snapshot(
+        &self,
+        track: usize,
+        rack_slot: usize,
+    ) -> Result<crate::sequencer::RackSlotSnapshot, String> {
+        self.state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(rack_slot))
+            .cloned()
+            .ok_or_else(|| format!("Track {} rack slot {} not found", track + 1, rack_slot + 1))
+    }
+
+    fn write_rack_slot_effect(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        descriptor: EffectDescriptor,
+        snapshot: EffectSlotSnapshot,
+        custom_name: Option<String>,
+    ) -> Result<(), String> {
+        if effect_slot >= MAX_CUSTOM_FX {
+            return Err(format!(
+                "Rack-slot effect slot {} is out of range",
+                effect_slot + 1
+            ));
+        }
+        let updated =
+            self.state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.normalize_effect_chain();
+                    slot.effect_descriptors[effect_slot] = descriptor.clone();
+                    slot.effect_slots[effect_slot] = snapshot.clone();
+                    slot.custom_effect_names[effect_slot] = custom_name.clone();
+                });
+        updated
+            .then_some(())
+            .ok_or_else(|| "Failed to update rack-slot FX state".to_string())
+    }
+
+    pub fn next_free_rack_slot_effect_slot(&self, track: usize, rack_slot: usize) -> Option<usize> {
+        self.rack_slot_effect_snapshot(track, rack_slot)
+            .ok()?
+            .effect_slots
+            .iter()
+            .position(|slot| slot.node_id == 0)
+    }
+
+    pub fn add_builtin_rack_slot_effect_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let effect_slot = self
+            .next_free_rack_slot_effect_slot(track, rack_slot)
+            .ok_or_else(|| "No free rack-slot effect slots available".to_string())?;
+        self.load_builtin_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, name)?;
+        Ok(effect_slot)
+    }
+
+    pub fn add_rack_slot_effect_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let effect_slot = self
+            .next_free_rack_slot_effect_slot(track, rack_slot)
+            .ok_or_else(|| "No free rack-slot effect slots available".to_string())?;
+        self.load_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, name)?;
+        Ok(effect_slot)
+    }
+
+    pub fn load_builtin_rack_slot_effect_to_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        if crate::effects::conv_reverb::is_dgen_builtin(name) {
+            let result = self.editor.dylib_cache.acquire(
+                lisp_host::DGenCompileKind::Effect,
+                lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+                crate::effects::conv_reverb::dsp_source(),
+                self.graph.sample_rate,
+                None,
+            )?;
+            let ir_slots =
+                crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+            self.apply_compiled_rack_slot_effect_to_slot_sync(
+                track,
+                rack_slot,
+                effect_slot,
+                name,
+                result,
+            )?;
+            let node_id = self
+                .rack_slot_effect_snapshot(track, rack_slot)?
+                .effect_slots[effect_slot]
+                .node_id as i32;
+            match ir_slots {
+                Some(slots) => crate::effects::conv_reverb::record_ir_slots(node_id, slots),
+                None => return Err(format!("'{name}' compiled without the expected IR tensors")),
+            }
+            if let Some(path) = crate::effects::conv_reverb::default_ir_path() {
+                self.set_conv_reverb_ir_rack_slot(
+                    track,
+                    rack_slot,
+                    effect_slot,
+                    &path,
+                    crate::effects::conv_reverb::DEFAULT_IR_REF,
+                )?;
+            }
+            return Ok(());
+        }
+        let descriptor = EffectDescriptor::builtin_insert(name)
+            .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let (node_id, modulator_node_id) =
+            self.install_builtin_fx_node(locator, effect_slot, &descriptor)?;
+        let snapshot = EffectSlotSnapshot::new_default_with_modulator(
+            &descriptor,
+            node_id as u32,
+            modulator_node_id.unwrap_or(0) as u32,
+        );
+        let project_name = EffectDescriptor::builtin_insert_project_name(&descriptor.name);
+        self.write_rack_slot_effect(
+            track,
+            rack_slot,
+            effect_slot,
+            descriptor,
+            snapshot,
+            project_name,
+        )?;
+        self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
+        self.push_all_delay_bpm();
+        Ok(())
+    }
+
+    pub fn load_rack_slot_effect_to_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        let result = self.compile_saved_effect(name)?;
+        self.apply_compiled_rack_slot_effect_to_slot_sync(
+            track,
+            rack_slot,
+            effect_slot,
+            name,
+            result,
+        )
+    }
+
+    fn apply_compiled_rack_slot_effect_to_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        name: &str,
+        result: lisp_host::CompileResult,
+    ) -> Result<(), String> {
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let (manifest, node_ids) = self.install_compiled_fx_node(locator, effect_slot, result)?;
+        let mut descriptor = EffectDescriptor::from_lisp_manifest(
+            name,
+            &manifest.params,
+            manifest.n_inputs,
+            manifest.n_outputs,
+        );
+        descriptor.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
+            &manifest.tensors,
+            &manifest.tensor_init_data,
+        );
+        lisp_host::append_effect_host_modulation_controls(&mut descriptor, &manifest);
+        let snapshot = EffectSlotSnapshot::new_default_with_modulator(
+            &descriptor,
+            node_ids.effect_node_id as u32,
+            node_ids.modulator_node_id.unwrap_or(0) as u32,
+        );
+        self.write_rack_slot_effect(
+            track,
+            rack_slot,
+            effect_slot,
+            descriptor,
+            snapshot,
+            Some(name.to_string()),
+        )?;
+        self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
+        self.push_all_delay_bpm();
+        Ok(())
+    }
+
+    pub fn delete_rack_slot_effect_slot(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+    ) -> Result<(), String> {
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        self.remove_fx_slot_node(locator, effect_slot, FxLeaseSlotRemoval::Clear)?;
+        self.write_rack_slot_effect(
+            track,
+            rack_slot,
+            effect_slot,
+            EffectDescriptor::empty_custom_slot(),
+            EffectSlotSnapshot::new_empty(),
+            None,
+        )
+    }
+
+    pub fn move_rack_slot_effect_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) -> Result<(), String> {
+        if source_slot >= MAX_CUSTOM_FX || target_slot >= MAX_CUSTOM_FX {
+            return Err("Rack-slot FX move is out of range".to_string());
+        }
+        if source_slot == target_slot {
+            return Ok(());
+        }
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let old_host = self.fx_chain_host(locator)?;
+        if old_host.slots[source_slot].node_id == 0 {
+            return Err("Source rack-slot effect is empty".to_string());
+        }
+        let updated =
+            self.state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.normalize_effect_chain();
+                    let effect = slot.effect_slots.remove(source_slot);
+                    slot.effect_slots.insert(target_slot, effect);
+                    let descriptor = slot.effect_descriptors.remove(source_slot);
+                    slot.effect_descriptors.insert(target_slot, descriptor);
+                    let name = slot.custom_effect_names.remove(source_slot);
+                    slot.custom_effect_names.insert(target_slot, name);
+                });
+        if !updated {
+            return Err("Failed to move rack-slot effect state".to_string());
+        }
+        let new_host = self.fx_chain_host(locator)?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        }
+        self.editor
+            .effect_chain_leases
+            .move_slot(locator, source_slot, target_slot)?;
+        Ok(())
+    }
+
+    pub fn set_rack_slot_effect_param(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let descriptor = rack
+            .effect_descriptors
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+        let param = descriptor
+            .params
+            .get(param_idx)
+            .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+        if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
+            return Err("Sidechain routing into rack-slot effects is not supported".to_string());
+        }
+        if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+            return Err(
+                "Rack-slot effect modulation does not support envelope sources".to_string(),
+            );
+        }
+        let stored_value = value.clamp(param.min, param.max);
+        let node_id = rack.effect_slots[effect_slot].node_id;
+        let modulator_node_id = rack.effect_slots[effect_slot].modulator_node_id;
+        let node_param_idx = param.node_param_idx;
+        let node_param_span = param.node_param_span.max(1);
+        if !self
+            .state
+            .update_rack_slot_in_current_pattern(track, rack_slot, |slot| {
+                if let Some(value) = slot
+                    .effect_slots
+                    .get_mut(effect_slot)
+                    .and_then(|effect| effect.defaults.get_mut(param_idx))
+                {
+                    *value = stored_value;
+                }
+            })
+        {
+            return Err("Failed to update rack-slot effect parameter".to_string());
+        }
+        push_fx_param(
+            self.graph.lg.0,
+            node_id,
+            modulator_node_id,
+            node_param_idx,
+            node_param_span,
+            stored_value,
+        );
+        Ok(())
+    }
+
+    pub fn push_rack_slot_effect_defaults(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+    ) {
+        let Ok(rack) = self.rack_slot_effect_snapshot(track, rack_slot) else {
+            return;
+        };
+        let Some(slot) = rack.effect_slots.get(effect_slot) else {
+            return;
+        };
+        let Some(descriptor) = rack.effect_descriptors.get(effect_slot) else {
+            return;
+        };
+        for (param_idx, param) in descriptor.params.iter().enumerate() {
+            if param.node_param_idx == u32::MAX || param_idx >= slot.defaults.len() {
                 continue;
             }
             push_fx_param(
