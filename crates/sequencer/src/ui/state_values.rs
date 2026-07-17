@@ -29157,11 +29157,54 @@ mod tests {
             .expect("custom instrument panel layout");
         let panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
             .expect("custom instrument panel");
+        let actions = find_layout_node_by_debug_name(panel, "instrument-header-actions-0-main")
+            .expect("custom instrument action menu");
         assert_finite_nonzero_rect(panel, "custom instrument drop target");
         assert_eq!(
             panel.props.get("drop-types"),
-            Some(&test_string_list(&["sample", "instrument"]))
+            Some(&test_string_list(&["sample", "instrument", "sound"]))
         );
+        assert_eq!(
+            actions.props.get("options"),
+            Some(&test_string_list(&[
+                "Copy current values to all scenes",
+                "Group Rack",
+                "Edit",
+            ])),
+            "top-level custom instrument actions should live in the hamburger menu"
+        );
+        assert!(
+            find_layout_node_by_debug_name(panel, "instrument-edit-button").is_none(),
+            "custom instrument header should not retain a separate edit button"
+        );
+        let on_action = actions
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("custom instrument action callback");
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(on_action.clone(), vec![Value::String("Group Rack".to_string())])
+            .expect("choose Group Rack action");
+        let group_commands = editor.drain_host_commands();
+        assert!(matches!(
+            group_commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "group-track-to-instrument-rack"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0)))
+        ), "unexpected Group Rack commands: {group_commands:?}");
+        editor
+            .runtime_mut()
+            .invoke(on_action, vec![Value::String("Edit".to_string())])
+            .expect("choose Edit action");
+        let edit_commands = editor.drain_host_commands();
+        assert!(matches!(
+            edit_commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }]
+                if name == "enter-edit-instrument"
+        ), "unexpected Edit commands: {edit_commands:?}");
         assert!(
             matches!(
                 panel.props.get("drop-meta"),
@@ -34785,6 +34828,14 @@ mod tests {
         let actions = find_layout_node_by_debug_name(panel, "instrument-header-actions-2-main")
             .expect("sampler action menu should render");
         assert_eq!(actions.widget_type, "menu-button");
+        assert_eq!(
+            actions.props.get("options"),
+            Some(&test_string_list(&[
+                "Copy current values to all scenes",
+                "Group Rack",
+            ])),
+            "top-level sampler Group Rack action should live in the hamburger menu"
+        );
         assert_finite_nonzero_rect(actions, "sampler action menu");
         assert_layout_inside(actions, header, "sampler action menu");
         assert!(
@@ -43425,6 +43476,11 @@ mod tests {
         let curve = find_layout_node_by_widget_type(&layout, "modulator-curve")
             .expect("modulator curve widget");
         assert_eq!(actions.widget_type, "menu-button");
+        assert_eq!(
+            actions.props.get("options"),
+            Some(&test_string_list(&["Copy current values to all scenes"])),
+            "modulator menu should not expose instrument-only Group Rack or Edit actions"
+        );
         assert_finite_nonzero_rect(actions, "modulator action menu");
         assert_layout_inside(actions, header, "modulator action menu");
         assert!(matches!(

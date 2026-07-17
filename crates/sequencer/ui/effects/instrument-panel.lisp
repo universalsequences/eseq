@@ -488,25 +488,7 @@
                   (instrument-mods-toggle-button)
                   (instrument-keys-button))
                 (box :flex 1 :height 0.15)
-                (if (= (get inst :rack-slot) nil)
-                  (button "Group Rack"
-                    :width 6.2 :height 0.78 :padding 0.1 :font-size 8
-                    :on-click |x y r|
-                      (host-command "group-track-to-instrument-rack"
-                        (dict :track (get inst :track))))
-                  (box :width 0 :height 0))
                 (instrument-header-actions-menu inst)
-                (v-stack
-                  (button "edit"
-                    :background-color '(rgba 0.0 0.0 0.0 0.3)
-                    :height 0.75
-                    :debug-name "instrument-edit-button"
-                    :font-size 10
-                    :border-color :transparent
-                    :on-click |x y r|
-                    (host-command "enter-edit-instrument"
-                      (dict :name (if (get inst :name) (get inst :name) SEQ.sidebar-instrument-name)))
-                    ))
                 (box :debug-name "instrument-preset-button" :padding 0.0 :width 2 :align :center
                   (v-stack
                     (box :width 1 :height 0.1)

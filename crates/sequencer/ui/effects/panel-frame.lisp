@@ -32,33 +32,64 @@
     (dict :track (get inst :track)
           :rack-slot (get inst :rack-slot))))
 
-(def header-actions-menu (debug-name action)
+(def header-actions-menu (debug-name options action)
   (menu-button
     :key debug-name
     :debug-name debug-name
     :icon "•••"
-    :options (list "Copy current values to all scenes")
+    :options options
     :width 2.25 :height 0.70 :font-size 10
     :bg-color :mixer-control-bg
     :text-color :dim
     :menu-bg :dropdown-menu-bg
     :menu-border-color :dropdown-menu-border
     :hover-bg :dropdown-hover-bg
-    :on-change (lambda (item) (action))))
+    :on-change (lambda (item) (action item))))
 
 (def fx-header-actions-menu (fx)
   (header-actions-menu
     (str "effect-header-actions-" (fx-effect-chain-kind fx) "-"
          (if (get fx :bus-fx) (get fx :bus-idx) (get fx :track-idx)) "-"
          (get fx :slot-idx))
-    (lambda () (fx-copy-values-to-all-scenes fx))))
+    (list "Copy current values to all scenes")
+    (lambda (item) (fx-copy-values-to-all-scenes fx))))
+
+(def instrument-group-rack (inst)
+  (host-command "group-track-to-instrument-rack"
+    (dict :track (get inst :track))))
+
+(def instrument-edit-source (inst)
+  (host-command "enter-edit-instrument"
+    (dict :name (if (get inst :name) (get inst :name) SEQ.sidebar-instrument-name))))
+
+(def instrument-header-action-options (inst)
+  (append
+    (append
+      (list "Copy current values to all scenes")
+      (if (and (= (get inst :rack-slot) nil)
+               (not (= (get inst :type) "modulator")))
+        (list "Group Rack")
+        (list)))
+    (if (and (not (= (get inst :type) "sampler"))
+             (not (= (get inst :type) "modulator"))
+             (not (= (get inst :type) "rack")))
+      (list "Edit")
+      (list))))
+
+(def instrument-run-header-action (inst item)
+  (if (= item "Group Rack")
+    (instrument-group-rack inst)
+    (if (= item "Edit")
+      (instrument-edit-source inst)
+      (instrument-copy-values-to-all-scenes inst))))
 
 (def instrument-header-actions-menu (inst)
   (header-actions-menu
     (str "instrument-header-actions-"
          (get inst :track) "-"
          (if (= (get inst :rack-slot) nil) "main" (get inst :rack-slot)))
-    (lambda () (instrument-copy-values-to-all-scenes inst))))
+    (instrument-header-action-options inst)
+    (lambda (item) (instrument-run-header-action inst item))))
 
 (def fx-effect-drag-kind (fx)
   (if (get fx :rack-fx)
