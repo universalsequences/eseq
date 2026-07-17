@@ -20,6 +20,7 @@ use crate::sequencer::{
     PatternSnapshot, RackRouting, RackTrackSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
 };
 
+use super::fx_chain::{FxChainLocator, FxGraphEditBatch};
 use super::graph::{
     RackCustomBuildSpec, RackSamplerBuildSpec, RackSlotBuildSpec, RackSlotInstrumentBuildSpec,
 };
@@ -1006,6 +1007,16 @@ impl App {
             return false;
         };
 
+        let batch = FxGraphEditBatch::new(self.graph.lg.0);
+        if let Err(err) = self
+            .editor
+            .effect_chain_leases
+            .retire_host(FxChainLocator::Bus(id), batch.serial)
+        {
+            self.editor.status_message = Some((format!("Error: {err}"), Instant::now()));
+            return false;
+        }
+
         if let Some(bus) = self.buses.get(bus_idx) {
             for slot in &bus.effect_slots {
                 if slot.node_id != 0 {
@@ -1026,9 +1037,6 @@ impl App {
         }
 
         self.buses.remove(bus_idx);
-        if bus_idx < self.editor.bus_effect_leases.len() {
-            self.editor.bus_effect_leases.remove(bus_idx);
-        }
 
         self.remove_bus_references_from_live_pattern(id);
         {
@@ -3142,6 +3150,31 @@ mod tests {
         assert_eq!(live_slot.defaults[0], 0.0);
         assert_eq!(live_slot.defaults[1], 1.0);
         assert_eq!(live_slot.plocks[3][1], Some(0.0));
+    }
+
+    #[test]
+    fn project_with_track_and_bus_effects_roundtrips_bit_identically() {
+        let desc = EffectDescriptor::builtin_insert("Filter").expect("filter descriptor");
+        let mut track_slot = default_project_effect_slot(&desc);
+        track_slot.defaults[0] = 0.25;
+        track_slot.plocks[2][0] = Some(0.75);
+        let mut bus_slot = default_project_effect_slot(&desc);
+        bus_slot.defaults[0] = 0.5;
+        bus_slot.plocks[3][0] = Some(0.125);
+
+        let project_name = EffectDescriptor::builtin_insert_project_name("Filter")
+            .expect("filter should have a persisted builtin name");
+        let mut project =
+            minimal_project_with_effect_slots(vec![Some(project_name.clone())], vec![track_slot]);
+        project.buses = project::default_project_buses();
+        project.buses[1].custom_effects = vec![Some(project_name)];
+        project.buses[1].effect_slots = vec![bus_slot];
+
+        let before = serde_json::to_string_pretty(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&before).expect("deserialize project");
+        let after = serde_json::to_string_pretty(&restored).expect("reserialize project");
+
+        assert_eq!(after, before);
     }
 
     #[test]

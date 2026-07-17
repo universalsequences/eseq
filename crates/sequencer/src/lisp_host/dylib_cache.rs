@@ -345,7 +345,13 @@ impl DylibCacheManager {
     }
 
     #[cfg(test)]
-    fn live_lease_count(&self, artifact_dir: &Path) -> usize {
+    pub(crate) fn test_lease(&self, artifact_dir: &Path) -> DylibLease {
+        self.lease_artifact(artifact_dir)
+            .expect("test artifact should be available for leasing")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_lease_count(&self, artifact_dir: &Path) -> usize {
         self.inner
             .lock()
             .ok()

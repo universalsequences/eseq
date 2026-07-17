@@ -8,6 +8,7 @@ use crate::effects::{
 
 use super::command::{AppCommand, apply_command};
 use super::draw::rect_contains;
+use super::fx_chain::push_fx_param;
 use super::{App, EffectPaneEntry, EffectTab, InputMode, ParamMouseDragTarget};
 
 const SCENE_MACRO_DIFF_EPSILON: f32 = 1.0e-5;
@@ -710,33 +711,14 @@ impl App {
         {
             return;
         }
-        let idx = slot.resolve_node_idx(param_idx);
-        let (logical_id, idx) = if idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE {
-            let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed);
-            if modulator_node_id == 0 {
-                return;
-            }
-            (
-                modulator_node_id as u64,
-                idx - crate::voice_modulator::MOD_PARAM_BASE as u64,
-            )
-        } else {
-            let node_id = slot.node_id.load(Ordering::Relaxed);
-            if node_id == 0 {
-                return;
-            }
-            (node_id as u64, idx)
-        };
-        unsafe {
-            crate::audiograph::params_push_wrapper(
-                self.graph.lg.0,
-                crate::audiograph::ParamMsg {
-                    idx,
-                    logical_id,
-                    fvalue: value,
-                },
-            );
-        }
+        push_fx_param(
+            self.graph.lg.0,
+            slot.node_id.load(Ordering::Relaxed),
+            slot.modulator_node_id.load(Ordering::Relaxed),
+            slot.resolve_node_idx(param_idx) as u32,
+            1,
+            value,
+        );
     }
 
     pub fn effective_slot_param_value(
@@ -823,7 +805,8 @@ impl App {
         else {
             return;
         };
-        self.push_bus_effect_param_to_graph(
+        push_fx_param(
+            self.graph.lg.0,
             slot.node_id,
             slot.modulator_node_id,
             param.node_param_idx,

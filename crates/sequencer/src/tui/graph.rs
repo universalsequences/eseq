@@ -14,6 +14,7 @@ use crate::sequencer::{
 };
 use crate::voice::MAX_VOICES;
 
+use super::fx_chain::{connect_fx_chain_gap, FxChainLocator, FxLeaseSlotRemoval};
 use super::{App, EngineDescriptor, EngineNodeIds, RackSlotNodeIds, TrackNodeIds};
 
 const DELETE_WITHOUT_SHIFT_ENV: &str = "TINYSEQ_DELETE_TRACK_WITHOUT_SHIFT";
@@ -230,12 +231,15 @@ pub struct GraphController<'a> {
 
 struct GraphEditBatchGuard {
     lg: *mut crate::audiograph::LiveGraph,
+    serial: u64,
 }
 
 impl GraphEditBatchGuard {
     fn new(lg: *mut crate::audiograph::LiveGraph) -> Self {
         unsafe { crate::audiograph::begin_graph_edit_batch(lg) };
-        Self { lg }
+        let serial = unsafe { crate::audiograph::graph_edit_current_batch_serial(lg) };
+        debug_assert!(serial > 0);
+        Self { lg, serial }
     }
 }
 
@@ -3056,7 +3060,7 @@ impl GraphController<'_> {
     }
 
     pub fn clear_all_tracks(&mut self) {
-        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let old_track_count = self.app.tracks.len();
 
         for track_idx in 0..old_track_count {
@@ -3069,31 +3073,7 @@ impl GraphController<'_> {
                 if node_id == 0 {
                     continue;
                 }
-                let offset = slot_idx - crate::effects::BUILTIN_SLOT_COUNT;
-                let predecessor_id = self.find_custom_slot_predecessor(track_idx, offset);
-                let successor_id = self.find_custom_slot_successor(track_idx, offset);
                 unsafe {
-                    crate::audiograph::graph_disconnect(
-                        self.app.graph.lg.0,
-                        predecessor_id,
-                        0,
-                        node_id as i32,
-                        0,
-                    );
-                    crate::audiograph::graph_disconnect(
-                        self.app.graph.lg.0,
-                        node_id as i32,
-                        0,
-                        successor_id,
-                        0,
-                    );
-                    crate::audiograph::graph_connect(
-                        self.app.graph.lg.0,
-                        predecessor_id,
-                        0,
-                        successor_id,
-                        0,
-                    );
                     crate::audiograph::delete_node(self.app.graph.lg.0, node_id as i32);
                     if modulator_node_id != 0 {
                         crate::audiograph::delete_node(
@@ -3202,8 +3182,14 @@ impl GraphController<'_> {
         self.app.graph.instrument_descriptors.clear();
         self.app.graph.record_armed.clear();
         self.clear_all_rack_sampler_runtime_pools();
-        self.app.editor.track_effect_leases.clear();
-        self.app.editor.bus_effect_leases.clear();
+        if let Err(error) = self
+            .app
+            .editor
+            .effect_chain_leases
+            .retire_tracks(batch.serial)
+        {
+            self.app.editor.status_message = Some((error, std::time::Instant::now()));
+        }
 
         self.app.ui.cursor_track = 0;
         self.app.ui.cursor_step = 0;
@@ -3239,7 +3225,7 @@ impl GraphController<'_> {
     }
 
     pub fn clear_all_bus_effect_chains(&mut self) {
-        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let bus_nodes = self.app.graph.bus_node_ids.clone();
 
         for bus in &mut self.app.buses {
@@ -3284,7 +3270,14 @@ impl GraphController<'_> {
             bus.effect_slots = super::BusChannelState::default_effect_slots();
             bus.custom_effect_names = vec![None; crate::lisp_host::MAX_CUSTOM_FX];
         }
-        self.app.editor.bus_effect_leases.clear();
+        if let Err(error) = self
+            .app
+            .editor
+            .effect_chain_leases
+            .retire_buses(batch.serial)
+        {
+            self.app.editor.status_message = Some((error, std::time::Instant::now()));
+        }
 
         self.app.publish_bus_gate_runtime();
     }
@@ -3308,9 +3301,11 @@ impl GraphController<'_> {
         let deleted_engine_id = self.app.graph.track_engine_ids[track_idx];
         let deleted_rack_engine_ids = self.rack_engine_ids_for_track(track_idx);
 
+        let retire_after;
         {
-            let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
-            self.delete_custom_effect_chain(track_idx);
+            let batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+            retire_after = batch.serial;
+            self.delete_custom_effect_chain(track_idx)?;
             self.delete_track_engine_routes(track_idx);
 
             let track_nodes = self.app.graph.track_node_ids[track_idx].clone();
@@ -3341,7 +3336,7 @@ impl GraphController<'_> {
             return Err("Failed to compact sequencer state for deleted track".to_string());
         }
 
-        self.compact_app_track_vectors(track_idx);
+        self.compact_app_track_vectors(track_idx, retire_after)?;
         self.rebind_live_track_runtime_after_delete();
         self.app.refresh_effect_sidechain_labels();
         self.app.push_all_restored_defaults();
@@ -3401,7 +3396,7 @@ impl GraphController<'_> {
 
         {
             let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
-            self.delete_custom_effect_chain(track_idx);
+            self.delete_custom_effect_chain(track_idx)?;
             self.delete_track_engine_routes(track_idx);
             if let Some(track_nodes) = self.app.graph.track_node_ids.get(track_idx).cloned() {
                 for rack_slot in &track_nodes.rack_slots {
@@ -3477,120 +3472,6 @@ impl GraphController<'_> {
         }
     }
 
-    fn find_custom_slot_predecessor(&self, track: usize, offset: usize) -> i32 {
-        let chain = &self.app.state.pattern.effect_chains[track];
-        for i in (0..offset).rev() {
-            let idx = crate::effects::BUILTIN_SLOT_COUNT + i;
-            if idx < chain.len() {
-                let node_id = chain[idx].node_id.load(Ordering::Relaxed);
-                if node_id != 0 {
-                    return node_id as i32;
-                }
-            }
-        }
-        self.app.graph.track_node_ids[track].pan_id
-    }
-
-    fn find_custom_slot_successor(&self, track: usize, offset: usize) -> i32 {
-        let chain = &self.app.state.pattern.effect_chains[track];
-        for i in (offset + 1)..crate::lisp_host::MAX_CUSTOM_FX {
-            let idx = crate::effects::BUILTIN_SLOT_COUNT + i;
-            if idx < chain.len() {
-                let node_id = chain[idx].node_id.load(Ordering::Relaxed);
-                if node_id != 0 {
-                    return node_id as i32;
-                }
-            }
-        }
-        self.app.graph.track_node_ids[track].delay_id
-    }
-
-    fn find_custom_slot_predecessor_with_channels(
-        &self,
-        track: usize,
-        offset: usize,
-    ) -> (i32, usize) {
-        let chain = &self.app.state.pattern.effect_chains[track];
-        for i in (0..offset).rev() {
-            let idx = crate::effects::BUILTIN_SLOT_COUNT + i;
-            if idx < chain.len() {
-                let node_id = chain[idx].node_id.load(Ordering::Relaxed);
-                if node_id != 0 {
-                    let channels = self.app.graph.effect_descriptors[track][idx]
-                        .output_channels
-                        .max(1);
-                    return (node_id as i32, channels);
-                }
-            }
-        }
-        (self.app.graph.track_node_ids[track].pan_id, 2)
-    }
-
-    fn find_custom_slot_successor_with_channels(
-        &self,
-        track: usize,
-        offset: usize,
-    ) -> (i32, usize) {
-        let chain = &self.app.state.pattern.effect_chains[track];
-        for i in (offset + 1)..crate::lisp_host::MAX_CUSTOM_FX {
-            let idx = crate::effects::BUILTIN_SLOT_COUNT + i;
-            if idx < chain.len() {
-                let node_id = chain[idx].node_id.load(Ordering::Relaxed);
-                if node_id != 0 {
-                    let channels = self.app.graph.effect_descriptors[track][idx]
-                        .input_channels
-                        .max(1);
-                    return (node_id as i32, channels);
-                }
-            }
-        }
-        (self.app.graph.track_node_ids[track].delay_id, 2)
-    }
-
-    fn connect_custom_effect_gap(
-        &self,
-        predecessor_id: i32,
-        predecessor_outputs: usize,
-        successor_id: i32,
-        successor_inputs: usize,
-    ) {
-        let predecessor_channels = predecessor_outputs.max(1).min(2);
-        let successor_channels = successor_inputs.max(1).min(2);
-        unsafe {
-            if predecessor_channels <= 1 {
-                for dst_port in 0..successor_channels {
-                    let _ = crate::audiograph::graph_connect(
-                        self.app.graph.lg.0,
-                        predecessor_id,
-                        0,
-                        successor_id,
-                        dst_port as i32,
-                    );
-                }
-            } else if successor_channels <= 1 {
-                for src_port in 0..predecessor_channels {
-                    let _ = crate::audiograph::graph_connect(
-                        self.app.graph.lg.0,
-                        predecessor_id,
-                        src_port as i32,
-                        successor_id,
-                        0,
-                    );
-                }
-            } else {
-                for ch in 0..predecessor_channels.min(successor_channels) {
-                    let _ = crate::audiograph::graph_connect(
-                        self.app.graph.lg.0,
-                        predecessor_id,
-                        ch as i32,
-                        successor_id,
-                        ch as i32,
-                    );
-                }
-            }
-        }
-    }
-
     pub fn delete_custom_effect_slot(
         &mut self,
         track_idx: usize,
@@ -3610,41 +3491,14 @@ impl GraphController<'_> {
         let node_id = self.app.state.pattern.effect_chains[track_idx][slot_idx]
             .node_id
             .load(Ordering::Relaxed);
-        let modulator_node_id = self.app.state.pattern.effect_chains[track_idx][slot_idx]
-            .modulator_node_id
-            .load(Ordering::Relaxed);
         if node_id == 0 {
             return Err("Effect slot is empty".to_string());
         }
-
-        let offset = slot_idx - crate::effects::BUILTIN_SLOT_COUNT;
-        let (predecessor_id, predecessor_outputs) =
-            self.find_custom_slot_predecessor_with_channels(track_idx, offset);
-        let (successor_id, successor_inputs) =
-            self.find_custom_slot_successor_with_channels(track_idx, offset);
-
-        {
-            let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
-            unsafe {
-                crate::lisp_host::remove_effect_from_chain(
-                    self.app.graph.lg.0,
-                    node_id as i32,
-                    predecessor_id,
-                    successor_id,
-                );
-                crate::effects::conv_reverb::clear_instance(node_id as i32);
-                crate::lisp_host::remove_effect_modulator(
-                    self.app.graph.lg.0,
-                    modulator_node_id as i32,
-                );
-            }
-            self.connect_custom_effect_gap(
-                predecessor_id,
-                predecessor_outputs,
-                successor_id,
-                successor_inputs,
-            );
-        }
+        self.app.remove_fx_slot_node(
+            FxChainLocator::Track(track_idx),
+            slot_idx,
+            FxLeaseSlotRemoval::Shift,
+        )?;
 
         for idx in slot_idx..chain_len.saturating_sub(1) {
             let next_idx = idx + 1;
@@ -3660,8 +3514,6 @@ impl GraphController<'_> {
         if let Some(last_slot) = self.app.state.pattern.effect_chains[track_idx].last() {
             last_slot.clear();
         }
-        self.app.remove_track_effect_lease_slot(track_idx, slot_idx);
-
         self.app
             .state
             .remove_effect_slot_from_track_patterns(track_idx, slot_idx);
@@ -3672,7 +3524,16 @@ impl GraphController<'_> {
         Ok(())
     }
 
-    fn delete_custom_effect_chain(&mut self, track_idx: usize) {
+    fn delete_custom_effect_chain(&mut self, track_idx: usize) -> Result<(), String> {
+        let retire_after =
+            unsafe { crate::audiograph::graph_edit_current_batch_serial(self.app.graph.lg.0) };
+        if retire_after == 0 {
+            return Err("Track FX chain deletion requires an edit batch".to_string());
+        }
+        let host = self
+            .app
+            .fx_chain_host(FxChainLocator::Track(track_idx))
+            .ok();
         for slot_idx in crate::effects::BUILTIN_SLOT_COUNT
             ..self.app.state.pattern.effect_chains[track_idx].len()
         {
@@ -3682,39 +3543,20 @@ impl GraphController<'_> {
             if node_id == 0 {
                 continue;
             }
-            let offset = slot_idx - crate::effects::BUILTIN_SLOT_COUNT;
-            let predecessor_id = self.find_custom_slot_predecessor(track_idx, offset);
-            let successor_id = self.find_custom_slot_successor(track_idx, offset);
             unsafe {
-                crate::audiograph::graph_disconnect(
-                    self.app.graph.lg.0,
-                    predecessor_id,
-                    0,
-                    node_id as i32,
-                    0,
-                );
-                crate::audiograph::graph_disconnect(
-                    self.app.graph.lg.0,
-                    node_id as i32,
-                    0,
-                    successor_id,
-                    0,
-                );
-                crate::audiograph::graph_connect(
-                    self.app.graph.lg.0,
-                    predecessor_id,
-                    0,
-                    successor_id,
-                    0,
-                );
                 crate::audiograph::delete_node(self.app.graph.lg.0, node_id as i32);
                 crate::effects::conv_reverb::clear_instance(node_id as i32);
                 if modulator_node_id != 0 {
                     crate::audiograph::delete_node(self.app.graph.lg.0, modulator_node_id as i32);
                 }
             }
-            self.app.set_track_effect_lease(track_idx, slot_idx, None);
+            self.app
+                .set_track_effect_lease(track_idx, slot_idx, None, retire_after)?;
         }
+        if let Some(host) = host {
+            connect_fx_chain_gap(self.app.graph.lg.0, host.predecessor, host.successor);
+        }
+        Ok(())
     }
 
     fn delete_track_engine_routes(&mut self, track_idx: usize) {
@@ -3999,7 +3841,11 @@ impl GraphController<'_> {
         }
     }
 
-    fn compact_app_track_vectors(&mut self, track_idx: usize) {
+    fn compact_app_track_vectors(
+        &mut self,
+        track_idx: usize,
+        retire_after: u64,
+    ) -> Result<(), String> {
         self.app.tracks.remove(track_idx);
         if track_idx < self.app.track_colors.len() {
             self.app.track_colors.remove(track_idx);
@@ -4026,9 +3872,15 @@ impl GraphController<'_> {
         self.app.graph.effect_descriptors.remove(track_idx);
         self.app.graph.instrument_descriptors.remove(track_idx);
         self.app.graph.record_armed.remove(track_idx);
-        if track_idx < self.app.editor.track_effect_leases.len() {
-            self.app.editor.track_effect_leases.remove(track_idx);
-        }
+        self.app
+            .editor
+            .effect_chain_leases
+            .retire_host(FxChainLocator::Track(track_idx), retire_after)?;
+        self.app
+            .editor
+            .effect_chain_leases
+            .reindex_tracks_after_delete(track_idx);
+        Ok(())
     }
 
     fn create_dedicated_engine_descriptor_from(

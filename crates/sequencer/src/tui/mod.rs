@@ -38,6 +38,7 @@ mod draw;
 mod effect_params;
 mod effects;
 mod effects_draw;
+mod fx_chain;
 mod graph;
 mod hooks;
 mod input;
@@ -406,8 +407,7 @@ pub struct EditorState {
     pending_project_load: Option<PendingProjectLoad>,
     pub dylib_cache: DylibCacheManager,
     lisp_libs: Vec<LoadedDGenLib>,
-    track_effect_leases: Vec<Vec<Option<DylibLease>>>,
-    bus_effect_leases: Vec<Vec<Option<DylibLease>>>,
+    effect_chain_leases: fx_chain::FxChainLeaseStore,
     pub instrument_libs: Vec<LoadedDGenLib>,
     instrument_lib_leases: Vec<Option<DylibLease>>,
     pub picker_cursor: usize,
@@ -1495,8 +1495,7 @@ impl App {
                 pending_project_load: None,
                 dylib_cache: DylibCacheManager::workspace_default(),
                 lisp_libs: Vec::new(),
-                track_effect_leases: Vec::new(),
-                bus_effect_leases: Vec::new(),
+                effect_chain_leases: fx_chain::FxChainLeaseStore::default(),
                 instrument_libs: Vec::new(),
                 instrument_lib_leases: Vec::new(),
                 picker_cursor: 0,
