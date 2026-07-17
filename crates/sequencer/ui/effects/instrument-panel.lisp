@@ -405,11 +405,6 @@
                :width 34 :height fx-fixed-panel-height
                :background "fx-panel-bg" :padding 0
             (v-stack :width :fill :height :fill :gap 0
-              (box :height 1 :width :fill :padding 0.15
-                (h-stack :width :fill :height :fill :gap 0.4 :align :center
-                  (label "Slot FX" :font-size 10 :color :white :bg :transparent)
-                  (label (str "Rack slot " (+ slot-idx 1))
-                    :font-size 7 :color :dim :bg :transparent)))
               (fx-panel-body "rack-slot-fx-content"
                 (scroll :width :fill :height :fill
                   (v-stack :width :fill :gap 0.2
@@ -470,7 +465,6 @@
 (def rack-slot-track-fx-divider ()
   (v-stack :debug-name "rack-slot-track-fx-divider"
            :width 1.2 :height fx-fixed-panel-height :gap 0 :align :center
-    (label "TRACK" :font-size 6.5 :color :dim :bg :transparent)
     (box :width 0.08 :flex 1 :background-color :mixer-strip-border)))
 
 (def rack-panel (inst)
