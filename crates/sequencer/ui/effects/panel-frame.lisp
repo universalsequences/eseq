@@ -122,7 +122,7 @@
     (if (get fx :bus-fx)
       (list "audio-effect" "effect-instance")
       (if (get fx :rack-fx)
-        (list "effect-instance")
+        (list "audio-effect" "effect-instance")
         (list "audio-effect" "effect-instance")))))
 
 (def fx-panel-header (title params fx)

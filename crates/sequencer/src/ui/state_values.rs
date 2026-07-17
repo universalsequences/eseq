@@ -20098,14 +20098,13 @@ mod tests {
         let app = test_app_with_rack_panel();
         let descriptor = sequencer::effects::EffectDescriptor::builtin_ott();
         let snapshot = sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 42);
-        assert!(
-            app.state
+        assert!(app
+            .state
                 .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
                     slot.effect_descriptors[0] = descriptor.clone();
                     slot.effect_slots[0] = snapshot.clone();
                     slot.custom_effect_names[0] = Some("builtin:OTT".to_string());
-                },)
-        );
+            },));
         app
     }
 
@@ -20251,10 +20250,9 @@ mod tests {
 
         let app = test_app_with_rack_panel();
         app.state.update_live_rack_slot(0, 0, |slot| {
-            assert!(
-                slot.param_plocks
-                    .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25)
-            );
+            assert!(slot
+                .param_plocks
+                .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25));
             slot.instrument_slot.defaults[8] = 44_100.0;
             assert!(slot.instrument_slot.set_plock(3, 8, 22_050.0));
         });
@@ -20926,8 +20924,9 @@ mod tests {
                 ott_panel.props.get("drop-types"),
                 Some(Value::List(items))
                     if items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "effect-instance"))
+                        && items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "audio-effect"))
             ),
-            "rack slot effect panels should accept effect-instance reorder drops: {:?}",
+            "rack slot effect panels should accept audio-effect insert and effect-instance reorder drops: {:?}",
             ott_panel.props.get("drop-types")
         );
         assert!(
@@ -21389,6 +21388,51 @@ mod tests {
                 );
             }
             other => panic!("expected move-rack-slot-effect command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-drop-on-effect
+                    (dict
+                      :payload (dict :kind "builtin-audio-effect"
+                                     :name "Filter")
+                      :target (dict :chain "rack"
+                                    :track 0
+                                    :rack-slot 0
+                                    :slot 0)))"#,
+            )
+            .expect("drop library effect before rack slot effect");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "insert-rack-slot-effect-before-slot");
+                let Value::Map(payload) = payload else {
+                    panic!("rack-slot effect insert payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("rack-slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Filter".to_string()))
+                );
+                assert_eq!(
+                    payload.get("builtin").map(|value| value.borrow().clone()),
+                    Some(Value::Bool(true))
+                );
+            }
+            other => panic!("expected rack-slot effect insert command, got {other:?}"),
         }
 
         editor
@@ -25349,12 +25393,9 @@ mod tests {
                 continue;
             };
             match items.as_slice() {
-                [
-                    Expression::Symbol(form),
-                    Expression::Symbol(name),
-                    Expression::String(value),
-                    ..,
-                ] if form == "def" && name == "script-buffer-name" => {
+                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
+                    if form == "def" && name == "script-buffer-name" =>
+                {
                     script_buffer_name = Some(value.clone());
                 }
                 [Expression::Symbol(form), Expression::String(target), ..]
@@ -43612,9 +43653,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec![
-                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
-            ]
+            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
         );
     }
 

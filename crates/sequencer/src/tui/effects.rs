@@ -6,16 +6,16 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::effects::{
-    BUILTIN_SLOT_COUNT, EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor,
-    ParamKind, ParamScaling,
+    EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+    BUILTIN_SLOT_COUNT,
 };
 use crate::lisp_host::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
 use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType, RackRouting};
+use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
-use eseqlisp::vm::{Value as LispValue, format_lisp_source};
 
 use super::fx_chain::{
-    FxChainLocator, FxGraphEditBatch, FxLeaseSlotRemoval, push_fx_param, rewire_fx_chain,
+    push_fx_param, rewire_fx_chain, FxChainLocator, FxGraphEditBatch, FxLeaseSlotRemoval,
 };
 use super::{
     App, CompileTarget, EffectTab, HookCallback, HookUnit, InputMode, PendingCompile,
@@ -3100,6 +3100,88 @@ impl App {
         Ok(effect_slot)
     }
 
+    fn prepare_rack_slot_effect_insert_slot(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        target_slot: usize,
+    ) -> Result<usize, String> {
+        if target_slot >= MAX_CUSTOM_FX {
+            return Err("Rack-slot FX insert target is out of range".to_string());
+        }
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let old_host = self.fx_chain_host(locator)?;
+        if old_host.slots[target_slot].node_id == 0 {
+            return Err("Rack-slot FX insert target is empty".to_string());
+        }
+        if old_host.slots.iter().all(|slot| slot.node_id != 0) {
+            return Err("No free rack-slot effect slots available".to_string());
+        }
+        let updated =
+            self.state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.normalize_effect_chain();
+                    slot.effect_slots
+                        .insert(target_slot, EffectSlotSnapshot::new_empty());
+                    slot.effect_slots.truncate(MAX_CUSTOM_FX);
+                    slot.effect_descriptors
+                        .insert(target_slot, EffectDescriptor::empty_custom_slot());
+                    slot.effect_descriptors.truncate(MAX_CUSTOM_FX);
+                    slot.custom_effect_names.insert(target_slot, None);
+                    slot.custom_effect_names.truncate(MAX_CUSTOM_FX);
+                });
+        if !updated {
+            return Err("Failed to update rack-slot FX state".to_string());
+        }
+        let new_host = self.fx_chain_host(locator)?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        }
+        self.editor
+            .effect_chain_leases
+            .insert_empty_slot(locator, target_slot)?;
+        Ok(target_slot)
+    }
+
+    pub fn insert_builtin_rack_slot_effect_before_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        if EffectDescriptor::builtin_insert(name).is_none()
+            && !crate::effects::conv_reverb::is_dgen_builtin(name)
+        {
+            return Err(format!("Unknown built-in effect '{name}'"));
+        }
+        let effect_slot =
+            self.prepare_rack_slot_effect_insert_slot(track, rack_slot, target_slot)?;
+        self.load_builtin_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, name)?;
+        Ok(effect_slot)
+    }
+
+    pub fn insert_rack_slot_effect_before_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let result = self.compile_saved_effect(name)?;
+        let effect_slot =
+            self.prepare_rack_slot_effect_insert_slot(track, rack_slot, target_slot)?;
+        self.apply_compiled_rack_slot_effect_to_slot_sync(
+            track,
+            rack_slot,
+            effect_slot,
+            name,
+            result,
+        )?;
+        Ok(effect_slot)
+    }
+
     pub fn load_builtin_rack_slot_effect_to_slot_sync(
         &mut self,
         track: usize,
@@ -3819,9 +3901,9 @@ mod tests {
     use super::*;
     use crate::audiograph::LiveGraphPtr;
     use crate::recorder::MasterRecorder;
-    use crate::sequencer::{SequencerState, default_empty_effect_chain};
+    use crate::sequencer::{default_empty_effect_chain, SequencerState};
     use crate::tui::AudioBuses;
-    use std::sync::{Mutex, mpsc};
+    use std::sync::{mpsc, Mutex};
     use std::time::Duration;
 
     fn test_app_with_track_count(track_count: usize) -> App {

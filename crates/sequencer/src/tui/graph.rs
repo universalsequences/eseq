@@ -6,17 +6,17 @@ use std::sync::atomic::Ordering;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
-    BusId, CustomInstrumentRunMode, DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE,
-    DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, InstrumentSlotResetSummary, InstrumentType,
-    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS, ModDestination, RackRouting,
-    RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, TrackOutput, TrackSoundState,
-    rack_slot_pool_index,
+    rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentSlotResetSummary,
+    InstrumentType, ModDestination, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, TrackOutput, TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE,
+    DRUM_RACK_LAST_PAD_NOTE, DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS,
+    MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
 use super::fx_chain::{
-    ChainSuccessor, FxChainHost, FxChainLocator, FxChainSlotView, FxLeaseSlotRemoval,
-    StereoEndpoint, connect_fx_chain_gap, connect_fx_chain_host, rewire_fx_chain,
+    connect_fx_chain_gap, connect_fx_chain_host, rewire_fx_chain, ChainSuccessor, FxChainHost,
+    FxChainLocator, FxChainSlotView, FxLeaseSlotRemoval, StereoEndpoint,
 };
 use super::{App, EngineDescriptor, EngineNodeIds, RackSlotNodeIds, TrackNodeIds};
 
@@ -7018,10 +7018,10 @@ mod tests {
     use crate::macro_engine::{MacroCurve, MacroKind, MacroMapping, MacroParamKey};
     use crate::process::ParamTarget;
     use crate::recorder::MasterRecorder;
-    use crate::sequencer::{SequencerState, default_empty_effect_chain};
+    use crate::sequencer::{default_empty_effect_chain, SequencerState};
     use crate::tui::AudioBuses;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{mpsc, Arc, Mutex};
 
     struct TestLiveGraph {
         ptr: LiveGraphPtr,
@@ -7571,15 +7571,14 @@ mod tests {
                 .override_value(&MacroParamKey::Instrument { track: 0, param: 0 }),
             None
         );
-        assert!(
-            app.macro_engine
+        assert!(app
+            .macro_engine
                 .override_value(&MacroParamKey::Effect {
                     track: 0,
                     slot: 0,
                     param: 0,
                 })
-                .is_some_and(|value| (value - 0.5).abs() < 1.0e-6)
-        );
+            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
         let old_engine = app.graph.engine_node_ids[0]
             .as_ref()
             .expect("shared old engine must remain for track 2");
@@ -7660,11 +7659,9 @@ mod tests {
         assert!(app.graph.track_voice_lids[0].is_empty());
         assert_eq!(app.graph.track_buffer_ids[0], -1);
         assert_eq!(app.state.runtime.voice_counts[0].load(Ordering::Acquire), 0);
-        assert!(
-            sampler_ids
+        assert!(sampler_ids
                 .iter()
-                .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) })
-        );
+            .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) }));
         let engine = app.graph.engine_node_ids[0]
             .as_ref()
             .expect("new custom engine should remain live");
@@ -7813,10 +7810,9 @@ mod tests {
             engine_routes_before,
             "grouping should rewire the existing engine route instead of rebuilding it"
         );
-        assert!(
-            app.rack_slot_instrument_descriptor(&rack.slots[0])
-                .is_some()
-        );
+        assert!(app
+            .rack_slot_instrument_descriptor(&rack.slots[0])
+            .is_some());
         graph.process_block();
     }
 
@@ -7924,11 +7920,10 @@ mod tests {
             .expect("rack sample should load");
         app.add_builtin_rack_slot_effect_sync(0, 0, "OTT")
             .expect("rack slot should accept OTT");
-        assert!(
-            app.editor
+        assert!(app
+            .editor
                 .effect_chain_leases
-                .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 })
-        );
+            .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
 
         app.graph_controller()
             .delete_rack_slot(0, 0)
@@ -7939,11 +7934,10 @@ mod tests {
             .expect("rack container should remain");
         assert!(rack.slots.is_empty());
         assert!(app.graph.track_node_ids[0].rack_slots.is_empty());
-        assert!(
-            !app.editor
+        assert!(!app
+            .editor
                 .effect_chain_leases
-                .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 })
-        );
+            .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
         graph.process_block();
     }
 
@@ -8047,6 +8041,37 @@ mod tests {
         assert_eq!(replacement_slot, 1);
         app.move_rack_slot_effect_slot_sync(0, 0, 0, 1)
             .expect("the compacted lease should remain movable");
+        graph.process_block();
+    }
+
+    #[test]
+    fn inserting_rack_slot_effect_before_existing_effect_shifts_state_and_leases() {
+        let graph = TestLiveGraph::new("rack-slot-fx-insert-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("rack sample should load");
+        app.add_builtin_rack_slot_effect_sync(0, 0, "OTT")
+            .expect("rack slot should accept OTT");
+        let before = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state");
+        let ott_node = before.slots[0].effect_slots[0].node_id;
+
+        let inserted_slot = app
+            .insert_builtin_rack_slot_effect_before_slot_sync(0, 0, 0, "filter")
+            .expect("filter should insert before OTT");
+
+        assert_eq!(inserted_slot, 0);
+        let after = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state");
+        assert_eq!(after.slots[0].effect_descriptors[0].name, "Filter");
+        assert_eq!(after.slots[0].effect_descriptors[1].name, "OTT");
+        assert_eq!(after.slots[0].effect_slots[1].node_id, ott_node);
+        app.move_rack_slot_effect_slot_sync(0, 0, 1, 0)
+            .expect("shifted OTT lease should remain movable");
         graph.process_block();
     }
 

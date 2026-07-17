@@ -67,8 +67,8 @@ use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
     CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
-    MAX_STEPS, MidiFxPosition, PatternId, RackSlotParam, SYNC_RESOLUTIONS, SequencerState,
-    StepParam, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
+    MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
+    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::tui;
 use std::sync::atomic::AtomicBool;
@@ -3886,14 +3886,14 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
-        FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP, Runtime, StepParam, Value,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         resolve_instrument_swap_target_index, restore_instrument_patcher_layout_source,
         should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
         show_instrument_patcher_source_layout_source, track_meter_bindings_visible,
+        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
+        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -6966,6 +6966,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             _ => editor.handle_host_event(HostEvent::Status(
                                 "Rack-slot effect drop is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "insert-rack-slot-effect-before-slot" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let target_slot = extract_usize_from_payload(&payload, "slot");
+                        let name = extract_string_from_payload(&payload, "name");
+                        let builtin = extract_bool_from_payload(&payload, "builtin");
+                        match (track, rack_slot, target_slot, name) {
+                            (Some(track), Some(rack_slot), Some(target_slot), Some(name)) => {
+                                let result = if builtin {
+                                    app.insert_builtin_rack_slot_effect_before_slot_sync(
+                                        track,
+                                        rack_slot,
+                                        target_slot,
+                                        &name,
+                                    )
+                                } else {
+                                    app.insert_rack_slot_effect_before_slot_sync(
+                                        track,
+                                        rack_slot,
+                                        target_slot,
+                                        &name,
+                                    )
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error inserting rack-slot effect: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect insert is incomplete".to_string(),
                             )),
                         }
                     }

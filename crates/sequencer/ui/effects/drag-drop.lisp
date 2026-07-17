@@ -24,13 +24,21 @@
         (host-command "insert-builtin-effect-before-slot" (dict :track track :slot slot :name name))
         (if (and (= chain "audio") (= kind "custom-audio-effect"))
           (host-command "insert-effect-before-slot" (dict :track track :slot slot :name name))
+          (if (and (= chain "rack")
+                   (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect")))
+            (host-command "insert-rack-slot-effect-before-slot"
+              (dict :track track
+                    :rack-slot (get target :rack-slot)
+                    :slot slot
+                    :name name
+                    :builtin (= kind "builtin-audio-effect")))
           (if (and (= chain "midi") (= kind "midi-effect"))
             (host-command "insert-midi-fx-before-slot" (dict :track track :slot slot :name name))
             (if (and (= chain "bus") (= kind "builtin-audio-effect"))
               (host-command "insert-builtin-bus-effect-before-slot" (dict :bus bus :slot slot :name name))
               (if (and (= chain "bus") (= kind "custom-audio-effect"))
                 (host-command "insert-bus-effect-before-slot" (dict :bus bus :slot slot :name name))
-                (status "That effect type does not belong in this chain")))))))))
+                  (status "That effect type does not belong in this chain"))))))))))
 
 (def fx-drop-existing-effect (payload target)
   (let ((kind (get payload :kind))
