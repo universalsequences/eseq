@@ -162,6 +162,8 @@ extern "C" {
     pub fn begin_graph_edit_batch(lg: *mut LiveGraph);
     pub fn end_graph_edit_batch(lg: *mut LiveGraph);
     pub fn graph_edit_queue_available(lg: *const LiveGraph) -> u32;
+    pub fn graph_edit_current_batch_serial(lg: *const LiveGraph) -> u64;
+    pub fn graph_edit_applied_batch_serial(lg: *const LiveGraph) -> u64;
 
     // Buffer management
     pub fn create_buffer(

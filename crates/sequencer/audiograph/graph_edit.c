@@ -573,6 +573,7 @@ bool apply_write_node_state(LiveGraph *lg, int node_id, size_t dest_offset,
 bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
   GraphEditCmd cmd;
   GraphEditCmd next_cmd;
+  uint64_t last_applied_batch_serial = 0;
 
   bool all_ok = true;
   bool needs_orphan_update = false;
@@ -596,6 +597,9 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
     }
     if (!geq_pop(r, &cmd)) {
       break;
+    }
+    if (cmd.batch_serial > last_applied_batch_serial) {
+      last_applied_batch_serial = cmd.batch_serial;
     }
     bool ok = true;
     bool topology_changed = false;
@@ -703,6 +707,11 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
   // Batch the orphan status update
   if (needs_orphan_update) {
     update_orphaned_status(lg);
+  }
+
+  if (last_applied_batch_serial != 0) {
+    atomic_store_explicit(&lg->applied_edit_batch_serial,
+                          last_applied_batch_serial, memory_order_release);
   }
 
   return all_ok;

@@ -419,14 +419,13 @@ dependency order:
   slots. Once a slot can host a chain, it hosts every effect.
 - The low-level insert API is **already host-agnostic**:
   `add_effect_to_chain_at` (`lisp_host.rs:1422`) takes arbitrary
-  predecessor/successor node ids + a registry `slot_id`;
+  predecessor/successor node ids + a host-local diagnostic `slot_id`;
   `connect_custom_effect_gap` (`tui/graph.rs:3206`) handles mono/stereo
   adaptation.
-- **Buses are the precedent for a second chain host**: bus chains key the
-  dgenlisp process registry as
-  `slot_id = (MAX_TRACKS + bus_idx) * MAX_CUSTOM_FX + offset`
-  (`effects.rs:4321`), `REGISTRY_SIZE = (MAX_TRACKS + MAX_BUS_FX_CHAINS) *
-  MAX_CUSTOM_FX` (`lisp_host.rs:89`).
+- DGenLisp effect nodes own an immutable process-function identity in their
+  initialized node state. Old and new nodes can therefore coexist while a
+  replacement batch crosses the audio-thread boundary; track compaction and
+  rack-slot addressing do not require registry-row re-keying.
 - But buses were added by **duplication, not generalization**: parallel
   `add_builtin_effect_sync` / `add_bus_effect_sync`, `move_effect_slot_sync`
   / `move_bus_effect_slot_sync`, `delete_custom_effect_slot` /
@@ -440,10 +439,11 @@ dependency order:
 1. **Generalize before adding the third host.** Introduce an `FxChainHost`
    seam (A4) and port track + bus chains onto it first. No third copy of the
    chain machinery.
-2. **Registry rows are leased, not statically allocated.** A bounded pool of
-   `MAX_RACK_FX_CHAINS` registry chain rows is assigned dynamically to
-   `(track, slot)` pairs when a slot first receives an effect (A5). Naive
-   static allocation (64 tracks × 16 slots × 8 fx = 8192 rows) is rejected.
+2. **Process identity is node-owned; resource retirement is acknowledged.**
+   A DGenLisp effect node carries its immutable process-function pointer in its
+   initialized state. Loaded-artifact leases remain owned until the audio
+   thread's applied-batch watermark reaches the batch that removed the node.
+   No timeout or queue-empty estimate participates in correctness.
 3. **v1 scope is edit + persist, not modulate.** Slot-FX params are editable
    and saved/loaded. P-locks on slot-FX params, macro mapping into slot FX,
    and sidechain taps *into* slot effects are all deferred (A9).
@@ -475,8 +475,6 @@ Define one description of "a place a chain lives":
 
 ```
 struct FxChainHost {
-    registry_base: usize,          // first slot_id row; chain occupies
-                                   // registry_base .. +MAX_CUSTOM_FX
     predecessor_id: i32,           // stereo node feeding the chain
     successor: ChainSuccessor,     // where the chain output lands
     // + accessors for: chain storage (Vec<EffectSlotState>),
@@ -492,8 +490,8 @@ enum ChainSuccessor {
 - Port the track chain and bus chain onto `FxChainHost`: one implementation
   each of add / move / delete / param-push / predecessor-successor search,
   parameterized by host. The 16 bus-specific functions in `tui/effects.rs`
-  collapse into the shared impl.
-  	* this would be a good opportunity to organize that file better / place it somewhere else
+  collapse into the shared impl. Move the shared implementation out of the
+  oversized `tui/effects.rs` module as part of the refactor.
 - `connect_custom_effect_gap` grows a `ChainSuccessor::MonoPair` arm: last
   effect out ch0 → `l`, ch1 → `r` (mono effect out fans to both).
 - Lease storage unifies to one keyed map or a per-host row, replacing the
@@ -504,55 +502,20 @@ enum ChainSuccessor {
 
 ### A5. Phase R2 — rack-slot chains (engine)
 
-**Registry region + leasing.** Extend the registry:
-
-```
-REGISTRY_SIZE = (MAX_TRACKS + MAX_BUS_FX_CHAINS + MAX_RACK_FX_CHAINS) * MAX_CUSTOM_FX
-MAX_RACK_FX_CHAINS = 64        // pooled chains, not per-(track,slot)
-```
-
-A `RackChainLeases` table maps `(track, slot) → chain_idx` on first effect
-add. Adding an effect when the pool is exhausted returns a user-visible error
-("too many rack FX chains in project").
-
-**Release-on-empty + reuse safety (resolves old open question A10.2).**
-Graph edits are enqueued and drained by the audio loop (FIFO, bounded per
-block), with no commit notification. Registry fn-pointer stores
-(`DGEN_PROCESS_FNS`, `lisp_host.rs:90`) bypass that queue: the audio thread
-re-loads the row every block and passthroughs on 0 (`lisp_host.rs:188`). So
-clearing a row early is always benign; the only dangerous interleaving is
-storing a *new* fn pointer into a row while a stale node that reads it may
-still be alive (new fn transmuted against an old, differently-sized state
-buffer → OOB). Leases therefore have three states:
-
-- **Active → Draining** (last effect deleted / slot deleted): in UI-thread
-  program order, store 0 into the row's fn pointers, enqueue the
-  disconnect/delete edits, release the `(track, slot)` map entry (UI-only
-  bookkeeping). The row's `DylibLease` stays with the Draining entry — the
-  audio thread may be mid-call into the dylib this block, so the dylib must
-  outlive the node, not the chain slot.
-- **Draining → Free**: lazily, upon observing
-  `graph_edit_queue_available() == capacity` (queue fully drained ⇒ all
-  earlier edits applied ⇒ stale nodes gone). Checked opportunistically at the
-  next effect add and on the UI tick; never blocks.
-- **Allocation**: Free rows only, FIFO. Draining rows are never handed out.
-  Exhaustion requires churning dozens of chains within a few audio blocks.
-
-The per-block edit budget only delays the queue-empty observation (later
-reclamation), never correctness — FIFO order is preserved.
-
-**Pre-existing hazard fixed in R1:** `remove_effect_from_chain`
-(`lisp_host.rs:1308`) deletes the node but never clears its registry row, so
-today's delete-then-re-add at the same `(track, offset)` briefly exposes the
-same stale-node/new-fn race (unhit in practice because reuse is user-paced).
-The clear-row-at-delete discipline above lands in the R1 `FxChainHost`
-refactor so tracks and buses inherit it too.
+**Node-owned process identity + acknowledged retirement.** Graph edits are
+enqueued and applied at an audio block boundary. Every committed edit batch
+has a monotonic serial, and the audio thread publishes the highest serial it
+has fully applied. Replacing an effect creates a new node with its own process
+pointer; the old node continues to reference only its old process pointer
+until its deletion is applied. The host retains the old loaded-artifact lease
+until `applied_batch_serial >= deletion_batch_serial`, checked opportunistically
+on the UI tick and subsequent chain edits. This is exact, non-blocking, and
+does not depend on the usual sub-50-ms drain time.
 
 **Host wiring.** For a leased slot chain:
 
 ```
 FxChainHost {
-    registry_base: (MAX_TRACKS + MAX_BUS_FX_CHAINS + chain_idx) * MAX_CUSTOM_FX,
     predecessor_id: slots[slot].slot_pan_id,
     successor: MonoPair { l: voice_sum_id, r: voice_sum_r_id },
 }
@@ -564,8 +527,7 @@ chain storage, as they do for tracks.
 **State + snapshot.** Slot chains get `Vec<EffectSlotState>` storage parallel
 to the slot (inside the rack-slot state, not a new top-level parallel vec).
 The audio-thread snapshot restore path (`sequencer/state.rs` effect-slot
-restore) walks slot chains the same way it walks track chains, keyed by the
-leased `chain_idx`.
+restore) walks slot chains the same way it walks track chains.
 
 **Lifecycle.**
 - Slot delete / rack track delete: free all chain nodes, release the lease,
@@ -657,16 +619,9 @@ Command on any `Sampler`/`Custom` track: **"Group to Instrument Rack"**.
 
 ### A10. Open questions
 
-1. `MAX_RACK_FX_CHAINS` value: 64 pooled chains ≈ plenty for real projects,
-   but drum racks with per-pad FX could burn 16 per track — start 64, make it
-   a single const, revisit with telemetry from real projects.
-2. ~~Should an *empty* slot chain hold its lease?~~ **Resolved: release on
-   empty**, via the three-state (Active/Draining/Free) lease design in A5 —
-   clearing registry rows is always safe, and reuse is gated on a lazy
-   queue-drained observation rather than any commit notification.
-3. Sound preset location: instrument-style directory
+1. Sound preset location: instrument-style directory
    (`crates/sequencer/instruments/…`) vs a user-level sounds dir? Sounds tab
    likely wants both (factory + user), mirroring the sample DB split.
-4. Does "Group to Instrument Rack" also move *builtin* mixer stages (filter/
+2. Does "Group to Instrument Rack" also move *builtin* mixer stages (filter/
    delay in `TrackShell`) into the slot chain, or only chain inserts? (Start:
    chain inserts only; the shell stages are per-track mixer furniture.)

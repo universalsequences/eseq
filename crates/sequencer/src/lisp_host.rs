@@ -78,45 +78,27 @@ type DGenProcessFn = unsafe extern "C" fn(
     host_sample_rate: c_float,
 );
 
-// ── Global process function registry ──
-// Each track can have up to MAX_CUSTOM_FX custom effects.
-// The process fn pointer is stored here, indexed by slot_id = track * MAX_CUSTOM_FX + offset.
-
-use crate::sequencer::{MAX_INSTRUMENT_ENGINES, MAX_TRACKS};
+use crate::sequencer::MAX_INSTRUMENT_ENGINES;
 pub const MAX_CUSTOM_FX: usize = 8;
 pub const MAX_MIDI_FX_SLOTS: usize = 4;
 pub const MAX_BUS_FX_CHAINS: usize = 64;
-const REGISTRY_SIZE: usize = (MAX_TRACKS + MAX_BUS_FX_CHAINS) * MAX_CUSTOM_FX;
-static DGEN_PROCESS_FNS: [AtomicUsize; REGISTRY_SIZE] = {
-    const INIT: AtomicUsize = AtomicUsize::new(0);
-    [INIT; REGISTRY_SIZE]
-};
-
-fn set_dgen_process_fn(slot_id: usize, f: DGenProcessFn) {
-    set_dgen_process_fn_raw(slot_id, f as usize);
-}
-
-fn dgen_process_fn_raw(slot_id: usize) -> usize {
-    DGEN_PROCESS_FNS[slot_id % REGISTRY_SIZE].load(Ordering::Acquire)
-}
-
-fn set_dgen_process_fn_raw(slot_id: usize, f: usize) {
-    DGEN_PROCESS_FNS[slot_id % REGISTRY_SIZE].store(f, Ordering::Release);
-}
 
 // ── Node state layout ──
-// state[0] = slot_id (f32), where slot_id = track_idx * MAX_CUSTOM_FX + offset
+// state[0] = host-local slot identity (diagnostics only)
 // state[1] = total_memory_slots (f32)
 // state[2] = canary
 // state[3] = declared input count (f32)
 // state[4] = enabled (0 = bypass/silent, 1 = active)
 // state[5] = host sample rate
-// state[6..6+N] = DGenLisp read buffer
+// state[6..10] = immutable process function pointer (four numeric u16 chunks)
+// state[10..10+N] = DGenLisp read buffer
 // state[...]     = DGenLisp write buffer (separate to respect `restrict`)
 
 pub const DGEN_ENABLED_PARAM_IDX: usize = 4;
 pub const DGEN_HOST_SAMPLE_RATE_IDX: usize = 5;
-pub const HEADER_SLOTS: usize = 6;
+const DGEN_PROCESS_FN_START_IDX: usize = 6;
+const DGEN_PROCESS_FN_CHUNKS: usize = 4;
+pub const HEADER_SLOTS: usize = 10;
 pub const DGEN_STATE_REDZONE_SLOTS: usize = 256;
 const HEADER_CANARY: f32 = f32::from_bits(0x4cd35a1d);
 
@@ -155,6 +137,23 @@ unsafe fn dgen_host_sample_rate(state: *mut f32) -> f32 {
     }
 }
 
+fn process_fn_pointer_chunks(process_fn: DGenProcessFn) -> [f32; DGEN_PROCESS_FN_CHUNKS] {
+    let pointer = process_fn as usize as u64;
+    std::array::from_fn(|chunk| ((pointer >> (chunk * 16)) & 0xffff) as f32)
+}
+
+unsafe fn dgen_process_fn_from_state(state: *mut f32) -> Option<DGenProcessFn> {
+    let mut pointer = 0u64;
+    for chunk in 0..DGEN_PROCESS_FN_CHUNKS {
+        let value = *state.add(DGEN_PROCESS_FN_START_IDX + chunk);
+        if !value.is_finite() || !(0.0..=u16::MAX as f32).contains(&value) {
+            return None;
+        }
+        pointer |= (value as u16 as u64) << (chunk * 16);
+    }
+    (pointer != 0).then(|| std::mem::transmute::<usize, DGenProcessFn>(pointer as usize))
+}
+
 unsafe extern "C" fn dgenlisp_wrapper_process(
     inp: *const *mut f32,
     out: *const *mut f32,
@@ -166,7 +165,6 @@ unsafe extern "C" fn dgenlisp_wrapper_process(
         return;
     }
     let s = state as *mut f32;
-    let slot_id = (*s) as usize;
     if (*s.add(2)).to_bits() != HEADER_CANARY.to_bits() {
         return;
     }
@@ -185,9 +183,7 @@ unsafe extern "C" fn dgenlisp_wrapper_process(
         }
         return;
     }
-    let fn_ptr = DGEN_PROCESS_FNS[slot_id % REGISTRY_SIZE].load(Ordering::Acquire);
-    if fn_ptr != 0 {
-        let process_fn: DGenProcessFn = std::mem::transmute(fn_ptr);
+    if let Some(process_fn) = dgen_process_fn_from_state(s) {
         let _total_memory_slots = *s.add(1) as usize;
         let memory_read = dgen_read_buffer_ptr(s) as *mut c_void;
         let memory_write = dgen_write_buffer_ptr(s, _total_memory_slots) as *mut c_void;
@@ -217,8 +213,9 @@ unsafe extern "C" fn dgenlisp_wrapper_process(
 ///   [2] = canary
 ///   [3] = declared input count
 ///   [4] = enabled
-///   [5] = num_entries (N)
-///   [6..6+2N] = pairs of (index, value)
+///   [5..9] = process function pointer (four numeric u16 chunks)
+///   [9] = num_entries (N)
+///   [10..10+2N] = pairs of (index, value)
 unsafe extern "C" fn dgenlisp_init(
     state: *mut c_void,
     sample_rate: c_int,
@@ -238,14 +235,17 @@ unsafe extern "C" fn dgenlisp_init(
     *dst.add(3) = *src.add(3); // declared input count
     *dst.add(DGEN_ENABLED_PARAM_IDX) = *src.add(4); // enabled
     *dst.add(DGEN_HOST_SAMPLE_RATE_IDX) = (sample_rate.max(1)) as f32;
+    for chunk in 0..DGEN_PROCESS_FN_CHUNKS {
+        *dst.add(DGEN_PROCESS_FN_START_IDX + chunk) = *src.add(5 + chunk);
+    }
 
     // Apply sparse index/value pairs into the memory region
-    let num_entries = (*src.add(5)) as usize;
+    let num_entries = (*src.add(9)) as usize;
     let total_memory_slots = *dst.add(1) as usize;
     let mem = dgen_read_buffer_ptr(dst);
     for i in 0..num_entries {
-        let idx = (*src.add(6 + i * 2)) as usize;
-        let val = *src.add(6 + i * 2 + 1);
+        let idx = (*src.add(10 + i * 2)) as usize;
+        let val = *src.add(10 + i * 2 + 1);
         *mem.add(idx) = val;
     }
     let write_mem = dgen_write_buffer_ptr(dst, total_memory_slots);
@@ -296,6 +296,8 @@ fn dgenlisp_vtable() -> NodeVTable {
 pub struct EffectGraphNodeIds {
     pub effect_node_id: i32,
     pub modulator_node_id: Option<i32>,
+    /// Edit batch whose application makes any replaced node unreachable.
+    pub replacement_batch_serial: u64,
 }
 
 // ── Manifest types ──
@@ -1261,9 +1263,14 @@ pub fn load_dylib(path: &Path) -> Result<LoadedDGenLib, String> {
 // ── Build initial state message (compact) ──
 
 /// Build a compact init message:
-/// [slot_id, total_memory_slots, canary, declared_input_count, enabled, num_entries, idx0, val0, ...]
+/// [slot_id, total_memory_slots, canary, declared_input_count, enabled,
+///  process_fn_chunk0..3, num_entries, idx0, val0, ...]
 /// The engine zeroes state; init only needs to set non-zero values.
-fn build_init_message(slot_id: usize, manifest: &DGenManifest) -> Vec<f32> {
+fn build_init_message(
+    slot_id: usize,
+    manifest: &DGenManifest,
+    process_fn: Option<DGenProcessFn>,
+) -> Vec<f32> {
     // Collect all non-zero index/value pairs
     let mut entries: Vec<(usize, f32)> = Vec::new();
 
@@ -1287,13 +1294,17 @@ fn build_init_message(slot_id: usize, manifest: &DGenManifest) -> Vec<f32> {
         }
     }
 
-    // Header (6) + pairs (2 * N)
-    let mut msg = Vec::with_capacity(6 + entries.len() * 2);
+    // Header (10) + pairs (2 * N)
+    let mut msg = Vec::with_capacity(10 + entries.len() * 2);
     msg.push(slot_id as f32);
     msg.push(manifest.total_memory_slots as f32);
     msg.push(HEADER_CANARY);
     msg.push(manifest.n_inputs as f32);
     msg.push(1.0);
+    let process_fn_chunks = process_fn
+        .map(process_fn_pointer_chunks)
+        .unwrap_or([0.0; DGEN_PROCESS_FN_CHUNKS]);
+    msg.extend(process_fn_chunks);
     msg.push(entries.len() as f32);
     for (idx, val) in &entries {
         msg.push(*idx as f32);
@@ -1437,7 +1448,7 @@ pub unsafe fn add_effect_to_chain_at(
         dgen_total_state_slots(manifest.total_memory_slots) * std::mem::size_of::<f32>();
 
     // Compact init message: only header + non-zero index/value pairs
-    let init_msg = build_init_message(slot_id, manifest);
+    let init_msg = build_init_message(slot_id, manifest, Some(lib.process_fn));
     let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
 
     let name = CString::new(format!("dgenlisp_fx_{}", slot_id)).unwrap();
@@ -1478,12 +1489,11 @@ pub unsafe fn add_effect_to_chain_at(
         None
     };
 
-    // Commit the replacement only after the new node exists and can be wired.
-    // Until this batch succeeds, the old node and process function remain the
-    // rollback target for the live graph.
-    let previous_process_fn = dgen_process_fn_raw(slot_id);
+    // Each node owns its immutable process-function identity. The old and new
+    // nodes may therefore coexist safely while this edit batch crosses the
+    // audio-thread boundary.
     audiograph::begin_graph_edit_batch(lg);
-    set_dgen_process_fn(slot_id, lib.process_fn);
+    let replacement_batch_serial = audiograph::graph_edit_current_batch_serial(lg);
     let connect_result = connect_effect_chain(
         lg,
         predecessor_id,
@@ -1495,7 +1505,6 @@ pub unsafe fn add_effect_to_chain_at(
         successor_inputs,
     );
     if let Err(error) = connect_result {
-        set_dgen_process_fn_raw(slot_id, previous_process_fn);
         audiograph::delete_node(lg, node_id);
         if let Some(mod_id) = modulator_node_id {
             audiograph::delete_node(lg, mod_id);
@@ -1535,7 +1544,6 @@ pub unsafe fn add_effect_to_chain_at(
         Ok(())
     })();
     if let Err(error) = mod_connect_result {
-        set_dgen_process_fn_raw(slot_id, previous_process_fn);
         audiograph::delete_node(lg, node_id);
         if let Some(mod_id) = modulator_node_id {
             audiograph::delete_node(lg, mod_id);
@@ -1557,6 +1565,7 @@ pub unsafe fn add_effect_to_chain_at(
     Ok(EffectGraphNodeIds {
         effect_node_id: node_id,
         modulator_node_id,
+        replacement_batch_serial,
     })
 }
 
@@ -3052,11 +3061,11 @@ pub fn render_loaded_effect_for_test(
     let total_slots = manifest.total_memory_slots;
     let mut memory_read = vec![0.0f32; total_slots];
     let mut memory_write = vec![0.0f32; total_slots];
-    let init_msg = build_init_message(0, manifest);
-    let entry_count = init_msg.get(5).copied().unwrap_or(0.0) as usize;
+    let init_msg = build_init_message(0, manifest, None);
+    let entry_count = init_msg.get(9).copied().unwrap_or(0.0) as usize;
     for i in 0..entry_count {
-        let idx = init_msg[6 + i * 2] as usize;
-        let value = init_msg[6 + i * 2 + 1];
+        let idx = init_msg[10 + i * 2] as usize;
+        let value = init_msg[10 + i * 2 + 1];
         if idx < total_slots {
             memory_read[idx] = value;
         }
@@ -18882,6 +18891,32 @@ mod tests {
         CAPTURED_DGEN_SAMPLE_RATE_BITS.store(host_sample_rate.to_bits(), Ordering::SeqCst);
     }
 
+    unsafe extern "C" fn write_one_process(
+        _inp: *const *mut f32,
+        out: *const *mut f32,
+        nframes: std::os::raw::c_int,
+        _state: *mut std::ffi::c_void,
+        _buffers: *mut std::ffi::c_void,
+        _host_sample_rate: std::os::raw::c_float,
+    ) {
+        for frame in 0..nframes.max(0) as usize {
+            *(*out).add(frame) = 1.0;
+        }
+    }
+
+    unsafe extern "C" fn write_two_process(
+        _inp: *const *mut f32,
+        out: *const *mut f32,
+        nframes: std::os::raw::c_int,
+        _state: *mut std::ffi::c_void,
+        _buffers: *mut std::ffi::c_void,
+        _host_sample_rate: std::os::raw::c_float,
+    ) {
+        for frame in 0..nframes.max(0) as usize {
+            *(*out).add(frame) = 2.0;
+        }
+    }
+
     fn descriptors_with_filter(track_count: usize) -> Vec<Vec<EffectDescriptor>> {
         (0..track_count)
             .map(|_| {
@@ -19077,6 +19112,10 @@ mod tests {
             super::HEADER_CANARY,
             2.0,
             1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
             2.0,
             4.0,
             0.25,
@@ -19104,17 +19143,19 @@ mod tests {
     #[test]
     fn dgenlisp_wrapper_passes_header_sample_rate_to_generated_process() {
         let total_memory_slots = 4;
-        let slot_id = 17usize;
         let mut state = vec![0.0_f32; super::dgen_total_state_slots(total_memory_slots)];
-        state[0] = slot_id as f32;
+        state[0] = 17.0;
         state[1] = total_memory_slots as f32;
         state[2] = super::HEADER_CANARY;
         state[3] = 1.0;
         state[super::DGEN_ENABLED_PARAM_IDX] = 1.0;
         state[super::DGEN_HOST_SAMPLE_RATE_IDX] = 48_000.0;
+        let process_fn_chunks = super::process_fn_pointer_chunks(capture_dgen_sample_rate_process);
+        for (chunk, value) in process_fn_chunks.into_iter().enumerate() {
+            state[super::DGEN_PROCESS_FN_START_IDX + chunk] = value;
+        }
 
         CAPTURED_DGEN_SAMPLE_RATE_BITS.store(0, Ordering::SeqCst);
-        super::set_dgen_process_fn(slot_id, capture_dgen_sample_rate_process);
 
         let mut input = vec![0.0_f32; 8];
         let mut output = vec![0.0_f32; 8];
@@ -19129,12 +19170,58 @@ mod tests {
                 std::ptr::null_mut(),
             );
         }
-        super::set_dgen_process_fn_raw(slot_id, 0);
-
         assert_eq!(
             f32::from_bits(CAPTURED_DGEN_SAMPLE_RATE_BITS.load(Ordering::SeqCst)),
             48_000.0
         );
+    }
+
+    #[test]
+    fn dgenlisp_nodes_keep_distinct_process_identity_while_coexisting() {
+        fn state_for(process_fn: super::DGenProcessFn) -> Vec<f32> {
+            let mut state = vec![0.0_f32; super::dgen_total_state_slots(1)];
+            state[1] = 1.0;
+            state[2] = super::HEADER_CANARY;
+            state[3] = 1.0;
+            state[super::DGEN_ENABLED_PARAM_IDX] = 1.0;
+            state[super::DGEN_HOST_SAMPLE_RATE_IDX] = 48_000.0;
+            for (chunk, value) in super::process_fn_pointer_chunks(process_fn)
+                .into_iter()
+                .enumerate()
+            {
+                state[super::DGEN_PROCESS_FN_START_IDX + chunk] = value;
+            }
+            state
+        }
+
+        let mut old_state = state_for(write_one_process);
+        let mut new_state = state_for(write_two_process);
+        let mut input = [0.0_f32; 4];
+        let inputs = [input.as_mut_ptr()];
+        let mut old_output = [0.0_f32; 4];
+        let mut new_output = [0.0_f32; 4];
+        let old_outputs = [old_output.as_mut_ptr()];
+        let new_outputs = [new_output.as_mut_ptr()];
+
+        unsafe {
+            super::dgenlisp_wrapper_process(
+                inputs.as_ptr(),
+                old_outputs.as_ptr(),
+                4,
+                old_state.as_mut_ptr().cast(),
+                std::ptr::null_mut(),
+            );
+            super::dgenlisp_wrapper_process(
+                inputs.as_ptr(),
+                new_outputs.as_ptr(),
+                4,
+                new_state.as_mut_ptr().cast(),
+                std::ptr::null_mut(),
+            );
+        }
+
+        assert_eq!(old_output, [1.0; 4]);
+        assert_eq!(new_output, [2.0; 4]);
     }
 
     #[test]

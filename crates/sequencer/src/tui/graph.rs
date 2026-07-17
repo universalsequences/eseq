@@ -6815,6 +6815,27 @@ mod tests {
     }
 
     #[test]
+    fn graph_edit_batch_reports_audio_thread_application() {
+        let graph = TestLiveGraph::new("graph-edit-application-watermark-test");
+
+        unsafe { crate::audiograph::begin_graph_edit_batch(graph.ptr.0) };
+        let serial = unsafe { crate::audiograph::graph_edit_current_batch_serial(graph.ptr.0) };
+        assert!(serial > 0, "an open batch should expose its serial");
+        graph.add_gain(1.0, "watermark_probe");
+        unsafe { crate::audiograph::end_graph_edit_batch(graph.ptr.0) };
+
+        assert!(
+            unsafe { crate::audiograph::graph_edit_applied_batch_serial(graph.ptr.0) } < serial,
+            "producer commit must not be mistaken for audio-thread application"
+        );
+        graph.process_block();
+        assert!(
+            unsafe { crate::audiograph::graph_edit_applied_batch_serial(graph.ptr.0) } >= serial,
+            "processing the next block should acknowledge the committed batch"
+        );
+    }
+
+    #[test]
     fn free_patch_idle_route_stays_closed_while_transport_is_stopped() {
         assert_eq!(free_patch_idle_route_value(2, 2, false), 0.0);
         assert_eq!(free_patch_idle_route_value(1, 2, false), 0.0);
