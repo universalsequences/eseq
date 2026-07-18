@@ -453,6 +453,14 @@
               :name (get payload :name)
               :builtin (get payload :builtin))))))
 
+(def rack-slot-display-value (slot prop field-prop)
+  (if (get slot field-prop)
+    (bind-seq (get slot field-prop))
+    (get slot prop)))
+
+(def rack-slot-display-scalar (slot prop field-prop)
+  (reactive-value (rack-slot-display-value slot prop field-prop)))
+
 (def rack-slot-row (slot)
   (let ((delete-target (rack-slot-delete-target? slot))
       (selected (get slot :selected)))
@@ -462,8 +470,8 @@
       :padding 0.18
       :selected delete-target
       :background-color (if selected
-        '(rgba 0.30 0.32 0.34 1.0)
-        '(rgba 0.06 0.065 0.074 0.0))
+        :mixer-strip-selected-bg
+        :mixer-strip-bg)
       :selected-background-color :fx-panel-header-selected-bg
       :border-width 1
       :border-color (if selected
@@ -478,29 +486,33 @@
       :drop-hover-border-color :mixer-strip-selected-border
       :on-drop (lambda (event) (rack-slot-drop-fx slot event))
       :on-click |x y r| (rack-slot-select slot)
-      (h-stack :width :fill :height :fill :gap 0.15 :align :center
+      (h-stack :width :fill :height :fill :gap 0.15 :align :baseline
+        (box :width 1)
         (label (str (+ (get slot :idx) 1))
           :font-size 10
-          :color :gray
+          :color (if selected :white :gray)
           :width 1.0
           :bg :transparent)
+        (box :width 1)
         (box :key (str "rack-slot-label-" (get slot :idx))
-          :width 9.5 :height :fill :v-align :center :padding 0
+          :width 9.5 :height :fill  :padding 0
           :selected delete-target
           :background-color :transparent
           :selected-background-color :fx-panel-header-selected-bg
           :corner-radius 3
           :on-click |x y r| (rack-slot-select-delete-target slot)
-          (label (substring (get slot :display-name) 0 14)
-            :font-size 10.5
-            :color :white
-            :active delete-target
-            :active-color :white
-            :bg :transparent))
+          (v-stack
+            (box :height 0.2)
+            (label (substring (get slot :display-name) 0 14)
+              :font-size 10.5
+              :color :white
+              :active delete-target
+              :active-color :white
+              :bg :transparent)))
         
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "T" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (get slot :base-note)
+          (number-picker :value (rack-slot-display-value slot :base-note :base-note-field)
             :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
             :noui true :font-size 9.4
             :text-align :center :text-color :dim :edit-color :yellow
@@ -508,7 +520,7 @@
             :on-change (lambda (v) (rack-slot-set-base-note slot v))))
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "G" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (get slot :gain)
+          (number-picker :value (rack-slot-display-value slot :gain :gain-field)
             :min (get slot :gain-min) :max (get slot :gain-max) :decimals 2
             :noui true :font-size 9.4
             :text-align :center :text-color :dim :edit-color :yellow
@@ -516,7 +528,7 @@
             :on-change (lambda (v) (rack-slot-set-gain slot v))))
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "P" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (get slot :pan)
+          (number-picker :value (rack-slot-display-value slot :pan :pan-field)
             :min (get slot :pan-min) :max (get slot :pan-max) :decimals 2
             :noui true :font-size 9.4
             :text-align :center :text-color :dim :edit-color :yellow
@@ -524,7 +536,7 @@
             :on-change (lambda (v) (rack-slot-set-pan slot v))))
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "V" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (get slot :max-polyphony)
+          (number-picker :value (rack-slot-display-value slot :max-polyphony :max-polyphony-field)
             :min (get slot :max-polyphony-min) :max (get slot :max-polyphony-max) :decimals 0
             :noui true :font-size 9.4
             :text-align :center :text-color :dim :edit-color :yellow
@@ -533,15 +545,15 @@
         (button "M"
           :width 2.0 :height 1.02 :padding 0 :font-size 9
           :border-color :transparent
-          :background-color (if (get slot :mute) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-          :color (if (get slot :mute) :black :dim)
-          :on-click |x y r| (rack-slot-set-mute slot (not (get slot :mute))))
+          :background-color (if (rack-slot-display-scalar slot :mute :mute-field) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+          :color (if (rack-slot-display-scalar slot :mute :mute-field) :black :dim)
+          :on-click |x y r| (rack-slot-set-mute slot (not (rack-slot-display-scalar slot :mute :mute-field))))
         (button "S"
           :width 2.0 :height 1.02 :padding 0 :font-size 9
           :border-color :transparent
-          :background-color (if (get slot :solo) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-          :color (if (get slot :solo) :black :dim)
-          :on-click |x y r| (rack-slot-set-solo slot (not (get slot :solo))))))))
+          :background-color (if (rack-slot-display-scalar slot :solo :solo-field) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+          :color (if (rack-slot-display-scalar slot :solo :solo-field) :black :dim)
+          :on-click |x y r| (rack-slot-set-solo slot (not (rack-slot-display-scalar slot :solo :solo-field))))))))
 
 (def rack-empty-selected-panel (inst)
   (box :debug-name "rack-empty-selected-panel"

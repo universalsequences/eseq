@@ -1162,13 +1162,28 @@ impl App {
             InstrumentType::Sampler => Some(EffectDescriptor::builtin_sampler()),
             InstrumentType::Custom | InstrumentType::Modulator => {
                 let engine_id = slot.track_sound_state.engine_id?;
-                let engine = self.editor.engine_registry.get(engine_id)?;
-                Some(crate::lisp_host::instrument_descriptor_from_manifest(
-                    &engine.name,
-                    &engine.manifest,
-                ))
+                self.editor
+                    .engine_registry
+                    .get_instrument_descriptor(engine_id)
+                    .cloned()
             }
             InstrumentType::Rack => None,
+        }
+    }
+
+    pub fn rack_slot_cached_instrument_descriptor(
+        &self,
+        slot: &RackSlotSnapshot,
+    ) -> Option<&EffectDescriptor> {
+        match slot.instrument_type {
+            InstrumentType::Custom | InstrumentType::Modulator => {
+                slot.track_sound_state.engine_id.and_then(|engine_id| {
+                    self.editor
+                        .engine_registry
+                        .get_instrument_descriptor(engine_id)
+                })
+            }
+            InstrumentType::Sampler | InstrumentType::Rack => None,
         }
     }
 
@@ -1903,39 +1918,14 @@ impl App {
         slot_idx: usize,
         changed_param_idx: usize,
     ) {
-        let Some(slot) = self.rack_slot_snapshot(track, slot_idx) else {
+        let Some((active_param_idx, value)) = self.rack_slot_mod_active_value(
+            track,
+            slot_idx,
+            None,
+            changed_param_idx,
+        ) else {
             return;
         };
-        let Some(desc) = self.rack_slot_instrument_descriptor(&slot) else {
-            return;
-        };
-        let Some(active_param_idx) = desc
-            .instrument_modulation_targets
-            .iter()
-            .find(|target| target.depth_param_idx == changed_param_idx)
-            .and_then(|target| target.active_param_idx)
-        else {
-            return;
-        };
-        let active = desc
-            .instrument_modulation_targets
-            .iter()
-            .filter(|target| target.active_param_idx == Some(active_param_idx))
-            .any(|target| {
-                slot.instrument_slot
-                    .defaults
-                    .get(target.depth_param_idx)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        desc.params
-                            .get(target.depth_param_idx)
-                            .map(|param| param.default)
-                            .unwrap_or_default()
-                    })
-                    .abs()
-                    > f32::EPSILON
-            });
-        let value = if active { 1.0 } else { 0.0 };
         if self.set_rack_slot_instrument_default_only(track, slot_idx, active_param_idx, value) {
             self.send_rack_slot_instrument_param(track, slot_idx, active_param_idx, value);
         }
@@ -1948,47 +1938,14 @@ impl App {
         step: usize,
         changed_param_idx: usize,
     ) {
-        let Some(slot) = self.rack_slot_snapshot(track, slot_idx) else {
+        let Some((active_param_idx, value)) = self.rack_slot_mod_active_value(
+            track,
+            slot_idx,
+            Some(step),
+            changed_param_idx,
+        ) else {
             return;
         };
-        let Some(desc) = self.rack_slot_instrument_descriptor(&slot) else {
-            return;
-        };
-        let Some(active_param_idx) = desc
-            .instrument_modulation_targets
-            .iter()
-            .find(|target| target.depth_param_idx == changed_param_idx)
-            .and_then(|target| target.active_param_idx)
-        else {
-            return;
-        };
-        let active = desc
-            .instrument_modulation_targets
-            .iter()
-            .filter(|target| target.active_param_idx == Some(active_param_idx))
-            .any(|target| {
-                slot.instrument_slot
-                    .plocks
-                    .get(step)
-                    .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
-                    .copied()
-                    .flatten()
-                    .unwrap_or_else(|| {
-                        slot.instrument_slot
-                            .defaults
-                            .get(target.depth_param_idx)
-                            .copied()
-                            .unwrap_or_else(|| {
-                                desc.params
-                                    .get(target.depth_param_idx)
-                                    .map(|param| param.default)
-                                    .unwrap_or_default()
-                            })
-                    })
-                    .abs()
-                    > f32::EPSILON
-            });
-        let value = if active { 1.0 } else { 0.0 };
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
             if slot
                 .instrument_slot
@@ -1997,6 +1954,71 @@ impl App {
                 slot.track_sound_state.dirty = true;
             }
         });
+    }
+
+    /// Computes the derived modulation-active parameter while borrowing the
+    /// live rack slot in place. Rack slots contain large p-lock grids and
+    /// effect descriptors; cloning one for every pointer movement made even a
+    /// parameter unrelated to modulation pay for copying the entire slot.
+    fn rack_slot_mod_active_value(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        step: Option<usize>,
+        changed_param_idx: usize,
+    ) -> Option<(usize, f32)> {
+        let racks = self.state.pattern.rack_tracks.lock().unwrap();
+        let slot = racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(slot_idx))?;
+
+        let sampler_descriptor;
+        let descriptor = match slot.instrument_type {
+            InstrumentType::Sampler => {
+                sampler_descriptor = EffectDescriptor::builtin_sampler();
+                &sampler_descriptor
+            }
+            InstrumentType::Custom | InstrumentType::Modulator => {
+                self.rack_slot_cached_instrument_descriptor(slot)?
+            }
+            InstrumentType::Rack => return None,
+        };
+        let active_param_idx = descriptor
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.depth_param_idx == changed_param_idx)
+            .and_then(|target| target.active_param_idx)?;
+        let active = descriptor
+            .instrument_modulation_targets
+            .iter()
+            .filter(|target| target.active_param_idx == Some(active_param_idx))
+            .any(|target| {
+                step.and_then(|step| {
+                    slot.instrument_slot
+                        .plocks
+                        .get(step)
+                        .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
+                        .copied()
+                        .flatten()
+                })
+                .or_else(|| {
+                    slot.instrument_slot
+                        .defaults
+                        .get(target.depth_param_idx)
+                        .copied()
+                })
+                .unwrap_or_else(|| {
+                    descriptor
+                        .params
+                        .get(target.depth_param_idx)
+                        .map(|param| param.default)
+                        .unwrap_or_default()
+                })
+                .abs()
+                    > f32::EPSILON
+            });
+        Some((active_param_idx, if active { 1.0 } else { 0.0 }))
     }
 
     pub(super) fn push_instrument_defaults_for_track(&self, track: usize) {

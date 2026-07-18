@@ -17,8 +17,12 @@
 (def process-panel-clear-selection ()
   (do
     (process-map-clear)
-    (set! process-panel-selected-track -1)
-    (set! process-panel-selected-instance-id 0)))
+    (if (or (not (= process-panel-selected-track -1))
+            (not (= process-panel-selected-instance-id 0)))
+      (do
+        (set! process-panel-selected-track -1)
+        (set! process-panel-selected-instance-id 0))
+      false)))
 
 (def process-panel-slot-selected? (slot)
   (and (= process-panel-selected-track SEQ.current-track)

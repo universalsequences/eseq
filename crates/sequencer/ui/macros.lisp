@@ -93,8 +93,8 @@
   (box :height 1.2 :padding 0.12 :background-color :mixer-strip-bg
     (h-stack :gap 0.25 :align :baseline
       (label "Macro" :width 6.0 :font-size 8.5 :color :dim :bg :transparent)
-      (label "Path" :width 8.5 :font-size 8.5 :color :dim :bg :transparent)
-      (label "Name" :width 7.0 :font-size 8.5 :color :dim :bg :transparent)
+      (label "Path" :width 16.5 :font-size 8.5 :color :dim :bg :transparent)
+      (label "Name" :width 10.0 :font-size 8.5 :color :dim :bg :transparent)
       (label "Min" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
       (label "Max" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
       (label "Curve" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
@@ -114,8 +114,8 @@
              :mixer-control-bg))
       (h-stack :gap 0.25 :align :baseline
         (label (get macro :name) :width 6.0 :font-size 9 :color :foreground :bg :transparent)
-        (label (get mapping :path-label) :width 8.5 :font-size 8.5 :color :dim :bg :transparent)
-        (label (get mapping :param-label) :width 7.0 :font-size 8.5
+        (label (get mapping :path-label) :width 16.5 :font-size 8.5 :color :dim :bg :transparent)
+        (label (get mapping :param-label) :width 10.0 :font-size 8.5
           :color (if (get mapping :suspended) :dim :foreground) :bg :transparent)
         (number-picker
           :key (str "macro-mapping-min-" (get macro :id) "-" (get mapping :mapping-idx))

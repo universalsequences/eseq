@@ -29,11 +29,13 @@
   (custom-ui-selected-section-for-scope (custom-ui-scope-name)))
 
 (def custom-ui-set-selected-section-for-scope (scope-name section)
-  (set! custom-ui-selected-sections
-    (cons
-      (dict :scope scope-name :section section)
-      (filter |item| (not (= (get item :scope) scope-name))
-        custom-ui-selected-sections))))
+  (if (= (custom-ui-selected-section-for-scope scope-name) section)
+    false
+    (set! custom-ui-selected-sections
+      (cons
+        (dict :scope scope-name :section section)
+        (filter |item| (not (= (get item :scope) scope-name))
+          custom-ui-selected-sections)))))
 
 (def custom-ui-select-section-in-scope (scope section)
   (custom-ui-set-selected-section-for-scope (get scope :name) section))

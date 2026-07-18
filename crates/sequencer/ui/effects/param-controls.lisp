@@ -33,11 +33,16 @@
       (seq-show-fx-lower-panel))))
 
 (def process-map-clear ()
-  (do
-    (set! process-map-track -1)
-    (set! process-map-instance-id 0)
-    (set! process-map-port "")
-    (set! process-map-target-kind "")))
+  (if (or (not (= process-map-track -1))
+          (not (= process-map-instance-id 0))
+          (not (= process-map-port ""))
+          (not (= process-map-target-kind "")))
+    (do
+      (set! process-map-track -1)
+      (set! process-map-instance-id 0)
+      (set! process-map-port "")
+      (set! process-map-target-kind ""))
+    false))
 
 (def macro-mapping-arm-enter-hook ()
   (do
@@ -585,61 +590,67 @@
 
 (def param-mod-bg (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (rgba 0.18 0.48 0.95 0.24)
+    (rgba 0.03 0.20 0.35 0.94)
+    :transparent))
+
+(def param-mod-border (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (rgba 0.18 0.48 0.95 0.84)
     :transparent))
 
 (def param-mod-wrapper (fx p key body)
   (if (param-macro-mapping-active?)
     (if (param-macro-bindable? fx p)
       (let ((mapped (if (>= rack-macro-mapping-selected 0)
-                      (rack-macro-mapping-for fx p) (param-macro-mapping-for fx p)))
-            (owner (or (rack-macro-owner-definition-for fx p)
-                       (param-macro-owner-definition-for fx p))))
+              (rack-macro-mapping-for fx p) (param-macro-mapping-for fx p)))
+          (owner (or (rack-macro-owner-definition-for fx p)
+              (param-macro-owner-definition-for fx p))))
         (subtree :key (str key "-macro-map")
           (box :background-color (param-macro-bg fx p)
-               :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
-               :corner-radius 8
-               :border-width (if mapped 2 1)
-               :border-color (if mapped (rgba 0.32 1.0 0.55 1.0)
-                 (if owner (rgba 0.18 0.85 0.42 0.62) (rgba 0.18 0.85 0.42 0.75)))
-               :macro-owned (if owner 1 0)
-               :padding 0.08
-               :capture-pointer true
-               :on-click (lambda (info) (param-macro-map fx p))
+            :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
+            :corner-radius 8
+            :border-width (if mapped 2 1)
+            :border-color (if mapped (rgba 0.32 1.0 0.55 1.0)
+              (if owner (rgba 0.18 0.85 0.42 0.62) (rgba 0.18 0.85 0.42 0.75)))
+            :macro-owned (if owner 1 0)
+            :padding 0.08
+            :capture-pointer true
+            :on-click (lambda (info) (param-macro-map fx p))
             body)))
       body)
-  (if (or (rack-macro-owner-definition-for fx p)
-          (param-macro-owner-definition-for fx p))
-    (subtree :key (str key "-macro-owned")
-      (box :debug-name "macro-param-owned-wrapper"
-           :background-color :transparent
-           :corner-radius 8
-           :border-width 0
-           :macro-owned 1
-           :capture-pointer true
-           :on-click (lambda (info) false)
-        body))
-  (if (process-map-active?)
-    (if (process-param-bindable? fx p)
-      (subtree :key (str key "-process-map")
-        (box :background-color (process-param-map-bg fx p)
-             :debug-name "process-param-map-wrapper"
-             :corner-radius 8
-             :border-width 1
-             :padding 0.08
-             :capture-pointer true
-             :on-click (lambda (info) (process-bind-param-target fx p))
+    (if (or (rack-macro-owner-definition-for fx p)
+        (param-macro-owner-definition-for fx p))
+      (subtree :key (str key "-macro-owned")
+        (box :debug-name "macro-param-owned-wrapper"
+          :background-color :transparent
+          :corner-radius 8
+          :border-width 0
+          :macro-owned 1
+          :capture-pointer true
+          :on-click (lambda (info) false)
           body))
-      body)
-    (if (and (param-mods-open? fx) (get p :modulatable))
-      (subtree :key key
-        (box :background-color (param-mod-bg fx p)
-             :corner-radius 8
-             :border-width 1
-             :padding 0.08
-             :on-double-click (lambda (info) (param-toggle-modulation fx p))
-          body))
-      body)))))
+      (if (process-map-active?)
+        (if (process-param-bindable? fx p)
+          (subtree :key (str key "-process-map")
+            (box :background-color (process-param-map-bg fx p)
+              :debug-name "process-param-map-wrapper"
+              :corner-radius 8
+              :border-width 1
+              :padding 0.08
+              :capture-pointer true
+              :on-click (lambda (info) (process-bind-param-target fx p))
+              body))
+          body)
+        (if (and (param-mods-open? fx) (get p :modulatable))
+          (subtree :key key
+            (box :background-color (param-mod-bg fx p)
+              :border-color (param-mod-border fx p)
+              :corner-radius 8
+              :border-width 1
+              :padding 0.08
+              :on-double-click (lambda (info) (param-toggle-modulation fx p))
+              body))
+          body)))))
 
 (def fx-param-numeric-value (p)
   (reactive-value (fx-param-value p)))

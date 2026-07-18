@@ -169,7 +169,9 @@
 
 (def fx-clear-delete-selection ()
   (do
-    (set! fx-selected-plock-row -1)
+    (if (not (= fx-selected-plock-row -1))
+      (set! fx-selected-plock-row -1)
+      false)
     (seq-clear-delete-target)))
 
 (def fx-clear-selected-effect ()
