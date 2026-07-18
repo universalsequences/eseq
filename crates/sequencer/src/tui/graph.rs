@@ -2,21 +2,22 @@ use std::ffi::CString;
 use std::os::raw::c_void;
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
-    BusId, CustomInstrumentRunMode, DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE,
-    DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, InstrumentSlotResetSummary, InstrumentType,
-    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS, ModDestination, RackRouting,
-    RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, TrackOutput, TrackSoundState,
-    rack_slot_pool_index,
+    rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentSlotResetSummary,
+    InstrumentType, ModDestination, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, TrackOutput, TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE,
+    DRUM_RACK_LAST_PAD_NOTE, DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS,
+    MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
 use super::fx_chain::{
-    ChainSuccessor, FxChainHost, FxChainLocator, FxChainSlotView, FxLeaseSlotRemoval,
-    StereoEndpoint, connect_fx_chain_gap, connect_fx_chain_host, rewire_fx_chain,
+    connect_fx_chain_gap, connect_fx_chain_host, rewire_fx_chain, ChainSuccessor, FxChainHost,
+    FxChainLocator, FxChainSlotView, FxLeaseSlotRemoval, StereoEndpoint,
 };
 use super::{App, EngineDescriptor, EngineNodeIds, RackSlotNodeIds, TrackNodeIds};
 
@@ -35,6 +36,8 @@ fn first_graph_node_identity(ids: &[i32]) -> u32 {
 
 const DEFAULT_LAYER_SLOT_MAX_POLYPHONY: usize = 4;
 const DEFAULT_DRUM_SLOT_MAX_POLYPHONY: usize = 1;
+const RACK_TEARDOWN_TAIL: Duration = Duration::from_secs(8);
+const MAX_DEFERRED_RACK_TEARDOWNS: usize = 16;
 
 /// Structural identity of a rack's live audio graph. Two racks with equal
 /// signatures can share the same graph nodes; fields omitted from this type
@@ -85,6 +88,18 @@ fn rack_topology_signature(rack: &RackTrackSnapshot) -> RackTopologySignature {
             })
             .collect(),
     }
+}
+
+pub struct DeferredEngineRouteGeneration {
+    engine_id: usize,
+    node_ids: Vec<i32>,
+}
+
+pub struct DeferredRackTeardown {
+    slots: Vec<RackSlotNodeIds>,
+    engine_routes: Vec<DeferredEngineRouteGeneration>,
+    track_idx: usize,
+    due_at: Instant,
 }
 
 fn appended_rack_slot_max_polyphony(_existing_slots: &[RackSlotSnapshot]) -> usize {
@@ -1504,11 +1519,12 @@ impl GraphController<'_> {
     }
 
     pub fn add_track(&mut self, wav_path: &Path) -> Result<usize, String> {
-        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
             return Err("Maximum number of tracks reached".to_string());
         }
+        self.force_reap_all_rack_teardowns();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
         let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         self.app.submit_sample_analysis(&loaded);
@@ -1552,11 +1568,12 @@ impl GraphController<'_> {
     }
 
     pub fn add_blank_sampler_track(&mut self) -> Result<usize, String> {
-        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
             return Err("Maximum number of tracks reached".to_string());
         }
+        self.force_reap_all_rack_teardowns();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
         let buffer_id = crate::sampler::create_silent_buffer(self.app.graph.lg.0)?;
         let sample_rate = self.app.graph.sample_rate;
@@ -1591,11 +1608,12 @@ impl GraphController<'_> {
     }
 
     pub fn add_modulator_track(&mut self) -> Result<usize, String> {
-        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
             return Err("Maximum number of tracks reached".to_string());
         }
+        self.force_reap_all_rack_teardowns();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
         let track_name = format!("Modulator {}", idx + 1);
         let shell = self.create_track_shell(idx, &track_name)?;
@@ -1619,11 +1637,12 @@ impl GraphController<'_> {
         lib: &LoadedDGenLib,
         run_mode: CustomInstrumentRunMode,
     ) -> Result<usize, String> {
-        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
             return Err("Maximum number of tracks reached".to_string());
         }
+        self.force_reap_all_rack_teardowns();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
         let track_name = instrument_display_name(name);
         let shell = self.create_track_shell(idx, &track_name)?;
@@ -2215,7 +2234,6 @@ impl GraphController<'_> {
         routing: RackRouting,
         slots: Vec<RackSlotBuildSpec<'_>>,
     ) -> Result<usize, String> {
-        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
             return Err("Maximum number of tracks reached".to_string());
@@ -2226,6 +2244,8 @@ impl GraphController<'_> {
             ));
         }
         validate_rack_build_slot_pad_map(routing, &slots)?;
+        self.force_reap_all_rack_teardowns();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
         let track_name = instrument_display_name(name);
         let shell = self.create_track_shell(idx, &track_name)?;
@@ -2587,6 +2607,7 @@ impl GraphController<'_> {
             )
             .ok_or_else(|| "Failed to move flat-track state into rack".to_string())?;
         self.app.graph.track_node_ids[track].rack_slots = vec![rack_nodes];
+        self.app.graph.track_node_ids[track].rack_signature = Some(rack_topology_signature(&rack));
         self.app.graph.track_node_ids[track].sampler_ids.clear();
         self.app.graph.track_node_ids[track]
             .sampler_gatepitch_ids
@@ -2639,7 +2660,6 @@ impl GraphController<'_> {
             .transport
             .pattern_epoch
             .fetch_add(1, Ordering::Relaxed);
-        let _ = rack;
         Ok(())
     }
 
@@ -2959,6 +2979,7 @@ impl GraphController<'_> {
         {
             return Err("Failed to append rack layer to current pattern".to_string());
         }
+        self.refresh_rack_signature_from_live_state(track_idx);
         self.app
             .state
             .transport
@@ -3172,6 +3193,7 @@ impl GraphController<'_> {
         {
             return Err("Failed to append rack instrument to current pattern".to_string());
         }
+        self.refresh_rack_signature_from_live_state(track_idx);
         self.app
             .state
             .transport
@@ -3652,6 +3674,7 @@ impl GraphController<'_> {
     }
 
     pub fn clear_all_tracks(&mut self) {
+        self.force_reap_all_rack_teardowns();
         let batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let old_track_count = self.app.tracks.len();
 
@@ -3888,6 +3911,7 @@ impl GraphController<'_> {
         if track_idx >= old_count {
             return Err("Invalid track index".to_string());
         }
+        self.force_reap_all_rack_teardowns();
 
         let names = self.app.tracks.clone();
         let buffer_ids = self.app.graph.track_buffer_ids.clone();
@@ -3952,6 +3976,7 @@ impl GraphController<'_> {
         if track_idx >= self.app.tracks.len() {
             return Err("Invalid track index".to_string());
         }
+        self.force_reap_all_rack_teardowns();
         let deleted_engine_id = self.app.graph.track_engine_ids[track_idx];
         let deleted_rack_engine_ids = self.rack_engine_ids_for_track(track_idx);
 
@@ -4029,6 +4054,7 @@ impl GraphController<'_> {
         self.app.graph.track_engine_ids[track_idx] = None;
         if let Some(nodes) = self.app.graph.track_node_ids.get_mut(track_idx) {
             nodes.rack_slots.clear();
+            nodes.rack_signature = None;
         }
         self.app.set_rack_selected_slot(track_idx, 0);
         self.app.graph.track_synth_node_ids[track_idx].clear();
@@ -4395,6 +4421,169 @@ impl GraphController<'_> {
                     .store(0, Ordering::Release);
             }
         }
+    }
+
+    /// Removes one engine route generation from the live route tables without
+    /// deleting its graph nodes. The returned concrete node ids remain valid
+    /// until the deferred rack teardown reaps that generation.
+    fn detach_engine_route_generation(
+        &mut self,
+        engine_id: usize,
+        track_idx: usize,
+    ) -> Option<DeferredEngineRouteGeneration> {
+        let track_mod_out_id = self
+            .app
+            .graph
+            .track_node_ids
+            .get(track_idx)
+            .map(|nodes| nodes.mod_out_id)?;
+        let engine = self
+            .app
+            .graph
+            .engine_node_ids
+            .get_mut(engine_id)
+            .and_then(Option::as_mut)?;
+
+        if let Some(mod_output_channel) = engine.mod_output_channels.first().copied() {
+            for &synth_id in &engine.synth_ids {
+                unsafe {
+                    crate::audiograph::graph_disconnect(
+                        self.app.graph.lg.0,
+                        synth_id,
+                        mod_output_channel as i32,
+                        track_mod_out_id,
+                        0,
+                    );
+                }
+            }
+        }
+
+        let route_ids = engine
+            .route_gain_ids
+            .get_mut(track_idx)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let ext_route_ids = engine
+            .ext_route_gain_ids
+            .get_mut(track_idx)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let mut node_ids = route_ids
+            .into_iter()
+            .flatten()
+            .filter(|node_id| *node_id > 0)
+            .collect::<Vec<_>>();
+        node_ids.extend(
+            ext_route_ids
+                .into_iter()
+                .flatten()
+                .filter(|node_id| *node_id > 0),
+        );
+
+        for voice in 0..MAX_VOICES {
+            self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+                .store(0, Ordering::Release);
+            self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+                .store(0, Ordering::Release);
+            for input in 0..EXT_MOD_INPUT_COUNT {
+                self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track_idx][input]
+                    .store(0, Ordering::Release);
+            }
+        }
+
+        (!node_ids.is_empty()).then_some(DeferredEngineRouteGeneration {
+            engine_id,
+            node_ids,
+        })
+    }
+
+    fn enqueue_deferred_rack_teardown(&mut self, teardown: DeferredRackTeardown) {
+        self.app.graph.deferred_rack_teardowns.push(teardown);
+    }
+
+    fn engine_has_deferred_route_generation(&self, engine_id: usize) -> bool {
+        self.app
+            .graph
+            .deferred_rack_teardowns
+            .iter()
+            .any(|teardown| {
+                teardown
+                    .engine_routes
+                    .iter()
+                    .any(|route| route.engine_id == engine_id)
+            })
+    }
+
+    fn reap_rack_teardowns(&mut self, teardowns: Vec<DeferredRackTeardown>) {
+        if teardowns.is_empty() {
+            return;
+        }
+        let mut reaped_engine_ids = Vec::new();
+        {
+            let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+            for teardown in &teardowns {
+                for route in &teardown.engine_routes {
+                    for &node_id in &route.node_ids {
+                        unsafe {
+                            crate::audiograph::delete_node(self.app.graph.lg.0, node_id);
+                        }
+                    }
+                    if !reaped_engine_ids.contains(&route.engine_id) {
+                        reaped_engine_ids.push(route.engine_id);
+                    }
+                }
+                for slot in &teardown.slots {
+                    self.delete_rack_slot_nodes(slot);
+                }
+                if std::env::var_os("TINYSEQ_LOG_RACK_SYNC").is_some() {
+                    eprintln!("rack sync track {}: reaped", teardown.track_idx);
+                }
+            }
+        }
+        for engine_id in reaped_engine_ids {
+            if !self.engine_is_still_referenced(engine_id)
+                && !self.engine_has_deferred_route_generation(engine_id)
+            {
+                self.delete_engine_runtime(engine_id);
+            }
+        }
+    }
+
+    fn reap_excess_rack_teardowns(&mut self) {
+        let excess = self
+            .app
+            .graph
+            .deferred_rack_teardowns
+            .len()
+            .saturating_sub(MAX_DEFERRED_RACK_TEARDOWNS);
+        if excess == 0 {
+            return;
+        }
+        let oldest = self
+            .app
+            .graph
+            .deferred_rack_teardowns
+            .drain(..excess)
+            .collect();
+        self.reap_rack_teardowns(oldest);
+    }
+
+    pub fn reap_due_rack_teardowns(&mut self) {
+        if self.app.graph.deferred_rack_teardowns.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let pending = std::mem::take(&mut self.app.graph.deferred_rack_teardowns);
+        let (due, waiting): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|teardown| teardown.due_at <= now);
+        self.app.graph.deferred_rack_teardowns = waiting;
+        self.reap_rack_teardowns(due);
+    }
+
+    pub fn force_reap_all_rack_teardowns(&mut self) {
+        let teardowns = std::mem::take(&mut self.app.graph.deferred_rack_teardowns);
+        self.reap_rack_teardowns(teardowns);
     }
 
     fn rewire_engine_route_output_for_track(
@@ -5315,6 +5504,21 @@ impl GraphController<'_> {
         self.validate_rack_slot_graph_rebuild(track_idx, rack)?;
         let old_engine_ids = self.rack_engine_ids_for_track(track_idx);
         let old_rack_slots = self.app.graph.track_node_ids[track_idx].rack_slots.clone();
+        let reused_engine_outputs = old_rack_slots
+            .iter()
+            .filter_map(|slot| {
+                let engine_id = slot.engine_id?;
+                let incoming_uses_engine = rack
+                    .slots
+                    .iter()
+                    .any(|incoming| incoming.track_sound_state.engine_id == Some(engine_id));
+                (incoming_uses_engine
+                    && self
+                        .validated_engine_route_ids_for_track(engine_id, track_idx)
+                        .is_ok())
+                .then_some((engine_id, slot.slot_sum_l_id, slot.slot_sum_r_id))
+            })
+            .collect::<Vec<_>>();
         let track_nodes = self.app.graph.track_node_ids[track_idx].clone();
         let has_solo = rack.slots.iter().any(|slot| slot.solo);
         let mut rebuilt_nodes = Vec::with_capacity(rack.slots.len());
@@ -5322,11 +5526,23 @@ impl GraphController<'_> {
 
         {
             let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
-            for engine_id in old_engine_ids.iter().copied() {
-                self.delete_engine_route_for_track(engine_id, track_idx);
-            }
-            for slot in &old_rack_slots {
-                self.delete_rack_slot_nodes(slot);
+            let old_engine_routes = old_engine_ids
+                .iter()
+                .copied()
+                .filter(|engine_id| {
+                    !reused_engine_outputs
+                        .iter()
+                        .any(|(reused, _, _)| reused == engine_id)
+                })
+                .filter_map(|engine_id| self.detach_engine_route_generation(engine_id, track_idx))
+                .collect::<Vec<_>>();
+            if !old_rack_slots.is_empty() || !old_engine_routes.is_empty() {
+                self.enqueue_deferred_rack_teardown(DeferredRackTeardown {
+                    slots: old_rack_slots,
+                    engine_routes: old_engine_routes,
+                    track_idx,
+                    due_at: Instant::now() + RACK_TEARDOWN_TAIL,
+                });
             }
             self.clear_rack_sampler_runtime_pools_for_track(track_idx);
 
@@ -5443,6 +5659,19 @@ impl GraphController<'_> {
                             track_nodes.mod_out_id,
                             track_nodes.mod_in_clip_ids,
                         )?;
+                        if let Some((_, old_sum_l_id, old_sum_r_id)) = reused_engine_outputs
+                            .iter()
+                            .find(|(reused, _, _)| *reused == engine_id)
+                        {
+                            self.rewire_engine_route_output_for_track(
+                                engine_id,
+                                track_idx,
+                                *old_sum_l_id,
+                                *old_sum_r_id,
+                                mixer.slot_sum_l_id,
+                                mixer.slot_sum_r_id,
+                            )?;
+                        }
                         let engine = self.app.graph.engine_node_ids[engine_id]
                             .as_ref()
                             .ok_or_else(|| {
@@ -5517,8 +5746,11 @@ impl GraphController<'_> {
         self.app.graph.track_node_ids[track_idx].rack_signature =
             Some(rack_topology_signature(rack));
 
+        self.reap_excess_rack_teardowns();
         for engine_id in old_engine_ids {
-            if !self.engine_is_still_referenced(engine_id) {
+            if !self.engine_is_still_referenced(engine_id)
+                && !self.engine_has_deferred_route_generation(engine_id)
+            {
                 self.delete_engine_runtime(engine_id);
             }
         }
@@ -5765,6 +5997,22 @@ impl GraphController<'_> {
         Ok((rack, slot_idx))
     }
 
+    pub(super) fn refresh_rack_signature_from_live_state(&mut self, track_idx: usize) {
+        let signature = self
+            .app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track_idx)
+            .and_then(Option::as_ref)
+            .map(rack_topology_signature);
+        if let Some(track_nodes) = self.app.graph.track_node_ids.get_mut(track_idx) {
+            track_nodes.rack_signature = signature;
+        }
+    }
+
     fn finish_rack_track_registration(
         &mut self,
         idx: usize,
@@ -5773,6 +6021,7 @@ impl GraphController<'_> {
         rack_slots: Vec<RackSlotNodeIds>,
         rack_track: RackTrackSnapshot,
     ) {
+        let rack_signature = rack_topology_signature(&rack_track);
         self.app.state.runtime.voice_counts[idx].store(0, Ordering::Release);
         self.app.state.runtime.sampler_lids[idx].store(0, Ordering::Release);
         self.app.state.runtime.modulator_lids[idx].store(0, Ordering::Release);
@@ -5841,7 +6090,7 @@ impl GraphController<'_> {
             mod_env_id: shell.mod_env_id,
             bus_send_ids: Vec::new(),
             rack_slots,
-            rack_signature: None,
+            rack_signature: Some(rack_signature),
         });
         self.publish_rack_slot_panner_runtime(idx);
         self.app.graph.track_synth_node_ids.push(Vec::new());
@@ -8104,6 +8353,186 @@ mod tests {
     }
 
     #[test]
+    fn rack_rebuild_defers_old_sampler_nodes_until_forced_reap() {
+        let graph = TestLiveGraph::new("rack-deferred-sampler-teardown-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("blank sampler track should be created");
+        app.graph_controller()
+            .group_track_to_instrument_rack(0)
+            .expect("flat sampler should group to a rack");
+
+        let old_sampler_id = app.graph.track_node_ids[0].rack_slots[0].sampler_ids[0];
+        assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, old_sampler_id) });
+        graph.process_block();
+        let mut sampler_state = vec![0.0_f32; crate::sampler::SAMPLER_STATE_SIZE];
+        let mut state_size = 0;
+        assert!(unsafe {
+            crate::audiograph::get_node_state_into(
+                graph.ptr.0,
+                old_sampler_id,
+                sampler_state.as_mut_ptr().cast(),
+                sampler_state.len() * std::mem::size_of::<f32>(),
+                &mut state_size,
+            )
+        });
+
+        let mut rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state should exist");
+        rack.slots.push(rack.slots[0].clone());
+        app.graph_controller()
+            .rebuild_rack_slot_graph(0, &mut rack)
+            .expect("rack topology should rebuild");
+        assert_eq!(app.graph.deferred_rack_teardowns.len(), 1);
+        assert_ne!(
+            app.graph.track_node_ids[0].rack_slots[0].sampler_ids[0],
+            old_sampler_id
+        );
+
+        graph.process_block();
+        state_size = 0;
+        assert!(unsafe {
+            crate::audiograph::get_node_state_into(
+                graph.ptr.0,
+                old_sampler_id,
+                sampler_state.as_mut_ptr().cast(),
+                sampler_state.len() * std::mem::size_of::<f32>(),
+                &mut state_size,
+            )
+        });
+
+        app.graph_controller().force_reap_all_rack_teardowns();
+        assert!(app.graph.deferred_rack_teardowns.is_empty());
+        graph.process_block();
+        state_size = 0;
+        assert!(!unsafe {
+            crate::audiograph::get_node_state_into(
+                graph.ptr.0,
+                old_sampler_id,
+                sampler_state.as_mut_ptr().cast(),
+                sampler_state.len() * std::mem::size_of::<f32>(),
+                &mut state_size,
+            )
+        });
+        assert_eq!(state_size, 0);
+    }
+
+    #[test]
+    fn adding_sampler_rack_slot_refreshes_live_topology_signature() {
+        let graph = TestLiveGraph::new("rack-append-signature-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("one-slot rack should load");
+        app.graph_controller()
+            .add_sampler_slot_to_rack(0, sample)
+            .expect("second sampler slot should append");
+
+        let rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state should remain published");
+        assert_eq!(rack.slots.len(), 2);
+        assert_eq!(
+            app.graph.track_node_ids[0].rack_signature,
+            Some(rack_topology_signature(&rack))
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn same_engine_rack_rebuild_reuses_routes_through_deferred_slot_reap() {
+        let graph = TestLiveGraph::new("rack-deferred-engine-route-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 0);
+        let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+            name: "deferred-engine".to_string(),
+            source: "deferred-engine.lisp".to_string(),
+            manifest: manifest.clone(),
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        app.graph_controller()
+            .add_custom_track(
+                "deferred-engine",
+                engine_id,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("custom track should be created");
+        app.editor.instrument_libs.push(lib);
+        app.graph_controller()
+            .group_track_to_instrument_rack(0)
+            .expect("custom track should group to a rack");
+
+        let old_routes = app.graph.engine_node_ids[engine_id]
+            .as_ref()
+            .expect("engine runtime should exist")
+            .route_gain_ids[0]
+            .clone();
+        let mut rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state should exist");
+        rack.slots[0].instrument_run_mode = CustomInstrumentRunMode::FreePatch;
+        app.graph_controller()
+            .rebuild_rack_slot_graph(0, &mut rack)
+            .expect("changed rack topology should rebuild");
+
+        assert_eq!(app.graph.deferred_rack_teardowns.len(), 1);
+        let reused_routes = app.graph.engine_node_ids[engine_id]
+            .as_ref()
+            .expect("engine runtime should remain live")
+            .route_gain_ids[0]
+            .clone();
+        assert_eq!(reused_routes, old_routes);
+        assert!(app.graph.deferred_rack_teardowns[0]
+            .engine_routes
+            .is_empty());
+
+        app.graph_controller().force_reap_all_rack_teardowns();
+        graph.process_block();
+        assert!(app.graph.engine_node_ids[engine_id].is_some());
+        assert_eq!(
+            app.graph.engine_node_ids[engine_id]
+                .as_ref()
+                .expect("replacement engine runtime should survive")
+                .route_gain_ids[0],
+            reused_routes
+        );
+    }
+
+    #[test]
+    fn rack_teardown_queue_is_bounded_and_reaps_due_generations() {
+        let graph = TestLiveGraph::new("rack-deferred-queue-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        for track_idx in 0..=MAX_DEFERRED_RACK_TEARDOWNS {
+            app.graph_controller()
+                .enqueue_deferred_rack_teardown(DeferredRackTeardown {
+                    slots: Vec::new(),
+                    engine_routes: Vec::new(),
+                    track_idx,
+                    due_at: Instant::now() + RACK_TEARDOWN_TAIL,
+                });
+        }
+        app.graph_controller().reap_excess_rack_teardowns();
+        assert_eq!(
+            app.graph.deferred_rack_teardowns.len(),
+            MAX_DEFERRED_RACK_TEARDOWNS
+        );
+        assert_eq!(app.graph.deferred_rack_teardowns[0].track_idx, 1);
+
+        for teardown in &mut app.graph.deferred_rack_teardowns {
+            teardown.due_at = Instant::now();
+        }
+        app.graph_controller().reap_due_rack_teardowns();
+        assert!(app.graph.deferred_rack_teardowns.is_empty());
+    }
+
+    #[test]
     fn grouping_custom_track_preserves_instrument_engine_state_and_insert_fx() {
         let graph = TestLiveGraph::new("custom-group-to-rack-test");
         let mut manifest = test_instrument_manifest();
@@ -8212,7 +8641,7 @@ mod tests {
     }
 
     #[test]
-    fn replacing_expanded_rack_instrument_preserves_slot_fx_and_retires_old_engine() {
+    fn replacing_expanded_rack_instrument_preserves_slot_fx_and_defers_old_engine() {
         let graph = TestLiveGraph::new("rack-slot-instrument-replacement-test");
         let manifest = test_instrument_manifest();
         let lib = lisp_host::test_loaded_dgen_lib();
@@ -8260,10 +8689,16 @@ mod tests {
         assert_eq!(app.graph.track_node_ids[0].rack_slots.len(), 1);
         assert_eq!(app.graph.track_node_ids[0].rack_slots[0].engine_id, None);
         assert!(
-            app.graph.engine_node_ids[engine_id].is_none(),
-            "the replaced dedicated instrument runtime should be retired"
+            app.graph.engine_node_ids[engine_id].is_some(),
+            "the replaced instrument runtime must survive for the release tail"
         );
         graph.process_block();
+        app.graph_controller().force_reap_all_rack_teardowns();
+        graph.process_block();
+        assert!(
+            app.graph.engine_node_ids[engine_id].is_none(),
+            "the replaced instrument runtime should retire when its tail is reaped"
+        );
     }
 
     #[test]
@@ -8422,6 +8857,10 @@ mod tests {
             .clone()
             .expect("rack state");
         let filter_node = before.slots[0].effect_slots[1].node_id;
+        assert_eq!(
+            app.graph.track_node_ids[0].rack_signature,
+            Some(rack_topology_signature(&before))
+        );
 
         app.delete_rack_slot_effect_slot(0, 0, 0)
             .expect("first effect should delete");
@@ -8432,12 +8871,23 @@ mod tests {
         assert_eq!(after.slots[0].effect_descriptors[0].name, "Filter");
         assert_eq!(after.slots[0].effect_slots[0].node_id, filter_node);
         assert_eq!(after.slots[0].effect_slots[1].node_id, 0);
+        assert_eq!(
+            app.graph.track_node_ids[0].rack_signature,
+            Some(rack_topology_signature(&after))
+        );
         let replacement_slot = app
             .add_builtin_rack_slot_effect_sync(0, 0, "OTT")
             .expect("the first empty compacted slot should remain installable");
         assert_eq!(replacement_slot, 1);
         app.move_rack_slot_effect_slot_sync(0, 0, 0, 1)
             .expect("the compacted lease should remain movable");
+        let reordered = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state");
+        assert_eq!(
+            app.graph.track_node_ids[0].rack_signature,
+            Some(rack_topology_signature(&reordered))
+        );
         graph.process_block();
     }
 

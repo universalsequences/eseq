@@ -537,6 +537,7 @@ pub struct GraphState {
     /// GraphController::sync_current_pattern_mod_routes so scene switches can
     /// diff instead of disconnecting every possible track pair.
     pub applied_mod_routes: Vec<(i32, i32)>,
+    pub deferred_rack_teardowns: Vec<graph::DeferredRackTeardown>,
 }
 
 impl GraphState {
@@ -1617,6 +1618,7 @@ impl App {
                 record_armed: Vec::new(),
                 keyboard_tx,
                 applied_mod_routes: Vec::new(),
+                deferred_rack_teardowns: Vec::new(),
             },
         };
         app.ensure_bus_pattern_bank_len(1);

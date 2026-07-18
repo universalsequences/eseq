@@ -6788,6 +6788,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))),
             }
         }
+        app.graph_controller().reap_due_rack_teardowns();
         let queued_transport_scene = state
             .quantized_launches()
             .pending_target(sequencer::quantized_launch::QuantizedLaunchOwner::Transport)

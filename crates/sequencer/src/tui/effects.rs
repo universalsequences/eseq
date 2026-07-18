@@ -3039,7 +3039,7 @@ impl App {
     }
 
     fn write_rack_slot_effect(
-        &self,
+        &mut self,
         track: usize,
         rack_slot: usize,
         effect_slot: usize,
@@ -3061,9 +3061,12 @@ impl App {
                     slot.effect_slots[effect_slot] = snapshot.clone();
                     slot.custom_effect_names[effect_slot] = custom_name.clone();
                 });
-        updated
-            .then_some(())
-            .ok_or_else(|| "Failed to update rack-slot FX state".to_string())
+        if !updated {
+            return Err("Failed to update rack-slot FX state".to_string());
+        }
+        self.graph_controller()
+            .refresh_rack_signature_from_live_state(track);
+        Ok(())
     }
 
     pub fn next_free_rack_slot_effect_slot(&self, track: usize, rack_slot: usize) -> Option<usize> {
@@ -3133,6 +3136,8 @@ impl App {
         if !updated {
             return Err("Failed to update rack-slot FX state".to_string());
         }
+        self.graph_controller()
+            .refresh_rack_signature_from_live_state(track);
         self.state
             .update_rack_macros_for_all_pattern_snapshots(track, |macros| {
                 for mapping in macros
@@ -3356,6 +3361,8 @@ impl App {
                     }
                 }
             });
+            self.graph_controller()
+                .refresh_rack_signature_from_live_state(track);
         }
         updated
             .then_some(())
@@ -3394,6 +3401,8 @@ impl App {
         if !updated {
             return Err("Failed to move rack-slot effect state".to_string());
         }
+        self.graph_controller()
+            .refresh_rack_signature_from_live_state(track);
         self.state
             .update_rack_macros_for_all_pattern_snapshots(track, |macros| {
                 for mapping in macros
