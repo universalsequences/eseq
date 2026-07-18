@@ -3105,6 +3105,13 @@ pub struct RuntimeBindingState {
     pub engine_route_lids: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_route_lids_r: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_ext_route_lids: Vec<[[[AtomicU64; EXT_MOD_INPUT_COUNT]; MAX_TRACKS]; MAX_VOICES]>,
+    /// Per-rack-slot routes for shared custom engines. Rack slots use the same
+    /// stable pool identity as sampler rack slots, so multiple slots on one
+    /// track can consume one engine without manufacturing duplicate engines.
+    pub rack_engine_route_lids: Vec<[AtomicU64; MAX_VOICES]>,
+    pub rack_engine_route_lids_r: Vec<[AtomicU64; MAX_VOICES]>,
+    pub rack_engine_route_engine_ids: Vec<AtomicU32>,
+    pub rack_engine_ext_route_lids: Vec<[[AtomicU64; EXT_MOD_INPUT_COUNT]; MAX_VOICES]>,
     pub sampler_analysis_buffer_ids: Vec<AtomicU32>,
     pub sampler_analysis_bpm: Vec<AtomicU32>,
     pub sampler_onset_ptr_lo: Vec<AtomicU32>,
@@ -3416,6 +3423,18 @@ impl SequencerState {
                             std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                         })
                     })
+                    .collect(),
+                rack_engine_route_lids: (0..MAX_SAMPLER_POOLS)
+                    .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                    .collect(),
+                rack_engine_route_lids_r: (0..MAX_SAMPLER_POOLS)
+                    .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                    .collect(),
+                rack_engine_route_engine_ids: (0..MAX_SAMPLER_POOLS)
+                    .map(|_| AtomicU32::new(u32::MAX))
+                    .collect(),
+                rack_engine_ext_route_lids: (0..MAX_SAMPLER_POOLS)
+                    .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
                     .collect(),
                 sampler_analysis_buffer_ids: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(u32::MAX))

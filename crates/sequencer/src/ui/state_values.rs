@@ -22328,6 +22328,64 @@ mod tests {
             .cloned()
             .expect("rack sampler speed mod-depth knob on-change");
 
+        let col = speed_knob.rect.col + speed_knob.rect.width * 0.5;
+        let row = speed_knob.rect.row + speed_knob.rect.height * 0.5;
+        let width = layout.rect.width.ceil().max(1.0) as u16;
+        let height = layout.rect.height.ceil().max(1.0) as u16;
+        let pointer_event = |kind, column: u16, row: u16| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                col.floor() as u16,
+                row.floor() as u16,
+            ),
+            0,
+            0,
+            width,
+            height,
+            col,
+            row,
+        );
+        editor.drain_host_commands();
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                col.floor() as u16,
+                (row - 1.0).floor() as u16,
+            ),
+            0,
+            0,
+            width,
+            height,
+            col,
+            row - 1.0,
+        );
+        let pointer_commands = editor.drain_host_commands();
+        assert_eq!(
+            pointer_commands.len(),
+            2,
+            "dragging an empty rack modulation lane should set its source and depth: {pointer_commands:?}"
+        );
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                col.floor() as u16,
+                (row - 1.0).floor() as u16,
+            ),
+            0,
+            0,
+            width,
+            height,
+            col,
+            row - 1.0,
+        );
+        editor.drain_host_commands();
+
         editor
             .runtime_mut()
             .invoke(callback, vec![Value::Number(0.5)])
@@ -22409,6 +22467,28 @@ mod tests {
             sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
             0.5,
         ));
+        let sampler_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let speed_idx = sampler_descriptor
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("sampler descriptor should expose speed");
+        let speed_param = &sampler_descriptor.params[speed_idx];
+        app.map_rack_macro(
+            0,
+            sequencer::sequencer::RackMacroId::from_index(2).expect("macro 3"),
+            sequencer::sequencer::RackMacroMapping {
+                target: sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
+                    slot: 0,
+                    param: speed_param.name.clone(),
+                    param_index: speed_idx,
+                },
+                range_min: speed_param.min,
+                range_max: speed_param.max,
+                curve: sequencer::sequencer::RackMacroCurve::Linear,
+            },
+        )
+        .expect("map rack macro to modulatable sampler speed");
         let ott_descriptor = sequencer::effects::EffectDescriptor::builtin_ott();
         let ott_param = &ott_descriptor.params[0];
         app.map_rack_macro(
@@ -22598,6 +22678,83 @@ mod tests {
             Some(true)
         );
         assert_finite_nonzero_rect(attack_wrapper, "macro-owned rack sampler attack");
+
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-mods-open true) (set! instrument-selected-mod-slot 1))")
+            .expect("open modulation editing for macro-owned rack sampler parameter");
+        editor.refresh_runtime_side_effects();
+        let mods_layout = editor
+            .widget_layout()
+            .expect("macro-owned rack sampler mods layout");
+        let speed_depth_key = format!("sampler-param-{speed_idx}-mod-depth");
+        let speed_depth = find_layout_node_by_stable_key(&mods_layout, &speed_depth_key)
+            .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+            .expect("macro-owned speed should become an editable modulation-depth control");
+        let col = speed_depth.rect.col + speed_depth.rect.width * 0.5;
+        let row = speed_depth.rect.row + speed_depth.rect.height * 0.5;
+        let pointer_event = |kind, column: u16, row: u16| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                col.floor() as u16,
+                row.floor() as u16,
+            ),
+            0,
+            0,
+            160,
+            20,
+            col,
+            row,
+        );
+        editor.drain_host_commands();
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                col.floor() as u16,
+                (row - 1.0).floor() as u16,
+            ),
+            0,
+            0,
+            160,
+            20,
+            col,
+            row - 1.0,
+        );
+        let depth_commands = editor.drain_host_commands();
+        assert!(
+            depth_commands.iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. }
+                    if name == "set-rack-slot-instrument-param"
+            )),
+            "macro ownership must protect only the base parameter, not its modulation depth: {depth_commands:?}"
+        );
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                col.floor() as u16,
+                (row - 1.0).floor() as u16,
+            ),
+            0,
+            0,
+            160,
+            20,
+            col,
+            row - 1.0,
+        );
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(set! instrument-mods-open false)")
+            .expect("return to rack sampler base controls");
+        editor.refresh_runtime_side_effects();
+
         assert_finite_nonzero_rect(ott_mods, "rack slot OTT modulation tab");
         assert_layout_inside(ott_mods, ott_header, "rack slot OTT modulation tab");
         assert!(

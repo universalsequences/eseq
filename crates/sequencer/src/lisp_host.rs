@@ -2199,7 +2199,7 @@ pub fn set_dgen_instrument_output_count(slot_id: usize, count: usize) {
 
 pub fn set_dgen_engine_enabled_voices(engine_id: usize, count: usize) {
     if engine_id < MAX_INSTRUMENT_ENGINES {
-        DGEN_ENGINE_ENABLED_VOICES[engine_id].store(count.clamp(1, MAX_VOICES), Ordering::Release);
+        DGEN_ENGINE_ENABLED_VOICES[engine_id].store(count.min(MAX_VOICES), Ordering::Release);
     }
 }
 
@@ -2207,7 +2207,7 @@ pub fn get_dgen_engine_enabled_voices(engine_id: usize) -> usize {
     if engine_id < MAX_INSTRUMENT_ENGINES {
         DGEN_ENGINE_ENABLED_VOICES[engine_id]
             .load(Ordering::Acquire)
-            .clamp(1, MAX_VOICES)
+            .min(MAX_VOICES)
     } else {
         1
     }
@@ -2269,7 +2269,7 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
     if engine_id < MAX_INSTRUMENT_ENGINES {
         let enabled = DGEN_ENGINE_ENABLED_VOICES[engine_id]
             .load(Ordering::Acquire)
-            .clamp(1, MAX_VOICES);
+            .min(MAX_VOICES);
         if voice_idx >= enabled {
             let nf = nframes as usize;
             let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]

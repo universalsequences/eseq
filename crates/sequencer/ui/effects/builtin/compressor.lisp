@@ -25,7 +25,7 @@
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
     :plock-color-b (param-plock-color-b)
-    :width 6.4 :height 3.2 :knob-size 2.0
+    :width 6.4 :height 2.6 :knob-size 2.0
     :track-color '(rgba 0.4, 0.4, 0.4, 1)
     :on-change (lambda (v) (fx-set-effect-value fx p v))))
 
@@ -61,6 +61,7 @@
   (button label-text
     :width w :height 1.05 :padding 0 :font-size 8.5
     :background-color (if (fx-param-on-for? fx p) (comp-orange) :mixer-control-bg)
+    :border-color :transparent
     :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
@@ -74,27 +75,31 @@
     (button label-text
       :width w :height 1.05 :padding 0 :font-size 8.5
       :background-color (if active (comp-orange) :mixer-control-bg)
+      :border-color :transparent
       :color (if active :black :dim)
       :on-click |x y r| (fx-set-effect-value fx p idx))))
 
 (def builtin-fx-comp-option (fx p w)
   (dropdown :value (get p :text-value)
     :options (get p :options)
+    :bg-color :mixer-strip-selected-bg
+    :border-color :mixer-strip-border
+    :badge-color :transparent
     :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
     :plock-color-b (param-plock-color-b)
-    :width w :height 1.05 :font-size 9.5))
+    :width w :height 0.8 :font-size 9.5))
 
 ;; ── Sidechain section ──
 
 (def builtin-fx-comp-sidechain-box (fx sc-source-p sc-on-p sc-gain-p listen-p
                                     filter-on-p type-p freq-p res-p)
-  (box :width 8.6 :height 9.7 :padding 0.30
+  (box :width 9.6 :height 9.7 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
-      (h-stack :gap 0.22 :align :center
+      (h-stack :gap 0.22 :align :baseline
         (label "Sidechain" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
         (builtin-fx-comp-toggle fx sc-on-p "SC" 2.0)
         (builtin-fx-comp-toggle fx listen-p "Ear" 2.0))
@@ -119,7 +124,7 @@
 ;; ── Activity display ──
 
 (def builtin-fx-comp-display-box (fx thr-p out-p knee-p look-p env-p)
-  (box :width 21.6 :height 9.7 :padding 0.30
+  (box :width 23.6 :height 9.7 :padding 0.30
        :background-color :black :corner-radius 7
     (v-stack :gap 0.16 :align :start
       (h-stack :gap 0.6 :align :baseline
@@ -128,10 +133,10 @@
         (label "Output" :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
         (builtin-fx-comp-mini-number fx "Out" out-p 1 4.4))
       (compressor-display
-        :width 20.8 :height 6.0
+        :width 23.6 :height 6.0
         :source (builtin-fx-comp-source fx)
         :threshold (instrument-param-base-value thr-p))
-      (h-stack :gap 0.55 :align :center
+      (h-stack :gap 0.55 :align :baseline
         (builtin-fx-comp-mini-number fx "Knee" knee-p 1 3.6)
         (label "Look." :font-size 8.5 :width 2.5 :color :dim :bg :transparent)
         (builtin-fx-comp-option fx look-p 4.4)

@@ -201,6 +201,16 @@ fn instrument_display_name(name: &str) -> String {
         .to_string()
 }
 
+fn custom_route_parent_track(route_idx: usize) -> Option<usize> {
+    if route_idx < MAX_TRACKS {
+        Some(route_idx)
+    } else if route_idx < crate::sequencer::MAX_SAMPLER_POOLS {
+        Some((route_idx - MAX_TRACKS) / MAX_RACK_SLOTS)
+    } else {
+        None
+    }
+}
+
 fn free_patch_idle_route_value(
     route_track: usize,
     target_track: usize,
@@ -1650,6 +1660,7 @@ impl GraphController<'_> {
         self.connect_engine_to_track(
             engine_id,
             idx,
+            idx,
             &track_name,
             shell.voice_sum_id,
             shell.voice_sum_r_id,
@@ -1832,6 +1843,7 @@ impl GraphController<'_> {
             self.connect_engine_to_track(
                 new_engine_id,
                 track,
+                track,
                 &track_name,
                 track_nodes.voice_sum_id,
                 track_nodes.voice_sum_r_id,
@@ -1849,7 +1861,7 @@ impl GraphController<'_> {
             );
 
             if new_engine_id != old_engine_id {
-                self.delete_engine_route_for_track(old_engine_id, track);
+                self.delete_engine_route_for_track(old_engine_id, track, track);
                 if should_delete_old_runtime {
                     self.delete_engine_runtime(old_engine_id);
                 }
@@ -2017,6 +2029,7 @@ impl GraphController<'_> {
         self.connect_engine_to_track(
             new_engine_id,
             track,
+            track,
             &old_track_name,
             track_nodes.voice_sum_id,
             track_nodes.voice_sum_r_id,
@@ -2142,7 +2155,7 @@ impl GraphController<'_> {
             track_nodes.mod_in_clip_ids,
             MAX_VOICES,
         )?;
-        self.delete_engine_route_for_track(old_engine_id, track);
+        self.delete_engine_route_for_track(old_engine_id, track, track);
         if should_delete_old_runtime {
             self.delete_engine_runtime(old_engine_id);
         }
@@ -2344,12 +2357,9 @@ impl GraphController<'_> {
                     });
                 }
                 RackSlotInstrumentBuildSpec::Custom(custom) => {
-                    if self.engine_has_track_route(custom.engine_id, idx) {
-                        return Err(format!(
-                            "Rack custom slot '{}' requires a dedicated engine runtime; engine {} is already routed to track {}",
-                            custom.instrument_name, custom.engine_id, idx
-                        ));
-                    }
+                    let route_idx = rack_slot_pool_index(idx, slot_idx).ok_or_else(|| {
+                        format!("Rack slot {} has no route-consumer identity", slot_idx + 1)
+                    })?;
                     self.ensure_custom_engine_runtime(
                         custom.engine_id,
                         custom.instrument_name,
@@ -2358,6 +2368,7 @@ impl GraphController<'_> {
                     )?;
                     self.connect_engine_to_track(
                         custom.engine_id,
+                        route_idx,
                         idx,
                         &slot_name,
                         mixer.slot_sum_l_id,
@@ -2579,6 +2590,9 @@ impl GraphController<'_> {
                     mixer.slot_sum_l_id,
                     mixer.slot_sum_r_id,
                 )?;
+                let route_idx = rack_slot_pool_index(track, 0)
+                    .ok_or_else(|| "Rack custom route unavailable".to_string())?;
+                self.move_engine_route_to_rack_consumer(engine_id, track, route_idx)?;
                 RackSlotNodeIds {
                     sampler_pool_id: None,
                     engine_id: Some(engine_id),
@@ -2693,7 +2707,7 @@ impl GraphController<'_> {
                 }
                 InstrumentType::Custom => {
                     if let Some(engine_id) = old_flat_engine {
-                        self.delete_engine_route_for_track(engine_id, track);
+                        self.delete_engine_route_for_track(engine_id, track, track);
                     }
                 }
                 _ => {
@@ -3096,12 +3110,8 @@ impl GraphController<'_> {
         if rack.routing == RackRouting::ByPitch {
             return Err("Add instruments to a drum rack pad, not the rack chain".to_string());
         }
-        if self.engine_has_track_route(engine_id, track_idx) {
-            return Err(format!(
-                "Rack custom slot '{}' requires a dedicated engine runtime; engine {} is already routed to track {}",
-                instrument_name, engine_id, track_idx
-            ));
-        }
+        let route_idx = rack_slot_pool_index(track_idx, slot_idx)
+            .ok_or_else(|| format!("Rack slot {} has no route-consumer identity", slot_idx + 1))?;
 
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         self.ensure_custom_engine_runtime(engine_id, instrument_name, manifest, lib)?;
@@ -3124,6 +3134,7 @@ impl GraphController<'_> {
         )?;
         self.connect_engine_to_track(
             engine_id,
+            route_idx,
             track_idx,
             &slot_name,
             mixer.slot_sum_l_id,
@@ -4021,7 +4032,13 @@ impl GraphController<'_> {
             self.delete_rack_effect_chains(track_idx, batch.serial)?;
             self.delete_track_engine_routes(track_idx);
             if let Some(track_nodes) = self.app.graph.track_node_ids.get(track_idx).cloned() {
-                for rack_slot in &track_nodes.rack_slots {
+                for (slot_idx, rack_slot) in track_nodes.rack_slots.iter().enumerate() {
+                    if let (Some(engine_id), Some(route_idx)) = (
+                        rack_slot.engine_id,
+                        rack_slot_pool_index(track_idx, slot_idx),
+                    ) {
+                        self.delete_engine_route_for_track(engine_id, route_idx, track_idx);
+                    }
                     self.delete_rack_slot_nodes(rack_slot);
                 }
             }
@@ -4251,7 +4268,7 @@ impl GraphController<'_> {
             })
             .collect::<Vec<_>>();
         for engine_id in engine_ids {
-            self.delete_engine_route_for_track(engine_id, track_idx);
+            self.delete_engine_route_for_track(engine_id, track_idx, track_idx);
         }
     }
 
@@ -4316,6 +4333,19 @@ impl GraphController<'_> {
         }
     }
 
+    /// Stops an outgoing custom-instrument generation from carrying future
+    /// audio produced by a shared engine. The slot panner smooths mute changes,
+    /// so this closes the generation without a discontinuity while downstream
+    /// rack FX remain available to render their own tails until reap.
+    fn retire_custom_rack_slot_output(&self, slot: &RackSlotNodeIds) {
+        push_graph_param(
+            self.app.graph.lg.0,
+            slot.slot_pan_id as u64,
+            crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+            1.0,
+        );
+    }
+
     fn rack_engine_ids_for_track(&self, track_idx: usize) -> Vec<usize> {
         let Some(nodes) = self.app.graph.track_node_ids.get(track_idx) else {
             return Vec::new();
@@ -4355,7 +4385,12 @@ impl GraphController<'_> {
                 })
     }
 
-    fn delete_engine_route_for_track(&mut self, engine_id: usize, track_idx: usize) {
+    fn delete_engine_route_for_track(
+        &mut self,
+        engine_id: usize,
+        route_idx: usize,
+        track_idx: usize,
+    ) {
         let track_mod_out_id = self
             .app
             .graph
@@ -4371,6 +4406,16 @@ impl GraphController<'_> {
         else {
             return;
         };
+        let has_sibling_route = engine
+            .route_gain_ids
+            .iter()
+            .enumerate()
+            .any(|(idx, routes)| {
+                idx != route_idx
+                    && !routes.is_empty()
+                    && custom_route_parent_track(idx) == Some(track_idx)
+            });
+        if !has_sibling_route {
         if let (Some(track_mod_out_id), Some(mod_output_channel)) = (
             track_mod_out_id,
             engine.mod_output_channels.first().copied(),
@@ -4387,8 +4432,9 @@ impl GraphController<'_> {
                 }
             }
         }
-        if track_idx < engine.route_gain_ids.len() {
-            for route_pair in &engine.route_gain_ids[track_idx] {
+        }
+        if route_idx < engine.route_gain_ids.len() {
+            for route_pair in &engine.route_gain_ids[route_idx] {
                 for &route_id in route_pair {
                     if route_id > 0 {
                         unsafe {
@@ -4397,10 +4443,10 @@ impl GraphController<'_> {
                     }
                 }
             }
-            engine.route_gain_ids[track_idx].clear();
+            engine.route_gain_ids[route_idx].clear();
         }
-        if track_idx < engine.ext_route_gain_ids.len() {
-            for route_ids in &engine.ext_route_gain_ids[track_idx] {
+        if route_idx < engine.ext_route_gain_ids.len() {
+            for route_ids in &engine.ext_route_gain_ids[route_idx] {
                 for &route_id in route_ids {
                     if route_id > 0 {
                         unsafe {
@@ -4409,17 +4455,34 @@ impl GraphController<'_> {
                     }
                 }
             }
-            engine.ext_route_gain_ids[track_idx].clear();
+            engine.ext_route_gain_ids[route_idx].clear();
         }
         for voice in 0..MAX_VOICES {
-            self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+            if route_idx < MAX_TRACKS {
+                self.app.state.runtime.engine_route_lids[engine_id][voice][route_idx]
                 .store(0, Ordering::Release);
-            self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+                self.app.state.runtime.engine_route_lids_r[engine_id][voice][route_idx]
+                    .store(0, Ordering::Release);
+            } else {
+                self.app.state.runtime.rack_engine_route_lids[route_idx][voice]
+                    .store(0, Ordering::Release);
+                self.app.state.runtime.rack_engine_route_lids_r[route_idx][voice]
                 .store(0, Ordering::Release);
+            }
             for input in 0..EXT_MOD_INPUT_COUNT {
-                self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track_idx][input]
+                if route_idx < MAX_TRACKS {
+                    self.app.state.runtime.engine_ext_route_lids[engine_id][voice][route_idx]
+                        [input]
+                        .store(0, Ordering::Release);
+                } else {
+                    self.app.state.runtime.rack_engine_ext_route_lids[route_idx][voice][input]
                     .store(0, Ordering::Release);
             }
+        }
+    }
+        if route_idx >= MAX_TRACKS {
+            self.app.state.runtime.rack_engine_route_engine_ids[route_idx]
+                .store(u32::MAX, Ordering::Release);
         }
     }
 
@@ -4429,6 +4492,7 @@ impl GraphController<'_> {
     fn detach_engine_route_generation(
         &mut self,
         engine_id: usize,
+        route_idx: usize,
         track_idx: usize,
     ) -> Option<DeferredEngineRouteGeneration> {
         let track_mod_out_id = self
@@ -4444,6 +4508,16 @@ impl GraphController<'_> {
             .get_mut(engine_id)
             .and_then(Option::as_mut)?;
 
+        let has_sibling_route = engine
+            .route_gain_ids
+            .iter()
+            .enumerate()
+            .any(|(idx, routes)| {
+                idx != route_idx
+                    && !routes.is_empty()
+                    && custom_route_parent_track(idx) == Some(track_idx)
+            });
+        if !has_sibling_route {
         if let Some(mod_output_channel) = engine.mod_output_channels.first().copied() {
             for &synth_id in &engine.synth_ids {
                 unsafe {
@@ -4457,15 +4531,16 @@ impl GraphController<'_> {
                 }
             }
         }
+        }
 
         let route_ids = engine
             .route_gain_ids
-            .get_mut(track_idx)
+            .get_mut(route_idx)
             .map(std::mem::take)
             .unwrap_or_default();
         let ext_route_ids = engine
             .ext_route_gain_ids
-            .get_mut(track_idx)
+            .get_mut(route_idx)
             .map(std::mem::take)
             .unwrap_or_default();
         let mut node_ids = route_ids
@@ -4481,15 +4556,17 @@ impl GraphController<'_> {
         );
 
         for voice in 0..MAX_VOICES {
-            self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+            self.app.state.runtime.rack_engine_route_lids[route_idx][voice]
                 .store(0, Ordering::Release);
-            self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+            self.app.state.runtime.rack_engine_route_lids_r[route_idx][voice]
                 .store(0, Ordering::Release);
             for input in 0..EXT_MOD_INPUT_COUNT {
-                self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track_idx][input]
+                self.app.state.runtime.rack_engine_ext_route_lids[route_idx][voice][input]
                     .store(0, Ordering::Release);
             }
         }
+        self.app.state.runtime.rack_engine_route_engine_ids[route_idx]
+            .store(u32::MAX, Ordering::Release);
 
         (!node_ids.is_empty()).then_some(DeferredEngineRouteGeneration {
             engine_id,
@@ -4631,6 +4708,53 @@ impl GraphController<'_> {
         Ok(())
     }
 
+    fn move_engine_route_to_rack_consumer(
+        &mut self,
+        engine_id: usize,
+        track_idx: usize,
+        route_idx: usize,
+    ) -> Result<(), String> {
+        let engine = self
+            .app
+            .graph
+            .engine_node_ids
+            .get_mut(engine_id)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| format!("Missing custom engine runtime {engine_id}"))?;
+        if route_idx >= engine.route_gain_ids.len() {
+            return Err(format!("Rack route consumer {route_idx} is unavailable"));
+        }
+        if !engine.route_gain_ids[route_idx].is_empty()
+            || !engine.ext_route_gain_ids[route_idx].is_empty()
+        {
+            return Err(format!("Rack route consumer {route_idx} is already in use"));
+        }
+        engine.route_gain_ids[route_idx] = std::mem::take(&mut engine.route_gain_ids[track_idx]);
+        engine.ext_route_gain_ids[route_idx] =
+            std::mem::take(&mut engine.ext_route_gain_ids[track_idx]);
+        self.app.state.runtime.rack_engine_route_engine_ids[route_idx]
+            .store(engine_id as u32, Ordering::Release);
+        for voice in 0..MAX_VOICES {
+            let [left, right] = engine.route_gain_ids[route_idx][voice];
+            self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+                .store(0, Ordering::Release);
+            self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+                .store(0, Ordering::Release);
+            self.app.state.runtime.rack_engine_route_lids[route_idx][voice]
+                .store(left as u64, Ordering::Release);
+            self.app.state.runtime.rack_engine_route_lids_r[route_idx][voice]
+                .store(right as u64, Ordering::Release);
+            for input in 0..EXT_MOD_INPUT_COUNT {
+                let ext = engine.ext_route_gain_ids[route_idx][voice][input];
+                self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track_idx][input]
+                    .store(0, Ordering::Release);
+                self.app.state.runtime.rack_engine_ext_route_lids[route_idx][voice][input]
+                    .store(ext as u64, Ordering::Release);
+            }
+        }
+        Ok(())
+    }
+
     fn validated_engine_route_ids_for_track(
         &self,
         engine_id: usize,
@@ -4713,7 +4837,7 @@ impl GraphController<'_> {
         }
 
         self.app.state.runtime.engine_voice_counts[engine_id].store(0, Ordering::Release);
-        lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+        lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
         for voice in 0..MAX_VOICES {
             self.app.state.runtime.engine_voice_lids[engine_id][voice].store(0, Ordering::Release);
             self.app.state.runtime.engine_synth_node_ids[engine_id][voice]
@@ -4728,6 +4852,26 @@ impl GraphController<'_> {
                 for input in 0..EXT_MOD_INPUT_COUNT {
                     self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track_idx]
                         [input]
+                        .store(0, Ordering::Release);
+                }
+            }
+        }
+        for route_idx in MAX_TRACKS..crate::sequencer::MAX_SAMPLER_POOLS {
+            if self.app.state.runtime.rack_engine_route_engine_ids[route_idx]
+                .load(Ordering::Acquire)
+                != engine_id as u32
+            {
+                continue;
+            }
+            self.app.state.runtime.rack_engine_route_engine_ids[route_idx]
+                .store(u32::MAX, Ordering::Release);
+            for voice in 0..MAX_VOICES {
+                self.app.state.runtime.rack_engine_route_lids[route_idx][voice]
+                    .store(0, Ordering::Release);
+                self.app.state.runtime.rack_engine_route_lids_r[route_idx][voice]
+                    .store(0, Ordering::Release);
+                for input in 0..EXT_MOD_INPUT_COUNT {
+                    self.app.state.runtime.rack_engine_ext_route_lids[route_idx][voice][input]
                         .store(0, Ordering::Release);
                 }
             }
@@ -4747,6 +4891,70 @@ impl GraphController<'_> {
             if old_count > 0 {
                 engine.route_gain_ids[old_count - 1].clear();
                 engine.ext_route_gain_ids[old_count - 1].clear();
+            }
+            for track in track_idx..old_count.saturating_sub(1) {
+                for slot in 0..MAX_RACK_SLOTS {
+                    let dst = rack_slot_pool_index(track, slot).expect("valid rack route index");
+                    let src = rack_slot_pool_index(track + 1, slot)
+                        .expect("valid shifted rack route index");
+                    engine.route_gain_ids[dst] = std::mem::take(&mut engine.route_gain_ids[src]);
+                    engine.ext_route_gain_ids[dst] =
+                        std::mem::take(&mut engine.ext_route_gain_ids[src]);
+                }
+            }
+            if old_count > 0 {
+                for slot in 0..MAX_RACK_SLOTS {
+                    let tail = rack_slot_pool_index(old_count - 1, slot)
+                        .expect("valid trailing rack route index");
+                    engine.route_gain_ids[tail].clear();
+                    engine.ext_route_gain_ids[tail].clear();
+                }
+            }
+        }
+        for track in track_idx..old_count.saturating_sub(1) {
+            for slot in 0..MAX_RACK_SLOTS {
+                let dst = rack_slot_pool_index(track, slot).expect("valid rack route index");
+                let src =
+                    rack_slot_pool_index(track + 1, slot).expect("valid shifted rack route index");
+                let engine_id = self.app.state.runtime.rack_engine_route_engine_ids[src]
+                    .load(Ordering::Acquire);
+                self.app.state.runtime.rack_engine_route_engine_ids[dst]
+                    .store(engine_id, Ordering::Release);
+                for voice in 0..MAX_VOICES {
+                    let left = self.app.state.runtime.rack_engine_route_lids[src][voice]
+                        .load(Ordering::Acquire);
+                    let right = self.app.state.runtime.rack_engine_route_lids_r[src][voice]
+                        .load(Ordering::Acquire);
+                    self.app.state.runtime.rack_engine_route_lids[dst][voice]
+                        .store(left, Ordering::Release);
+                    self.app.state.runtime.rack_engine_route_lids_r[dst][voice]
+                        .store(right, Ordering::Release);
+                    for input in 0..EXT_MOD_INPUT_COUNT {
+                        let ext = self.app.state.runtime.rack_engine_ext_route_lids[src][voice]
+                            [input]
+                            .load(Ordering::Acquire);
+                        self.app.state.runtime.rack_engine_ext_route_lids[dst][voice][input]
+                            .store(ext, Ordering::Release);
+                    }
+                }
+            }
+        }
+        if old_count > 0 {
+            for slot in 0..MAX_RACK_SLOTS {
+                let tail = rack_slot_pool_index(old_count - 1, slot)
+                    .expect("valid trailing rack route index");
+                self.app.state.runtime.rack_engine_route_engine_ids[tail]
+                    .store(u32::MAX, Ordering::Release);
+                for voice in 0..MAX_VOICES {
+                    self.app.state.runtime.rack_engine_route_lids[tail][voice]
+                        .store(0, Ordering::Release);
+                    self.app.state.runtime.rack_engine_route_lids_r[tail][voice]
+                        .store(0, Ordering::Release);
+                    for input in 0..EXT_MOD_INPUT_COUNT {
+                        self.app.state.runtime.rack_engine_ext_route_lids[tail][voice][input]
+                            .store(0, Ordering::Release);
+                    }
+                }
             }
         }
     }
@@ -4878,6 +5086,7 @@ impl GraphController<'_> {
         })?;
         self.connect_engine_to_track(
             dedicated_engine_id,
+            track,
             track,
             &track_name,
             track_nodes.voice_sum_id,
@@ -5504,21 +5713,6 @@ impl GraphController<'_> {
         self.validate_rack_slot_graph_rebuild(track_idx, rack)?;
         let old_engine_ids = self.rack_engine_ids_for_track(track_idx);
         let old_rack_slots = self.app.graph.track_node_ids[track_idx].rack_slots.clone();
-        let reused_engine_outputs = old_rack_slots
-            .iter()
-            .filter_map(|slot| {
-                let engine_id = slot.engine_id?;
-                let incoming_uses_engine = rack
-                    .slots
-                    .iter()
-                    .any(|incoming| incoming.track_sound_state.engine_id == Some(engine_id));
-                (incoming_uses_engine
-                    && self
-                        .validated_engine_route_ids_for_track(engine_id, track_idx)
-                        .is_ok())
-                .then_some((engine_id, slot.slot_sum_l_id, slot.slot_sum_r_id))
-            })
-            .collect::<Vec<_>>();
         let track_nodes = self.app.graph.track_node_ids[track_idx].clone();
         let has_solo = rack.slots.iter().any(|slot| slot.solo);
         let mut rebuilt_nodes = Vec::with_capacity(rack.slots.len());
@@ -5526,15 +5720,15 @@ impl GraphController<'_> {
 
         {
             let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
-            let old_engine_routes = old_engine_ids
+            let old_engine_routes = old_rack_slots
                 .iter()
-                .copied()
-                .filter(|engine_id| {
-                    !reused_engine_outputs
-                        .iter()
-                        .any(|(reused, _, _)| reused == engine_id)
+                .enumerate()
+                .filter_map(|(slot_idx, slot)| {
+                    let engine_id = slot.engine_id?;
+                    self.retire_custom_rack_slot_output(slot);
+                    let route_idx = rack_slot_pool_index(track_idx, slot_idx)?;
+                    self.detach_engine_route_generation(engine_id, route_idx, track_idx)
                 })
-                .filter_map(|engine_id| self.detach_engine_route_generation(engine_id, track_idx))
                 .collect::<Vec<_>>();
             if !old_rack_slots.is_empty() || !old_engine_routes.is_empty() {
                 self.enqueue_deferred_rack_teardown(DeferredRackTeardown {
@@ -5652,6 +5846,9 @@ impl GraphController<'_> {
                         }
                         self.connect_engine_to_track(
                             engine_id,
+                            rack_slot_pool_index(track_idx, slot_idx).ok_or_else(|| {
+                                format!("Rack slot {} has no route-consumer identity", slot_idx + 1)
+                            })?,
                             track_idx,
                             &slot_name,
                             mixer.slot_sum_l_id,
@@ -5659,19 +5856,6 @@ impl GraphController<'_> {
                             track_nodes.mod_out_id,
                             track_nodes.mod_in_clip_ids,
                         )?;
-                        if let Some((_, old_sum_l_id, old_sum_r_id)) = reused_engine_outputs
-                            .iter()
-                            .find(|(reused, _, _)| *reused == engine_id)
-                        {
-                            self.rewire_engine_route_output_for_track(
-                                engine_id,
-                                track_idx,
-                                *old_sum_l_id,
-                                *old_sum_r_id,
-                                mixer.slot_sum_l_id,
-                                mixer.slot_sum_r_id,
-                            )?;
-                        }
                         let engine = self.app.graph.engine_node_ids[engine_id]
                             .as_ref()
                             .ok_or_else(|| {
@@ -5746,6 +5930,14 @@ impl GraphController<'_> {
         self.app.graph.track_node_ids[track_idx].rack_signature =
             Some(rack_topology_signature(rack));
 
+        for engine_id in old_engine_ids.iter().copied() {
+            if !self.engine_is_still_referenced(engine_id) {
+                // A deferred custom generation has no scheduler-visible work
+                // left. Keep its graph nodes allocated for safe reap, but stop
+                // running an otherwise-idle instrument voice in the meantime.
+                lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
+            }
+        }
         self.reap_excess_rack_teardowns();
         for engine_id in old_engine_ids {
             if !self.engine_is_still_referenced(engine_id)
@@ -5957,17 +6149,6 @@ impl GraphController<'_> {
             slot_sum_r_id,
             slot_pan_id,
         })
-    }
-
-    fn engine_has_track_route(&self, engine_id: usize, track_idx: usize) -> bool {
-        self.app
-            .graph
-            .engine_node_ids
-            .get(engine_id)
-            .and_then(|engine| engine.as_ref())
-            .and_then(|engine| engine.route_gain_ids.get(track_idx))
-            .map(|routes| !routes.is_empty())
-            .unwrap_or(false)
     }
 
     fn rack_slot_append_target(
@@ -6592,8 +6773,12 @@ impl GraphController<'_> {
             mod_output_channels,
             gatepitch_ids,
             modulator_ids,
-            route_gain_ids: (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
-            ext_route_gain_ids: (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
+            route_gain_ids: (0..crate::sequencer::MAX_SAMPLER_POOLS)
+                .map(|_| Vec::new())
+                .collect(),
+            ext_route_gain_ids: (0..crate::sequencer::MAX_SAMPLER_POOLS)
+                .map(|_| Vec::new())
+                .collect(),
         });
 
         for (v, &lid) in voice_lids.iter().enumerate() {
@@ -6618,6 +6803,7 @@ impl GraphController<'_> {
     fn connect_engine_to_track(
         &mut self,
         engine_id: usize,
+        route_idx: usize,
         track_idx: usize,
         track_name: &str,
         voice_sum_id: i32,
@@ -6631,9 +6817,9 @@ impl GraphController<'_> {
                 "connect_engine_to_track: engine {engine_id} has no audio-thread route table"
             ));
         }
-        if track_idx >= MAX_TRACKS {
+        if route_idx >= crate::sequencer::MAX_SAMPLER_POOLS {
             return Err(format!(
-                "connect_engine_to_track: track {track_idx} exceeds the {MAX_TRACKS}-track runtime limit"
+                "connect_engine_to_track: route consumer {route_idx} exceeds the custom route limit"
             ));
         }
         let Some(existing_engine) = self.app.graph.engine_node_ids[engine_id].as_ref() else {
@@ -6642,9 +6828,12 @@ impl GraphController<'_> {
                 engine_id
             ));
         };
+        if lisp_host::get_dgen_engine_enabled_voices(engine_id) == 0 {
+            lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+        }
         let (Some(existing_routes), Some(existing_ext_routes)) = (
-            existing_engine.route_gain_ids.get(track_idx),
-            existing_engine.ext_route_gain_ids.get(track_idx),
+            existing_engine.route_gain_ids.get(route_idx),
+            existing_engine.ext_route_gain_ids.get(route_idx),
         ) else {
             return Err(format!(
                 "connect_engine_to_track: track {track_idx} is outside engine {engine_id}'s route table"
@@ -6659,6 +6848,16 @@ impl GraphController<'_> {
             ));
         }
         let synth_ids = existing_engine.synth_ids.clone();
+        let has_sibling_route =
+            existing_engine
+                .route_gain_ids
+                .iter()
+                .enumerate()
+                .any(|(idx, routes)| {
+                    idx != route_idx
+                        && !routes.is_empty()
+                        && custom_route_parent_track(idx) == Some(track_idx)
+                });
         let audio_output_channels = existing_engine.audio_output_channels.clone();
         let primary_mod_output_channel = existing_engine.mod_output_channels.first().copied();
         let modulator_ids = existing_engine.modulator_ids.clone();
@@ -6776,6 +6975,7 @@ impl GraphController<'_> {
 
             route_ids.push(route_pair);
 
+            if !has_sibling_route {
             if let Some(src_channel) = primary_mod_output_channel {
                 transaction.connect(
                     synth_ids[v],
@@ -6787,6 +6987,7 @@ impl GraphController<'_> {
                         engine_id, track_idx, v
                     ),
                 )?;
+            }
             }
 
             let mut voice_ext_route_ids = [0; EXT_MOD_INPUT_COUNT];
@@ -6852,19 +7053,34 @@ impl GraphController<'_> {
         let engine = self.app.graph.engine_node_ids[engine_id]
             .as_mut()
             .expect("engine runtime was validated immediately before transaction commit");
-        engine.route_gain_ids[track_idx] = route_ids;
-        engine.ext_route_gain_ids[track_idx] = ext_route_ids;
+        engine.route_gain_ids[route_idx] = route_ids;
+        engine.ext_route_gain_ids[route_idx] = ext_route_ids;
         for voice in 0..MAX_VOICES {
-            let [route_l_id, route_r_id] = engine.route_gain_ids[track_idx][voice];
-            self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+            let [route_l_id, route_r_id] = engine.route_gain_ids[route_idx][voice];
+            if route_idx < MAX_TRACKS {
+                self.app.state.runtime.engine_route_lids[engine_id][voice][route_idx]
                 .store(route_l_id as u64, Ordering::Release);
-            self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+                self.app.state.runtime.engine_route_lids_r[engine_id][voice][route_idx]
+                    .store(route_r_id as u64, Ordering::Release);
+            } else {
+                self.app.state.runtime.rack_engine_route_engine_ids[route_idx]
+                    .store(engine_id as u32, Ordering::Release);
+                self.app.state.runtime.rack_engine_route_lids[route_idx][voice]
+                    .store(route_l_id as u64, Ordering::Release);
+                self.app.state.runtime.rack_engine_route_lids_r[route_idx][voice]
                 .store(route_r_id as u64, Ordering::Release);
+            }
             for input in 0..EXT_MOD_INPUT_COUNT {
-                let ext_route_id = engine.ext_route_gain_ids[track_idx][voice][input];
-                self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track_idx][input]
+                let ext_route_id = engine.ext_route_gain_ids[route_idx][voice][input];
+                if route_idx < MAX_TRACKS {
+                    self.app.state.runtime.engine_ext_route_lids[engine_id][voice][route_idx]
+                        [input]
+                        .store(ext_route_id as u64, Ordering::Release);
+                } else {
+                    self.app.state.runtime.rack_engine_ext_route_lids[route_idx][voice][input]
                     .store(ext_route_id as u64, Ordering::Release);
             }
+        }
         }
         Ok(())
     }
@@ -7866,6 +8082,7 @@ mod tests {
                     .connect_engine_to_track(
                         0,
                         track,
+                        track,
                         &format!("Track {}", track + 1),
                         nodes.voice_sum_id,
                         nodes.voice_sum_r_id,
@@ -7938,8 +8155,12 @@ mod tests {
             mod_output_channels: vec![0],
             gatepitch_ids: Vec::new(),
             modulator_ids,
-            route_gain_ids: (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
-            ext_route_gain_ids: (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
+            route_gain_ids: (0..crate::sequencer::MAX_SAMPLER_POOLS)
+                .map(|_| Vec::new())
+                .collect(),
+            ext_route_gain_ids: (0..crate::sequencer::MAX_SAMPLER_POOLS)
+                .map(|_| Vec::new())
+                .collect(),
         })];
         RouteTargets {
             voice_sum_id: graph.add_gain(1.0, "test_voice_sum"),
@@ -7953,6 +8174,7 @@ mod tests {
 
     fn connect_test_engine(app: &mut App, targets: &RouteTargets) -> Result<(), String> {
         app.graph_controller().connect_engine_to_track(
+            0,
             0,
             0,
             "Test Track",
@@ -8202,15 +8424,14 @@ mod tests {
                 .override_value(&MacroParamKey::Instrument { track: 0, param: 0 }),
             None
         );
-        assert!(
-            app.macro_engine
+        assert!(app
+            .macro_engine
                 .override_value(&MacroParamKey::Effect {
                     track: 0,
                     slot: 0,
                     param: 0,
                 })
-                .is_some_and(|value| (value - 0.5).abs() < 1.0e-6)
-        );
+            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
         let old_engine = app.graph.engine_node_ids[0]
             .as_ref()
             .expect("shared old engine must remain for track 2");
@@ -8291,11 +8512,9 @@ mod tests {
         assert!(app.graph.track_voice_lids[0].is_empty());
         assert_eq!(app.graph.track_buffer_ids[0], -1);
         assert_eq!(app.state.runtime.voice_counts[0].load(Ordering::Acquire), 0);
-        assert!(
-            sampler_ids
+        assert!(sampler_ids
                 .iter()
-                .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) })
-        );
+            .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) }));
         let engine = app.graph.engine_node_ids[0]
             .as_ref()
             .expect("new custom engine should remain live");
@@ -8443,7 +8662,7 @@ mod tests {
     }
 
     #[test]
-    fn same_engine_rack_rebuild_reuses_routes_through_deferred_slot_reap() {
+    fn same_engine_rack_rebuild_replaces_only_the_rack_route_generation() {
         let graph = TestLiveGraph::new("rack-deferred-engine-route-test");
         let manifest = test_instrument_manifest();
         let lib = lisp_host::test_loaded_dgen_lib();
@@ -8469,10 +8688,11 @@ mod tests {
             .group_track_to_instrument_rack(0)
             .expect("custom track should group to a rack");
 
+        let route_idx = rack_slot_pool_index(0, 0).expect("rack route identity");
         let old_routes = app.graph.engine_node_ids[engine_id]
             .as_ref()
             .expect("engine runtime should exist")
-            .route_gain_ids[0]
+            .route_gain_ids[route_idx]
             .clone();
         let mut rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone()
@@ -8486,12 +8706,15 @@ mod tests {
         let reused_routes = app.graph.engine_node_ids[engine_id]
             .as_ref()
             .expect("engine runtime should remain live")
-            .route_gain_ids[0]
+            .route_gain_ids[route_idx]
             .clone();
-        assert_eq!(reused_routes, old_routes);
-        assert!(app.graph.deferred_rack_teardowns[0]
-            .engine_routes
-            .is_empty());
+        assert_ne!(reused_routes, old_routes);
+        assert_eq!(app.graph.deferred_rack_teardowns[0].engine_routes.len(), 1);
+        assert_eq!(
+            lisp_host::get_dgen_engine_enabled_voices(engine_id),
+            1,
+            "a reused live engine must not be retired"
+        );
 
         app.graph_controller().force_reap_all_rack_teardowns();
         graph.process_block();
@@ -8500,9 +8723,81 @@ mod tests {
             app.graph.engine_node_ids[engine_id]
                 .as_ref()
                 .expect("replacement engine runtime should survive")
-                .route_gain_ids[0],
+                .route_gain_ids[route_idx],
             reused_routes
         );
+    }
+
+    #[test]
+    fn flat_track_and_rack_slot_share_one_custom_engine_with_distinct_routes() {
+        let graph = TestLiveGraph::new("shared-flat-and-rack-engine-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 0);
+        let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+            name: "shared-engine".to_string(),
+            source: "shared-engine.lisp".to_string(),
+            manifest: manifest.clone(),
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        app.graph_controller()
+            .add_custom_track(
+                "shared-engine",
+                engine_id,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("flat custom track should be created");
+        let rack_track = app
+            .graph_controller()
+            .add_empty_layer_rack_track()
+            .expect("rack track should be created");
+        app.graph_controller()
+            .add_custom_slot_to_rack(
+                rack_track,
+                "shared-engine",
+                engine_id,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("rack slot should consume the existing engine");
+        app.graph_controller()
+            .add_custom_slot_to_rack(
+                rack_track,
+                "shared-engine",
+                engine_id,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("a second rack slot should also consume the existing engine");
+
+        let rack_route = rack_slot_pool_index(rack_track, 0).expect("rack route identity");
+        let second_rack_route =
+            rack_slot_pool_index(rack_track, 1).expect("second rack route identity");
+        let engine = app.graph.engine_node_ids[engine_id]
+            .as_ref()
+            .expect("shared engine runtime should exist");
+        assert_eq!(engine.route_gain_ids[0].len(), MAX_VOICES);
+        assert_eq!(engine.route_gain_ids[rack_route].len(), MAX_VOICES);
+        assert_eq!(engine.route_gain_ids[second_rack_route].len(), MAX_VOICES);
+        assert_eq!(
+            app.state.runtime.rack_engine_route_engine_ids[rack_route].load(Ordering::Acquire),
+            engine_id as u32
+        );
+        assert_eq!(
+            app.graph
+                .engine_node_ids
+                .iter()
+                .filter(|engine| engine.is_some())
+                .count(),
+            1,
+            "rack routing must not create a second DSP engine"
+        );
+        graph.process_block();
     }
 
     #[test]
@@ -8625,18 +8920,23 @@ mod tests {
             .slots[0];
         assert_eq!(stored_slot.instrument_slot.defaults[0], 0.73);
         assert_eq!(stored_slot.effect_slots[effect_slot].defaults[0], 0.63);
+        let rack_route = rack_slot_pool_index(0, 0).expect("rack route identity");
         assert_eq!(
             app.graph.engine_node_ids[engine_id]
                 .as_ref()
                 .expect("custom engine should remain live")
-                .route_gain_ids[0],
+                .route_gain_ids[rack_route],
             engine_routes_before,
-            "grouping should rewire the existing engine route instead of rebuilding it"
+            "grouping should move the existing engine route instead of rebuilding it"
         );
-        assert!(
-            app.rack_slot_instrument_descriptor(&rack.slots[0])
-                .is_some()
-        );
+        assert!(app.graph.engine_node_ids[engine_id]
+            .as_ref()
+            .expect("custom engine should remain live")
+            .route_gain_ids[0]
+            .is_empty());
+        assert!(app
+            .rack_slot_instrument_descriptor(&rack.slots[0])
+            .is_some());
         graph.process_block();
     }
 
@@ -8674,6 +8974,7 @@ mod tests {
             .slots[0]
             .effect_slots[effect_slot]
             .node_id;
+        let old_slot_pan_id = app.graph.track_node_ids[0].rack_slots[0].slot_pan_id;
 
         app.graph_controller()
             .replace_rack_slot_with_sampler(0, 0, Path::new("assets/ir/lexicon-300-rich-plate.wav"))
@@ -8692,7 +8993,29 @@ mod tests {
             app.graph.engine_node_ids[engine_id].is_some(),
             "the replaced instrument runtime must survive for the release tail"
         );
+        assert_eq!(
+            lisp_host::get_dgen_engine_enabled_voices(engine_id),
+            0,
+            "an unreferenced deferred engine must stop consuming DSP"
+        );
         graph.process_block();
+        let mut old_panner_state =
+            vec![0.0_f32; crate::effects::stereo_panner::STEREO_PANNER_STATE_SIZE];
+        let mut old_panner_state_size = 0;
+        assert!(unsafe {
+            crate::audiograph::get_node_state_into(
+                graph.ptr.0,
+                old_slot_pan_id,
+                old_panner_state.as_mut_ptr().cast(),
+                old_panner_state.len() * std::mem::size_of::<f32>(),
+                &mut old_panner_state_size,
+            )
+        });
+        assert_eq!(
+            old_panner_state[crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE as usize],
+            1.0,
+            "the outgoing custom slot must stop carrying future shared-engine audio"
+        );
         app.graph_controller().force_reap_all_rack_teardowns();
         graph.process_block();
         assert!(
@@ -8750,11 +9073,10 @@ mod tests {
             .expect("rack sample should load");
         app.add_builtin_rack_slot_effect_sync(0, 0, "OTT")
             .expect("rack slot should accept OTT");
-        assert!(
-            app.editor
+        assert!(app
+            .editor
                 .effect_chain_leases
-                .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 })
-        );
+            .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
 
         app.graph_controller()
             .delete_rack_slot(0, 0)
@@ -8765,11 +9087,10 @@ mod tests {
             .expect("rack container should remain");
         assert!(rack.slots.is_empty());
         assert!(app.graph.track_node_ids[0].rack_slots.is_empty());
-        assert!(
-            !app.editor
+        assert!(!app
+            .editor
                 .effect_chain_leases
-                .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 })
-        );
+            .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
         graph.process_block();
     }
 

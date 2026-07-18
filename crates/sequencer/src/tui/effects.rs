@@ -306,11 +306,9 @@ impl App {
             .manifest
             .clone();
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-        let engine_id =
-            self.register_dedicated_instrument_engine(name, &source, &manifest, lib_index)?;
         Ok(PreparedRackInstrument {
             name: name.to_string(),
-            engine_id,
+            engine_id: cache_idx,
             manifest,
             lib_index,
             run_mode,

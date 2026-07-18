@@ -4,7 +4,7 @@ A Metal-based step sequencer and audio workstation built in Rust, ESeqLisp, and
 DGenLisp on top of a lock-free audio engine. The earlier `ratatui` interface is
 still available as the `sequencer` binary, but `metal_seq` is the active UI.
 
-![Metal sequencer](https://img.shields.io/badge/interface-Metal-blue)
+![Metal sequencer]okay(https://img.shields.io/badge/interface-Metal-blue)
 ![built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 
 ## Features
@@ -63,94 +63,6 @@ Lisp-defined project fixture without opening the interactive app or an audio
 device. This is useful for visually iterating on instrument, process, effect,
 and sequencer panels. See [Metal sequencer UI capture](../../docs/metal-seq-ui-capture.md).
 
-## Legacy TUI quick start
-
-1. Press **Ctrl+N** to open the sample browser
-2. Navigate folders with **Up/Down**, expand/collapse with **Enter**
-3. Select a `.wav` file to add it as a new track
-4. Press **Tab** to focus the step grid
-5. Press **Enter** to toggle steps on/off
-6. Press **Space** to play/stop
-
-## Legacy TUI controls
-
-### Global
-
-| Key | Action |
-|-----|--------|
-| `q` | Quit |
-| `Space` | Play / Stop |
-| `Tab` / `Shift+Tab` | Cycle focus: Grid -> Params -> Grid |
-| `Ctrl+N` | Open sample browser (add track) |
-| `Ctrl+L` | Open effect picker / edit custom effect |
-| `Ctrl+A` | Select all active steps |
-| `Esc` | Clear selection |
-| `/` | Focus sidebar search, disarm all tracks |
-
-### Step grid (Cirklon region)
-
-| Key | Action |
-|-----|--------|
-| `Left` / `Right` | Move cursor between steps |
-| `Up` / `Down` | Move cursor between tracks |
-| `Alt+Left` / `Alt+Right` | Jump 4 steps |
-| `Shift+Left` / `Shift+Right` | Extend selection |
-| `Shift+Up` / `Shift+Down` | Adjust selected step's parameter value |
-| `Enter` | Toggle step on/off |
-| `Backspace` / `Delete` | Clear selected steps |
-| `d` `v` `a` `b` `t` `c` | Switch active parameter (duration, velocity, auxA, auxB, transpose, chop) |
-| `i` | Enter **Insert mode** (type values directly) |
-| `s` | Enter **Select mode** (multi-select steps) |
-| `r` | Enter **Arm mode** (keyboard recording) |
-| `x` `x` (double tap) | Clear entire pattern |
-
-### Param region (bottom panels)
-
-**Track params** (left panel):
-
-| Key | Action |
-|-----|--------|
-| `Up` / `Down` | Navigate: Gate, Attack, Release, Swing, Steps, Send, Poly |
-| `Left` / `Right` | Adjust value |
-| `Enter` | Toggle boolean params (Gate, Poly) |
-
-**Effects** (right panel):
-
-| Key | Action |
-|-----|--------|
-| `Left` / `Right` | Switch between loaded effect slots and Reverb |
-| `Up` / `Down` | Navigate effect parameters |
-| `Shift+Up` / `Shift+Down` | Adjust parameter value |
-| `Enter` | Toggle on/off or cycle enum values |
-
-### Keyboard playing (Arm mode)
-
-| Key | Action |
-|-----|--------|
-| `r` | Enter arm mode, then click track arm dots to arm/disarm |
-| Piano row (`a`-`'`) | Play notes (chromatic keyboard layout) |
-| `z` / `x` | Octave down / up |
-| `,` | Toggle recording (writes notes into pattern while playing) |
-| `[` / `]` | Adjust record quantize threshold |
-
-### Patterns
-
-| Key | Action |
-|-----|--------|
-| Click pattern numbers | Switch patterns |
-| Click `[+]` | Clone current pattern |
-| Click `[x]` | Delete current pattern |
-
-### Sample browser (sidebar)
-
-| Key | Action |
-|-----|--------|
-| `Up` / `Down` | Navigate tree |
-| `Enter` | Expand folder / select sample |
-| Type characters | Filter by name |
-| `Backspace` | Clear filter character |
-| `Ctrl+A` | Switch to audition mode (preview samples on current track) |
-
 ## Architecture
 
 ```
@@ -189,6 +101,106 @@ because the current app still shares parts of its state and audio-graph model.
 The audio runs through the C-based lock-free graph engine in `audiograph/`,
 which supports real-time node addition, removal, and parameter changes without
 blocking the audio thread.
+
+### Shared DGenLisp instrument engines
+
+Note-triggered custom instruments use a project-wide shared-engine model
+inspired by the voice pools in Elektron synthesizers. A saved instrument's
+`dsp.lisp` is compiled at runtime into a native dylib plus a manifest. Tracks
+and rack slots that resolve to the same saved instrument identity (name and
+source) use one canonical engine, one dylib process function, and one pool of
+12 voices. They do not instantiate private synth engines per track or per rack
+slot.
+
+```mermaid
+flowchart LR
+    Source["Saved DGenLisp source<br/>dsp.lisp + imported macros"]
+    Assets["Referenced assets<br/>tables, tensors, samples"]
+    Tool["DGenLisp compiler binary"]
+
+    Key["Content cache key<br/>schema + kind + effective source SHA-256<br/>sample rate + voice count<br/>compiler fingerprint + asset fingerprints"]
+    Cache[(".eseq/dgenlisp-cache/dylibs")]
+    Compile["DGenLisp compile<br/>native dylib + manifest"]
+    Load["dlopen + manifest load"]
+
+    Registry["Canonical instrument engine<br/>registry key: name + source"]
+    Pool["Shared 12-voice allocator<br/>allocation, release, stealing"]
+    Voices["12 graph voice chains<br/>gate/pitch → modulator → synth"]
+    Scratch["Dylib-owned scratch<br/>12 segments, one per voice number"]
+
+    Flat["Ordinary track consumers"]
+    RackA["Rack slot consumer A"]
+    RackB["Rack slot consumer B"]
+    Routes["Per-consumer, per-voice gain routes"]
+    FX["Track or rack-slot FX and mixer"]
+
+    Source --> Key
+    Assets --> Key
+    Tool --> Key
+    Key --> Cache
+    Cache -- "cache miss" --> Compile
+    Compile --> Cache
+    Cache -- "cache hit / completed compile" --> Load
+    Load --> Registry
+    Registry --> Pool
+    Pool --> Voices
+    Voices <--> Scratch
+
+    Flat --> Pool
+    RackA --> Pool
+    RackB --> Pool
+    Voices --> Routes
+    Flat --> Routes
+    RackA --> Routes
+    RackB --> Routes
+    Routes --> FX
+```
+
+The engine and its consumers have deliberately different identities:
+
+- The **engine identity** selects the compiled instrument and owns its shared
+  voice pool, synth nodes, modulators, and DGenLisp process function.
+- A **consumer identity** represents an ordinary track or one specific rack
+  slot. Each consumer has independent output and external-modulation routes,
+  parameter state, p-locks, FX, gain, pan, mute, and polyphony limit.
+- A voice allocation records both its engine voice number and its current
+  consumer. Voice stealing changes the consumer route without creating a new
+  synth node. Two slots in the same rack may therefore use the same instrument
+  while remaining independently routable.
+
+This separation is also a DSP correctness requirement. Generated DGenLisp
+instrument dylibs own mutable scratch arrays divided into 12 segments by voice
+number. Per-node state memory is separate, but scratch is shared by every call
+into that dylib image. Consequently, two independent allocators must never
+drive the same dylib with overlapping voice numbers. Keeping one canonical
+engine and allocator per saved instrument identity makes the voice lease
+authoritative across the whole project.
+
+The allocator applies per-consumer polyphony caps within the shared pool and
+prefers suitable idle or releasing voices before stealing an active voice.
+When a voice moves between consumers, the audio thread disables its previous
+gain route and enables only its new route. Note state, parameter fingerprints,
+and release-tail ownership stay attached to the allocated voice. If a topology
+reset invalidates the remembered consumer, the voice's first subsequent
+allocation closes every other route for that engine voice before opening the
+new one, re-establishing exclusive ownership.
+
+#### Dylib cache
+
+The persistent cache lives at `.eseq/dgenlisp-cache/dylibs`. Its key is a
+SHA-256 hash over the cache schema, compile kind (instrument or effect),
+effective source hash, sample rate, instrument voice count, the DGenLisp tool
+fingerprint, and fingerprints of every referenced source asset. “Effective
+source” includes the host preamble and materialized `defmacro` imports, so a
+change to injected DSP helpers invalidates the cache even when the saved
+`dsp.lisp` text itself is unchanged.
+
+Each artifact directory contains the effective `source.lisp`, `manifest.json`,
+`metadata.json`, and compiled dylib. Cache hits validate the metadata and all
+required files before loading. Loaded artifacts are leased so an in-use dylib
+path is not reused as a second live image; if no matching artifact is currently
+free, the cache may compile another artifact under the same content key. This
+also prevents `dlopen` from returning a stale handle after recompilation.
 
 ## Custom effects
 

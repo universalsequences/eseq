@@ -482,6 +482,7 @@ struct CustomVoiceSlot {
     release_started_sample: Option<u64>,
     note: f32,
     assigned_track: Option<usize>,
+    assigned_route: Option<usize>,
     fingerprint: u64,
 }
 
@@ -490,6 +491,7 @@ struct CustomVoiceAllocation {
     voice_idx: usize,
     logical_id: u64,
     previous_track: Option<usize>,
+    previous_route: Option<usize>,
     stole_active_voice: bool,
 }
 
@@ -510,6 +512,7 @@ impl CustomEnginePool {
                 release_started_sample: None,
                 note: 0.0,
                 assigned_track: None,
+                assigned_route: None,
                 fingerprint: 0,
             }),
             num_voices: 0,
@@ -527,6 +530,7 @@ impl CustomEnginePool {
                 release_started_sample: None,
                 note: 0.0,
                 assigned_track: None,
+                assigned_route: None,
                 fingerprint: 0,
             };
             self.num_voices += 1;
@@ -545,6 +549,7 @@ impl CustomEnginePool {
                 release_started_sample: None,
                 note: 0.0,
                 assigned_track: None,
+                assigned_route: None,
                 fingerprint: 0,
             };
         }
@@ -553,6 +558,7 @@ impl CustomEnginePool {
     fn allocate_voice(
         &mut self,
         track: usize,
+        route_idx: usize,
         note: f32,
         polyphonic: bool,
         max_polyphony: usize,
@@ -561,20 +567,23 @@ impl CustomEnginePool {
         let max_polyphony = max_polyphony.clamp(1, MAX_VOICES);
         if !polyphonic {
             if let Some(idx) =
-                (0..self.num_voices).find(|&i| self.voices[i].assigned_track == Some(track))
+                (0..self.num_voices).find(|&i| self.voices[i].assigned_route == Some(route_idx))
             {
                 let slot = &mut self.voices[idx];
                 let previous_track = slot.assigned_track;
+                let previous_route = slot.assigned_route;
                 let stole_active_voice = slot.active;
                 slot.age = self.age_counter;
                 slot.active = true;
                 slot.release_started_sample = None;
                 slot.note = note;
                 slot.assigned_track = Some(track);
+                slot.assigned_route = Some(route_idx);
                 return CustomVoiceAllocation {
                     voice_idx: idx,
                     logical_id: slot.logical_id,
                     previous_track,
+                    previous_route,
                     stole_active_voice,
                 };
             }
@@ -604,7 +613,7 @@ impl CustomEnginePool {
             if !voice.active {
                 let is_releasing = voice.release_started_sample.is_some();
                 match voice.assigned_track {
-                    Some(assigned) if assigned == track => {
+                    Some(_) if voice.assigned_route == Some(route_idx) => {
                         if is_releasing {
                             if (voice.note - note).abs() < 0.01
                                 && voice.age < releasing_same_note_age
@@ -641,12 +650,12 @@ impl CustomEnginePool {
                 }
             }
             if voice.active
-                && voice.assigned_track == Some(track)
+                && voice.assigned_route == Some(route_idx)
                 && (voice.note - note).abs() < 0.01
             {
                 active_same_note_idx = Some(i);
             }
-            if voice.assigned_track == Some(track) {
+            if voice.assigned_route == Some(route_idx) {
                 assigned_same_track_count += 1;
                 if voice.age < oldest_same_track_age {
                     oldest_same_track = Some(i);
@@ -679,16 +688,19 @@ impl CustomEnginePool {
         };
         let slot = &mut self.voices[idx];
         let previous_track = slot.assigned_track;
+        let previous_route = slot.assigned_route;
         let stole_active_voice = slot.active;
         slot.age = self.age_counter;
         slot.active = true;
         slot.release_started_sample = None;
         slot.note = note;
         slot.assigned_track = Some(track);
+        slot.assigned_route = Some(route_idx);
         CustomVoiceAllocation {
             voice_idx: idx,
             logical_id: slot.logical_id,
             previous_track,
+            previous_route,
             stole_active_voice,
         }
     }
@@ -696,6 +708,7 @@ impl CustomEnginePool {
     fn allocate_free_patch_voice(
         &mut self,
         track: usize,
+        route_idx: usize,
         note: f32,
     ) -> Option<CustomVoiceAllocation> {
         if self.num_voices == 0 {
@@ -704,16 +717,19 @@ impl CustomEnginePool {
         self.age_counter += 1;
         let slot = &mut self.voices[0];
         let previous_track = slot.assigned_track;
+        let previous_route = slot.assigned_route;
         let stole_active_voice = slot.active;
         slot.age = self.age_counter;
         slot.active = true;
         slot.release_started_sample = None;
         slot.note = note;
         slot.assigned_track = Some(track);
+        slot.assigned_route = Some(route_idx);
         Some(CustomVoiceAllocation {
             voice_idx: 0,
             logical_id: slot.logical_id,
             previous_track,
+            previous_route,
             stole_active_voice,
         })
     }
@@ -755,8 +771,9 @@ impl CustomEnginePool {
         engine_id: usize,
         current_sample: u64,
         release_tail_samples: u64,
+        minimum_enabled_voices: usize,
     ) {
-        let mut highest_retained_idx = 0usize;
+        let mut highest_retained_idx: Option<usize> = None;
         for i in 0..self.num_voices {
             let voice = &mut self.voices[i];
             if let Some(release_started_sample) = voice.release_started_sample {
@@ -765,11 +782,15 @@ impl CustomEnginePool {
                 }
             }
             if voice.active || voice.release_started_sample.is_some() {
-                highest_retained_idx = highest_retained_idx.max(i);
+                highest_retained_idx =
+                    Some(highest_retained_idx.map_or(i, |highest| highest.max(i)));
             }
         }
 
-        let needed = (highest_retained_idx + 1).clamp(1, MAX_VOICES);
+        let needed = highest_retained_idx
+            .map(|highest| highest + 1)
+            .unwrap_or(minimum_enabled_voices)
+            .clamp(minimum_enabled_voices, MAX_VOICES);
         if needed < self.enabled_voice_count {
             self.enabled_voice_count = needed;
             crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, needed);
@@ -781,6 +802,30 @@ impl CustomEnginePool {
             self.voices[i].fingerprint = 0;
         }
     }
+}
+
+fn custom_engine_requires_idle_voice(
+    data: &AudioCallbackData,
+    engine_id: usize,
+    num_tracks: usize,
+) -> bool {
+    let num_tracks = num_tracks.min(data.scheduler_snapshot.tracks.len());
+    (0..num_tracks).any(|track_idx| {
+        if track_engine_id(&data.state, track_idx) == Some(engine_id)
+            && track_custom_run_mode(&data.state, track_idx) == CustomInstrumentRunMode::FreePatch
+        {
+            return true;
+        }
+        data.scheduler_snapshot.tracks[track_idx]
+            .rack_track
+            .as_ref()
+            .is_some_and(|rack| {
+                rack.slots.iter().any(|slot| {
+                    slot.track_sound_state.engine_id == Some(engine_id)
+                        && slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch
+                })
+            })
+    })
 }
 
 fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool: &mut VoicePool) {
@@ -2601,58 +2646,118 @@ unsafe fn dispatch_effect_chain_for_track(
     }
 }
 
-unsafe fn route_custom_voice_to_track(
+fn for_each_custom_route_lid(
+    state: &SequencerState,
+    engine_id: usize,
+    voice_idx: usize,
+    route_idx: usize,
+    mut visit: impl FnMut(u64),
+) {
+    let (lid_l, lid_r, ext_lids): (u64, u64, [u64; crate::sequencer::EXT_MOD_INPUT_COUNT]) =
+        if route_idx < MAX_TRACKS {
+            (
+                state.runtime.engine_route_lids[engine_id][voice_idx][route_idx]
+                    .load(Ordering::Relaxed),
+                state.runtime.engine_route_lids_r[engine_id][voice_idx][route_idx]
+                    .load(Ordering::Relaxed),
+                std::array::from_fn(|input| {
+                    state.runtime.engine_ext_route_lids[engine_id][voice_idx][route_idx][input]
+                        .load(Ordering::Relaxed)
+                }),
+            )
+        } else if route_idx < crate::sequencer::MAX_SAMPLER_POOLS
+            && state.runtime.rack_engine_route_engine_ids[route_idx].load(Ordering::Relaxed)
+                == engine_id as u32
+        {
+            (
+                state.runtime.rack_engine_route_lids[route_idx][voice_idx]
+                    .load(Ordering::Relaxed),
+                state.runtime.rack_engine_route_lids_r[route_idx][voice_idx]
+                    .load(Ordering::Relaxed),
+                std::array::from_fn(|input| {
+                    state.runtime.rack_engine_ext_route_lids[route_idx][voice_idx][input]
+                        .load(Ordering::Relaxed)
+                }),
+            )
+        } else {
+            return;
+        };
+    for lid in [lid_l, lid_r] {
+        if lid != 0 {
+            visit(lid);
+        }
+    }
+    for ext_lid in ext_lids {
+        if ext_lid != 0 {
+            visit(ext_lid);
+        }
+    }
+}
+
+fn for_each_custom_voice_route_update(
+    state: &SequencerState,
+    engine_id: usize,
+    voice_idx: usize,
+    previous_route: Option<usize>,
+    route_idx: usize,
+    mut visit: impl FnMut(u64, f32),
+) {
+    let mut set_route = |target_route: usize, value: f32| {
+        for_each_custom_route_lid(state, engine_id, voice_idx, target_route, |lid| {
+            visit(lid, value)
+        });
+    };
+    if let Some(previous_route) = previous_route {
+        if previous_route != route_idx {
+            set_route(previous_route, 0.0);
+        }
+    } else {
+        // A pool/topology reset forgets voice ownership, but route gain nodes
+        // can retain their previous values. Re-establish exclusivity before
+        // opening the new route so a stale rack route cannot mirror the voice.
+        for stale_route in 0..MAX_TRACKS {
+            if stale_route != route_idx {
+                set_route(stale_route, 0.0);
+            }
+        }
+        for stale_route in MAX_TRACKS..crate::sequencer::MAX_SAMPLER_POOLS {
+            if stale_route != route_idx
+                && state.runtime.rack_engine_route_engine_ids[stale_route]
+                    .load(Ordering::Relaxed)
+                    == engine_id as u32
+            {
+                set_route(stale_route, 0.0);
+            }
+        }
+    }
+    set_route(route_idx, 1.0);
+}
+
+unsafe fn route_custom_voice_to_consumer(
     lg: *mut LiveGraph,
     state: &SequencerState,
     engine_id: usize,
     voice_idx: usize,
-    track_idx: usize,
+    previous_route: Option<usize>,
+    route_idx: usize,
 ) {
-    let num_tracks = state.active_track_count();
-    for t in 0..num_tracks {
-        let lid_l =
-            state.runtime.engine_route_lids[engine_id][voice_idx][t].load(Ordering::Relaxed);
-        let lid_r =
-            state.runtime.engine_route_lids_r[engine_id][voice_idx][t].load(Ordering::Relaxed);
-        if lid_l == 0 && lid_r == 0 {
-            continue;
-        }
-        let value = if t == track_idx { 1.0 } else { 0.0 };
-        if lid_l != 0 {
+    for_each_custom_voice_route_update(
+        state,
+        engine_id,
+        voice_idx,
+        previous_route,
+        route_idx,
+        |logical_id, fvalue| {
             params_push_wrapper(
                 lg,
                 ParamMsg {
                     idx: 0,
-                    logical_id: lid_l,
-                    fvalue: value,
+                    logical_id,
+                    fvalue,
                 },
             );
-        }
-        if lid_r != 0 {
-            params_push_wrapper(
-                lg,
-                ParamMsg {
-                    idx: 0,
-                    logical_id: lid_r,
-                    fvalue: value,
-                },
-            );
-        }
-        for input in 0..crate::sequencer::EXT_MOD_INPUT_COUNT {
-            let ext_lid = state.runtime.engine_ext_route_lids[engine_id][voice_idx][t][input]
-                .load(Ordering::Relaxed);
-            if ext_lid != 0 {
-                params_push_wrapper(
-                    lg,
-                    ParamMsg {
-                        idx: 0,
-                        logical_id: ext_lid,
-                        fvalue: value,
-                    },
-                );
-            }
-        }
-    }
+        },
+    );
 }
 
 /// Dispatch instrument param values (with p-lock support) to a selected synth node.
@@ -4203,10 +4308,12 @@ fn collect_rack_slot_active_voice_releases(
                 return note_offs;
             }
             let free_patch = slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch;
+            let route_idx = rack_slot_pool_index(track_idx, slot_idx)
+                .expect("validated rack slot must have a route identity");
             let lids: Vec<u64> = custom_engine_pools[engine_id].voices
                 [..custom_engine_pools[engine_id].num_voices]
                 .iter()
-                .filter(|voice| voice.active && voice.assigned_track == Some(track_idx))
+                .filter(|voice| voice.active && voice.assigned_route == Some(route_idx))
                 .map(|voice| voice.logical_id)
                 .collect();
             for lid in lids {
@@ -4526,7 +4633,12 @@ fn fire_live_keyboard_rack_note(
                 let free_patch = slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch;
                 let allocation = if free_patch {
                     let Some(allocation) = data.custom_engine_pools[engine_id]
-                        .allocate_free_patch_voice(parent_track_idx, playback_transpose)
+                        .allocate_free_patch_voice(
+                            parent_track_idx,
+                            rack_slot_pool_index(parent_track_idx, slot_idx)
+                                .expect("validated rack slot must have a route identity"),
+                            playback_transpose,
+                        )
                     else {
                         continue;
                     };
@@ -4534,6 +4646,8 @@ fn fire_live_keyboard_rack_note(
                 } else {
                     data.custom_engine_pools[engine_id].allocate_voice(
                         parent_track_idx,
+                        rack_slot_pool_index(parent_track_idx, slot_idx)
+                            .expect("validated rack slot must have a route identity"),
                         playback_transpose,
                         slot.max_polyphony > 1,
                         slot.max_polyphony,
@@ -4570,12 +4684,14 @@ fn fire_live_keyboard_rack_note(
                     voice_lid,
                 );
                 unsafe {
-                    route_custom_voice_to_track(
+                    route_custom_voice_to_consumer(
                         data.lg.0,
                         &data.state,
                         engine_id,
                         voice_idx,
-                        parent_track_idx,
+                        allocation.previous_route,
+                        rack_slot_pool_index(parent_track_idx, slot_idx)
+                            .expect("validated rack slot must have a route identity"),
                     );
                     if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
                         != instrument_fingerprint
@@ -4773,7 +4889,12 @@ fn fire_rack_slot_note(
             let free_patch = slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch;
             let allocation = if free_patch {
                 let Some(allocation) = data.custom_engine_pools[engine_id]
-                    .allocate_free_patch_voice(parent_track_idx, transpose)
+                    .allocate_free_patch_voice(
+                        parent_track_idx,
+                        rack_slot_pool_index(parent_track_idx, slot_idx)
+                            .expect("validated rack slot must have a route identity"),
+                        transpose,
+                    )
                 else {
                     return;
                 };
@@ -4781,6 +4902,8 @@ fn fire_rack_slot_note(
             } else {
                 data.custom_engine_pools[engine_id].allocate_voice(
                     parent_track_idx,
+                    rack_slot_pool_index(parent_track_idx, slot_idx)
+                        .expect("validated rack slot must have a route identity"),
                     transpose,
                     slot_params.max_polyphony > 1,
                     slot_params.max_polyphony,
@@ -4803,12 +4926,14 @@ fn fire_rack_slot_note(
                     let off_seq = next_event_sequence_from(&mut data.event_seq);
                     send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
                 }
-                route_custom_voice_to_track(
+                route_custom_voice_to_consumer(
                     data.lg.0,
                     &data.state,
                     engine_id,
                     voice_idx,
-                    parent_track_idx,
+                    allocation.previous_route,
+                    rack_slot_pool_index(parent_track_idx, slot_idx)
+                        .expect("validated rack slot must have a route identity"),
                 );
                 if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
                     != instrument_fingerprint
@@ -5384,13 +5509,14 @@ fn fire_resolved(
                 };
                 let allocation = if free_patch {
                     let Some(allocation) = data.custom_engine_pools[engine_id]
-                        .allocate_free_patch_voice(track_idx, transpose)
+                        .allocate_free_patch_voice(track_idx, track_idx, transpose)
                     else {
                         continue;
                     };
                     allocation
                 } else {
                     data.custom_engine_pools[engine_id].allocate_voice(
+                        track_idx,
                         track_idx,
                         transpose,
                         track_polyphonic,
@@ -5436,11 +5562,12 @@ fn fire_resolved(
                     let off_seq = next_event_sequence_from(&mut data.event_seq);
                     unsafe {
                         send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
-                        route_custom_voice_to_track(
+                        route_custom_voice_to_consumer(
                             data.lg.0,
                             &data.state,
                             engine_id,
                             voice_idx,
+                            allocation.previous_route,
                             track_idx,
                         );
                         if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
@@ -5461,11 +5588,12 @@ fn fire_resolved(
                     }
                 } else {
                     unsafe {
-                        route_custom_voice_to_track(
+                        route_custom_voice_to_consumer(
                             data.lg.0,
                             &data.state,
                             engine_id,
                             voice_idx,
+                            allocation.previous_route,
                             track_idx,
                         );
                         if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
@@ -5588,13 +5716,14 @@ fn fire_resolved(
             };
             let allocation = if free_patch {
                 let Some(allocation) = data.custom_engine_pools[engine_id]
-                    .allocate_free_patch_voice(track_idx, transpose)
+                    .allocate_free_patch_voice(track_idx, track_idx, transpose)
                 else {
                     return;
                 };
                 allocation
             } else {
                 data.custom_engine_pools[engine_id].allocate_voice(
+                    track_idx,
                     track_idx,
                     transpose,
                     track_polyphonic,
@@ -5639,11 +5768,12 @@ fn fire_resolved(
                 let off_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
                     send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
-                    route_custom_voice_to_track(
+                    route_custom_voice_to_consumer(
                         data.lg.0,
                         &data.state,
                         engine_id,
                         voice_idx,
+                        allocation.previous_route,
                         track_idx,
                     );
                     if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
@@ -5664,11 +5794,12 @@ fn fire_resolved(
                 }
             } else {
                 unsafe {
-                    route_custom_voice_to_track(
+                    route_custom_voice_to_consumer(
                         data.lg.0,
                         &data.state,
                         engine_id,
                         voice_idx,
+                        allocation.previous_route,
                         track_idx,
                     );
                     if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
@@ -6147,13 +6278,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     == CustomInstrumentRunMode::FreePatch;
                 let allocation = if free_patch {
                     let Some(allocation) = data.custom_engine_pools[engine_id]
-                        .allocate_free_patch_voice(kt.track, resolved_transpose)
+                        .allocate_free_patch_voice(kt.track, kt.track, resolved_transpose)
                     else {
                         continue;
                     };
                     allocation
                 } else {
                     data.custom_engine_pools[engine_id].allocate_voice(
+                        kt.track,
                         kt.track,
                         resolved_transpose,
                         track_polyphonic,
@@ -6204,11 +6336,12 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     voice_lid,
                 );
                 unsafe {
-                    route_custom_voice_to_track(
+                    route_custom_voice_to_consumer(
                         data.lg.0,
                         &data.state,
                         engine_id,
                         voice_idx,
+                        allocation.previous_route,
                         kt.track,
                     );
                     if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
@@ -6492,10 +6625,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         if data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) == 0 {
             continue;
         }
+        let minimum_enabled_voices = usize::from(custom_engine_requires_idle_voice(
+            data, engine_id, num_tracks,
+        ));
         data.custom_engine_pools[engine_id].shrink_released_voices(
             engine_id,
             block_end_sample,
             custom_release_tail_samples,
+            minimum_enabled_voices,
         );
     }
 
@@ -6861,7 +6998,8 @@ mod tests {
         GateOffEvent, GateOffTarget, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
         apply_rack_macros_at_step, bus_gate_target_at, clear_active_keyboard_note_by_lid,
         collect_rack_choke_group_voice_releases, free_patch_transport_route_cache_is_fresh,
-        free_patch_transport_route_target, instrument_sound_fingerprint,
+        free_patch_transport_route_target, for_each_custom_voice_route_update,
+        instrument_sound_fingerprint,
         key_locked_live_instrument_params, mute_group_winner_for_block_events,
         rack_slot_matches_routing, rack_slot_playback_transpose, resolve_live_instrument_defaults,
         resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
@@ -7855,8 +7993,8 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let a = pool.allocate_voice(0, 0.0, true, 6);
-        let b = pool.allocate_voice(0, 4.0, true, 6);
+        let a = pool.allocate_voice(0, 0, 0.0, true, 6);
+        let b = pool.allocate_voice(0, 0, 4.0, true, 6);
         assert_eq!(a.logical_id, 1);
         assert_eq!(b.logical_id, 2);
         assert!(!a.stole_active_voice);
@@ -7864,10 +8002,10 @@ mod tests {
 
         pool.release_voice_by_logical_id(a.logical_id, 0);
         pool.release_voice_by_logical_id(b.logical_id, 0);
-        pool.shrink_released_voices(0, 1_000, 1_000);
+        pool.shrink_released_voices(0, 1_000, 1_000, 1);
 
-        let c = pool.allocate_voice(0, 7.0, true, 6);
-        let d = pool.allocate_voice(0, 11.0, true, 6);
+        let c = pool.allocate_voice(0, 0, 7.0, true, 6);
+        let d = pool.allocate_voice(0, 0, 11.0, true, 6);
         assert_eq!(c.logical_id, 1);
         assert_eq!(d.logical_id, 2);
         assert!(!c.stole_active_voice);
@@ -7881,8 +8019,8 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let a = pool.allocate_voice(0, 0.0, true, 6);
-        let b = pool.allocate_voice(0, 4.0, true, 6);
+        let a = pool.allocate_voice(0, 0, 0.0, true, 6);
+        let b = pool.allocate_voice(0, 0, 4.0, true, 6);
 
         assert_eq!(a.logical_id, 1);
         assert_eq!(b.logical_id, 2);
@@ -7897,17 +8035,17 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let a0 = pool.allocate_voice(0, 0.0, true, 2);
-        let a1 = pool.allocate_voice(0, 4.0, true, 2);
-        let b0 = pool.allocate_voice(1, 0.0, true, 2);
-        let b1 = pool.allocate_voice(1, 4.0, true, 2);
+        let a0 = pool.allocate_voice(0, 0, 0.0, true, 2);
+        let a1 = pool.allocate_voice(0, 0, 4.0, true, 2);
+        let b0 = pool.allocate_voice(1, 1, 0.0, true, 2);
+        let b1 = pool.allocate_voice(1, 1, 4.0, true, 2);
 
         assert_eq!(a0.logical_id, 1);
         assert_eq!(a1.logical_id, 2);
         assert_eq!(b0.logical_id, 3);
         assert_eq!(b1.logical_id, 4);
 
-        let capped = pool.allocate_voice(0, 7.0, true, 2);
+        let capped = pool.allocate_voice(0, 0, 7.0, true, 2);
         assert!(capped.stole_active_voice);
         assert_eq!(capped.previous_track, Some(0));
         assert!(matches!(capped.logical_id, 1 | 2));
@@ -7920,17 +8058,85 @@ mod tests {
     }
 
     #[test]
+    fn custom_engine_pool_tracks_polyphony_per_rack_route_consumer() {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=6 {
+            pool.add_voice(lid);
+        }
+        let first_route = crate::sequencer::rack_slot_pool_index(0, 0).expect("first rack route");
+        let second_route = crate::sequencer::rack_slot_pool_index(0, 1).expect("second rack route");
+
+        let a0 = pool.allocate_voice(0, first_route, 0.0, true, 2);
+        let a1 = pool.allocate_voice(0, first_route, 4.0, true, 2);
+        let b0 = pool.allocate_voice(0, second_route, 7.0, true, 2);
+        let b1 = pool.allocate_voice(0, second_route, 11.0, true, 2);
+
+        assert_eq!([a0.logical_id, a1.logical_id], [1, 2]);
+        assert_eq!([b0.logical_id, b1.logical_id], [3, 4]);
+        assert_eq!(
+            pool.voices[..pool.num_voices]
+                .iter()
+                .filter(|voice| voice.assigned_route == Some(first_route))
+                .count(),
+            2
+        );
+        assert_eq!(
+            pool.voices[..pool.num_voices]
+                .iter()
+                .filter(|voice| voice.assigned_route == Some(second_route))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn unknown_previous_consumer_closes_stale_rack_route_before_opening_track_route() {
+        let state = SequencerState::new(2, Vec::new());
+        let engine_id = 4;
+        let voice_idx = 3;
+        let rack_route = crate::sequencer::rack_slot_pool_index(0, 0)
+            .expect("rack route identity");
+        state.runtime.engine_route_lids[engine_id][voice_idx][1]
+            .store(201, Ordering::Relaxed);
+        state.runtime.engine_route_lids_r[engine_id][voice_idx][1]
+            .store(202, Ordering::Relaxed);
+        state.runtime.rack_engine_route_engine_ids[rack_route]
+            .store(engine_id as u32, Ordering::Relaxed);
+        state.runtime.rack_engine_route_lids[rack_route][voice_idx]
+            .store(101, Ordering::Relaxed);
+        state.runtime.rack_engine_route_lids_r[rack_route][voice_idx]
+            .store(102, Ordering::Relaxed);
+
+        let mut updates = Vec::new();
+        for_each_custom_voice_route_update(
+            &state,
+            engine_id,
+            voice_idx,
+            None,
+            1,
+            |logical_id, value| updates.push((logical_id, value)),
+        );
+
+        assert!(updates.contains(&(101, 0.0)));
+        assert!(updates.contains(&(102, 0.0)));
+        assert!(updates.contains(&(201, 1.0)));
+        assert!(updates.contains(&(202, 1.0)));
+        assert!(!updates.contains(&(101, 1.0)));
+        assert!(!updates.contains(&(102, 1.0)));
+    }
+
+    #[test]
     fn custom_engine_pool_reuses_releasing_same_note_before_expanding() {
         let mut pool = CustomEnginePool::new();
         for lid in 1..=6 {
             pool.add_voice(lid);
         }
 
-        let low = pool.allocate_voice(0, 0.0, true, 6);
+        let low = pool.allocate_voice(0, 0, 0.0, true, 6);
         let low_lid = low.logical_id;
         pool.release_voice_by_logical_id(low_lid, 1_000);
 
-        let retriggered = pool.allocate_voice(0, 0.0, true, 6);
+        let retriggered = pool.allocate_voice(0, 0, 0.0, true, 6);
 
         assert_eq!(low_lid, 1);
         assert_eq!(retriggered.logical_id, low_lid);
@@ -7945,12 +8151,12 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let low = pool.allocate_voice(0, -24.0, true, 6);
+        let low = pool.allocate_voice(0, 0, -24.0, true, 6);
         let low_lid = low.logical_id;
         pool.release_voice_by_logical_id(low_lid, 1_000);
 
-        let mid = pool.allocate_voice(0, 0.0, true, 6);
-        let high = pool.allocate_voice(0, 7.0, true, 6);
+        let mid = pool.allocate_voice(0, 0, 0.0, true, 6);
+        let high = pool.allocate_voice(0, 0, 7.0, true, 6);
 
         assert_eq!(low_lid, 1);
         assert_eq!(mid.logical_id, 2);
@@ -7967,20 +8173,40 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let low = pool.allocate_voice(0, 0.0, true, 6);
-        let high = pool.allocate_voice(0, 7.0, true, 6);
+        let low = pool.allocate_voice(0, 0, 0.0, true, 6);
+        let high = pool.allocate_voice(0, 0, 7.0, true, 6);
         let low_lid = low.logical_id;
         let high_lid = high.logical_id;
         pool.enabled_voice_count = 2;
 
         pool.release_voice_by_logical_id(high_lid, 1_000);
-        pool.shrink_released_voices(0, 1_999, 1_000);
+        pool.shrink_released_voices(0, 1_999, 1_000, 1);
         assert_eq!(pool.enabled_voice_count, 2);
 
-        pool.shrink_released_voices(0, 2_000, 1_000);
+        pool.shrink_released_voices(0, 2_000, 1_000, 1);
         assert_eq!(pool.enabled_voice_count, 1);
         assert!(pool.voices[0].active);
         assert_eq!(pool.voices[0].logical_id, low_lid);
+    }
+
+    #[test]
+    fn idle_instrument_engine_disables_all_voices() {
+        let engine_id = 0;
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=4 {
+            pool.add_voice(lid);
+        }
+        pool.enabled_voice_count = 1;
+        crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, 1);
+
+        pool.shrink_released_voices(engine_id, 0, 1_000, 0);
+
+        assert_eq!(pool.enabled_voice_count, 0);
+        assert_eq!(
+            crate::lisp_host::get_dgen_engine_enabled_voices(engine_id),
+            0
+        );
+        crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
     }
 
     #[test]
@@ -7990,12 +8216,12 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let first = pool.allocate_voice(0, 0.0, true, 6);
-        let second = pool.allocate_voice(1, 4.0, true, 6);
+        let first = pool.allocate_voice(0, 0, 0.0, true, 6);
+        let second = pool.allocate_voice(1, 1, 4.0, true, 6);
         assert_eq!(first.logical_id, 1);
         assert_eq!(second.logical_id, 2);
 
-        let stolen = pool.allocate_voice(1, 7.0, true, 6);
+        let stolen = pool.allocate_voice(1, 1, 7.0, true, 6);
         assert!(stolen.stole_active_voice);
         assert_eq!(stolen.previous_track, Some(1));
         assert_eq!(stolen.logical_id, 2);
@@ -8008,8 +8234,8 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let first = pool.allocate_voice(3, 0.0, false, 6);
-        let reused = pool.allocate_voice(3, 12.0, false, 6);
+        let first = pool.allocate_voice(3, 3, 0.0, false, 6);
+        let reused = pool.allocate_voice(3, 3, 12.0, false, 6);
 
         assert_eq!(reused.logical_id, first.logical_id);
         assert!(reused.stole_active_voice);
@@ -8023,8 +8249,8 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let first = pool.allocate_free_patch_voice(2, 0.0).unwrap();
-        let second = pool.allocate_free_patch_voice(2, 7.0).unwrap();
+        let first = pool.allocate_free_patch_voice(2, 2, 0.0).unwrap();
+        let second = pool.allocate_free_patch_voice(2, 2, 7.0).unwrap();
 
         assert_eq!(first.voice_idx, 0);
         assert_eq!(first.logical_id, 10);

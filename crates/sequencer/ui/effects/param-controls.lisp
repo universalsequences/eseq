@@ -864,8 +864,9 @@
                :on-click (lambda (info) (param-macro-map false p))
             body)))
       body)
-  (if (or (rack-macro-owner-definition-for false p)
-          (param-macro-owner-definition-for false p))
+  (if (and (not instrument-mods-open)
+          (or (rack-macro-owner-definition-for false p)
+              (param-macro-owner-definition-for false p)))
     (subtree :key (str key "-macro-owned")
       (box :debug-name "macro-param-owned-wrapper"
            :background-color :transparent
