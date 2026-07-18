@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use eseqlisp::live_audio::BandMeterFrame;
+use eseqlisp::live_audio::{BandMeterFrame, CompressorMeterFrame};
+use eseqlisp::widget_render::compressor_display::{
+    CompressorMeterRequest, collect_compressor_meter_requests,
+};
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
 use eseqlisp::widget_render::multiband_meter::{BandMeterRequest, collect_band_meter_requests};
 use eseqlisp::widget_render::roar_shaper::collect_roar_meter_requests;
@@ -62,11 +65,20 @@ struct MeterNode {
     last_frame: Option<BandMeterFrame>,
 }
 
+/// One watched Compressor effect node whose state meter ring feeds a
+/// `compressor-display` widget.
+struct CompressorMeterNode {
+    node_id: i32,
+    revision: u64,
+    last_ring_write: f32,
+}
+
 pub(crate) struct LiveAudioAnalyzerManager {
     lg: LiveGraphPtr,
     taps: HashMap<TapKey, TapNode>,
     processors: HashMap<String, SpectrogramProcessor>,
     meter_nodes: HashMap<String, MeterNode>,
+    compressor_nodes: HashMap<String, CompressorMeterNode>,
     last_poll_at: Instant,
 }
 
@@ -77,6 +89,7 @@ impl LiveAudioAnalyzerManager {
             taps: HashMap::new(),
             processors: HashMap::new(),
             meter_nodes: HashMap::new(),
+            compressor_nodes: HashMap::new(),
             last_poll_at: Instant::now() - LIVE_AUDIO_ANALYZER_POLL_INTERVAL,
         }
     }
@@ -89,6 +102,7 @@ impl LiveAudioAnalyzerManager {
         let mut grouped: HashMap<TapKey, Vec<SpectrogramRequest>> = HashMap::new();
         let mut scope_grouped: HashMap<TapKey, Vec<ScopeRequest>> = HashMap::new();
         let mut meter_requests: HashMap<String, BandMeterRequest> = HashMap::new();
+        let mut compressor_requests: HashMap<String, CompressorMeterRequest> = HashMap::new();
         for layout in editor.visible_widget_layouts() {
             for request in collect_spectrogram_requests(layout.as_ref()) {
                 grouped
@@ -117,9 +131,15 @@ impl LiveAudioAnalyzerManager {
                         source: request.source,
                     });
             }
+            for request in collect_compressor_meter_requests(layout.as_ref()) {
+                compressor_requests
+                    .entry(request.data_key.clone())
+                    .or_insert(request);
+            }
         }
         let poll_due = self.last_poll_at.elapsed() >= LIVE_AUDIO_ANALYZER_POLL_INTERVAL;
-        let meters_changed = self.sync_band_meters(app, meter_requests, poll_due);
+        let meters_changed = self.sync_band_meters(app, meter_requests, poll_due)
+            | self.sync_compressor_meters(app, compressor_requests, poll_due);
 
         let mut active_keys = HashSet::new();
         let mut active_scope_keys = HashSet::new();
@@ -427,15 +447,125 @@ impl LiveAudioAnalyzerManager {
         changed
     }
 
+    /// Watches the Compressor effect nodes behind visible
+    /// `compressor-display` widgets and republishes their meter rings.
+    fn sync_compressor_meters(
+        &mut self,
+        app: &tui::App,
+        requests: HashMap<String, CompressorMeterRequest>,
+        poll_due: bool,
+    ) -> bool {
+        use sequencer::effects::compressor as comp;
+
+        let mut changed = false;
+        let stale_keys = self
+            .compressor_nodes
+            .keys()
+            .filter(|key| !requests.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in stale_keys {
+            if let Some(node) = self.compressor_nodes.remove(&key) {
+                let _ = unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
+            }
+        }
+        eseqlisp::live_audio::retain_compressor_meter_frames(&requests.keys().cloned().collect());
+
+        for (data_key, request) in requests {
+            let Some(node_id) = resolve_effect_node(app, &request.source) else {
+                if let Some(node) = self.compressor_nodes.remove(&data_key) {
+                    let _ =
+                        unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
+                }
+                continue;
+            };
+            let needs_watch = self
+                .compressor_nodes
+                .get(&data_key)
+                .map(|node| node.node_id != node_id)
+                .unwrap_or(true);
+            if needs_watch {
+                if let Some(node) = self.compressor_nodes.remove(&data_key) {
+                    let _ =
+                        unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
+                }
+                if !unsafe { audiograph::add_node_to_watchlist(self.lg.0, node_id) } {
+                    continue;
+                }
+                self.compressor_nodes.insert(
+                    data_key.clone(),
+                    CompressorMeterNode {
+                        node_id,
+                        revision: 0,
+                        last_ring_write: -1.0,
+                    },
+                );
+            }
+            if !poll_due {
+                continue;
+            }
+            let Some(node) = self.compressor_nodes.get_mut(&data_key) else {
+                continue;
+            };
+            let mut state = vec![0.0f32; comp::COMPRESSOR_STATE_SIZE];
+            let state_bytes = state.len() * std::mem::size_of::<f32>();
+            let mut state_size = 0usize;
+            let copied = unsafe {
+                audiograph::get_node_state_into(
+                    self.lg.0,
+                    node.node_id,
+                    state.as_mut_ptr().cast(),
+                    state_bytes,
+                    &mut state_size as *mut usize,
+                )
+            };
+            if !copied || state_size < state_bytes {
+                continue;
+            }
+            let ring_write = state[comp::STATE_RING_WRITE];
+            if ring_write == node.last_ring_write {
+                continue;
+            }
+            node.last_ring_write = ring_write;
+            node.revision += 1;
+            // Unroll the ring so history reads oldest..newest.
+            let head = (ring_write.max(0.0) as usize) % comp::METER_RING_LEN;
+            let mut history = Vec::with_capacity(comp::METER_RING_LEN);
+            for i in 0..comp::METER_RING_LEN {
+                let entry = (head + i) % comp::METER_RING_LEN;
+                history.push([
+                    state[comp::STATE_METER_RING + entry * 2],
+                    state[comp::STATE_METER_RING + entry * 2 + 1],
+                ]);
+            }
+            eseqlisp::live_audio::publish_compressor_meter_frame(
+                data_key,
+                CompressorMeterFrame {
+                    revision: node.revision,
+                    gr_db: state[comp::STATE_METER_GR_DB],
+                    out_db: state[comp::STATE_METER_OUT_DB],
+                    sample_rate: state[comp::STATE_SAMPLE_RATE],
+                    stride: comp::METER_STRIDE,
+                    history: Arc::new(history),
+                },
+            );
+            changed = true;
+        }
+        changed
+    }
+
     pub(crate) fn suspend_for_project_load(&mut self) -> bool {
-        let had_live_data =
-            !self.taps.is_empty() || !self.processors.is_empty() || !self.meter_nodes.is_empty();
+        let had_live_data = !self.taps.is_empty()
+            || !self.processors.is_empty()
+            || !self.meter_nodes.is_empty()
+            || !self.compressor_nodes.is_empty();
         self.clear_taps();
         self.processors.clear();
         self.clear_meter_nodes();
         eseqlisp::live_audio::retain_spectrogram_frames(&HashSet::<String>::new());
         eseqlisp::live_audio::retain_scope_frames(&HashSet::<String>::new());
         eseqlisp::live_audio::retain_band_meter_frames(&HashSet::<String>::new());
+        eseqlisp::live_audio::retain_compressor_meter_frames(&HashSet::<String>::new());
         had_live_data
     }
 
@@ -511,6 +641,9 @@ impl LiveAudioAnalyzerManager {
 
     fn clear_meter_nodes(&mut self) {
         for (_, node) in std::mem::take(&mut self.meter_nodes) {
+            let _ = unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
+        }
+        for (_, node) in std::mem::take(&mut self.compressor_nodes) {
             let _ = unsafe { audiograph::remove_node_from_watchlist(self.lg.0, node.node_id) };
         }
     }

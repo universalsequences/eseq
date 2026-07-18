@@ -267,11 +267,12 @@
   :state (active)
   :shader
   (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
-        (muted-col (rgba 0.25 0.25 0.20 1.0))
-        (bg-col (if (= active 1)
-          (rgba 0.40 0.40 0.42 1.0)
-          (rgba 0.18 0.18 0.20 1.0)))
-        (panel-col (if (= active 1) fg-col muted-col)))
+      (muted-col (rgba 0.25 0.25 0.20 1.0))
+      (bg-col (if (= active 1)
+          :mixer-strip-selected-bg
+          :buffer-bg
+          ))
+      (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
@@ -303,11 +304,12 @@
   :state (active)
   :shader
   (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
-        (muted-col (rgba 0.25 0.25 0.20 1.0))
-        (bg-col (if (= active 1)
-          (rgba 0.40 0.40 0.42 1.0)
-          (rgba 0.18 0.18 0.20 1.0)))
-        (panel-col (if (= active 1) fg-col muted-col)))
+      (muted-col (rgba 0.25 0.25 0.20 1.0))
+      (bg-col (if (= active 1)
+          :mixer-strip-selected-bg
+          :buffer-bg
+          ))
+      (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
@@ -318,7 +320,7 @@
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.0 0.14
-          (sdf/rounded-rect 1.12 0.56 0.08))
+          (sdf/rounded-rect 0.9 0.56 0.08))
         (material :color (rgba 0.11 0.11 0.13 1.0)))
       (sdf/fill
         (sdf/translate -0.34 0.14
@@ -339,11 +341,12 @@
   :state (active)
   :shader
   (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
-        (muted-col (rgba 0.25 0.25 0.20 1.0))
-        (bg-col (if (= active 1)
-          (rgba 0.40 0.40 0.42 1.0)
-          (rgba 0.18 0.18 0.20 1.0)))
-        (panel-col (if (= active 1) fg-col muted-col)))
+      (muted-col (rgba 0.25 0.25 0.20 1.0))
+      (bg-col (if (= active 1)
+          :mixer-strip-selected-bg
+          :buffer-bg
+          ))
+      (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
@@ -354,7 +357,7 @@
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.0 -0.14
-          (sdf/rounded-rect 1.12 0.56 0.08))
+          (sdf/rounded-rect 0.9 0.56 0.08))
         (material :color (rgba 0.11 0.11 0.13 1.0)))
       (sdf/fill
         (sdf/translate -0.34 -0.14

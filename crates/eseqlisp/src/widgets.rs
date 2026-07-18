@@ -50,6 +50,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "spectrogram",
     "scope",
     "multiband-meter",
+    "compressor-display",
     "phaser-notch",
     "roar-shaper",
     "roar-filter",

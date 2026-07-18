@@ -38125,6 +38125,172 @@ mod tests {
         assert_eq!(requests[0].data_key, "band-meter:track-effect:0:0");
     }
 
+    fn test_compressor_params() -> Vec<Value> {
+        let mut params = vec![
+            Value::Map(test_param_map("threshold", 0, -18.0, -70.0, 6.0)),
+            Value::Map(test_param_map("ratio", 1, 4.0, 1.0, 40.0)),
+            Value::Map(test_param_map("attack", 2, 1.0, 0.01, 1000.0)),
+            Value::Map(test_param_map("release", 3, 30.0, 1.0, 3000.0)),
+            Value::Map(test_param_map("auto release", 4, 0.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "model",
+                5,
+                1.0,
+                vec!["peak", "rms", "expand"],
+            )),
+            Value::Map(test_param_map("knee", 6, 6.0, 0.0, 18.0)),
+            Value::Map(test_enum_param_map(
+                "lookahead",
+                7,
+                0.0,
+                vec!["0 ms", "1 ms", "10 ms"],
+            )),
+            Value::Map(test_enum_param_map("env", 8, 1.0, vec!["lin", "log"])),
+            Value::Map(test_param_map("out", 9, 0.0, -36.0, 36.0)),
+            Value::Map(test_param_map("makeup", 10, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("dry/wet", 11, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("sc on", 12, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("sc gain", 13, 0.0, -24.0, 24.0)),
+            Value::Map(test_param_map("sc filter", 14, 0.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "sc type",
+                15,
+                0.0,
+                vec!["lowpass", "highpass", "bandpass", "notch"],
+            )),
+            Value::Map(test_param_map("sc freq", 16, 80.0, 30.0, 15000.0)),
+            Value::Map(test_param_map("sc res", 17, 0.71, 0.1, 8.0)),
+            Value::Map(test_param_map("sc listen", 18, 0.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map("sidechain", 19, 0.0, vec!["off"])),
+            Value::Map(test_param_map("enabled", 20, 1.0, 0.0, 1.0)),
+        ];
+        // The display binds the threshold live.
+        let Value::Map(threshold) = &mut params[0] else {
+            unreachable!("compressor test params are maps")
+        };
+        threshold.insert(
+            "value-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                "test-comp-param-0".to_string(),
+            ))),
+        );
+        params
+    }
+
+    #[test]
+    fn metal_seq_fx_compressor_layout_contains_sidechain_display_and_controls() {
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Compressor".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Compressor",
+                        0,
+                        test_compressor_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+                ("test-comp-param-0", Value::Number(-18.0)),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe compressor ui")
+            .expect("compressor ui probe value");
+        for label in [
+            "Sidechain", "SC Filter", "Ratio", "Attack", "Release", "Auto", "Thresh", "Knee",
+            "Makeup", "Peak", "RMS", "Expand", "Dry/Wet",
+        ] {
+            assert!(
+                value_contains_string(&ui_probe, label),
+                "compressor custom UI probe should contain {label:?}: {ui_probe:?}"
+            );
+        }
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("compressor fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(160, 24);
+        let layout = editor.widget_layout().expect("compressor fx layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Compressor"),
+            "layout should contain the built-in Compressor panel"
+        );
+        for label in ["Sidechain", "SC Filter", "Auto", "Makeup", "Peak", "Expand"] {
+            let node = find_layout_node_by_text(&layout, label)
+                .unwrap_or_else(|| panic!("compressor layout should contain {label:?}"));
+            assert_finite_nonzero_rect(node, &format!("compressor {label} label"));
+        }
+        let display = find_layout_node_by_widget_type(&layout, "compressor-display")
+            .expect("compressor display widget");
+        assert_finite_nonzero_rect(display, "compressor activity display");
+        assert!(
+            matches!(
+                display.props.get("threshold"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "compressor display threshold must retain its live parameter binding: {:?}",
+            display.props.get("threshold")
+        );
+        let requests =
+            eseqlisp::widget_render::compressor_display::collect_compressor_meter_requests(
+                &layout,
+            );
+        assert_eq!(
+            requests.len(),
+            1,
+            "visible Compressor panel should request one meter feed"
+        );
+        assert_eq!(requests[0].data_key, "comp-meter:track-effect:0:0");
+    }
+
     #[test]
     fn metal_seq_fx_space_echo_layout_contains_mode_grid_and_knobs() {
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");

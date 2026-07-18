@@ -49,6 +49,21 @@ struct BusEffectEntry {
     custom_name: Option<String>,
 }
 
+/// Patch any host-routed sidechain params on a descriptor with the current
+/// source-track labels. Builtin descriptors (e.g. Compressor) ship with a
+/// placeholder "off"-only enum; lisp effects get theirs from
+/// `build_effect_descriptor`.
+fn patch_sidechain_labels(desc: &mut EffectDescriptor, labels: &[String]) {
+    for param in &mut desc.params {
+        if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
+            param.max = labels.len().saturating_sub(1) as f32;
+            param.kind = ParamKind::Enum {
+                labels: labels.to_vec(),
+            };
+        }
+    }
+}
+
 fn instrument_display_name(name: &str) -> String {
     std::path::Path::new(name)
         .file_name()
@@ -1508,8 +1523,9 @@ impl App {
         if crate::effects::conv_reverb::is_dgen_builtin(name) {
             return self.load_dgen_builtin_to_slot_sync(track, slot_idx, name);
         }
-        let desc = EffectDescriptor::builtin_insert(name)
+        let mut desc = EffectDescriptor::builtin_insert(name)
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        patch_sidechain_labels(&mut desc, &self.effect_sidechain_labels(track));
         let (node_id, modulator_node_id) =
             self.install_builtin_fx_node(FxChainLocator::Track(track), slot_idx, &desc)?;
         self.apply_builtin_effect_to_slot_with_modulator(
@@ -2615,8 +2631,9 @@ impl App {
         if crate::effects::conv_reverb::is_dgen_builtin(name) {
             return self.load_dgen_builtin_bus_to_slot_sync(bus_idx, slot_idx, name);
         }
-        let desc = EffectDescriptor::builtin_insert(name)
+        let mut desc = EffectDescriptor::builtin_insert(name)
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        patch_sidechain_labels(&mut desc, &self.bus_effect_sidechain_labels());
         let locator = self.bus_fx_locator(bus_idx)?;
         let (node_id, modulator_node_id) =
             self.install_builtin_fx_node(locator, slot_idx, &desc)?;

@@ -140,6 +140,63 @@ pub fn clear_band_meter_frames() {
     band_meter_frames().lock().unwrap().clear();
 }
 
+/// Live meter history for one compressor effect instance: fine-grained
+/// (output dB, gain-reduction dB) entries recorded by the DSP every `stride`
+/// samples, oldest first, plus the latest block meters.
+#[derive(Clone, Debug)]
+pub struct CompressorMeterFrame {
+    pub revision: u64,
+    pub gr_db: f32,
+    pub out_db: f32,
+    pub sample_rate: f32,
+    /// Samples per history entry.
+    pub stride: usize,
+    /// (output dB, gain-reduction dB) pairs, oldest..newest.
+    pub history: Arc<Vec<[f32; 2]>>,
+}
+
+impl CompressorMeterFrame {
+    pub fn is_well_formed(&self) -> bool {
+        self.sample_rate.is_finite()
+            && self.sample_rate > 0.0
+            && self.stride > 0
+            && !self.history.is_empty()
+    }
+}
+
+static COMPRESSOR_METER_FRAMES: OnceLock<Mutex<HashMap<String, Arc<CompressorMeterFrame>>>> =
+    OnceLock::new();
+
+fn compressor_meter_frames() -> &'static Mutex<HashMap<String, Arc<CompressorMeterFrame>>> {
+    COMPRESSOR_METER_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn publish_compressor_meter_frame(key: impl Into<String>, frame: CompressorMeterFrame) {
+    if !frame.is_well_formed() {
+        return;
+    }
+    compressor_meter_frames()
+        .lock()
+        .unwrap()
+        .insert(key.into(), Arc::new(frame));
+    crate::widget_render::bump_widget_state_generation();
+}
+
+pub fn compressor_meter_frame(key: &str) -> Option<Arc<CompressorMeterFrame>> {
+    compressor_meter_frames().lock().unwrap().get(key).cloned()
+}
+
+pub fn retain_compressor_meter_frames(active_keys: &HashSet<String>) {
+    compressor_meter_frames()
+        .lock()
+        .unwrap()
+        .retain(|key, _| active_keys.contains(key));
+}
+
+pub fn clear_compressor_meter_frames() {
+    compressor_meter_frames().lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

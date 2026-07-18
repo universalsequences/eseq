@@ -17,6 +17,7 @@ pub mod label;
 pub mod lane_preview;
 pub mod live_audio;
 pub mod matrix;
+pub mod compressor_display;
 pub mod mixer_meter;
 pub mod modulator_curve;
 pub mod multiband_meter;
@@ -937,6 +938,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &eq8_editor::EQ8_EDITOR_WIDGET,
     &phaser_notch::PHASER_NOTCH_WIDGET,
     &multiband_meter::MULTIBAND_METER_WIDGET,
+    &compressor_display::COMPRESSOR_DISPLAY_WIDGET,
     &roar_shaper::ROAR_SHAPER_WIDGET,
     &roar_filter::ROAR_FILTER_WIDGET,
     &vstack::VSTACK_WIDGET,

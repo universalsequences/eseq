@@ -206,7 +206,7 @@
               (label "Filter" :font-size 9.0 :width 3.8 :color :dim :bg :transparent)
               (builtin-fx-filter-mini-cutoff fx filter-freq-p)
               (builtin-fx-filter-mini-number fx "wid" filter-q-p))))
-        (box :width 9.2 :height 7.45 :padding 0.36
+        (box :width 9.6 :height 7.45 :padding 0.36
              :background-color :fx-inner-panel-bg :corner-radius 7
           (v-stack :gap 0.16
             (h-stack :gap 0.18 :align :center
