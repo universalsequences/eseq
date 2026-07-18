@@ -650,6 +650,7 @@ pub struct TrackNodeIds {
     pub mod_env_id: i32,
     pub bus_send_ids: Vec<BusSendNodeIds>,
     pub rack_slots: Vec<RackSlotNodeIds>,
+    pub rack_signature: Option<graph::RackTopologySignature>,
 }
 
 #[derive(Clone)]

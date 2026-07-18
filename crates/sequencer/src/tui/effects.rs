@@ -4585,6 +4585,7 @@ mod tests {
             mod_env_id: 0,
             bus_send_ids: Vec::new(),
             rack_slots: Vec::new(),
+            rack_signature: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
@@ -4673,6 +4674,7 @@ mod tests {
             mod_env_id: 0,
             bus_send_ids: Vec::new(),
             rack_slots: Vec::new(),
+            rack_signature: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
