@@ -125,6 +125,7 @@ pub struct StepEvent {
     pub instrument_params: ScheduledInstrumentParams,
     pub instrument_tensor_params: ScheduledInstrumentTensorParams,
     pub sampler_params: ScheduledSamplerParams,
+    pub rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
     pub source: EventSource,
 }
 
@@ -141,6 +142,7 @@ pub enum ScheduledEventKind {
         instrument_tensor_params: ScheduledInstrumentTensorParams,
         sampler_params: ScheduledSamplerParams,
         instrument_fingerprint: u64,
+        rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
     },
     NetworkTrigger {
         track: usize,
@@ -154,6 +156,7 @@ pub enum ScheduledEventKind {
         instrument_tensor_params: ScheduledInstrumentTensorParams,
         sampler_params: ScheduledSamplerParams,
         instrument_fingerprint: u64,
+        rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
     },
     InstrumentParams {
         track: usize,
@@ -326,6 +329,7 @@ mod tests {
                     instrument_tensor_params: empty_instrument_tensor_params(),
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 11,
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 },
             })
             .unwrap();
@@ -359,6 +363,7 @@ mod tests {
                     instrument_tensor_params: empty_instrument_tensor_params(),
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 },
             })
             .unwrap();
@@ -405,6 +410,7 @@ mod tests {
                     instrument_tensor_params: empty_instrument_tensor_params(),
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 11,
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 },
             })
         );
@@ -439,6 +445,7 @@ mod tests {
                     instrument_tensor_params: empty_instrument_tensor_params(),
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 },
             })
         );
@@ -478,6 +485,7 @@ mod tests {
                     instrument_tensor_params: empty_instrument_tensor_params(),
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 },
             })
             .unwrap();
@@ -511,6 +519,7 @@ mod tests {
                 instrument_tensor_params: empty_instrument_tensor_params(),
                 sampler_params: default_sampler_params(),
                 instrument_fingerprint: 0,
+                rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             },
         });
         assert!(overflow.is_err());

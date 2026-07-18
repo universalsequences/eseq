@@ -77,24 +77,7 @@
           )
         (fx-param-grid params fx)))))
 
-(def builtin-fx-compressor-ui (fx)
-  (let ((params (get fx :params)))
-    (let ((threshold-p (builtin-fx-param params "threshold"))
-          (ratio-p (builtin-fx-param params "ratio"))
-          (attack-p (builtin-fx-param params "attack"))
-          (release-p (builtin-fx-param params "release"))
-          (makeup-p (builtin-fx-param params "makeup"))
-          (mix-p (builtin-fx-param params "mix")))
-      (if (and threshold-p ratio-p attack-p release-p makeup-p mix-p)
-        (v-stack :gap 0.34
-          (h-stack :gap 0.5 :align :center
-            (builtin-fx-dynamics-number-knob fx "thr" threshold-p 1)
-            (builtin-fx-dynamics-number-knob fx "ratio" ratio-p 1)
-            (builtin-fx-dynamics-number-knob fx "atk" attack-p 1)
-            (builtin-fx-dynamics-number-knob fx "rel" release-p 0)
-            (builtin-fx-dynamics-number-knob fx "mkup" makeup-p 1)
-            (builtin-fx-dynamics-percent-knob fx "mix" mix-p)))
-        (fx-param-grid params fx)))))
+;; The Compressor panel lives in ui/effects/builtin/compressor.lisp.
 
 (def builtin-fx-limiter-ui (fx)
   (let ((params (get fx :params)))

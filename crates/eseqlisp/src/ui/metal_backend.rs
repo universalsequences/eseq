@@ -1925,7 +1925,7 @@ fragment float4 live_spectrogram_frag(
     #[derive(Clone)]
     struct CachedWidgetRunScene {
         runs: Vec<widget_render::MetalPrimitiveRun>,
-        run_indices: HashMap<widget_render::MetalPrimitiveRunKey, usize>,
+        run_indices: widget_render::MetalPrimitiveRunIndex,
     }
 
     struct ImageTextureResource {

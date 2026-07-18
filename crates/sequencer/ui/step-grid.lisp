@@ -184,6 +184,10 @@
                   (if visible
                     (bus-step-pointer-up step evt)
                     nil))
+                :on-double-click (lambda (evt)
+                  (if visible
+                    (bus-step-double-click step evt)
+                    nil))
                 (tick :active (if visible (if (nth bus-steps step) 1 0) 0)
                       :plocked (if visible (if (nth bus-plocks step) 1 0) 0)
                       :selected (if visible (bind-seq-nth "selected-steps" step) 0)))
@@ -376,6 +380,10 @@
                 :on-mouse-up (lambda (evt)
                   (if visible
                     (step-pointer-up step evt)
+                    nil))
+                :on-double-click (lambda (evt)
+                  (if visible
+                    (step-double-click step evt)
                     nil))
                 (metal-track-tick
                       :active (if visible (if (nth SEQ.steps step) 1 0) 0)

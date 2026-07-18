@@ -99,6 +99,11 @@ pub(crate) enum ActiveDeleteTarget {
         bus: Option<usize>,
         slot: usize,
     },
+    RackEffect {
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+    },
     RackSlot {
         track: usize,
         slot: usize,
@@ -942,7 +947,9 @@ impl ActiveDeleteTarget {
             ActiveDeleteTarget::MixerTrack { .. }
             | ActiveDeleteTarget::TrackPattern { .. }
             | ActiveDeleteTarget::ModRoute { .. } => "*mixer*",
-            ActiveDeleteTarget::FxEffect { .. } | ActiveDeleteTarget::RackSlot { .. } => "*fx*",
+            ActiveDeleteTarget::FxEffect { .. }
+            | ActiveDeleteTarget::RackEffect { .. }
+            | ActiveDeleteTarget::RackSlot { .. } => "*fx*",
         }
     }
 }
@@ -1333,6 +1340,19 @@ fn rack_slot_snapshot_for_host(
         .cloned()
 }
 
+fn rack_slot_effect_param_needs_panel_rebuild(
+    state: &Arc<SequencerState>,
+    track: usize,
+    rack_slot: usize,
+    effect_slot: usize,
+    param_idx: usize,
+) -> bool {
+    rack_slot_snapshot_for_host(state, track, rack_slot)
+        .and_then(|slot| slot.effect_descriptors.get(effect_slot).cloned())
+        .and_then(|descriptor| descriptor.params.get(param_idx).cloned())
+        .is_none_or(|param| param_change_needs_fx_rebuild(&param))
+}
+
 fn param_change_needs_fx_rebuild(param: &sequencer::effects::ParamDescriptor) -> bool {
     matches!(param.kind, ParamKind::Boolean | ParamKind::Enum { .. })
 }
@@ -1461,19 +1481,197 @@ fn refresh_instrument_panel_reactive(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &AtomicUsize,
 ) {
-    if editor
-        .runtime_mut()
+    let selected_step = selected_plock_step(selected_steps);
+    let display_step = displayed_plock_step(&app.state, track, selected_step);
+    let rt = editor.runtime_mut();
+    let mut dirty = rt
         .set_reactive(
             "SEQ",
             "instrument-panel",
             build_instrument_panel_value(app, track, selected_steps),
         )
-        .effects_dirty
-    {
+        .effects_dirty;
+    dirty |= sync_rack_macro_value_fields(rt, app, track, display_step);
+    dirty |= sync_rack_panel_param_value_fields(rt, app, track, display_step);
+    if dirty {
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
     }
     ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+fn refresh_rack_macro_value_reactive(
+    editor: &mut Editor,
+    app: &tui::App,
+    track: usize,
+    id: sequencer::sequencer::RackMacroId,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    ui_epoch: &AtomicUsize,
+) {
+    let display_step = displayed_plock_step(&app.state, track, selected_plock_step(selected_steps));
+    let rt = editor.runtime_mut();
+    let mut dirty = sync_rack_macro_value_field(rt, app, track, id, display_step);
+    dirty |= sync_rack_macro_target_value_fields(rt, app, track, id, display_step);
+    flush_reactive_display_edit(editor, dirty);
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+fn refresh_rack_macro_plock_reactive(
+    editor: &mut Editor,
+    app: &tui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    id: sequencer::sequencer::RackMacroId,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    rebuild_plock_rows: bool,
+) {
+    let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
+    let rt = editor.runtime_mut();
+    let mut dirty = sync_rack_macro_value_field(rt, app, track, id, display_step);
+    dirty |= sync_rack_macro_target_value_fields(rt, app, track, id, display_step);
+    if rebuild_plock_rows {
+        let result = rt.set_reactive(
+            "SEQ",
+            "track-plocks",
+            build_track_plocks_value(app, state, track, selected_steps),
+        );
+        dirty |= result.effects_dirty || result.widgets_dirty;
+    }
+    flush_reactive_display_edit(editor, dirty);
+}
+
+#[derive(Clone, Copy)]
+enum RackDirectDisplayTarget {
+    SlotParam {
+        slot_idx: usize,
+        param: RackSlotParam,
+    },
+    InstrumentParam {
+        slot_idx: usize,
+        param_idx: usize,
+    },
+    EffectParam {
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+    },
+}
+
+fn refresh_rack_direct_param_reactive(
+    editor: &mut Editor,
+    app: &tui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    target: RackDirectDisplayTarget,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    sync_plock_rows: bool,
+    ui_epoch: &AtomicUsize,
+) {
+    let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
+    let rt = editor.runtime_mut();
+    let mut dirty = match target {
+        RackDirectDisplayTarget::SlotParam { slot_idx, param } => {
+            sync_rack_slot_control_value_field(rt, app, track, slot_idx, param, display_step)
+        }
+        RackDirectDisplayTarget::InstrumentParam {
+            slot_idx,
+            param_idx,
+        } => sync_rack_slot_instrument_param_value_field(
+            rt,
+            app,
+            track,
+            slot_idx,
+            param_idx,
+            display_step,
+        ),
+        RackDirectDisplayTarget::EffectParam {
+            rack_slot,
+            effect_slot,
+            param_idx,
+        } => sync_rack_slot_effect_param_value_field(
+            rt,
+            app,
+            track,
+            rack_slot,
+            effect_slot,
+            param_idx,
+            display_step,
+        ),
+    };
+    if sync_plock_rows {
+        let result = rt.set_reactive(
+            "SEQ",
+            "track-plocks",
+            build_track_plocks_value(app, state, track, selected_steps),
+        );
+        dirty |= result.effects_dirty || result.widgets_dirty;
+    }
+    flush_reactive_display_edit(editor, dirty);
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+fn apply_rack_macro_host_command(
+    name: &str,
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+    editor: &mut Editor,
+    app: &mut tui::App,
+    state: &Arc<SequencerState>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    ui_epoch: &AtomicUsize,
+    fx_epoch: &AtomicUsize,
+) -> bool {
+    let (Some(track), Some(id), Some(value)) = (
+        map_usize(map, "track"),
+        map_usize(map, "id").and_then(sequencer::sequencer::RackMacroId::from_index),
+        map_number(map, "value").map(|value| value as f32),
+    ) else {
+        return false;
+    };
+    match name {
+        "set-rack-macro-value" => {
+            if !app.set_rack_macro_value(track, id, value) {
+                return false;
+            }
+            refresh_rack_macro_value_reactive(editor, app, track, id, selected_steps, ui_epoch);
+        }
+        "set-rack-macro-plock" => {
+            let steps = selected_steps
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>();
+            let display_step =
+                displayed_plock_step(state, track, selected_plock_step(selected_steps));
+            let plock_row_exists = {
+                let racks = state.pattern.rack_tracks.lock().unwrap();
+                display_step.is_some_and(|step| {
+                    racks
+                        .get(track)
+                        .and_then(Option::as_ref)
+                        .and_then(|rack| rack.macros.get(id.index()))
+                        .and_then(|rack_macro| rack_macro.plocks.get(step))
+                        .is_some_and(Option::is_some)
+                })
+            };
+            if !app.set_rack_macro_plocks(track, id, &steps, value) {
+                return false;
+            }
+            refresh_rack_macro_plock_reactive(
+                editor,
+                app,
+                state,
+                track,
+                id,
+                selected_steps,
+                !plock_row_exists,
+            );
+            fx_epoch.fetch_add(1, Ordering::Relaxed);
+            ui_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => return false,
+    }
+    true
 }
 
 fn sync_rack_slot_instrument_authoring_display(
@@ -1483,7 +1681,6 @@ fn sync_rack_slot_instrument_authoring_display(
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
-    let steps: Vec<usize> = selected_steps.lock().unwrap().iter().copied().collect();
     let rt = editor.runtime_mut();
     let mut dirty = rt
         .set_reactive(
@@ -1492,12 +1689,15 @@ fn sync_rack_slot_instrument_authoring_display(
             build_instrument_panel_value(app, track, selected_steps),
         )
         .effects_dirty;
+    let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
+    dirty |= sync_rack_macro_value_fields(rt, app, track, display_step);
+    dirty |= sync_rack_panel_param_value_fields(rt, app, track, display_step);
     dirty |= sync_instrument_plock_presence_fields(
         rt,
         state,
         &app.graph.effect_descriptors,
         track,
-        &steps,
+        selected_steps,
     );
     flush_reactive_display_edit(editor, dirty);
 }
@@ -2096,8 +2296,9 @@ fn sync_instrument_plock_presence_fields(
     state: &Arc<SequencerState>,
     effect_descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
     track: usize,
-    steps: &[usize],
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> bool {
+    let steps: Vec<usize> = selected_steps.lock().unwrap().iter().copied().collect();
     let mut dirty = false;
     dirty |= rt
         .set_reactive(
@@ -2106,7 +2307,42 @@ fn sync_instrument_plock_presence_fields(
             build_step_has_plocks(state, track, effect_descriptors),
         )
         .effects_dirty;
-    for &step in steps {
+    let step_plock_kinds = build_step_plock_kinds(state, track);
+    let step_variant_r = build_step_variant_color_channel(state, track, 0);
+    let step_variant_g = build_step_variant_color_channel(state, track, 1);
+    let step_variant_b = build_step_variant_color_channel(state, track, 2);
+    dirty |= rt
+        .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds.clone())
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive("SEQ", "step-variant-r", step_variant_r.clone())
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive("SEQ", "step-variant-g", step_variant_g.clone())
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive("SEQ", "step-variant-b", step_variant_b.clone())
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-plock-kinds", track, step_plock_kinds)
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-r", track, step_variant_r)
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-g", track, step_variant_g)
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive_list_index("SEQ", "track-step-variant-b", track, step_variant_b)
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "track-plock-variants",
+            build_track_plock_variants_value(state, track, selected_steps),
+        )
+        .effects_dirty;
+    for step in steps {
         if step >= MAX_STEPS {
             continue;
         }
@@ -2240,19 +2476,12 @@ fn sync_instrument_param_authoring_display(
         );
     }
     if sync.sync_plock_presence {
-        let steps: Vec<usize> = sync
-            .selected_steps
-            .lock()
-            .unwrap()
-            .iter()
-            .copied()
-            .collect();
         ui_dirty |= sync_instrument_plock_presence_fields(
             editor.runtime_mut(),
             sync.state,
             &sync.app.graph.effect_descriptors,
             sync.track,
-            &steps,
+            sync.selected_steps,
         );
     }
     ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
@@ -2823,14 +3052,12 @@ fn apply_ui_invalidations(
                         needs_reactive_cycle |=
                             sync_instrument_param_value_field(rt, app, track, param, display_step);
                         if track == current_track_idx {
-                            let steps: Vec<usize> =
-                                selected_steps.lock().unwrap().iter().copied().collect();
                             needs_reactive_cycle |= sync_instrument_plock_presence_fields(
                                 rt,
                                 state,
                                 &app.graph.effect_descriptors,
                                 track,
-                                &steps,
+                                selected_steps,
                             );
                         }
                     }
@@ -4029,12 +4256,16 @@ mod tests {
         let effect_descriptors = vec![Vec::new()];
         let mut runtime = Runtime::new();
 
+        let selected_steps =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::from([
+                2, 3,
+            ])));
         super::sync_instrument_plock_presence_fields(
             &mut runtime,
             &state,
             &effect_descriptors,
             0,
-            &[2, 3],
+            &selected_steps,
         );
 
         assert_eq!(
@@ -4404,6 +4635,56 @@ mod tests {
         node.children
             .iter()
             .find_map(|child| find_layout_node_by_stable_key(child, key))
+    }
+
+    fn find_layout_node_by_stable_key_suffix<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        suffix: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node
+            .stable_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(suffix))
+        {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_stable_key_suffix(child, suffix))
+    }
+
+    fn find_layout_node_by_debug_name<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        name: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if matches!(node.props.get("debug-name"), Some(Value::String(value)) if value == name) {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_debug_name(child, name))
+    }
+
+    fn layout_prop_number(node: &eseqlisp::layout::LayoutNode, name: &str) -> Option<f64> {
+        match node.props.get(name) {
+            Some(Value::Number(value)) => Some(*value),
+            Some(Value::ReactiveRef { slot, .. }) => {
+                Some(eseqlisp::reactive::read_float_slot(slot) as f64)
+            }
+            _ => None,
+        }
+    }
+
+    fn find_layout_node_by_widget_type<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_widget_type(child, widget_type))
     }
 
     fn visible_layout_revisions(editor: &eseqlisp::Editor) -> Vec<(String, u64)> {
@@ -4885,14 +5166,28 @@ mod tests {
             .expect("project 92 Escape selection probe should pass");
     }
 
+    #[test]
+    #[ignore = "release-mode perf probe: compares a three-target instrument-rack macro with a direct rack number-picker through the real mouse, host-command, reactive, tiled-frame, and retained-render paths"]
+    fn project_92_rack_macro_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-rack-macro-drag-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::RackMacroDrag))
+            .expect("spawn project 92 rack macro drag probe")
+            .join()
+            .expect("project 92 rack macro drag probe should pass");
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Project92UiProbe {
         SceneSwitch,
         EscapeDeselect,
+        RackMacroDrag,
     }
 
     fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
         use super::*;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use std::collections::HashSet;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
@@ -4900,6 +5195,15 @@ mod tests {
 
         fn duration_ms(duration: Duration) -> f64 {
             duration.as_secs_f64() * 1000.0
+        }
+
+        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
         }
 
         let _dir = SequencerDirGuard::enter();
@@ -5029,6 +5333,41 @@ mod tests {
             "project 92 should have multiple scenes"
         );
 
+        if probe == Project92UiProbe::RackMacroDrag {
+            app.load_rack_preset_onto_track(0, "rifton")
+                .expect("load realistic instrument rack fixture");
+            let slot = state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref()
+                .expect("rack fixture track")
+                .slots[0]
+                .clone();
+            let descriptor = app
+                .rack_slot_instrument_descriptor(&slot)
+                .expect("rack fixture instrument descriptor");
+            let mappings = descriptor
+                .params
+                .iter()
+                .enumerate()
+                .take(3)
+                .map(
+                    |(param_index, param)| sequencer::sequencer::RackMacroMapping {
+                        target: sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
+                            slot: 0,
+                            param: param.name.clone(),
+                            param_index,
+                        },
+                        range_min: param.min,
+                        range_max: param.max,
+                        curve: sequencer::sequencer::RackMacroCurve::Linear,
+                    },
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(mappings.len(), 3, "rack fixture instrument parameters");
+            state.update_rack_macros_for_all_pattern_snapshots(0, |macros| {
+                macros[0].mappings = mappings.clone();
+            });
+        }
+
         current_track.store(0, Ordering::Relaxed);
         *track_pan_ids.lock().unwrap() = app
             .graph
@@ -5094,6 +5433,536 @@ mod tests {
         refresh_visible_track_topology_layouts(&mut editor);
         editor.update_tile_rects(180, 70);
         let _ = editor.drain_host_commands();
+
+        if probe == Project92UiProbe::RackMacroDrag {
+            const TRACK: usize = 0;
+            const SELECTED_COUNT: usize = 32;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+            // Recorded before the optimization on this exact project/rack fixture,
+            // after replacing the old cheap slot-gain/pan/mute mappings with three
+            // real instrument-parameter mappings.
+            const REFERENCE_LIVE_MEDIAN_MS: f64 = 5.023;
+            const REFERENCE_PLOCK_MEDIAN_MS: f64 = 2.234;
+
+            struct RackMacroPerfSamples {
+                total: Vec<f64>,
+                host: Vec<f64>,
+                reactive: Vec<f64>,
+                frame: Vec<f64>,
+                retained: Vec<f64>,
+            }
+
+            let fx_buffer_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*fx*")
+                .expect("fx buffer should exist")
+                .id;
+            editor.set_active_buffer(fx_buffer_id);
+            editor
+                .runtime_mut()
+                .eval_str("(if (not rack-panel-macros-open) (rack-panel-toggle-macros) false)")
+                .expect("open rack macro bank");
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(180, 70);
+
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            let mut run_scenario = |selected_count: usize| {
+                selected_steps.lock().unwrap().clear();
+                selected_steps.lock().unwrap().extend(0..selected_count);
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "selected-steps",
+                    build_selection_value(&selected_steps),
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+
+                let initial_frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let initial_fx_frame = initial_frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                    .expect("visible initial fx frame");
+                let initial_fx_layout = initial_fx_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("initial fx layout");
+                let initial_viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: 1440.0,
+                    vp_h: 1120.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: initial_fx_frame.frame.focused_widget_id,
+                    focused_branch: true,
+                    overlay_viewport_bottom: 70.0,
+                    scroll_top: initial_fx_frame.frame.widget_scroll_top
+                        + initial_fx_frame.frame.text_scroll_top as f32,
+                    scroll_left: initial_fx_frame.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                    initial_fx_layout,
+                    initial_viewport,
+                    initial_viewport.scroll_top,
+                    70,
+                );
+                let retained_run_indices =
+                    eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+
+                let mut samples = RackMacroPerfSamples {
+                    total: Vec::with_capacity(SAMPLES),
+                    host: Vec::with_capacity(SAMPLES),
+                    reactive: Vec::with_capacity(SAMPLES),
+                    frame: Vec::with_capacity(SAMPLES),
+                    retained: Vec::with_capacity(SAMPLES),
+                };
+                for iteration in 0..(WARMUPS + SAMPLES) {
+                    let layout = editor.widget_layout().expect("rack macro layout");
+                    let knob = find_layout_node_by_debug_name(&layout, "rack-macro-knob-0")
+                        .expect("first rack macro knob");
+                    let col = knob.rect.col + knob.rect.width * 0.5;
+                    let row = knob.rect.row + knob.rect.height * 0.5;
+                    let target_row = if iteration % 2 == 0 {
+                        row - 1.0
+                    } else {
+                        row + 1.0
+                    };
+                    let width = layout.rect.width.ceil().max(1.0) as u16;
+                    let height = layout.rect.height.ceil().max(1.0) as u16;
+
+                    editor.handle_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Down(MouseButton::Left),
+                            col.floor() as u16,
+                            row.floor() as u16,
+                        ),
+                        0,
+                        0,
+                        width,
+                        height,
+                        col,
+                        row,
+                    );
+                    let _ = editor.drain_host_commands();
+
+                    let started = Instant::now();
+                    editor.handle_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Drag(MouseButton::Left),
+                            col.floor() as u16,
+                            target_row.floor() as u16,
+                        ),
+                        0,
+                        0,
+                        width,
+                        height,
+                        col,
+                        target_row,
+                    );
+                    let commands = editor.drain_host_commands();
+                    assert_eq!(commands.len(), 1, "macro drag commands={commands:?}");
+                    let HostCommand::Custom { name, payload } = &commands[0] else {
+                        panic!("macro drag must emit a custom command: {commands:?}");
+                    };
+                    let Value::Map(map) = payload else {
+                        panic!("macro drag payload must be a map: {payload:?}");
+                    };
+                    assert!(apply_rack_macro_host_command(
+                        name,
+                        map,
+                        &mut editor,
+                        &mut app,
+                        &state,
+                        &selected_steps,
+                        &ui_epoch,
+                        &fx_epoch,
+                    ));
+                    let host_done = Instant::now();
+                    editor.runtime_mut().run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    let reactive_done = Instant::now();
+                    let frame =
+                        eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                    let fx_frame = frame
+                        .tiles
+                        .iter()
+                        .find(|tile| tile.frame.buffer_name == "*fx*")
+                        .expect("visible fx frame after macro drag");
+                    let fx_layout = fx_frame
+                        .frame
+                        .widget_layout
+                        .as_ref()
+                        .expect("fx layout after macro drag");
+                    let frame_done = Instant::now();
+                    let viewport = eseqlisp::widget_render::WidgetViewport {
+                        cell_w: 8.0,
+                        cell_h: 16.0,
+                        vp_w: 1440.0,
+                        vp_h: 1120.0,
+                        time_seconds: 0.0,
+                        focused_widget_id: fx_frame.frame.focused_widget_id,
+                        focused_branch: true,
+                        overlay_viewport_bottom: 70.0,
+                        scroll_top: fx_frame.frame.widget_scroll_top
+                            + fx_frame.frame.text_scroll_top as f32,
+                        scroll_left: fx_frame.frame.widget_layout_scroll_left,
+                        inherited_hover: false,
+                    };
+                    let (_, retained_stats) =
+                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                            fx_layout,
+                            viewport,
+                            viewport.scroll_top,
+                            70,
+                            &mut retained_runs,
+                            &retained_run_indices,
+                            &fx_frame.frame.dirty_widget_ids,
+                        );
+                    assert_eq!(retained_stats.missing_previous_runs, 0);
+                    assert_eq!(retained_stats.invalid_previous_runs, 0);
+                    assert!(
+                        !retained_runs.is_empty(),
+                        "macro drag must retain Metal runs"
+                    );
+                    let knob_wrapper =
+                        find_layout_node_by_debug_name(fx_layout, "rack-macro-knob-0")
+                            .expect("rendered first rack macro knob");
+                    let knob = find_layout_node_by_widget_type(knob_wrapper, "knob-number")
+                        .expect("rendered rack macro knob-number");
+                    assert!(layout_prop_number(knob, "value").is_some());
+                    if iteration >= WARMUPS {
+                        let retained_done = Instant::now();
+                        samples.total.push(duration_ms(started.elapsed()));
+                        samples.host.push(duration_ms(host_done - started));
+                        samples
+                            .reactive
+                            .push(duration_ms(reactive_done - host_done));
+                        samples.frame.push(duration_ms(frame_done - reactive_done));
+                        samples
+                            .retained
+                            .push(duration_ms(retained_done - frame_done));
+                    }
+                }
+                samples
+            };
+
+            // Populate frame/layout caches through the production path. The old
+            // comparison happened to do this by running its legacy scenario
+            // first, which hid the dependency from the measured samples.
+            let _unmeasured_cache_warmup = run_scenario(0);
+            let mut live_samples = run_scenario(0);
+            let _unmeasured_plock_cache_warmup = run_scenario(SELECTED_COUNT);
+            let mut plock_samples = run_scenario(SELECTED_COUNT);
+            let live_median = percentile(&mut live_samples.total, 0.50);
+            let plock_median = percentile(&mut plock_samples.total, 0.50);
+            let live_speedup = REFERENCE_LIVE_MEDIAN_MS / live_median;
+            let plock_speedup = REFERENCE_PLOCK_MEDIAN_MS / plock_median;
+            eprintln!(
+                "[project-92-rack-macro-drag] mappings=3 selected=0 samples={} reference_median_ms={:.3} median_ms={:.3} p95_ms={:.3} speedup={:.1}x",
+                SAMPLES,
+                REFERENCE_LIVE_MEDIAN_MS,
+                live_median,
+                percentile(&mut live_samples.total, 0.95),
+                live_speedup,
+            );
+            eprintln!(
+                "[project-92-rack-macro-drag] mappings=3 selected={} samples={} reference_median_ms={:.3} median_ms={:.3} p95_ms={:.3} speedup={:.1}x",
+                SELECTED_COUNT,
+                SAMPLES,
+                REFERENCE_PLOCK_MEDIAN_MS,
+                plock_median,
+                percentile(&mut plock_samples.total, 0.95),
+                plock_speedup,
+            );
+            eprintln!(
+                "[project-92-rack-macro-drag-phases] selected=0 host_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                percentile(&mut live_samples.host, 0.50),
+                percentile(&mut live_samples.reactive, 0.50),
+                percentile(&mut live_samples.frame, 0.50),
+                percentile(&mut live_samples.retained, 0.50),
+            );
+            eprintln!(
+                "[project-92-rack-macro-drag-phases] selected={} host_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                SELECTED_COUNT,
+                percentile(&mut plock_samples.host, 0.50),
+                percentile(&mut plock_samples.reactive, 0.50),
+                percentile(&mut plock_samples.frame, 0.50),
+                percentile(&mut plock_samples.retained, 0.50),
+            );
+            drop(run_scenario);
+
+            selected_steps.lock().unwrap().clear();
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "selected-steps",
+                build_selection_value(&selected_steps),
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+
+            let initial_frame =
+                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+            let initial_fx_frame = initial_frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*fx*")
+                .expect("visible initial fx frame for direct rack control");
+            let initial_fx_layout = initial_fx_frame
+                .frame
+                .widget_layout
+                .as_ref()
+                .expect("initial fx layout for direct rack control");
+            let direct_slot = state.pattern.rack_tracks.lock().unwrap()[TRACK]
+                .as_ref()
+                .expect("direct rack fixture track")
+                .slots[0]
+                .clone();
+            let direct_descriptor = app
+                .rack_slot_instrument_descriptor(&direct_slot)
+                .expect("direct rack fixture instrument descriptor");
+            let (direct_param_idx, direct_param, direct_param_key_suffix) = direct_descriptor
+                .params
+                .iter()
+                .enumerate()
+                .skip(3)
+                .find_map(|(param_idx, param)| {
+                    let is_haptic_free_continuous = matches!(
+                        param.kind,
+                        sequencer::effects::ParamKind::Continuous { .. }
+                    ) && (param.max - param.min).abs() <= 1.0
+                        && !sequencer::voice_modulator::is_bar_resync_param(
+                            param.node_param_idx,
+                        );
+                    let suffix = format!("-{}", param.name);
+                    (is_haptic_free_continuous
+                        && find_layout_node_by_stable_key_suffix(initial_fx_layout, &suffix)
+                            .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+                            .is_some())
+                    .then(|| (param_idx, param.clone(), suffix))
+                })
+                .expect("visible unmapped 0-1 rack instrument knob");
+            let initial_viewport = eseqlisp::widget_render::WidgetViewport {
+                cell_w: 8.0,
+                cell_h: 16.0,
+                vp_w: 1440.0,
+                vp_h: 1120.0,
+                time_seconds: 0.0,
+                focused_widget_id: initial_fx_frame.frame.focused_widget_id,
+                focused_branch: true,
+                overlay_viewport_bottom: 70.0,
+                scroll_top: initial_fx_frame.frame.widget_scroll_top
+                    + initial_fx_frame.frame.text_scroll_top as f32,
+                scroll_left: initial_fx_frame.frame.widget_layout_scroll_left,
+                inherited_hover: false,
+            };
+            let (mut direct_retained_runs, _) =
+                eseqlisp::widget_render::collect_metal_primitive_runs(
+                    initial_fx_layout,
+                    initial_viewport,
+                    initial_viewport.scroll_top,
+                    70,
+                );
+            let direct_retained_indices =
+                eseqlisp::widget_render::build_metal_primitive_run_index(&direct_retained_runs);
+            let mut direct_samples = RackMacroPerfSamples {
+                total: Vec::with_capacity(SAMPLES),
+                host: Vec::with_capacity(SAMPLES),
+                reactive: Vec::with_capacity(SAMPLES),
+                frame: Vec::with_capacity(SAMPLES),
+                retained: Vec::with_capacity(SAMPLES),
+            };
+            let mut direct_input_samples = Vec::with_capacity(SAMPLES);
+            let mut direct_state_samples = Vec::with_capacity(SAMPLES);
+            let mut direct_sync_samples = Vec::with_capacity(SAMPLES);
+            for iteration in 0..(WARMUPS + SAMPLES) {
+                let layout = editor.widget_layout().expect("direct rack control layout");
+                let control_wrapper =
+                    find_layout_node_by_stable_key_suffix(&layout, &direct_param_key_suffix)
+                        .expect("direct rack instrument parameter wrapper");
+                let control = find_layout_node_by_widget_type(control_wrapper, "knob-number")
+                    .expect("direct rack instrument knob");
+                let col = control.rect.col + control.rect.width * 0.5;
+                let row = control.rect.row + control.rect.height * 0.5;
+                let target_row = if iteration % 2 == 0 {
+                    row - 1.0
+                } else {
+                    row + 1.0
+                };
+                let width = layout.rect.width.ceil().max(1.0) as u16;
+                let height = layout.rect.height.ceil().max(1.0) as u16;
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        col.floor() as u16,
+                        row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    col,
+                    row,
+                );
+                let _ = editor.drain_host_commands();
+
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        col.floor() as u16,
+                        target_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    col,
+                    target_row,
+                );
+                let commands = editor.drain_host_commands();
+                let input_done = Instant::now();
+                assert_eq!(commands.len(), 1, "direct rack control commands={commands:?}");
+                let HostCommand::Custom { name, payload } = &commands[0] else {
+                    panic!("direct rack control must emit a custom command: {commands:?}");
+                };
+                assert_eq!(name, "set-rack-slot-instrument-param");
+                let Value::Map(map) = payload else {
+                    panic!("direct rack control payload must be a map: {payload:?}");
+                };
+                let track = map_usize(map, "track").expect("direct rack track");
+                let slot_idx = map_usize(map, "slot").expect("direct rack slot");
+                let param_idx = map_usize(map, "param-idx").expect("direct rack param");
+                assert_eq!(param_idx, direct_param_idx);
+                let user_value = map_number(map, "value").expect("direct rack value") as f32;
+                let stored = direct_param.clamp(direct_param.user_input_to_stored(user_value));
+                app.set_rack_slot_instrument_param(track, slot_idx, param_idx, stored);
+                let state_done = Instant::now();
+                refresh_rack_direct_param_reactive(
+                    &mut editor,
+                    &app,
+                    &state,
+                    track,
+                    RackDirectDisplayTarget::InstrumentParam {
+                        slot_idx,
+                        param_idx,
+                    },
+                    &selected_steps,
+                    false,
+                    &ui_epoch,
+                );
+                let host_done = Instant::now();
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let reactive_done = Instant::now();
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let fx_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                    .expect("visible fx frame after direct rack edit");
+                let fx_layout = fx_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("fx layout after direct rack edit");
+                let frame_done = Instant::now();
+                let viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: 1440.0,
+                    vp_h: 1120.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: fx_frame.frame.focused_widget_id,
+                    focused_branch: true,
+                    overlay_viewport_bottom: 70.0,
+                    scroll_top: fx_frame.frame.widget_scroll_top
+                        + fx_frame.frame.text_scroll_top as f32,
+                    scroll_left: fx_frame.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (_, retained_stats) =
+                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        fx_layout,
+                        viewport,
+                        viewport.scroll_top,
+                        70,
+                        &mut direct_retained_runs,
+                        &direct_retained_indices,
+                        &fx_frame.frame.dirty_widget_ids,
+                    );
+                assert_eq!(retained_stats.missing_previous_runs, 0);
+                assert_eq!(retained_stats.invalid_previous_runs, 0);
+                let rendered_wrapper = find_layout_node_by_stable_key_suffix(
+                    fx_layout,
+                    &direct_param_key_suffix,
+                )
+                .expect("rendered direct rack instrument parameter wrapper");
+                let rendered_control =
+                    find_layout_node_by_widget_type(rendered_wrapper, "knob-number")
+                        .expect("rendered direct rack instrument knob");
+                let rendered_value = layout_prop_number(rendered_control, "value")
+                    .expect("rendered direct rack instrument value");
+                assert!((rendered_value - user_value as f64).abs() < 0.0001);
+                if iteration >= WARMUPS {
+                    let retained_done = Instant::now();
+                    direct_samples.total.push(duration_ms(started.elapsed()));
+                    direct_samples.host.push(duration_ms(host_done - started));
+                    direct_samples
+                        .reactive
+                        .push(duration_ms(reactive_done - host_done));
+                    direct_samples
+                        .frame
+                        .push(duration_ms(frame_done - reactive_done));
+                    direct_samples
+                        .retained
+                        .push(duration_ms(retained_done - frame_done));
+                    direct_input_samples.push(duration_ms(input_done - started));
+                    direct_state_samples.push(duration_ms(state_done - input_done));
+                    direct_sync_samples.push(duration_ms(host_done - state_done));
+                }
+            }
+            let direct_median = percentile(&mut direct_samples.total, 0.50);
+            eprintln!(
+                "[project-92-direct-rack-instrument-drag] param={:?} selected=0 samples={} median_ms={:.3} p95_ms={:.3} versus_macro={:.1}x slower",
+                direct_param.name,
+                SAMPLES,
+                direct_median,
+                percentile(&mut direct_samples.total, 0.95),
+                direct_median / live_median,
+            );
+            eprintln!(
+                "[project-92-direct-rack-instrument-drag-phases] host_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                percentile(&mut direct_samples.host, 0.50),
+                percentile(&mut direct_samples.reactive, 0.50),
+                percentile(&mut direct_samples.frame, 0.50),
+                percentile(&mut direct_samples.retained, 0.50),
+            );
+            eprintln!(
+                "[project-92-direct-rack-instrument-drag-host-detail] input_ms={:.3} state_ms={:.3} sync_ms={:.3}",
+                percentile(&mut direct_input_samples, 0.50),
+                percentile(&mut direct_state_samples, 0.50),
+                percentile(&mut direct_sync_samples, 0.50),
+            );
+            assert!(
+                live_speedup >= 20.0,
+                "live macro speedup={live_speedup:.1}x"
+            );
+            assert!(
+                plock_speedup >= 20.0,
+                "selected-step macro speedup={plock_speedup:.1}x"
+            );
+            return;
+        }
 
         if probe == Project92UiProbe::EscapeDeselect {
             const TRACK: usize = 0;
@@ -5828,6 +6697,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_render_at = Instant::now() - idle_frame_interval;
     let mut stub_animation_cache = StubAnimationRenderCache::new();
     let mut pending_drag: Option<(Event, (f32, f32))> = None;
+    // Pointer-rate rack edits update the live graph immediately. Their large
+    // immutable scheduler snapshot is committed once at gesture end instead
+    // of being rebuilt for every mouse pixel.
+    let mut rack_control_snapshot_dirty = false;
     let mut sample_import_session: Option<SampleImportSession> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
@@ -5903,6 +6776,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ui_loop_stats = UiLoopStats::new();
 
     loop {
+        let mut pointer_released_this_loop = false;
         for result in app.drain_due_pattern_launches() {
             match result {
                 Ok(outcome) => editor.handle_host_event(HostEvent::Status(format!(
@@ -5914,6 +6788,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))),
             }
         }
+        app.graph_controller().reap_due_rack_teardowns();
         let queued_transport_scene = state
             .quantized_launches()
             .pending_target(sequencer::quantized_launch::QuantizedLaunchOwner::Transport)
@@ -6300,6 +7175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_)) {
                             pending_drag = None;
+                            pointer_released_this_loop = true;
                         }
                         editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                         backend.set_widget_cursor(editor.widget_cursor());
@@ -6768,6 +7644,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "replace-rack-slot-sample" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let preserve_browser_context =
+                            extract_bool_from_payload(&payload, "preserve-browser-context");
+                        match (track, slot, path_str) {
+                            (Some(track), Some(slot), Some(path_str)) => {
+                                if preserve_browser_context {
+                                    preserve_sample_browser_context_for_loaded_sample(
+                                        &mut editor,
+                                        &path_str,
+                                    );
+                                }
+                                match app.graph_controller().replace_rack_slot_with_sampler(
+                                    track,
+                                    slot,
+                                    Path::new(&path_str),
+                                ) {
+                                    Ok(()) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Replaced rack layer {} with sample",
+                                            slot + 1
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        if preserve_browser_context {
+                                            preserve_sample_browser_context_for_loaded_sample(
+                                                &mut editor,
+                                                "",
+                                            );
+                                        }
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error replacing rack layer: {error}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack layer replacement is missing a track, slot, or sample path"
+                                    .to_string(),
+                            )),
+                        }
+                    }
                     "add-rack-sample-pad" => {
                         let path_str = extract_path_from_payload(&payload);
                         let track = extract_usize_from_payload(&payload, "track")
@@ -6864,6 +7801,397 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )),
                         }
                     }
+                    "add-rack-slot-effect" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let name = extract_string_from_payload(&payload, "name");
+                        let builtin = extract_bool_from_payload(&payload, "builtin");
+                        match (track, rack_slot, name) {
+                            (Some(track), Some(rack_slot), Some(name)) => {
+                                let is_builtin = builtin
+                                    || sequencer::effects::EffectDescriptor::builtin_insert(&name)
+                                        .is_some()
+                                    || sequencer::effects::conv_reverb::is_dgen_builtin(&name);
+                                let result = if is_builtin {
+                                    app.add_builtin_rack_slot_effect_sync(track, rack_slot, &name)
+                                } else {
+                                    app.add_rack_slot_effect_sync(track, rack_slot, &name)
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error adding rack-slot effect: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect drop is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "insert-rack-slot-effect-before-slot" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let target_slot = extract_usize_from_payload(&payload, "slot");
+                        let name = extract_string_from_payload(&payload, "name");
+                        let builtin = extract_bool_from_payload(&payload, "builtin");
+                        match (track, rack_slot, target_slot, name) {
+                            (Some(track), Some(rack_slot), Some(target_slot), Some(name)) => {
+                                let result = if builtin {
+                                    app.insert_builtin_rack_slot_effect_before_slot_sync(
+                                        track,
+                                        rack_slot,
+                                        target_slot,
+                                        &name,
+                                    )
+                                } else {
+                                    app.insert_rack_slot_effect_before_slot_sync(
+                                        track,
+                                        rack_slot,
+                                        target_slot,
+                                        &name,
+                                    )
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error inserting rack-slot effect: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect insert is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "delete-rack-slot-effect" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
+                        match (track, rack_slot, effect_slot) {
+                            (Some(track), Some(rack_slot), Some(effect_slot)) => match app
+                                .delete_rack_slot_effect_slot(track, rack_slot, effect_slot)
+                            {
+                                Ok(()) => {
+                                    refresh_instrument_panel_reactive(
+                                        &mut editor,
+                                        &app,
+                                        track,
+                                        &selected_steps,
+                                        &ui_epoch,
+                                    );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error deleting rack-slot effect: {error}"
+                                ))),
+                            },
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect deletion is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "move-rack-slot-effect" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let source_slot = extract_usize_from_payload(&payload, "source-slot");
+                        let requested_target = extract_usize_from_payload(&payload, "target-slot");
+                        let position = extract_string_from_payload(&payload, "position");
+                        match (track, rack_slot, source_slot) {
+                            (Some(track), Some(rack_slot), Some(source_slot)) => {
+                                let target_slot = if position.as_deref() == Some("append") {
+                                    rack_slot_snapshot_for_host(&state, track, rack_slot).and_then(
+                                        |slot| {
+                                            slot.effect_slots
+                                                .iter()
+                                                .rposition(|effect| effect.node_id != 0)
+                                        },
+                                    )
+                                } else {
+                                    requested_target.map(|target| {
+                                        if source_slot < target {
+                                            target.saturating_sub(1)
+                                        } else {
+                                            target
+                                        }
+                                    })
+                                };
+                                if let Some(target_slot) = target_slot {
+                                    match app.move_rack_slot_effect_slot_sync(
+                                        track,
+                                        rack_slot,
+                                        source_slot,
+                                        target_slot,
+                                    ) {
+                                        Ok(()) => {
+                                            refresh_instrument_panel_reactive(
+                                                &mut editor,
+                                                &app,
+                                                track,
+                                                &selected_steps,
+                                                &ui_epoch,
+                                            );
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(error) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Error moving rack-slot effect: {error}"),
+                                        )),
+                                    }
+                                } else {
+                                    editor.handle_host_event(HostEvent::Status(
+                                        "Rack-slot FX move is missing a destination".to_string(),
+                                    ));
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect move is missing its source".to_string(),
+                            )),
+                        }
+                    }
+                    "set-rack-slot-effect-param" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
+                        let param = extract_usize_from_payload(&payload, "param");
+                        let value = extract_f32_from_payload(&payload, "value");
+                        match (track, rack_slot, effect_slot, param, value) {
+                            (
+                                Some(track),
+                                Some(rack_slot),
+                                Some(effect_slot),
+                                Some(param),
+                                Some(value),
+                            ) => {
+                                if let Err(error) = app.set_rack_slot_effect_param(
+                                    track,
+                                    rack_slot,
+                                    effect_slot,
+                                    param,
+                                    value,
+                                ) {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error setting rack-slot effect parameter: {error}"
+                                    )));
+                                } else {
+                                    rack_control_snapshot_dirty = true;
+                                    if rack_slot_effect_param_needs_panel_rebuild(
+                                        &state,
+                                        track,
+                                        rack_slot,
+                                        effect_slot,
+                                        param,
+                                    ) {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                    } else {
+                                        refresh_rack_direct_param_reactive(
+                                            &mut editor,
+                                            &app,
+                                            &state,
+                                            track,
+                                            RackDirectDisplayTarget::EffectParam {
+                                                rack_slot,
+                                                effect_slot,
+                                                param_idx: param,
+                                            },
+                                            &selected_steps,
+                                            false,
+                                            &ui_epoch,
+                                        );
+                                    }
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect parameter edit is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "set-rack-slot-effect-plock" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
+                        let param = extract_usize_from_payload(&payload, "param");
+                        let value = extract_f32_from_payload(&payload, "value");
+                        match (track, rack_slot, effect_slot, param, value) {
+                            (
+                                Some(track),
+                                Some(rack_slot),
+                                Some(effect_slot),
+                                Some(param),
+                                Some(value),
+                            ) => {
+                                let steps: Vec<usize> =
+                                    selected_steps.lock().unwrap().iter().copied().collect();
+                                if let Err(error) = app.set_rack_slot_effect_plocks(
+                                    track,
+                                    rack_slot,
+                                    effect_slot,
+                                    &steps,
+                                    param,
+                                    value,
+                                ) {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error setting rack-slot effect parameter locks: {error}"
+                                    )));
+                                } else {
+                                    rack_control_snapshot_dirty = true;
+                                    if rack_slot_effect_param_needs_panel_rebuild(
+                                        &state,
+                                        track,
+                                        rack_slot,
+                                        effect_slot,
+                                        param,
+                                    ) {
+                                        sync_rack_slot_instrument_authoring_display(
+                                            &mut editor,
+                                            &app,
+                                            &state,
+                                            track,
+                                            &selected_steps,
+                                        );
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    } else {
+                                        refresh_rack_direct_param_reactive(
+                                            &mut editor,
+                                            &app,
+                                            &state,
+                                            track,
+                                            RackDirectDisplayTarget::EffectParam {
+                                                rack_slot,
+                                                effect_slot,
+                                                param_idx: param,
+                                            },
+                                            &selected_steps,
+                                            true,
+                                            &ui_epoch,
+                                        );
+                                    }
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect parameter-lock edit is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "set-rack-slot-effect-param-option" | "set-rack-slot-effect-plock-option" => {
+                        let write_plock = name == "set-rack-slot-effect-plock-option";
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                        let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
+                        let param_idx = extract_usize_from_payload(&payload, "param");
+                        let label = extract_string_from_payload(&payload, "label");
+                        match (track, rack_slot, effect_slot, param_idx, label) {
+                            (
+                                Some(track),
+                                Some(rack_slot),
+                                Some(effect_slot),
+                                Some(param_idx),
+                                Some(label),
+                            ) => {
+                                let result = if write_plock {
+                                    let steps: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    app.set_rack_slot_effect_plock_option(
+                                        track,
+                                        rack_slot,
+                                        effect_slot,
+                                        &steps,
+                                        param_idx,
+                                        &label,
+                                    )
+                                } else {
+                                    app.set_rack_slot_effect_param_option(
+                                        track,
+                                        rack_slot,
+                                        effect_slot,
+                                        param_idx,
+                                        &label,
+                                    )
+                                };
+                                match result {
+                                    Ok(()) => {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error setting rack-slot effect option: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack-slot effect option edit is incomplete".to_string(),
+                            )),
+                        }
+                    }
+                    "group-track-to-instrument-rack" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        match track {
+                            Some(track) => {
+                                match app.graph_controller().group_track_to_instrument_rack(track) {
+                                    Ok(()) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(
+                                            "Grouped track to Instrument Rack".to_string(),
+                                        ));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Could not group track: {error}"),
+                                    )),
+                                }
+                            }
+                            None => editor.handle_host_event(HostEvent::Status(
+                                "No track selected for grouping".to_string(),
+                            )),
+                        }
+                    }
                     "add-rack-instrument-slot" => {
                         let track = extract_usize_from_payload(&payload, "track")
                             .or_else(|| current_track_for_app(&mut app, &current_track));
@@ -6907,6 +8235,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .to_string(),
                                 ));
                             }
+                        }
+                    }
+                    "replace-rack-slot-instrument" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let name = extract_string_from_payload(&payload, "name");
+                        match (track, slot, name) {
+                            (Some(track), Some(slot), Some(name)) => {
+                                match app.replace_rack_slot_with_saved_instrument_sync(
+                                    track, slot, &name,
+                                ) {
+                                    Ok(()) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Replaced rack layer {} with {}",
+                                            slot + 1,
+                                            name
+                                        )));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error replacing rack instrument layer: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack instrument replacement is missing a track, slot, or instrument name"
+                                    .to_string(),
+                            )),
                         }
                     }
                     "add-rack-instrument-pad" => {
@@ -7669,26 +9041,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             if let Some(preset_name) = preset_name {
                                 let track = current_track.load(Ordering::Relaxed);
-                                match load_instrument_preset_into_track(
-                                    &mut app,
-                                    track,
-                                    &preset_name,
-                                ) {
+                                let is_rack = app.graph.track_instrument_types.get(track)
+                                    == Some(&sequencer::sequencer::InstrumentType::Rack);
+                                let load_result = if is_rack {
+                                    app.load_rack_preset_onto_track(track, &preset_name)
+                                } else {
+                                    load_instrument_preset_into_track(&mut app, track, &preset_name)
+                                };
+                                match load_result {
                                     Ok(()) => {
-                                        let rt = editor.runtime_mut();
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "instrument-panel",
-                                            build_instrument_panel_value(
-                                                &app,
+                                        if is_rack {
+                                            sync_after_instrument_track_apply(
+                                                &mut app,
+                                                &mut editor,
+                                                &state,
                                                 track,
+                                                &current_track,
+                                                &mut track_names,
+                                                &track_pan_ids,
+                                                &record_armed,
                                                 &selected_steps,
-                                            ),
-                                        );
-                                        sync_sidebar_browser(rt, &app, track);
-                                        rt.run_reactive_cycle();
-                                        editor.refresh_runtime_side_effects();
-                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                                &accumulator_names,
+                                                &cached_track_peak_levels,
+                                                &cached_bus_peak_levels,
+                                                &ui_epoch,
+                                                lg_raw,
+                                            );
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "instrument-panel",
+                                                build_instrument_panel_value(
+                                                    &app,
+                                                    track,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                            sync_sidebar_browser(rt, &app, track);
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
                                         editor.handle_host_event(HostEvent::Status(format!(
                                             "Loaded preset '{preset_name}'"
                                         )));
@@ -7725,15 +9120,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     let track = current_track.load(Ordering::Relaxed);
                                     app.ui.cursor_track = track;
-                                    app.save_current_track_as_preset(&name, overwrite);
+                                    let save_result =
+                                        app.save_current_track_as_preset(&name, overwrite);
                                     // Refresh sidebar presets list
                                     let rt = editor.runtime_mut();
                                     sync_sidebar_browser(rt, &app, track);
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
-                                    editor.handle_host_event(HostEvent::Status(format!(
-                                        "Saved preset '{name}'"
-                                    )));
+                                    match save_result {
+                                        Ok(()) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Saved preset '{name}'"),
+                                        )),
+                                        Err(error) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Error saving preset: {error}"),
+                                        )),
+                                    }
                                 }
                             }
                         }
@@ -7877,6 +9278,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "Error saving project: {error}"
                                 )));
                             }
+                        }
+                    }
+                    "load-sound-onto-track" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let path = extract_path_from_payload(&payload);
+                        match (track, path) {
+                            (Some(track), Some(path)) => {
+                                match app.load_sound_onto_track(track, Path::new(&path)) {
+                                    Ok(()) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(
+                                            "Loaded Sound".to_string(),
+                                        ));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error loading Sound: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Loading a Sound requires a track and path".to_string(),
+                            )),
+                        }
+                    }
+                    "promote-preset-to-sound" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let preset_name = extract_string_from_payload(&payload, "name");
+                        match (track, preset_name) {
+                            (Some(track), Some(name)) if !name.trim().is_empty() => {
+                                app.ui.cursor_track = track;
+                                match app.promote_preset_to_sound(track, &name) {
+                                    Ok(_) => {
+                                        let rt = editor.runtime_mut();
+                                        sync_project_state(rt, &app);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Added preset '{name}' to Sounds"
+                                        )));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error adding preset to Sounds: {error}"),
+                                    )),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Preset promotion requires a track and preset name".to_string(),
+                            )),
+                        }
+                    }
+                    "add-track-from-sound" => {
+                        let path = extract_path_from_payload(&payload);
+                        match path {
+                            Some(path) => match app.add_track_from_sound(Path::new(&path)) {
+                                Ok(track) => {
+                                    sync_after_instrument_track_apply(
+                                        &mut app,
+                                        &mut editor,
+                                        &state,
+                                        track,
+                                        &current_track,
+                                        &mut track_names,
+                                        &track_pan_ids,
+                                        &record_armed,
+                                        &selected_steps,
+                                        &accumulator_names,
+                                        &cached_track_peak_levels,
+                                        &cached_bus_peak_levels,
+                                        &ui_epoch,
+                                        lg_raw,
+                                    );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(
+                                        "Added track from Sound".to_string(),
+                                    ));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error adding Sound track: {error}"
+                                ))),
+                            },
+                            None => editor.handle_host_event(HostEvent::Status(
+                                "Sound drop is missing a path".to_string(),
+                            )),
                         }
                     }
                     "load-project" => {
@@ -8221,19 +9723,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                tui::apply_command(
-                                    &mut app,
-                                    tui::AppCommand::SetRackSlotGain {
-                                        track,
-                                        slot_idx,
-                                        value,
-                                    },
-                                );
-                                refresh_instrument_panel_reactive(
+                                app.set_rack_slot_gain(track, slot_idx, value);
+                                rack_control_snapshot_dirty = true;
+                                refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
+                                    &state,
                                     track,
+                                    RackDirectDisplayTarget::SlotParam {
+                                        slot_idx,
+                                        param: RackSlotParam::Gain,
+                                    },
                                     &selected_steps,
+                                    false,
                                     &ui_epoch,
                                 );
                             }
@@ -8246,19 +9748,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                tui::apply_command(
-                                    &mut app,
-                                    tui::AppCommand::SetRackSlotPan {
-                                        track,
-                                        slot_idx,
-                                        value,
-                                    },
-                                );
-                                refresh_instrument_panel_reactive(
+                                app.set_rack_slot_pan(track, slot_idx, value);
+                                rack_control_snapshot_dirty = true;
+                                refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
+                                    &state,
                                     track,
+                                    RackDirectDisplayTarget::SlotParam {
+                                        slot_idx,
+                                        param: RackSlotParam::Pan,
+                                    },
                                     &selected_steps,
+                                    false,
                                     &ui_epoch,
                                 );
                             }
@@ -8277,11 +9779,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: map_bool(map, "value"),
                                     },
                                 );
-                                refresh_instrument_panel_reactive(
+                                refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
+                                    &state,
                                     track,
+                                    RackDirectDisplayTarget::SlotParam {
+                                        slot_idx,
+                                        param: RackSlotParam::Mute,
+                                    },
                                     &selected_steps,
+                                    false,
                                     &ui_epoch,
                                 );
                             }
@@ -8300,11 +9808,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: map_bool(map, "value"),
                                     },
                                 );
-                                refresh_instrument_panel_reactive(
+                                refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
+                                    &state,
                                     track,
+                                    RackDirectDisplayTarget::SlotParam {
+                                        slot_idx,
+                                        param: RackSlotParam::Solo,
+                                    },
                                     &selected_steps,
+                                    false,
                                     &ui_epoch,
                                 );
                             }
@@ -8325,11 +9839,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value,
                                     },
                                 );
-                                refresh_instrument_panel_reactive(
+                                refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
+                                    &state,
                                     track,
+                                    RackDirectDisplayTarget::SlotParam {
+                                        slot_idx,
+                                        param: RackSlotParam::MaxPolyphony,
+                                    },
                                     &selected_steps,
+                                    false,
                                     &ui_epoch,
                                 );
                             }
@@ -8351,11 +9871,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value,
                                     },
                                 );
-                                refresh_instrument_panel_reactive(
+                                refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
+                                    &state,
                                     track,
+                                    RackDirectDisplayTarget::SlotParam {
+                                        slot_idx,
+                                        param: RackSlotParam::BaseNote,
+                                    },
                                     &selected_steps,
+                                    false,
                                     &ui_epoch,
                                 );
                             }
@@ -8398,25 +9924,214 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                tui::apply_command(
-                                    &mut app,
-                                    tui::AppCommand::SetRackSlotParamPlockMulti {
-                                        track,
-                                        slot_idx,
-                                        steps,
-                                        param,
-                                        value,
-                                    },
-                                );
-                                sync_rack_slot_instrument_authoring_display(
+                                for step in steps {
+                                    app.set_rack_slot_param_plock(
+                                        track, slot_idx, step, param, value,
+                                    );
+                                }
+                                rack_control_snapshot_dirty = true;
+                                refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
                                     &state,
                                     track,
+                                    RackDirectDisplayTarget::SlotParam { slot_idx, param },
                                     &selected_steps,
+                                    true,
+                                    &ui_epoch,
                                 );
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    "set-rack-macro-value" => {
+                        if let Value::Map(ref map) = payload {
+                            apply_rack_macro_host_command(
+                                &name,
+                                map,
+                                &mut editor,
+                                &mut app,
+                                &state,
+                                &selected_steps,
+                                &ui_epoch,
+                                &fx_epoch,
+                            );
+                        }
+                    }
+                    "rename-rack-macro" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(id), Some(name)) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "id"),
+                                map_string(map, "name"),
+                            ) {
+                                if let Some(id) = sequencer::sequencer::RackMacroId::from_index(id)
+                                {
+                                    app.rename_rack_macro(track, id, name);
+                                    refresh_instrument_panel_reactive(
+                                        &mut editor,
+                                        &app,
+                                        track,
+                                        &selected_steps,
+                                        &ui_epoch,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    "set-rack-macro-plock" => {
+                        if let Value::Map(ref map) = payload {
+                            apply_rack_macro_host_command(
+                                &name,
+                                map,
+                                &mut editor,
+                                &mut app,
+                                &state,
+                                &selected_steps,
+                                &ui_epoch,
+                                &fx_epoch,
+                            );
+                        }
+                    }
+                    "map-rack-macro-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let id = map_usize(map, "id")
+                                .and_then(sequencer::sequencer::RackMacroId::from_index);
+                            let kind = map_string(map, "kind");
+                            let rack_slot = map_usize(map, "rack-slot");
+                            let param = map_string(map, "param");
+                            let param_index = map_usize(map, "param-idx");
+                            let min = map_number(map, "min").map(|value| value as f32);
+                            let max = map_number(map, "max").map(|value| value as f32);
+                            if let (
+                                Some(track),
+                                Some(id),
+                                Some(kind),
+                                Some(rack_slot),
+                                Some(param),
+                                Some(param_index),
+                                Some(min),
+                                Some(max),
+                            ) = (track, id, kind, rack_slot, param, param_index, min, max)
+                            {
+                                let resolved = if kind == "rack-slot-instrument" {
+                                    rack_slot_snapshot_for_host(&state, track, rack_slot)
+                                        .and_then(|slot| app.rack_slot_instrument_descriptor(&slot))
+                                        .and_then(|descriptor| descriptor.params.get(param_index).cloned())
+                                        .map(|descriptor| (sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
+                                            slot: rack_slot, param, param_index,
+                                        }, descriptor.user_input_to_stored(min), descriptor.user_input_to_stored(max)))
+                                } else if kind == "rack-slot-effect" {
+                                    map_usize(map, "effect-slot").and_then(|effect_slot| {
+                                        let descriptor = rack_slot_snapshot_for_host(&state, track, rack_slot)?
+                                            .effect_descriptors.get(effect_slot)?.params.get(param_index)?.clone();
+                                        Some((sequencer::sequencer::RackMacroTarget::SlotEffectParam {
+                                            slot: rack_slot, effect_slot, param, param_index,
+                                        }, descriptor.user_input_to_stored(min), descriptor.user_input_to_stored(max)))
+                                    })
+                                } else {
+                                    None
+                                };
+                                if let Some((target, range_min, range_max)) = resolved {
+                                    let mapping = sequencer::sequencer::RackMacroMapping {
+                                        target,
+                                        range_min,
+                                        range_max,
+                                        curve: sequencer::sequencer::RackMacroCurve::Linear,
+                                    };
+                                    if let Err(error) = app.map_rack_macro(track, id, mapping) {
+                                        eprintln!("rack macro mapping failed: {error}");
+                                    } else {
+                                        app.set_rack_macro_value(track, id, 0.0);
+                                    }
+                                    refresh_instrument_panel_reactive(
+                                        &mut editor,
+                                        &app,
+                                        track,
+                                        &selected_steps,
+                                        &ui_epoch,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    "unmap-rack-macro-param" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(id), Some(mapping_idx)) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "id")
+                                    .and_then(sequencer::sequencer::RackMacroId::from_index),
+                                map_usize(map, "mapping-idx"),
+                            ) {
+                                app.unmap_rack_macro(track, id, mapping_idx);
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-macro-range" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (
+                                Some(track),
+                                Some(id),
+                                Some(mapping_idx),
+                                Some(range_min),
+                                Some(range_max),
+                            ) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "id")
+                                    .and_then(sequencer::sequencer::RackMacroId::from_index),
+                                map_usize(map, "mapping-idx"),
+                                map_number(map, "min").map(|value| value as f32),
+                                map_number(map, "max").map(|value| value as f32),
+                            ) {
+                                app.set_rack_macro_mapping_range(
+                                    track,
+                                    id,
+                                    mapping_idx,
+                                    range_min,
+                                    range_max,
+                                );
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-macro-curve" => {
+                        if let Value::Map(ref map) = payload {
+                            let curve =
+                                map_string(map, "curve").and_then(|curve| match curve.as_str() {
+                                    "linear" => Some(sequencer::sequencer::RackMacroCurve::Linear),
+                                    "exp" => Some(sequencer::sequencer::RackMacroCurve::Exp),
+                                    "log" => Some(sequencer::sequencer::RackMacroCurve::Log),
+                                    _ => None,
+                                });
+                            if let (Some(track), Some(id), Some(mapping_idx), Some(curve)) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "id")
+                                    .and_then(sequencer::sequencer::RackMacroId::from_index),
+                                map_usize(map, "mapping-idx"),
+                                curve,
+                            ) {
+                                app.set_rack_macro_mapping_curve(track, id, mapping_idx, curve);
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
                             }
                         }
                     }
@@ -8438,22 +10153,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         let stored =
                                             desc.clamp(desc.user_input_to_stored(user_val));
-                                        tui::apply_command(
-                                            &mut app,
-                                            tui::AppCommand::SetRackSlotInstrumentParam {
+                                        app.set_rack_slot_instrument_param(
+                                            track, slot_idx, param_idx, stored,
+                                        );
+                                        rack_control_snapshot_dirty = true;
+                                        if param_change_needs_fx_rebuild(&desc) {
+                                            refresh_instrument_panel_reactive(
+                                                &mut editor,
+                                                &app,
                                                 track,
-                                                slot_idx,
-                                                param_idx,
-                                                value: stored,
-                                            },
-                                        );
-                                        refresh_instrument_panel_reactive(
-                                            &mut editor,
-                                            &app,
-                                            track,
-                                            &selected_steps,
-                                            &ui_epoch,
-                                        );
+                                                &selected_steps,
+                                                &ui_epoch,
+                                            );
+                                        } else {
+                                            refresh_rack_direct_param_reactive(
+                                                &mut editor,
+                                                &app,
+                                                &state,
+                                                track,
+                                                RackDirectDisplayTarget::InstrumentParam {
+                                                    slot_idx,
+                                                    param_idx,
+                                                },
+                                                &selected_steps,
+                                                false,
+                                                &ui_epoch,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -8483,25 +10209,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .copied()
                                             .collect();
-                                        tui::apply_command(
-                                            &mut app,
-                                            tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                        for step in steps {
+                                            app.set_rack_slot_instrument_plock(
+                                                track, slot_idx, step, param_idx, stored,
+                                            );
+                                        }
+                                        rack_control_snapshot_dirty = true;
+                                        if param_change_needs_fx_rebuild(&desc) {
+                                            sync_rack_slot_instrument_authoring_display(
+                                                &mut editor,
+                                                &app,
+                                                &state,
                                                 track,
-                                                slot_idx,
-                                                steps,
-                                                param_idx,
-                                                value: stored,
-                                            },
-                                        );
-                                        sync_rack_slot_instrument_authoring_display(
-                                            &mut editor,
-                                            &app,
-                                            &state,
-                                            track,
-                                            &selected_steps,
-                                        );
+                                                &selected_steps,
+                                            );
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            refresh_rack_direct_param_reactive(
+                                                &mut editor,
+                                                &app,
+                                                &state,
+                                                track,
+                                                RackDirectDisplayTarget::InstrumentParam {
+                                                    slot_idx,
+                                                    param_idx,
+                                                },
+                                                &selected_steps,
+                                                true,
+                                                &ui_epoch,
+                                            );
+                                        }
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -10438,6 +12176,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "select-bus-step" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let step = map_number(map, "step").map(|value| value as usize);
+                            if let (Some(bus_idx), Some(step)) = (bus_idx, step) {
+                                if let Some(bus) = app.buses.get(bus_idx) {
+                                    let num_steps = bus.gate_sequence.num_steps.max(1);
+                                    let step = step.min(num_steps - 1);
+                                    {
+                                        let mut set = selected_steps.lock().unwrap();
+                                        if !set.insert(step) {
+                                            set.remove(&step);
+                                        }
+                                    }
+                                    editor.runtime_mut().set_reactive(
+                                        "SEQ",
+                                        "selected-steps",
+                                        build_selection_value(&selected_steps),
+                                    );
+                                    editor.runtime_mut().run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
                     "select-all-bus-steps" => {
                         if let Value::Map(ref map) = payload {
                             let bus_idx = map_number(map, "bus").map(|value| value as usize);
@@ -11483,6 +13248,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
+                            let rack_slot =
+                                map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
                             let param_idx =
                                 map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
@@ -11565,6 +13335,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    "rack-macro" => {
+                                        if let Some(param_idx) = param_idx {
+                                            if let Some(id) =
+                                                sequencer::sequencer::RackMacroId::from_index(
+                                                    param_idx,
+                                                )
+                                            {
+                                                if app.set_rack_macro_plock(track, id, step, value)
+                                                {
+                                                    state.publish_scheduler_snapshot();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "rack-effect" => {
+                                        if let (
+                                            Some(rack_slot),
+                                            Some(effect_slot),
+                                            Some(param_idx),
+                                        ) = (rack_slot, slot_idx, param_idx)
+                                        {
+                                            if let Err(error) = app.set_rack_slot_effect_plocks(
+                                                track,
+                                                rack_slot,
+                                                effect_slot,
+                                                &[step],
+                                                param_idx,
+                                                value,
+                                            ) {
+                                                editor.handle_host_event(HostEvent::Status(
+                                                    format!(
+                                                    "Error editing rack-slot effect lock: {error}"
+                                                ),
+                                                ));
+                                            }
+                                        }
+                                    }
                                     "midi-fx" => {
                                         if let (Some(slot_idx), Some(param_idx)) =
                                             (slot_idx, param_idx)
@@ -11611,6 +13418,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                             let slot_idx =
                                 map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let rack_slot =
+                                map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
@@ -11726,6 +13538,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    "rack-effect" => {
+                                        if let (
+                                            Some(rack_slot),
+                                            Some(effect_slot),
+                                            Some(param_idx),
+                                        ) = (rack_slot, slot_idx, param_idx)
+                                        {
+                                            if let Err(error) = app
+                                                .set_rack_slot_effect_plock_option(
+                                                    track,
+                                                    rack_slot,
+                                                    effect_slot,
+                                                    &[step],
+                                                    param_idx,
+                                                    &label,
+                                                )
+                                            {
+                                                editor.handle_host_event(HostEvent::Status(
+                                                    format!(
+                                                    "Error editing rack-slot effect lock: {error}"
+                                                ),
+                                                ));
+                                            }
+                                        }
+                                    }
                                     "midi-fx" => {
                                         if let (Some(slot_idx), Some(param_idx)) =
                                             (slot_idx, param_idx)
@@ -11794,6 +13631,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                             let slot_idx =
                                 map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let rack_slot =
+                                map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
@@ -11870,6 +13712,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .and_then(|chain| chain.get(slot_idx))
                                             {
                                                 slot.plocks.clear_param(step, param_idx);
+                                            }
+                                        }
+                                    }
+                                    "rack-macro" => {
+                                        if let (Some(step), Some(param_idx)) = (step, param_idx) {
+                                            if let Some(id) =
+                                                sequencer::sequencer::RackMacroId::from_index(
+                                                    param_idx,
+                                                )
+                                            {
+                                                changed =
+                                                    app.clear_rack_macro_plock(track, id, step);
+                                                if changed {
+                                                    state.publish_scheduler_snapshot();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "rack-effect" => {
+                                        if let (
+                                            Some(step),
+                                            Some(rack_slot),
+                                            Some(effect_slot),
+                                            Some(param_idx),
+                                        ) = (step, rack_slot, slot_idx, param_idx)
+                                        {
+                                            changed = state.update_rack_slot_in_current_pattern(
+                                                track,
+                                                rack_slot,
+                                                |slot| {
+                                                    if let Some(effect) =
+                                                        slot.effect_slots.get_mut(effect_slot)
+                                                    {
+                                                        effect.clear_plock(step, param_idx);
+                                                    }
+                                                },
+                                            );
+                                            if changed {
+                                                state.publish_scheduler_snapshot();
                                             }
                                         }
                                     }
@@ -16596,6 +18477,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )));
                 }
             }
+        }
+        if pointer_released_this_loop && rack_control_snapshot_dirty {
+            state.publish_scheduler_snapshot();
+            rack_control_snapshot_dirty = false;
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 

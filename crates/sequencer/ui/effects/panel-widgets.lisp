@@ -14,6 +14,15 @@
     (process-panel-clear-selection)
     (seq-set-delete-target :fx-effect (dict :chain "bus" :bus bus :slot slot))))
 
+(def fx-select-rack-effect (track rack-slot effect-slot)
+  (do
+    (process-panel-clear-selection)
+    (seq-set-delete-target :fx-effect
+      (dict :chain "rack"
+            :track track
+            :rack-slot rack-slot
+            :effect-slot effect-slot))))
+
 (def fx-has-selected-bus? ()
   (and (>= selected-bus 0)
        (< selected-bus (len SEQ.bus-names))

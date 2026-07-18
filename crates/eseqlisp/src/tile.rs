@@ -12,6 +12,24 @@ use crate::vm::Value;
 pub type TileId = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileFrameCacheKey {
+    pub buffer_id: BufferId,
+    pub frame_state_revision: u64,
+    pub widget_tree_revision: u64,
+    pub layout_revision: u64,
+    pub text_scroll_top: usize,
+    pub widget_scroll_top_bits: u32,
+    pub widget_scroll_left_bits: u32,
+    pub viewport_width: usize,
+    pub viewport_height: usize,
+    pub exact_viewport_width_bits: u32,
+    pub exact_viewport_height_bits: u32,
+    pub text_cell_width_scale_bits: u32,
+    pub text_cell_height_scale_bits: u32,
+    pub view_mode: crate::editor::ViewMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitDir {
     Horizontal, // children stacked top/bottom
     Vertical,   // children stacked left/right
@@ -82,6 +100,9 @@ pub struct TileLeaf {
     pub widget_viewport_width: f32,
     pub widget_viewport_height: f32,
     pub widget_scroll_left: f32,
+    /// (layout revision, viewport width bits, viewport height bits, aspect
+    /// bits, maximum vertical scroll, maximum horizontal scroll).
+    pub widget_scroll_limits_cache: Option<(u64, u32, u32, u32, f32, f32)>,
     pub active_widget_gesture: Option<WidgetGesture>,
     pub last_widget_click: Option<WidgetClick>,
     pub hit_grid_cache: Option<CachedHitGrid>,
@@ -91,27 +112,8 @@ pub struct TileLeaf {
     pub cached_layout_widget_tree_revision: u64,
     pub dirty_widget_ids: Vec<u64>,
     pub layout_revision: u64,
-    /// Cached RenderFrame for inactive tile optimization.
-    /// Key is (buffer_id, buffer_revision, widget_tree_revision, layout_revision, scroll_top,
-    /// viewport_width, viewport_height, exact viewport width bits, exact viewport height bits,
-    /// text cell width scale bits, text cell height scale bits, view_mode).
-    pub cached_inactive_frame: Option<(
-        (
-            BufferId,
-            u64,
-            u64,
-            u64,
-            usize,
-            usize,
-            usize,
-            u32,
-            u32,
-            u32,
-            u32,
-            crate::editor::ViewMode,
-        ),
-        crate::backend::RenderFrame,
-    )>,
+    /// Cached RenderFrame for active UI-only and inactive tile optimization.
+    pub cached_inactive_frame: Option<(TileFrameCacheKey, crate::backend::RenderFrame)>,
 }
 
 pub struct TileSplit {
@@ -198,6 +200,7 @@ impl TileLeaf {
             widget_viewport_width: 0.0,
             widget_viewport_height: 0.0,
             widget_scroll_left: 0.0,
+            widget_scroll_limits_cache: None,
             active_widget_gesture: None,
             last_widget_click: None,
             hit_grid_cache: None,

@@ -5,7 +5,7 @@
       (custom-ui-param-mod-wrapper p (str "custom-ui-knob-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-knob-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (custom-ui-param-value p)
+            :value (custom-ui-param-binding p)
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 2
             :base-value (custom-ui-param-base-value-prop p)
             :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
@@ -53,7 +53,7 @@
       (custom-ui-param-mod-wrapper p (str "custom-ui-knob-c-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-knob-c-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (custom-ui-param-value p)
+            :value (custom-ui-param-binding p)
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 2
             :base-value (custom-ui-param-base-value-prop p)
             :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
@@ -85,7 +85,7 @@
     (if p
       (subtree :key (str "custom-ui-base-note-c-" (custom-ui-scope-name))
         (knob-number :label "note"
-          :value (custom-ui-param-value p)
+          :value (custom-ui-param-binding p)
           :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
           :step 1
           :font-size 8.5 :label-font-size 7.5
@@ -121,7 +121,7 @@
 
 (def ui-param-bound-value (name fallback)
   (let ((p (custom-ui-current-param name)))
-    (if p (custom-ui-param-value p) fallback)))
+    (if p (custom-ui-param-binding p) fallback)))
 
 (def ui-set-param (name value)
   (let ((p (custom-ui-current-param name)))

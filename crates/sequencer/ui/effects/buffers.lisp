@@ -47,6 +47,32 @@
       :color :dim
       :bg :transparent)))
 
+(def fx-track-drop-placeholder-panel ()
+  (box :debug-name "fx-track-drop-placeholder-panel"
+       :background-color :buffer-bg
+       :corner-radius 10
+       :border-color :mixer-strip-border
+       :border-width 2
+       :drop-types (list "audio-effect" "midi-effect" "effect-instance")
+       :drop-meta (dict :kind "fx-append"
+                    :chain "append"
+                    :track SEQ.current-track
+                    :bus -1
+                    :slot -1)
+       :drop-hover-border-color :mixer-strip-selected-border
+       :drop-hover-background-color :mixer-control-bg
+       :on-drop (lambda (event) (fx-drop-on-effect event))
+       :height fx-fixed-panel-height
+       :width 34
+       :padding 0
+       :h-align :center
+       :v-align :center
+    (v-stack :gap 0.35 :align :center
+      (label "Track FX" :font-size 9 :color :blue :bg :transparent)
+      (label "Drop Audio or MIDI Effect Here"
+        :width 30 :font-size 12 :h-align :center
+        :color :dim :bg :transparent))))
+
 (def fx-bus-selection-panel ()
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
@@ -62,16 +88,25 @@
   `(v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
       (if (> (len SEQ.process-slots) 0)
-        (process-chain-panel)
-        (box :width 0 :height 0))
+        (process-chain-panel))
       (each SEQ.instrument-panel |inst inst-idx|
-        (instrument-panel inst))
+        (if (= (get inst :type) "rack")
+          (h-stack :gap 0.2 :height fx-fixed-panel-height :align :stretch
+            (instrument-panel inst)
+            (if rack-panel-selected-chain-open
+              (h-stack :debug-name "rack-selected-chain-fx"
+                :gap 1 :height fx-fixed-panel-height :align :stretch
+                (rack-selected-fx-panel inst)
+                (rack-slot-fx-drop-panel inst)
+                (rack-slot-track-fx-divider))
+              (box :width 0 :height 0)))
+          (instrument-panel inst)))
       (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
         (midi-fx-panel (get fx :name) (get fx :params) fx))
       (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
         (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
           (fx-panel (get fx :name) (get fx :params) fx)))
-      (fx-drop-placeholder-panel))))
+      (fx-track-drop-placeholder-panel))))
 
 (effect-buffer "*track*"
   (if (= SEQ.num-tracks 0)

@@ -92,6 +92,11 @@ bool graph_disconnect(LiveGraph *lg, int src_node, int src_port, int dst_node,
 
 // Number of producer commands that can be queued without overflowing.
 uint32_t graph_edit_queue_available(const LiveGraph *lg);
+// Serial of the producer-side batch currently being assembled, or zero when
+// no batch is open.
+uint64_t graph_edit_current_batch_serial(const LiveGraph *lg);
+// Highest committed batch fully consumed at an audio block boundary.
+uint64_t graph_edit_applied_batch_serial(const LiveGraph *lg);
 
 bool hot_swap_node(LiveGraph *lg, int node_id, NodeVTable vt, size_t state_size,
                    int nin, int nout, bool xfade,

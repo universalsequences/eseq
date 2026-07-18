@@ -32,6 +32,7 @@ impl App {
         }
         self.tick_control_hooks();
         self.poll_agent_request();
+        self.reclaim_applied_effect_leases();
 
         if self.editor.pending_project_load.is_some() {
             let result = self.advance_project_load();

@@ -17,6 +17,7 @@ pub mod label;
 pub mod lane_preview;
 pub mod live_audio;
 pub mod matrix;
+pub mod compressor_display;
 pub mod mixer_meter;
 pub mod modulator_curve;
 pub mod multiband_meter;
@@ -676,6 +677,14 @@ pub struct MetalPrimitiveRunKey {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Default)]
+pub struct MetalPrimitiveRunIndex {
+    by_key: HashMap<MetalPrimitiveRunKey, usize>,
+    ancestor_widget_ids: HashMap<u64, Vec<u64>>,
+    subtree_run_indices: HashMap<u64, Vec<usize>>,
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RetainedMetalPrimitiveRunStats {
     pub reused_runs: usize,
@@ -929,6 +938,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &eq8_editor::EQ8_EDITOR_WIDGET,
     &phaser_notch::PHASER_NOTCH_WIDGET,
     &multiband_meter::MULTIBAND_METER_WIDGET,
+    &compressor_display::COMPRESSOR_DISPLAY_WIDGET,
     &roar_shaper::ROAR_SHAPER_WIDGET,
     &roar_filter::ROAR_FILTER_WIDGET,
     &vstack::VSTACK_WIDGET,
@@ -1386,21 +1396,39 @@ pub fn flatten_metal_primitive_runs(runs: &[MetalPrimitiveRun]) -> Vec<MetalPrim
 }
 
 #[cfg(target_os = "macos")]
-pub fn build_metal_primitive_run_index(
-    runs: &[MetalPrimitiveRun],
-) -> HashMap<MetalPrimitiveRunKey, usize> {
-    runs.iter()
-        .enumerate()
-        .map(|(index, run)| {
-            (
-                MetalPrimitiveRunKey {
-                    widget_id: run.widget_id,
-                    ordinal: run.ordinal,
-                },
-                index,
-            )
-        })
-        .collect()
+pub fn build_metal_primitive_run_index(runs: &[MetalPrimitiveRun]) -> MetalPrimitiveRunIndex {
+    let mut result = MetalPrimitiveRunIndex::default();
+    for (index, run) in runs.iter().enumerate() {
+        result.by_key.insert(
+            MetalPrimitiveRunKey {
+                widget_id: run.widget_id,
+                ordinal: run.ordinal,
+            },
+            index,
+        );
+
+        for (depth, widget_id) in run.ancestor_widget_ids.iter().copied().enumerate() {
+            result
+                .ancestor_widget_ids
+                .entry(widget_id)
+                .or_insert_with(|| run.ancestor_widget_ids[..depth].to_vec());
+            result
+                .subtree_run_indices
+                .entry(widget_id)
+                .or_default()
+                .push(index);
+        }
+        result
+            .ancestor_widget_ids
+            .entry(run.widget_id)
+            .or_insert_with(|| run.ancestor_widget_ids.clone());
+        result
+            .subtree_run_indices
+            .entry(run.widget_id)
+            .or_default()
+            .push(index);
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -1410,13 +1438,36 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
     scroll_top: f32,
     max_rows: u16,
     runs: &mut [MetalPrimitiveRun],
-    run_indices: &HashMap<MetalPrimitiveRunKey, usize>,
+    run_indices: &MetalPrimitiveRunIndex,
     dirty_widget_ids: &[u64],
 ) -> (Vec<MetalPrimitive>, RetainedMetalPrimitiveRunStats) {
     let mut stats = RetainedMetalPrimitiveRunStats::default();
     let mut run_ordinals = HashMap::new();
     let mut rebuilt_indices = Vec::new();
     let mut visited_indices = Vec::new();
+    let dirty_widget_ids: HashSet<u64> = dirty_widget_ids.iter().copied().collect();
+    let mut relevant_widget_ids = HashSet::new();
+    let mut expected_dirty_indices = Vec::new();
+
+    // A paint-only update cannot affect a clean sibling. Use the retained scene
+    // index to restrict the layout walk to dirty subtrees and their ancestors.
+    // Cached runs inside a dirty subtree are tracked so structural changes still
+    // invalidate the retained scene.
+    if !dirty_widget_ids.is_empty() {
+        for widget_id in &dirty_widget_ids {
+            relevant_widget_ids.insert(*widget_id);
+            if let Some(ancestors) = run_indices.ancestor_widget_ids.get(widget_id) {
+                relevant_widget_ids.extend(ancestors.iter().copied());
+            }
+            if let Some(indices) = run_indices.subtree_run_indices.get(widget_id) {
+                expected_dirty_indices.extend(indices.iter().copied());
+            }
+        }
+        expected_dirty_indices.sort_unstable();
+        expected_dirty_indices.dedup();
+    }
+    let relevant_widget_ids = (!dirty_widget_ids.is_empty()).then_some(&relevant_widget_ids);
+
     for run in runs.iter_mut() {
         run.reused_from_previous = true;
     }
@@ -1429,7 +1480,8 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
         false,
         runs,
         run_indices,
-        dirty_widget_ids,
+        &dirty_widget_ids,
+        relevant_widget_ids,
         &mut run_ordinals,
         &mut rebuilt_indices,
         &mut visited_indices,
@@ -1437,8 +1489,15 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
     );
     visited_indices.sort_unstable();
     visited_indices.dedup();
-    if visited_indices.len() < runs.len() {
-        stats.invalid_previous_runs += runs.len() - visited_indices.len();
+    if dirty_widget_ids.is_empty() {
+        if visited_indices.len() < runs.len() {
+            stats.invalid_previous_runs += runs.len() - visited_indices.len();
+        }
+    } else {
+        stats.invalid_previous_runs += expected_dirty_indices
+            .iter()
+            .filter(|index| visited_indices.binary_search(index).is_err())
+            .count();
     }
     let overlay = drain_overlay_primitives();
     (overlay, stats)
@@ -1530,7 +1589,7 @@ fn push_retained_primitive_run(
 #[allow(clippy::too_many_arguments)]
 fn refresh_retained_primitive_run_in_place(
     runs: &mut [MetalPrimitiveRun],
-    run_indices: &HashMap<MetalPrimitiveRunKey, usize>,
+    run_indices: &MetalPrimitiveRunIndex,
     run_ordinals: &mut HashMap<u64, u16>,
     rebuilt_indices: &mut Vec<usize>,
     visited_indices: &mut Vec<usize>,
@@ -1542,7 +1601,7 @@ fn refresh_retained_primitive_run_in_place(
     build_primitives: impl FnOnce() -> Vec<MetalPrimitive>,
 ) {
     let key = next_primitive_run_key(run_ordinals, widget_id);
-    let Some(index) = run_indices.get(&key).copied() else {
+    let Some(index) = run_indices.by_key.get(&key).copied() else {
         if dirty_ancestor {
             let primitives = build_primitives();
             if !primitives.is_empty() {
@@ -2058,13 +2117,19 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     ancestor_widget_ids: &[u64],
     dirty_ancestor: bool,
     runs: &mut [MetalPrimitiveRun],
-    run_indices: &HashMap<MetalPrimitiveRunKey, usize>,
-    dirty_widget_ids: &[u64],
+    run_indices: &MetalPrimitiveRunIndex,
+    dirty_widget_ids: &HashSet<u64>,
+    relevant_widget_ids: Option<&HashSet<u64>>,
     run_ordinals: &mut HashMap<u64, u16>,
     rebuilt_indices: &mut Vec<usize>,
     visited_indices: &mut Vec<usize>,
     stats: &mut RetainedMetalPrimitiveRunStats,
 ) {
+    if !dirty_ancestor
+        && relevant_widget_ids.is_some_and(|relevant| !relevant.contains(&node.widget_id))
+    {
+        return;
+    }
     let node_is_dirty = dirty_widget_ids.contains(&node.widget_id);
     let subtree_dirty = dirty_ancestor || node_is_dirty;
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
@@ -2122,6 +2187,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                 runs,
                 run_indices,
                 dirty_widget_ids,
+                relevant_widget_ids,
                 run_ordinals,
                 rebuilt_indices,
                 visited_indices,
@@ -2205,6 +2271,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                 runs,
                 run_indices,
                 dirty_widget_ids,
+                relevant_widget_ids,
                 run_ordinals,
                 rebuilt_indices,
                 visited_indices,
@@ -2268,6 +2335,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             runs,
             run_indices,
             dirty_widget_ids,
+            relevant_widget_ids,
             run_ordinals,
             rebuilt_indices,
             visited_indices,

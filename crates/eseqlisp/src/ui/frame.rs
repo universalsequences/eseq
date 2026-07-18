@@ -8,7 +8,7 @@ use crate::layout::{Rect, layout_contains_widget_id};
 use crate::mode::{TokenClass, TokenSpan, highlight_lines};
 use crate::text::matching_paren;
 use crate::theme;
-use crate::tile::{tile_body_rect, tile_tab_layouts_with_hover};
+use crate::tile::{TileFrameCacheKey, tile_body_rect, tile_tab_layouts_with_hover};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -283,16 +283,11 @@ fn build_render_frame_with_layout_viewport(
         leaf.widget_viewport_width = layout_width;
         leaf.widget_viewport_height = layout_height;
     }
-    editor.clamp_widget_scroll_offsets();
-    if let Some(layout) = editor.widget_layout() {
-        let aspect = editor.layout_aspect();
-        let max_h = (crate::ui::hit::max_extent_exact(&layout, aspect).0 - layout_width).max(0.0);
-        let leaf = editor.active_leaf_mut();
-        if leaf.widget_scroll_left > max_h {
-            leaf.widget_scroll_left = max_h;
-        }
-    } else {
+    let (_, max_h) = editor.clamp_widget_scroll_offsets();
+    if editor.widget_layout().is_none() {
         editor.active_leaf_mut().widget_scroll_left = 0.0;
+    } else if editor.active_leaf().widget_scroll_left > max_h {
+        editor.active_leaf_mut().widget_scroll_left = max_h;
     }
     let view_mode = editor.active_buffer().view_mode;
     let (text_cell_width_scale, text_cell_height_scale) = {
@@ -836,6 +831,50 @@ mod tests {
     }
 
     #[test]
+    fn cached_active_ui_frame_preserves_paint_only_dirty_widget_ids() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str("(effect (box :width :fill :height :fill))")
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+
+        let _ = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+        assert!(editor.active_leaf().cached_inactive_frame.is_some());
+        editor.active_leaf_mut().dirty_widget_ids.push(42);
+
+        let frame = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+        assert_eq!(frame.tiles[0].frame.dirty_widget_ids, vec![42]);
+        assert!(editor.active_leaf().cached_inactive_frame.is_some());
+    }
+
+    #[test]
+    fn cached_active_ui_frame_tracks_widget_viewport_scroll() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str("(effect (box :width 40 :height 30))")
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+
+        let initial = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+        assert_eq!(initial.tiles[0].frame.widget_scroll_top, 0.0);
+        assert_eq!(initial.tiles[0].frame.widget_scroll_left, 0.0);
+        assert!(editor.active_leaf().cached_inactive_frame.is_some());
+
+        editor.active_leaf_mut().widget_scroll_top = 4.5;
+        editor.active_leaf_mut().widget_scroll_left = 7.25;
+        let scrolled = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+
+        assert_eq!(scrolled.tiles[0].frame.widget_scroll_top, 4.5);
+        assert_eq!(scrolled.tiles[0].frame.widget_scroll_left, 7.25);
+    }
+
+    #[test]
     fn text_zoom_increases_text_only_rows_without_moving_statusline_grid() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -898,7 +937,6 @@ fn build_tiled_render_frame_impl(
                         leaf.dirty_widget_ids.push(widget_id);
                     }
                 }
-                leaf.cached_inactive_frame = None;
             }
         }
     }
@@ -1082,37 +1120,73 @@ fn build_tiled_render_frame_impl(
             leaf.widget_viewport_height = inner_height_exact;
         }
 
-        let frame_key = (
+        let status_signature = if is_active {
+            let (cursor_row, cursor_col) = editor.active_buffer().cursor;
+            build_active_status_row(editor, cursor_row, cursor_col, inner_width).2
+        } else {
+            let buffer = &editor.buffers[buffer_idx];
+            build_buffer_status_row(
+                buffer,
+                buffer.widget_tree.is_some() || cached_layout.is_some(),
+                None,
+                buffer.cursor.0,
+                buffer.cursor.1,
+                inner_width,
+            )
+            .2
+        };
+        let frame_state_revision = {
+            let mut hasher = DefaultHasher::new();
+            buffer_revision.hash(&mut hasher);
+            status_signature.hash(&mut hasher);
+            hasher.finish()
+        };
+        let frame_key = TileFrameCacheKey {
             buffer_id,
-            buffer_revision,
+            frame_state_revision,
             widget_tree_revision,
             layout_revision,
-            buffer_scroll_top,
-            inner_width,
-            inner_height,
-            inner_width_exact.to_bits(),
-            inner_height_exact.to_bits(),
-            text_cell_width_scale.to_bits(),
-            text_cell_height_scale.to_bits(),
+            text_scroll_top: buffer_scroll_top,
+            widget_scroll_top_bits: widget_scroll_top.to_bits(),
+            widget_scroll_left_bits: widget_scroll_left.to_bits(),
+            viewport_width: inner_width,
+            viewport_height: inner_height,
+            exact_viewport_width_bits: inner_width_exact.to_bits(),
+            exact_viewport_height_bits: inner_height_exact.to_bits(),
+            text_cell_width_scale_bits: text_cell_width_scale.to_bits(),
+            text_cell_height_scale_bits: text_cell_height_scale.to_bits(),
             view_mode,
-        );
+        };
         let cached = cached_frame
             .as_ref()
             .filter(|_| inspect_status_message.is_none())
-            .filter(|_| dirty_widget_ids.is_empty())
             .filter(|(key, _)| *key == frame_key)
             .map(|(_, frame)| frame.clone());
 
         if is_active {
             // Active tile: use full build_render_frame for highlights/cursor, but
             // completion is rendered once globally by the tiled backend.
-            let mut frame = build_render_frame_with_layout_viewport(
-                editor,
-                inner_width,
-                inner_height,
-                inner_width_exact,
-                inner_height_exact,
-            );
+            let cacheable_ui_frame =
+                view_mode == ViewMode::UiOnly && inspect_status_message.is_none();
+            let mut frame = if cacheable_ui_frame {
+                cached.unwrap_or_else(|| {
+                    build_render_frame_with_layout_viewport(
+                        editor,
+                        inner_width,
+                        inner_height,
+                        inner_width_exact,
+                        inner_height_exact,
+                    )
+                })
+            } else {
+                build_render_frame_with_layout_viewport(
+                    editor,
+                    inner_width,
+                    inner_height,
+                    inner_width_exact,
+                    inner_height_exact,
+                )
+            };
             if let Some(message) = inspect_status_message.as_deref() {
                 let (status_cells, status_indicator, _) =
                     build_message_status_row(&format!(" {message}"), inner_width);
@@ -1133,6 +1207,11 @@ fn build_tiled_render_frame_impl(
             }
             if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
                 leaf.dirty_widget_ids.clear();
+                if cacheable_ui_frame {
+                    let mut clean_frame = frame.clone();
+                    clean_frame.dirty_widget_ids.clear();
+                    leaf.cached_inactive_frame = Some((frame_key, clean_frame));
+                }
             }
             tiles.push(TileFrame {
                 tile_id,
@@ -1194,6 +1273,7 @@ fn build_tiled_render_frame_impl(
                 frame.status_cells = status_cells;
                 frame.status_indicator = status_indicator;
             }
+            frame.dirty_widget_ids = dirty_widget_ids.clone();
             if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
                 leaf.dirty_widget_ids.clear();
             }

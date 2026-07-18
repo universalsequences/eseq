@@ -23,6 +23,7 @@
     (process-map-clear)
     (do
       (macro-clear-mapping-arm)
+      (rack-macro-clear-mapping-arm)
       (set! instrument-mods-open false)
       (set! effect-mods-open false)
       (set! process-map-track track)
@@ -32,15 +33,21 @@
       (seq-show-fx-lower-panel))))
 
 (def process-map-clear ()
-  (do
-    (set! process-map-track -1)
-    (set! process-map-instance-id 0)
-    (set! process-map-port "")
-    (set! process-map-target-kind "")))
+  (if (or (not (= process-map-track -1))
+          (not (= process-map-instance-id 0))
+          (not (= process-map-port ""))
+          (not (= process-map-target-kind "")))
+    (do
+      (set! process-map-track -1)
+      (set! process-map-instance-id 0)
+      (set! process-map-port "")
+      (set! process-map-target-kind ""))
+    false))
 
 (def macro-mapping-arm-enter-hook ()
   (do
     (process-map-clear)
+    (rack-macro-clear-mapping-arm)
     (set! instrument-mods-open false)
     (set! effect-mods-open false)))
 
@@ -93,10 +100,56 @@
     :transparent))
 
 (def param-macro-mapping-active? ()
-  (and macro-mapping-open (>= macro-mapping-selected 0)))
+  (or (and macro-mapping-open (>= macro-mapping-selected 0))
+      (>= rack-macro-mapping-selected 0)))
+
+(def rack-macro-target-map (fx p)
+  (if fx
+    (if (get fx :rack-fx)
+      (dict :kind "rack-slot-effect" :rack-slot (get fx :rack-slot)
+        :effect-slot (get fx :slot-idx) :param-idx (get p :idx) :param (get p :name)
+        :min (get p :min) :max (get p :max))
+      false)
+    (if (instrument-rack-target? p)
+      (dict :kind "rack-slot-instrument" :rack-slot (get p :rack-slot)
+        :param-idx (get p :idx) :param (get p :name) :min (get p :min) :max (get p :max))
+      false)))
+
+(def rack-macro-selected-definition ()
+  (let ((panel (nth SEQ.instrument-panel 0)))
+    (if panel
+      (nth (filter |macro| (= (get macro :id) rack-macro-mapping-selected)
+        (get panel :macros)) 0)
+      false)))
+
+(def rack-macro-target-equal? (left right)
+  (and (= (get left :kind) (get right :kind))
+       (= (get left :rack-slot) (get right :rack-slot))
+       (= (get left :param-idx) (get right :param-idx))
+       (= (get left :effect-slot) (get right :effect-slot))))
+
+(def rack-macro-mapping-for (fx p)
+  (let ((macro (rack-macro-selected-definition)) (target (rack-macro-target-map fx p)))
+    (if (and macro target)
+      (nth (filter |mapping| (rack-macro-target-equal? mapping target)
+        (get macro :mappings)) 0)
+      false)))
+
+(def rack-macro-owner-definition-for (fx p)
+  (let ((panel (nth SEQ.instrument-panel 0)) (target (rack-macro-target-map fx p)))
+    (if (and panel target)
+      (nth
+        (filter |macro|
+          (> (len (filter |mapping| (rack-macro-target-equal? mapping target)
+            (get macro :mappings))) 0)
+          (get panel :macros))
+        0)
+      false)))
 
 (def param-macro-bindable? (fx p)
-  (and (get p :modulatable) (process-map-target-map fx p)))
+  (if (>= rack-macro-mapping-selected 0)
+    (rack-macro-target-map fx p)
+    (and (get p :modulatable) (process-map-target-map fx p))))
 
 (def param-macro-selected-definition ()
   (nth (filter |macro| (= (get macro :id) macro-mapping-selected) SEQ.macros) 0))
@@ -178,17 +231,29 @@
 
 (def param-macro-bg (fx p)
   (if (and (param-macro-mapping-active?) (param-macro-bindable? fx p))
-    (if (param-macro-mapping-for fx p)
-      (rgba 0.18 0.85 0.42 0.38)
-      (rgba 0.18 0.85 0.42 0.26))
+    (if (if (>= rack-macro-mapping-selected 0)
+          (rack-macro-mapping-for fx p)
+          (param-macro-mapping-for fx p))
+      (rgba 0.18 0.45 0.142 0.98)
+      (rgba 0.18 0.35 0.242 0.9))
     :transparent))
 
 (def param-macro-map (fx p)
-  (let ((target (process-map-target-map fx p)))
-    (if (and target (not (param-macro-owner-mapping-for fx p)))
-      (host-command "macro-map-param"
-        (merge target :id macro-mapping-selected :track SEQ.current-track))
-      false)))
+  (if (>= rack-macro-mapping-selected 0)
+    (let ((target (rack-macro-target-map fx p)) (mapped (rack-macro-mapping-for fx p)))
+      (if mapped
+        (host-command "unmap-rack-macro-param"
+          (dict :track SEQ.current-track :id rack-macro-mapping-selected
+            :mapping-idx (get mapped :mapping-idx)))
+        (if target (host-command "map-rack-macro-param"
+          (merge target :id rack-macro-mapping-selected :track SEQ.current-track)) false)))
+    (let ((target (process-map-target-map fx p)))
+      (if (and target
+               (not (rack-macro-owner-definition-for fx p))
+               (not (param-macro-owner-mapping-for fx p)))
+        (host-command "macro-map-param"
+          (merge target :id macro-mapping-selected :track SEQ.current-track))
+        false))))
 
 (def instrument-target-param-dict (source-p idx)
   (if (instrument-rack-target? source-p)
@@ -272,6 +337,13 @@
 (def fx-set-effect-value (fx p v)
   (do
     (fx-clear-selected-effect)
+    (if (get fx :rack-fx)
+      (host-command (if (seq-has-selection?) "set-rack-slot-effect-plock" "set-rack-slot-effect-param")
+        (dict :track (get fx :track-idx)
+              :rack-slot (get fx :rack-slot)
+              :effect-slot (get fx :slot-idx)
+              :param (get p :idx)
+              :value v))
     (if (get fx :bus-fx)
       (host-command (if (seq-has-selection?) "set-bus-effect-plock" "set-bus-effect-param")
         (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
@@ -283,7 +355,7 @@
       (if (seq-has-selection?)
         (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
         (host-command "set-effect-param"
-          (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v)))))))
+          (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v))))))))
 
 (def fx-toggle-instrument-value (p)
   (do
@@ -305,12 +377,19 @@
 (def fx-toggle-effect-value (fx p)
   (do
     (fx-clear-selected-effect)
-    (host-command "toggle-effect-param"
-      (dict :bus (get fx :bus-idx)
-            :bus-fx (get fx :bus-fx)
-            :midi-fx (get fx :midi-fx)
-            :slot-idx (get fx :slot-idx)
-            :param-idx (get p :idx)))))
+    (if (get fx :rack-fx)
+      (host-command (if (seq-has-selection?) "set-rack-slot-effect-plock" "set-rack-slot-effect-param")
+        (dict :track (get fx :track-idx)
+              :rack-slot (get fx :rack-slot)
+              :effect-slot (get fx :slot-idx)
+              :param (get p :idx)
+              :value (if (fx-param-on? p) 0 1)))
+      (host-command "toggle-effect-param"
+        (dict :bus (get fx :bus-idx)
+              :bus-fx (get fx :bus-fx)
+              :midi-fx (get fx :midi-fx)
+              :slot-idx (get fx :slot-idx)
+              :param-idx (get p :idx))))))
 
 (def fx-param-has-idx? (p)
   (not (= (get p :idx) nil)))
@@ -327,7 +406,9 @@
   (and fx
        effect-mods-open
        (= effect-mods-chain (fx-effect-chain-kind fx))
+       (= effect-mods-track (if (get fx :bus-fx) -1 (get fx :track-idx)))
        (= effect-mods-slot (get fx :slot-idx))
+       (= effect-mods-rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1))
        (= effect-mods-bus (if (get fx :bus-fx) (get fx :bus-idx) -1))))
 
 (def fx-has-modulators? (fx)
@@ -380,7 +461,8 @@
 
 (def param-plock-row-target (fx)
   (if fx
-    (if (get fx :midi-fx) "midi-fx" "effect")
+    (if (get fx :rack-fx) "rack-effect"
+      (if (get fx :midi-fx) "midi-fx" "effect"))
     "instrument"))
 
 (def param-plock-row (fx p)
@@ -391,7 +473,10 @@
       (nth (filter |row|
         (and (= (get row :target) target)
              (= (get row :param-idx) idx)
-             (if fx (= (get row :slot-idx) slot) true))
+             (if fx (= (get row :slot-idx) slot) true)
+             (if (and fx (get fx :rack-fx))
+               (= (get row :rack-slot) (get fx :rack-slot))
+               true))
         SEQ.track-plocks) 0))
     false))
 
@@ -443,14 +528,22 @@
   (if fx
     (do
       (fx-clear-selected-effect)
-      (host-command
-        (if (get fx :bus-fx)
-          (if (seq-has-selection?) "set-bus-effect-plock-option" "set-bus-effect-param-option")
-          (if (get fx :midi-fx)
-            (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
-            (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")))
-        (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
-              :param-idx (get p :idx) :label label)))
+      (if (get fx :rack-fx)
+        (host-command
+          (if (seq-has-selection?) "set-rack-slot-effect-plock-option" "set-rack-slot-effect-param-option")
+          (dict :track (get fx :track-idx)
+                :rack-slot (get fx :rack-slot)
+                :effect-slot (get fx :slot-idx)
+                :param (get p :idx)
+                :label label))
+        (host-command
+          (if (get fx :bus-fx)
+            (if (seq-has-selection?) "set-bus-effect-plock-option" "set-bus-effect-param-option")
+            (if (get fx :midi-fx)
+              (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
+              (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")))
+          (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
+                :param-idx (get p :idx) :label label))))
     (fx-set-instrument-option p label)))
 
 (def param-set-control-value (fx p v)
@@ -497,64 +590,79 @@
 
 (def param-mod-bg (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (rgba 0.18 0.48 0.95 0.24)
+    (rgba 0.03 0.20 0.35 0.94)
+    :transparent))
+
+(def param-mod-border (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (rgba 0.18 0.48 0.95 0.84)
     :transparent))
 
 (def param-mod-wrapper (fx p key body)
   (if (param-macro-mapping-active?)
     (if (param-macro-bindable? fx p)
-      (let ((mapped (param-macro-mapping-for fx p))
-            (owner (param-macro-owner-definition-for fx p)))
+      (let ((mapped (if (>= rack-macro-mapping-selected 0)
+              (rack-macro-mapping-for fx p) (param-macro-mapping-for fx p)))
+          (owner (or (rack-macro-owner-definition-for fx p)
+              (param-macro-owner-definition-for fx p))))
         (subtree :key (str key "-macro-map")
           (box :background-color (param-macro-bg fx p)
-               :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
-               :corner-radius 8
-               :border-width (if mapped 2 1)
-               :border-color (if mapped (rgba 0.32 1.0 0.55 1.0)
-                 (if owner (rgba 0.18 0.85 0.42 0.22) (rgba 0.18 0.85 0.42 0.55)))
-               :macro-owned (if owner 1 0)
-               :padding 0.08
-               :capture-pointer true
-               :on-click (lambda (info) (param-macro-map fx p))
+            :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
+            :corner-radius 8
+            :border-width (if mapped 2 1)
+            :border-color (if mapped (rgba 0.32 1.0 0.55 1.0)
+              (if owner (rgba 0.18 0.85 0.42 0.62) (rgba 0.18 0.85 0.42 0.75)))
+            :macro-owned (if owner 1 0)
+            :padding 0.08
+            :capture-pointer true
+            :on-click (lambda (info) (param-macro-map fx p))
             body)))
       body)
-  (if (param-macro-owner-definition-for fx p)
-    (subtree :key (str key "-macro-owned")
-      (box :debug-name "macro-param-owned-wrapper"
-           :background-color :transparent
-           :corner-radius 8
-           :border-width 0
-           :macro-owned 1
-           :capture-pointer true
-           :on-click (lambda (info) false)
-        body))
-  (if (process-map-active?)
-    (if (process-param-bindable? fx p)
-      (subtree :key (str key "-process-map")
-        (box :background-color (process-param-map-bg fx p)
-             :debug-name "process-param-map-wrapper"
-             :corner-radius 8
-             :border-width 1
-             :padding 0.08
-             :capture-pointer true
-             :on-click (lambda (info) (process-bind-param-target fx p))
+    (if (or (rack-macro-owner-definition-for fx p)
+        (param-macro-owner-definition-for fx p))
+      (subtree :key (str key "-macro-owned")
+        (box :debug-name "macro-param-owned-wrapper"
+          :background-color :transparent
+          :corner-radius 8
+          :border-width 0
+          :macro-owned 1
+          :capture-pointer true
+          :on-click (lambda (info) false)
           body))
-      body)
-    (if (and (param-mods-open? fx) (get p :modulatable))
-      (subtree :key key
-        (box :background-color (param-mod-bg fx p)
-             :corner-radius 8
-             :border-width 1
-             :padding 0.08
-             :on-double-click (lambda (info) (param-toggle-modulation fx p))
-          body))
-      body)))))
+      (if (process-map-active?)
+        (if (process-param-bindable? fx p)
+          (subtree :key (str key "-process-map")
+            (box :background-color (process-param-map-bg fx p)
+              :debug-name "process-param-map-wrapper"
+              :corner-radius 8
+              :border-width 1
+              :padding 0.08
+              :capture-pointer true
+              :on-click (lambda (info) (process-bind-param-target fx p))
+              body))
+          body)
+        (if (and (param-mods-open? fx) (get p :modulatable))
+          (subtree :key key
+            (box :background-color (param-mod-bg fx p)
+              :border-color (param-mod-border fx p)
+              :corner-radius 8
+              :border-width 1
+              :padding 0.08
+              :on-double-click (lambda (info) (param-toggle-modulation fx p))
+              body))
+          body)))))
 
 (def fx-param-numeric-value (p)
   (reactive-value (fx-param-value p)))
 
+(def fx-param-numeric-value-for (fx p)
+  (reactive-value (fx-param-value-for fx p)))
+
 (def fx-param-on? (p)
   (> (fx-param-numeric-value p) 0.5))
+
+(def fx-param-on-for? (fx p)
+  (> (fx-param-numeric-value-for fx p) 0.5))
 
 (def instrument-mod-selected-slot ()
   (if (> instrument-selected-mod-slot 0) instrument-selected-mod-slot 1))
@@ -739,8 +847,10 @@
 (def instrument-param-mod-wrapper (p key body)
   (if (param-macro-mapping-active?)
     (if (param-macro-bindable? false p)
-      (let ((mapped (param-macro-mapping-for false p))
-            (owner (param-macro-owner-definition-for false p)))
+      (let ((mapped (if (>= rack-macro-mapping-selected 0)
+                      (rack-macro-mapping-for false p) (param-macro-mapping-for false p)))
+            (owner (or (rack-macro-owner-definition-for false p)
+                       (param-macro-owner-definition-for false p))))
         (subtree :key (str key "-macro-map")
           (box :background-color (param-macro-bg false p)
                :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
@@ -754,7 +864,9 @@
                :on-click (lambda (info) (param-macro-map false p))
             body)))
       body)
-  (if (param-macro-owner-definition-for false p)
+  (if (and (not instrument-mods-open)
+          (or (rack-macro-owner-definition-for false p)
+              (param-macro-owner-definition-for false p)))
     (subtree :key (str key "-macro-owned")
       (box :debug-name "macro-param-owned-wrapper"
            :background-color :transparent

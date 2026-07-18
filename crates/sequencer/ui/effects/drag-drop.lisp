@@ -24,13 +24,21 @@
         (host-command "insert-builtin-effect-before-slot" (dict :track track :slot slot :name name))
         (if (and (= chain "audio") (= kind "custom-audio-effect"))
           (host-command "insert-effect-before-slot" (dict :track track :slot slot :name name))
+          (if (and (= chain "rack")
+                   (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect")))
+            (host-command "insert-rack-slot-effect-before-slot"
+              (dict :track track
+                    :rack-slot (get target :rack-slot)
+                    :slot slot
+                    :name name
+                    :builtin (= kind "builtin-audio-effect")))
           (if (and (= chain "midi") (= kind "midi-effect"))
             (host-command "insert-midi-fx-before-slot" (dict :track track :slot slot :name name))
             (if (and (= chain "bus") (= kind "builtin-audio-effect"))
               (host-command "insert-builtin-bus-effect-before-slot" (dict :bus bus :slot slot :name name))
               (if (and (= chain "bus") (= kind "custom-audio-effect"))
                 (host-command "insert-bus-effect-before-slot" (dict :bus bus :slot slot :name name))
-                (status "That effect type does not belong in this chain")))))))))
+                  (status "That effect type does not belong in this chain"))))))))))
 
 (def fx-drop-existing-effect (payload target)
   (let ((kind (get payload :kind))
@@ -60,12 +68,25 @@
           (host-command "move-bus-effect-slot"
             (dict :bus target-bus :source-slot source-slot
                   :target-slot target-slot :position target-chain))
-          (status "Move effects within the same audio, MIDI, or bus chain"))))))
+          (if (and (= kind "rack-effect-instance") (= source-chain "rack")
+                   (or (= target-chain "rack") (= target-chain "append"))
+                   (= source-track target-track)
+                   (= (get payload :rack-slot) (get target :rack-slot)))
+            (host-command "move-rack-slot-effect"
+              (dict :track target-track
+                    :rack-slot (get target :rack-slot)
+                    :source-slot source-slot
+                    :target-slot target-slot
+                    :position target-chain))
+            (status "Move effects within the same audio, MIDI, bus, or rack-slot chain")))))))
 
 (def fx-drop-on-effect (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((kind (get payload :kind)))
-      (if (or (= kind "audio-effect-instance") (= kind "midi-effect-instance") (= kind "bus-effect-instance"))
+      (if (or (= kind "audio-effect-instance")
+              (= kind "midi-effect-instance")
+              (= kind "bus-effect-instance")
+              (= kind "rack-effect-instance"))
         (fx-drop-existing-effect payload target)
         (fx-drop-library-effect payload target)))))

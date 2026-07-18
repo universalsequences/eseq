@@ -20,6 +20,7 @@ use crate::sequencer::{
     PatternSnapshot, RackRouting, RackTrackSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
 };
 
+use super::fx_chain::{FxChainLocator, FxGraphEditBatch};
 use super::graph::{
     RackCustomBuildSpec, RackSamplerBuildSpec, RackSlotBuildSpec, RackSlotInstrumentBuildSpec,
 };
@@ -481,6 +482,178 @@ fn migrate_dgen_builtin_effect_names(project: &mut ProjectFile) {
     for bus in &mut project.buses {
         for name in &mut bus.custom_effects {
             migrate_name(name);
+        }
+    }
+}
+
+/// Version-1 project files were saved when dgenlisp node state used a 6-slot
+/// header. Version 2 grew the header to 10 slots (the node-owned process
+/// identity refactor), which shifted every dgen param's node-state index by
+/// +4. The migration below rewrites saved indices for dgen-hosted slots so
+/// they address the same memory cells under the new layout. Native builtin
+/// effects (filter, OTT, DJ mixer, EQ8, …) and MIDI FX own their layouts,
+/// which did not change, and are left untouched.
+const LEGACY_DGEN_HEADER_SLOTS: u32 = 6;
+
+fn legacy_dgen_header_delta() -> u32 {
+    crate::lisp_host::HEADER_SLOTS as u32 - LEGACY_DGEN_HEADER_SLOTS
+}
+
+fn shifted_legacy_dgen_node_index(idx: u32) -> Option<u32> {
+    (idx >= LEGACY_DGEN_HEADER_SLOTS && idx < crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
+        .then(|| idx + legacy_dgen_header_delta())
+}
+
+/// Shift a legacy dgen slot's saved node indices to the 10-slot header
+/// layout. Returns the set of pre-migration indices that were shifted so
+/// callers can rebase saved `ParamNodeId`s referencing this slot.
+fn migrate_legacy_dgen_effect_slot(
+    slot: &mut project::ProjectEffectSlot,
+) -> std::collections::BTreeSet<u32> {
+    let shifted_sources: std::collections::BTreeSet<u32> = slot
+        .param_node_indices
+        .iter()
+        .copied()
+        .filter(|&idx| shifted_legacy_dgen_node_index(idx).is_some())
+        .collect();
+    for idx in &mut slot.param_node_indices {
+        if let Some(shifted) = shifted_legacy_dgen_node_index(*idx) {
+            *idx = shifted;
+        }
+    }
+    fn migrate_param_id(
+        shifted_sources: &std::collections::BTreeSet<u32>,
+        param_id: &mut Option<ParamNodeId>,
+    ) {
+        if let Some(param_id) = param_id {
+            if shifted_sources.contains(&param_id.node_param_idx) {
+                param_id.node_param_idx += legacy_dgen_header_delta();
+            }
+        }
+    }
+    for row in &mut slot.plock_param_ids {
+        for param_id in row {
+            migrate_param_id(&shifted_sources, param_id);
+        }
+    }
+    for row in slot.key_lock_param_ids.values_mut() {
+        for param_id in row {
+            migrate_param_id(&shifted_sources, param_id);
+        }
+    }
+    shifted_sources
+}
+
+/// True when a saved effect-chain slot name refers to a dgenlisp-hosted
+/// effect: any custom (non-builtin) effect, or a dgenlisp-backed builtin.
+fn project_effect_name_is_dgen_hosted(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    match crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name) {
+        Some(builtin) => crate::effects::conv_reverb::is_dgen_builtin(builtin),
+        None => true,
+    }
+}
+
+fn migrate_legacy_dgen_param_node_indices(project: &mut ProjectFile) {
+    let custom_instrument_tracks: Vec<bool> = project
+        .tracks
+        .iter()
+        .map(|track| matches!(track, project::ProjectTrack::Custom { .. }))
+        .collect();
+    let track_effect_names = project.custom_effects.clone();
+    let bus_effect_names: std::collections::HashMap<u64, Vec<Option<String>>> = project
+        .buses
+        .iter()
+        .map(|bus| (bus.id, bus.custom_effects.clone()))
+        .collect();
+    let slot_name_is_dgen = |names: Option<&Vec<Option<String>>>, slot_idx: usize| {
+        project_effect_name_is_dgen_hosted(
+            names
+                .and_then(|names| names.get(slot_idx))
+                .and_then(|name| name.as_deref()),
+        )
+    };
+
+    for bus in &mut project.buses {
+        let names = bus.custom_effects.clone();
+        for (slot_idx, slot) in bus.effect_slots.iter_mut().enumerate() {
+            if slot_name_is_dgen(Some(&names), slot_idx) {
+                migrate_legacy_dgen_effect_slot(slot);
+            }
+        }
+    }
+
+    for pattern in &mut project.patterns {
+        let mut instrument_shifted: std::collections::HashMap<
+            usize,
+            std::collections::BTreeSet<u32>,
+        > = std::collections::HashMap::new();
+        let mut effect_shifted: std::collections::HashMap<
+            (usize, usize),
+            std::collections::BTreeSet<u32>,
+        > = std::collections::HashMap::new();
+
+        for (track, slot) in pattern.instrument_slots.iter_mut().enumerate() {
+            if custom_instrument_tracks
+                .get(track)
+                .copied()
+                .unwrap_or(false)
+            {
+                instrument_shifted.insert(track, migrate_legacy_dgen_effect_slot(slot));
+            }
+        }
+        for (track, slots) in pattern.effect_slots.iter_mut().enumerate() {
+            for (slot_idx, slot) in slots.iter_mut().enumerate() {
+                if slot_name_is_dgen(track_effect_names.get(track), slot_idx) {
+                    effect_shifted.insert((track, slot_idx), migrate_legacy_dgen_effect_slot(slot));
+                }
+            }
+        }
+        for bus_pattern in &mut pattern.bus_patterns {
+            let names = bus_effect_names.get(&bus_pattern.id);
+            for (slot_idx, slot) in bus_pattern.effect_slots.iter_mut().enumerate() {
+                if slot_name_is_dgen(names, slot_idx) {
+                    migrate_legacy_dgen_effect_slot(slot);
+                }
+            }
+        }
+        for rack in pattern.rack_tracks.iter_mut().flatten() {
+            for slot in &mut rack.slots {
+                if matches!(slot.instrument_type, project::ProjectInstrumentType::Custom) {
+                    migrate_legacy_dgen_effect_slot(&mut slot.instrument_slot);
+                }
+                let names = slot.custom_effects.clone();
+                for (fx_idx, fx_slot) in slot.effect_slots.iter_mut().enumerate() {
+                    if slot_name_is_dgen(Some(&names), fx_idx) {
+                        migrate_legacy_dgen_effect_slot(fx_slot);
+                    }
+                }
+            }
+        }
+
+        for network in &mut pattern.neural_networks {
+            for neuron in &mut network.neurons {
+                for override_param in &mut neuron.output_overrides.instrument {
+                    if let Some(shifted_sources) =
+                        instrument_shifted.get(&override_param.target_track)
+                    {
+                        if shifted_sources.contains(&override_param.param_id.node_param_idx) {
+                            override_param.param_id.node_param_idx += legacy_dgen_header_delta();
+                        }
+                    }
+                }
+                for override_param in &mut neuron.output_overrides.effects {
+                    if let Some(shifted_sources) = effect_shifted
+                        .get(&(override_param.target_track, override_param.slot_index))
+                    {
+                        if shifted_sources.contains(&override_param.param_id.node_param_idx) {
+                            override_param.param_id.node_param_idx += legacy_dgen_header_delta();
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1006,6 +1179,16 @@ impl App {
             return false;
         };
 
+        let batch = FxGraphEditBatch::new(self.graph.lg.0);
+        if let Err(err) = self
+            .editor
+            .effect_chain_leases
+            .retire_host(FxChainLocator::Bus(id), batch.serial)
+        {
+            self.editor.status_message = Some((format!("Error: {err}"), Instant::now()));
+            return false;
+        }
+
         if let Some(bus) = self.buses.get(bus_idx) {
             for slot in &bus.effect_slots {
                 if slot.node_id != 0 {
@@ -1026,9 +1209,6 @@ impl App {
         }
 
         self.buses.remove(bus_idx);
-        if bus_idx < self.editor.bus_effect_leases.len() {
-            self.editor.bus_effect_leases.remove(bus_idx);
-        }
 
         self.remove_bus_references_from_live_pattern(id);
         {
@@ -1106,11 +1286,14 @@ impl App {
             project.patterns.len(),
             project.custom_effects.len()
         );
-        if project.version != project::project_file_version() {
+        if project.version > project::project_file_version() {
             return Err(format!("Unsupported project version {}", project.version));
         }
         migrate_legacy_default_track_effects(&mut project);
         migrate_dgen_builtin_effect_names(&mut project);
+        if project.version < 2 {
+            migrate_legacy_dgen_param_node_indices(&mut project);
+        }
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
             name: name.to_string(),
@@ -1250,6 +1433,418 @@ impl App {
         let project = self.capture_project(project_name)?;
         project::save_project(project_name, &project).map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    fn capture_track_as_container_preset(
+        &mut self,
+        track: usize,
+        name: &str,
+        tags: Vec<String>,
+        author: String,
+    ) -> Result<crate::project::ProjectSoundPreset, String> {
+        if track >= self.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        let project = self.capture_project(name)?;
+        let source_track = project.tracks[track].clone();
+        let pattern = project
+            .patterns
+            .get(project.current_pattern)
+            .ok_or_else(|| "Current pattern is missing while saving Sound".to_string())?;
+        let (track_payload, rack_payload) = match source_track {
+            ProjectTrack::Rack { .. } => {
+                let rack = pattern
+                    .rack_tracks
+                    .get(track)
+                    .cloned()
+                    .flatten()
+                    .ok_or_else(|| "Rack pattern data is missing".to_string())?;
+                (project.tracks[track].clone(), rack)
+            }
+            ProjectTrack::Sampler {
+                sample_path,
+                color,
+                collapsed,
+            } => {
+                let sample_name = pattern.sample_names.get(track).cloned();
+                let slot_source = crate::project::ProjectRackTrackSlot {
+                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                    sample_path: Some(sample_path.clone()),
+                    sample_name: sample_name.clone(),
+                    instrument_name: None,
+                };
+                let slot = crate::project::ProjectRackSlotPattern {
+                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                    instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: pattern
+                        .instrument_base_note_offsets
+                        .get(track)
+                        .copied()
+                        .unwrap_or(0.0),
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: crate::voice::MAX_VOICES,
+                    param_plocks: Vec::new(),
+                    instrument_slot: pattern.instrument_slots[track].clone(),
+                    effect_slots: pattern.effect_slots[track].clone(),
+                    custom_effects: project.custom_effects[track].clone(),
+                    track_sound_state: pattern.track_sound_states[track].clone(),
+                    sample_path: Some(sample_path),
+                    sample_name,
+                };
+                (
+                    ProjectTrack::Rack {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot_source],
+                        color,
+                        collapsed,
+                    },
+                    crate::project::ProjectRackTrackPattern {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot],
+                        macros: crate::project::default_project_rack_macros(),
+                    },
+                )
+            }
+            ProjectTrack::Custom {
+                instrument_name,
+                color,
+                collapsed,
+            } => {
+                let slot_source = crate::project::ProjectRackTrackSlot {
+                    instrument_type: crate::project::ProjectInstrumentType::Custom,
+                    sample_path: None,
+                    sample_name: None,
+                    instrument_name: Some(instrument_name.clone()),
+                };
+                let slot = crate::project::ProjectRackSlotPattern {
+                    instrument_type: crate::project::ProjectInstrumentType::Custom,
+                    instrument_run_mode: pattern
+                        .instrument_run_modes
+                        .get(track)
+                        .copied()
+                        .unwrap_or_default(),
+                    instrument_base_note_offset: pattern
+                        .instrument_base_note_offsets
+                        .get(track)
+                        .copied()
+                        .unwrap_or(0.0),
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: crate::voice::MAX_VOICES,
+                    param_plocks: Vec::new(),
+                    instrument_slot: pattern.instrument_slots[track].clone(),
+                    effect_slots: pattern.effect_slots[track].clone(),
+                    custom_effects: project.custom_effects[track].clone(),
+                    track_sound_state: pattern.track_sound_states[track].clone(),
+                    sample_path: None,
+                    sample_name: None,
+                };
+                (
+                    ProjectTrack::Rack {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot_source],
+                        color,
+                        collapsed,
+                    },
+                    crate::project::ProjectRackTrackPattern {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot],
+                        macros: crate::project::default_project_rack_macros(),
+                    },
+                )
+            }
+            ProjectTrack::Modulator { .. } => {
+                return Err("Modulator tracks cannot be saved as Sounds".to_string())
+            }
+        };
+        let sound = crate::project::ProjectSoundPreset {
+            version: crate::project::project_file_version(),
+            metadata: crate::project::ProjectSoundMetadata {
+                name: name.trim().to_string(),
+                tags,
+                author,
+            },
+            track: track_payload,
+            rack: rack_payload,
+        };
+        Ok(sound)
+    }
+
+    pub fn load_sound_onto_track(&mut self, track: usize, path: &Path) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Sound");
+        self.load_container_preset_onto_track(track, sound, fallback_name)
+    }
+
+    pub fn add_track_from_sound(&mut self, path: &Path) -> Result<usize, String> {
+        // Parse and validate before changing topology. Loading samples and engines
+        // still happens after the shell exists, so roll that shell back on error.
+        crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let track = self.graph_controller().add_blank_sampler_track()?;
+        if let Err(error) = self.load_sound_onto_track(track, path) {
+            let rollback = self.graph_controller().delete_track(track);
+            return match rollback {
+                Ok(_) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "{error}; failed to roll back new track: {rollback_error}"
+                )),
+            };
+        }
+        Ok(track)
+    }
+
+    fn load_container_preset_onto_track(
+        &mut self,
+        track: usize,
+        sound: crate::project::ProjectSoundPreset,
+        fallback_name: &str,
+    ) -> Result<(), String> {
+        let source_slots = match &sound.track {
+            ProjectTrack::Rack { slots, .. } => slots.clone(),
+            _ => return Err("Container preset does not contain a rack".to_string()),
+        };
+        if source_slots.len() != sound.rack.slots.len() {
+            return Err("Container preset source/state slot counts do not match".to_string());
+        }
+        let mut rack = RackTrackSnapshot::from(sound.rack);
+        for (slot_idx, (source, slot)) in source_slots.iter().zip(&mut rack.slots).enumerate() {
+            match source.instrument_type {
+                crate::project::ProjectInstrumentType::Sampler => {
+                    let sample_path = source
+                        .sample_path
+                        .as_deref()
+                        .ok_or_else(|| format!("Sound slot {} has no sample path", slot_idx + 1))?;
+                    let loaded =
+                        crate::sampler::load_wav_buffer(self.graph.lg.0, Path::new(sample_path))
+                            .map_err(|error| {
+                                format!(
+                                    "Failed to load Sound sample '{}' for slot {}: {error}",
+                                    sample_path,
+                                    slot_idx + 1
+                                )
+                            })?;
+                    self.submit_sample_analysis(&loaded);
+                    let sample_name = source
+                        .sample_name
+                        .clone()
+                        .unwrap_or_else(|| loaded.name.clone());
+                    self.register_loaded_sample_path(
+                        &sample_name,
+                        loaded.buffer_id,
+                        PathBuf::from(sample_path),
+                    );
+                    slot.instrument_type = InstrumentType::Sampler;
+                    slot.sample_id = Some((loaded.buffer_id, sample_name, loaded.sample_rate));
+                    slot.track_sound_state.engine_id = None;
+                }
+                crate::project::ProjectInstrumentType::Custom => {
+                    let instrument_name = source.instrument_name.as_deref().ok_or_else(|| {
+                        format!("Sound slot {} has no instrument name", slot_idx + 1)
+                    })?;
+                    let prepared =
+                        self.prepare_saved_instrument_for_rack_slot_sync(instrument_name)?;
+                    slot.instrument_type = InstrumentType::Custom;
+                    slot.instrument_run_mode = prepared.run_mode;
+                    slot.track_sound_state.engine_id = Some(prepared.engine_id);
+                    slot.sample_id = None;
+                }
+                crate::project::ProjectInstrumentType::Modulator
+                | crate::project::ProjectInstrumentType::Rack => {
+                    return Err(format!(
+                        "Sound slot {} has unsupported instrument type",
+                        slot_idx + 1
+                    ));
+                }
+            }
+        }
+        let saved_effects = rack
+            .slots
+            .iter()
+            .enumerate()
+            .flat_map(|(rack_slot, slot)| {
+                slot.custom_effect_names.iter().enumerate().filter_map(
+                    move |(effect_slot, name)| {
+                        let name = name.as_ref()?.trim();
+                        if name.is_empty() {
+                            return None;
+                        }
+                        Some((
+                            rack_slot,
+                            effect_slot,
+                            name.to_string(),
+                            slot.effect_slots[effect_slot].clone(),
+                        ))
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        for slot in &mut rack.slots {
+            for effect in &mut slot.effect_slots {
+                effect.node_id = 0;
+                effect.modulator_node_id = 0;
+            }
+        }
+        let display_name = sound.metadata.name.trim();
+        let display_name = if display_name.is_empty() {
+            fallback_name
+        } else {
+            display_name
+        };
+        self.graph_controller()
+            .replace_track_instrument_container_with_rack(track, rack, display_name)?;
+        for (rack_slot, effect_slot, name, saved) in saved_effects {
+            if let Some(builtin_name) = project_builtin_effect_name_for_load(&name) {
+                self.load_builtin_rack_slot_effect_to_slot_sync(
+                    track,
+                    rack_slot,
+                    effect_slot,
+                    &builtin_name,
+                )?;
+            } else {
+                self.load_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, &name)?;
+            }
+            let live = self
+                .state
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(rack_slot))
+                .cloned()
+                .ok_or_else(|| "Loaded Sound rack slot disappeared".to_string())?;
+            let mut restored = saved;
+            restored.node_id = live.effect_slots[effect_slot].node_id;
+            restored.modulator_node_id = live.effect_slots[effect_slot].modulator_node_id;
+            restored.sync_to_descriptor_with_modulator(
+                &live.effect_descriptors[effect_slot],
+                restored.node_id,
+                restored.modulator_node_id,
+            );
+            if !self
+                .state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.effect_slots[effect_slot] = restored.clone()
+                })
+            {
+                return Err("Failed to restore Sound effect parameters".to_string());
+            }
+            self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
+        }
+        self.push_all_restored_defaults();
+        Ok(())
+    }
+
+    pub fn save_rack_preset(
+        &mut self,
+        track: usize,
+        name: &str,
+        overwrite: bool,
+    ) -> Result<PathBuf, String> {
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Rack) {
+            return Err("Current track is not an instrument rack".to_string());
+        }
+        if crate::project::rack_preset_path(name).exists() && !overwrite {
+            return Err(format!("Preset '{name}' already exists"));
+        }
+        let preset =
+            self.capture_track_as_container_preset(track, name, Vec::new(), String::new())?;
+        let path =
+            crate::project::save_rack_preset(name, &preset).map_err(|error| error.to_string())?;
+        self.set_track_sound_state(track, None, Some(name.to_string()), false);
+        Ok(path)
+    }
+
+    pub fn load_rack_preset_onto_track(&mut self, track: usize, name: &str) -> Result<(), String> {
+        let preset = crate::project::load_rack_preset(name).map_err(|error| error.to_string())?;
+        self.load_container_preset_onto_track(track, preset, name)?;
+        self.set_track_sound_state(track, None, Some(name.to_string()), false);
+        Ok(())
+    }
+
+    pub fn promote_preset_to_sound(
+        &mut self,
+        track: usize,
+        preset_name: &str,
+    ) -> Result<PathBuf, String> {
+        let mut sound = match self.graph.track_instrument_types.get(track).copied() {
+            Some(InstrumentType::Rack) => {
+                crate::project::load_rack_preset(preset_name).map_err(|error| error.to_string())?
+            }
+            Some(InstrumentType::Custom) => {
+                let engine_id = self
+                    .graph
+                    .track_engine_ids
+                    .get(track)
+                    .and_then(|id| *id)
+                    .ok_or_else(|| "Current custom instrument engine is unavailable".to_string())?;
+                let instrument_name = self
+                    .editor
+                    .engine_registry
+                    .get(engine_id)
+                    .map(|engine| engine.name.clone())
+                    .ok_or_else(|| "Current custom instrument is unavailable".to_string())?;
+                let preset = crate::lisp_host::load_instrument_presets(&instrument_name)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .find(|preset| preset.name == preset_name)
+                    .ok_or_else(|| format!("Preset '{preset_name}' not found"))?;
+                let descriptor = self
+                    .graph
+                    .instrument_descriptors
+                    .get(track)
+                    .cloned()
+                    .ok_or_else(|| "Instrument descriptor unavailable".to_string())?;
+                let mut sound = self.capture_track_as_container_preset(
+                    track,
+                    preset_name,
+                    Vec::new(),
+                    String::new(),
+                )?;
+                let slot = sound
+                    .rack
+                    .slots
+                    .first_mut()
+                    .ok_or_else(|| "Captured instrument preset has no rack slot".to_string())?;
+                apply_instrument_preset_to_container_slot(
+                    &mut slot.instrument_slot,
+                    &mut slot.instrument_base_note_offset,
+                    &descriptor,
+                    &preset,
+                );
+                // Track insert FX are not part of an ordinary instrument preset.
+                // Only container presets (racks) carry their saved slot chains.
+                for effect in &mut slot.effect_slots {
+                    *effect = crate::project::ProjectEffectSlot::default();
+                }
+                slot.custom_effects.fill(None);
+                slot.track_sound_state.loaded_preset = Some(preset.name.clone());
+                slot.track_sound_state.dirty = false;
+                sound
+            }
+            Some(InstrumentType::Sampler) => {
+                return Err("Sampler tracks do not have instrument presets".to_string())
+            }
+            _ => return Err("Current track cannot promote presets to Sounds".to_string()),
+        };
+        sound.metadata.name = preset_name.to_string();
+        crate::project::save_sound_preset(preset_name, &sound).map_err(|error| error.to_string())
     }
 
     pub(super) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
@@ -1852,6 +2447,15 @@ impl App {
                                     instrument_slot: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.instrument_slot.clone()),
+                                    effect_slots: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.effect_slots.clone()),
+                                    effect_descriptors: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.effect_descriptors.clone()),
+                                    custom_effect_names: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.custom_effect_names.clone()),
                                     track_sound_state: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.track_sound_state.clone()),
@@ -1867,6 +2471,73 @@ impl App {
                                 routing,
                                 build_specs,
                             )?;
+                            let saved_rack_effects = rack_pattern
+                                .as_ref()
+                                .into_iter()
+                                .flat_map(|rack| rack.slots.iter().enumerate())
+                                .flat_map(|(rack_slot, slot)| {
+                                    slot.custom_effects.iter().enumerate().filter_map(
+                                        move |(effect_slot, name)| {
+                                            let name = name.as_ref()?.trim();
+                                            if name.is_empty() {
+                                                return None;
+                                            }
+                                            let saved = slot.effect_slots.get(effect_slot)?.clone();
+                                            Some((rack_slot, effect_slot, name.to_string(), saved))
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            for (rack_slot, effect_slot, name, saved) in saved_rack_effects {
+                                if let Some(builtin_name) =
+                                    project_builtin_effect_name_for_load(&name)
+                                {
+                                    self.load_builtin_rack_slot_effect_to_slot_sync(
+                                        track_idx,
+                                        rack_slot,
+                                        effect_slot,
+                                        &builtin_name,
+                                    )?;
+                                } else {
+                                    self.load_rack_slot_effect_to_slot_sync(
+                                        track_idx,
+                                        rack_slot,
+                                        effect_slot,
+                                        &name,
+                                    )?;
+                                }
+                                let graph_slot = self
+                                    .state
+                                    .pattern
+                                    .rack_tracks
+                                    .lock()
+                                    .unwrap()
+                                    .get(track_idx)
+                                    .and_then(Option::as_ref)
+                                    .and_then(|rack| rack.slots.get(rack_slot))
+                                    .cloned()
+                                    .ok_or_else(|| "Loaded rack slot disappeared".to_string())?;
+                                let descriptor = graph_slot.effect_descriptors[effect_slot].clone();
+                                let live_effect = &graph_slot.effect_slots[effect_slot];
+                                let restored = project_slot_into_synced_snapshot_with_modulator(
+                                    saved,
+                                    &descriptor,
+                                    live_effect.node_id,
+                                    live_effect.modulator_node_id,
+                                );
+                                if !self.state.update_rack_slot_in_current_pattern(
+                                    track_idx,
+                                    rack_slot,
+                                    |slot| slot.effect_slots[effect_slot] = restored.clone(),
+                                ) {
+                                    return Err("Failed to restore rack-slot FX state".to_string());
+                                }
+                                self.push_rack_slot_effect_defaults(
+                                    track_idx,
+                                    rack_slot,
+                                    effect_slot,
+                                );
+                            }
                         }
                     }
                     if let Some(color) = saved_color {
@@ -2334,6 +3005,26 @@ impl App {
                         }
                         InstrumentType::Modulator | InstrumentType::Rack => {}
                     }
+                    slot.effect_descriptors = graph_slot.effect_descriptors.clone();
+                    slot.custom_effect_names = graph_slot.custom_effect_names.clone();
+                    slot.effect_slots.resize_with(
+                        crate::lisp_host::MAX_CUSTOM_FX,
+                        crate::effects::EffectSlotSnapshot::new_empty,
+                    );
+                    for effect_idx in 0..crate::lisp_host::MAX_CUSTOM_FX {
+                        let graph_effect = &graph_slot.effect_slots[effect_idx];
+                        let descriptor = &graph_slot.effect_descriptors[effect_idx];
+                        if graph_effect.node_id == 0 {
+                            slot.effect_slots[effect_idx] =
+                                crate::effects::EffectSlotSnapshot::new_empty();
+                        } else {
+                            slot.effect_slots[effect_idx].sync_to_descriptor_with_modulator(
+                                descriptor,
+                                graph_effect.node_id,
+                                graph_effect.modulator_node_id,
+                            );
+                        }
+                    }
                     rebound_slots.push(slot);
                 }
                 saved_rack.slots = rebound_slots;
@@ -2793,9 +3484,134 @@ impl App {
     }
 }
 
+fn apply_instrument_preset_to_container_slot(
+    slot: &mut crate::project::ProjectEffectSlot,
+    base_note_offset: &mut f32,
+    descriptor: &crate::effects::EffectDescriptor,
+    preset: &crate::lisp_host::InstrumentPreset,
+) {
+    *base_note_offset = preset.base_note_offset;
+    for (index, param) in descriptor.params.iter().enumerate() {
+        if index < slot.defaults.len() {
+            slot.defaults[index] = param.clamp(
+                preset
+                    .params
+                    .get(&param.name)
+                    .copied()
+                    .unwrap_or(param.default),
+            );
+        }
+    }
+    slot.key_locks.clear();
+    slot.key_lock_param_ids.clear();
+    for (&note, locks) in &preset.key_locks {
+        let mut row = vec![None; descriptor.params.len()];
+        for (param_name, value) in locks {
+            let mut matches = descriptor
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, param)| param.name == *param_name);
+            let Some((index, param)) = matches.next() else {
+                continue;
+            };
+            if matches.next().is_none() && value.is_finite() {
+                row[index] = Some(param.clamp(*value));
+            }
+        }
+        if row.iter().any(Option::is_some) {
+            slot.key_locks.insert(note, row);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_dgen_slot_migration_shifts_only_header_relative_indices() {
+        let mut slot = project::ProjectEffectSlot {
+            num_params: 4,
+            defaults: vec![1.0, 0.5, 0.25, 0.7],
+            plocks: vec![vec![None; 4]; 2],
+            plock_param_ids: vec![
+                vec![
+                    None,
+                    Some(ParamNodeId {
+                        logical_id: 11,
+                        node_param_idx: 6,
+                    }),
+                    None,
+                    // Modulator-relative index that happens to be small but
+                    // does not match any effect-node index in this slot.
+                    Some(ParamNodeId {
+                        logical_id: 12,
+                        node_param_idx: 64,
+                    }),
+                ],
+                vec![None; 4],
+            ],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::from([(
+                60,
+                vec![
+                    Some(ParamNodeId {
+                        logical_id: 11,
+                        node_param_idx: 9,
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
+            )]),
+            tensor_params: Vec::new(),
+            // enabled param (4), two dgen cells (6, 9), one modulator param.
+            param_node_indices: vec![4, 6, 9, crate::voice_modulator::MOD_PARAM_BASE + 3],
+            param_node_spans: vec![1; 4],
+            ir: None,
+        };
+
+        migrate_legacy_dgen_effect_slot(&mut slot);
+
+        assert_eq!(
+            slot.param_node_indices,
+            vec![4, 10, 13, crate::voice_modulator::MOD_PARAM_BASE + 3]
+        );
+        assert_eq!(
+            slot.plock_param_ids[0][1],
+            Some(ParamNodeId {
+                logical_id: 11,
+                node_param_idx: 10,
+            })
+        );
+        assert_eq!(
+            slot.plock_param_ids[0][3],
+            Some(ParamNodeId {
+                logical_id: 12,
+                node_param_idx: 64,
+            }),
+            "modulator-relative param id must not shift"
+        );
+        assert_eq!(
+            slot.key_lock_param_ids[&60][0],
+            Some(ParamNodeId {
+                logical_id: 11,
+                node_param_idx: 13,
+            })
+        );
+    }
+
+    #[test]
+    fn dgen_hosted_effect_name_classification() {
+        assert!(project_effect_name_is_dgen_hosted(Some("my-custom-fx")));
+        assert!(project_effect_name_is_dgen_hosted(Some(
+            "builtin:Convolution Reverb"
+        )));
+        assert!(!project_effect_name_is_dgen_hosted(Some("builtin:EQ8")));
+        assert!(!project_effect_name_is_dgen_hosted(Some("builtin:OTT")));
+        assert!(!project_effect_name_is_dgen_hosted(None));
+    }
 
     fn test_param(
         name: &str,
@@ -2814,6 +3630,45 @@ mod tests {
             host_control: None,
             ui_metadata: None,
         }
+    }
+
+    #[test]
+    fn instrument_preset_promotion_uses_saved_values_instead_of_captured_live_defaults() {
+        let mut descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        descriptor.params = vec![
+            test_param("cutoff", 0.25, 0),
+            test_param("resonance", 0.1, 1),
+        ];
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("cutoff".to_string(), 0.8);
+        let mut note_locks = std::collections::BTreeMap::new();
+        note_locks.insert("resonance".to_string(), 0.65);
+        let mut key_locks = std::collections::BTreeMap::new();
+        key_locks.insert(60, note_locks);
+        let preset = crate::lisp_host::InstrumentPreset {
+            id: "saved".to_string(),
+            name: "Saved".to_string(),
+            base_note_offset: 7.0,
+            params,
+            key_locks,
+        };
+        let mut container_slot = crate::project::ProjectEffectSlot {
+            num_params: 2,
+            defaults: vec![0.05, 0.95],
+            ..crate::project::ProjectEffectSlot::default()
+        };
+        let mut base_note_offset = -12.0;
+
+        apply_instrument_preset_to_container_slot(
+            &mut container_slot,
+            &mut base_note_offset,
+            &descriptor,
+            &preset,
+        );
+
+        assert_eq!(container_slot.defaults, vec![0.8, 0.1]);
+        assert_eq!(container_slot.key_locks[&60], vec![None, Some(0.65)]);
+        assert_eq!(base_note_offset, 7.0);
     }
 
     #[test]
@@ -3142,6 +3997,31 @@ mod tests {
         assert_eq!(live_slot.defaults[0], 0.0);
         assert_eq!(live_slot.defaults[1], 1.0);
         assert_eq!(live_slot.plocks[3][1], Some(0.0));
+    }
+
+    #[test]
+    fn project_with_track_and_bus_effects_roundtrips_bit_identically() {
+        let desc = EffectDescriptor::builtin_insert("Filter").expect("filter descriptor");
+        let mut track_slot = default_project_effect_slot(&desc);
+        track_slot.defaults[0] = 0.25;
+        track_slot.plocks[2][0] = Some(0.75);
+        let mut bus_slot = default_project_effect_slot(&desc);
+        bus_slot.defaults[0] = 0.5;
+        bus_slot.plocks[3][0] = Some(0.125);
+
+        let project_name = EffectDescriptor::builtin_insert_project_name("Filter")
+            .expect("filter should have a persisted builtin name");
+        let mut project =
+            minimal_project_with_effect_slots(vec![Some(project_name.clone())], vec![track_slot]);
+        project.buses = project::default_project_buses();
+        project.buses[1].custom_effects = vec![Some(project_name)];
+        project.buses[1].effect_slots = vec![bus_slot];
+
+        let before = serde_json::to_string_pretty(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&before).expect("deserialize project");
+        let after = serde_json::to_string_pretty(&restored).expect("reserialize project");
+
+        assert_eq!(after, before);
     }
 
     #[test]

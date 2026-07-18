@@ -84,8 +84,8 @@
 (def builtin-fx-roar-toggle (fx p label-text w)
   (button label-text
     :width w :height 1.05 :padding 0 :font-size 8.5
-    :background-color (if (> (get p :value) 0.5) (roar-orange) :mixer-control-bg)
-    :color (if (> (get p :value) 0.5) :black :dim)
+    :background-color (if (fx-param-on-for? fx p) (roar-orange) :mixer-control-bg)
+    :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
@@ -133,7 +133,7 @@
       (label "ROUTING" :font-size 8.0 :width 6.2 :color :dim :bg :transparent)
       (subtree :key "roar-routing-control"
         (builtin-fx-roar-option fx routing-p 6.4))
-      (builtin-fx-roar-routing-fields fx (round (get routing-p :value)) blend-p xlow-p xhigh-p))))
+      (builtin-fx-roar-routing-fields fx (round (fx-param-numeric-value routing-p)) blend-p xlow-p xhigh-p))))
 
 ;; ── Stage box (tab row + shaper/filter views for the selected stage) ──
 
@@ -264,7 +264,7 @@
         (h-stack :gap 0.35 :align :start
           (builtin-fx-roar-input-box fx drive-p tone-p tone-freq-p tone-mode-p)
           (builtin-fx-roar-routing-box fx routing-p blend-p xlow-p xhigh-p)
-          (builtin-fx-roar-stage-box fx params (round (get routing-p :value)))
+          (builtin-fx-roar-stage-box fx params (round (fx-param-numeric-value routing-p)))
           (builtin-fx-roar-feedback-box fx fbmode-p fbtime-p fbdiv-p fbamount-p fbinvert-p fbduck-p fbfreq-p fbwidth-p)
           (builtin-fx-roar-out-box fx compress-p schpf-p output-p mix-p))
         (fx-param-grid params fx)))))

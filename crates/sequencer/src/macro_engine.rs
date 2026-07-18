@@ -187,6 +187,10 @@ pub enum MacroParamKey {
         slot: usize,
         param: String,
     },
+    RackMacro {
+        track: usize,
+        macro_id: u8,
+    },
     BusNode {
         bus: BusId,
         param_id: ParamNodeId,
@@ -223,6 +227,10 @@ impl MacroParamKey {
             },
             |param_id| Self::Node { track, param_id },
         )
+    }
+
+    pub fn for_rack_macro(track: usize, macro_id: u8) -> Self {
+        Self::RackMacro { track, macro_id }
     }
 
     pub fn for_bus_effect(
@@ -301,6 +309,9 @@ impl MacroParamKey {
                         param: param.clone(),
                     })
                 }),
+            ParamTarget::RackMacroParam { macro_id } => {
+                Some(Self::for_rack_macro(track, *macro_id))
+            }
             ParamTarget::StepParam { .. } | ParamTarget::ProcessInlet { .. } => None,
         }
     }
@@ -1393,16 +1404,12 @@ mod tests {
             engine.override_value(&MacroParamKey::Instrument { track: 0, param: 0 }),
             None
         );
-        assert!(
-            engine
-                .override_value(&effect_key(11))
-                .is_some_and(|value| (value - 0.5).abs() < 1.0e-6)
-        );
-        assert!(
-            engine
-                .override_value(&MacroParamKey::Instrument { track: 1, param: 0 })
-                .is_some_and(|value| (value - 0.5).abs() < 1.0e-6)
-        );
+        assert!(engine
+            .override_value(&effect_key(11))
+            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
+        assert!(engine
+            .override_value(&MacroParamKey::Instrument { track: 1, param: 0 })
+            .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
     }
 
     #[test]

@@ -13,6 +13,7 @@
 (load "@/ui/effects/builtin/roar.lisp")
 (load "@/ui/effects/builtin/filter-panel.lisp")
 (load "@/ui/effects/builtin/dynamics.lisp")
+(load "@/ui/effects/builtin/compressor.lisp")
 (load "@/ui/effects/builtin/multiband.lisp")
 (load "@/ui/effects/builtin/tape.lisp")
 (load "@/ui/effects/builtin/dj-mixer.lisp")

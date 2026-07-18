@@ -1,7 +1,7 @@
 //! Built-in audio effects and the shared effect-chain model.
 
 #[allow(dead_code)]
-pub(crate) mod compressor;
+pub mod compressor;
 pub mod conv_reverb;
 #[allow(dead_code)]
 pub(crate) mod delay;
@@ -5220,103 +5220,220 @@ impl EffectDescriptor {
         Self::builtin_dynamics_variant("Glue Compressor", 0.0, 0.42, 2.0, 2.0, 2.0, 0.12, 0.0, 1.0)
     }
 
-    /// General-purpose compressor with conservative hybrid behavior.
+    /// Ableton-style bread-and-butter compressor with external sidechain.
     pub fn builtin_compressor() -> Self {
+        use crate::effects::compressor as comp;
+
+        fn continuous(
+            name: &str,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            scaling: ParamScaling,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(|unit| unit.to_string()),
+                },
+                scaling,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        fn toggle(name: &str, default: f32, node_param_idx: u64) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: 1.0,
+                default,
+                kind: ParamKind::Boolean,
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        fn options(
+            name: &str,
+            labels: &[&str],
+            default: f32,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: (labels.len() - 1) as f32,
+                default,
+                kind: ParamKind::Enum {
+                    labels: labels.iter().map(|label| label.to_string()).collect(),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
         Self {
             name: "Compressor".to_string(),
-            input_channels: 2,
+            // Inputs 0/1 carry the track signal; input 2 is the external
+            // sidechain the host routes via the `sidechain` param below.
+            input_channels: 3,
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
-                ParamDescriptor {
-                    name: "threshold".to_string(),
-                    min: -60.0,
-                    max: 0.0,
-                    default: -18.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("dB".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::effects::compressor::COMPRESSOR_PARAM_THRESHOLD_DB
-                        as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "ratio".to_string(),
-                    min: 1.0,
-                    max: 20.0,
-                    default: 4.0,
-                    kind: ParamKind::Continuous { unit: None },
-                    scaling: ParamScaling::Exponential,
-                    node_param_idx: crate::effects::compressor::COMPRESSOR_PARAM_RATIO as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "attack".to_string(),
-                    min: 0.1,
-                    max: 200.0,
-                    default: 10.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("ms".to_string()),
-                    },
-                    scaling: ParamScaling::Exponential,
-                    node_param_idx: crate::effects::compressor::COMPRESSOR_PARAM_ATTACK_MS as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "release".to_string(),
-                    min: 5.0,
-                    max: 2000.0,
-                    default: 120.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("ms".to_string()),
-                    },
-                    scaling: ParamScaling::Exponential,
-                    node_param_idx: crate::effects::compressor::COMPRESSOR_PARAM_RELEASE_MS as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "makeup".to_string(),
-                    min: -24.0,
-                    max: 24.0,
-                    default: 0.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("dB".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::effects::compressor::COMPRESSOR_PARAM_MAKEUP_DB as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "mix".to_string(),
-                    min: 0.0,
-                    max: 1.0,
-                    default: 1.0,
-                    kind: ParamKind::Continuous {
-                        unit: Some("%".to_string()),
-                    },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::effects::compressor::COMPRESSOR_PARAM_MIX as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                Self::enabled_param(
-                    crate::effects::compressor::COMPRESSOR_PARAM_ENABLED as u32,
-                    1.0,
+                continuous(
+                    "threshold",
+                    -70.0,
+                    6.0,
+                    -18.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    comp::COMPRESSOR_PARAM_THRESHOLD_DB,
                 ),
+                continuous(
+                    "ratio",
+                    1.0,
+                    40.0,
+                    4.0,
+                    None,
+                    ParamScaling::Exponential,
+                    comp::COMPRESSOR_PARAM_RATIO,
+                ),
+                continuous(
+                    "attack",
+                    0.01,
+                    1000.0,
+                    1.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    comp::COMPRESSOR_PARAM_ATTACK_MS,
+                ),
+                continuous(
+                    "release",
+                    1.0,
+                    3000.0,
+                    30.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    comp::COMPRESSOR_PARAM_RELEASE_MS,
+                ),
+                toggle("auto release", 0.0, comp::COMPRESSOR_PARAM_AUTO_RELEASE),
+                options(
+                    "model",
+                    &["peak", "rms", "expand"],
+                    comp::MODEL_RMS,
+                    comp::COMPRESSOR_PARAM_MODEL,
+                ),
+                continuous(
+                    "knee",
+                    0.0,
+                    18.0,
+                    6.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    comp::COMPRESSOR_PARAM_KNEE_DB,
+                ),
+                options(
+                    "lookahead",
+                    &["0 ms", "1 ms", "10 ms"],
+                    0.0,
+                    comp::COMPRESSOR_PARAM_LOOKAHEAD,
+                ),
+                options(
+                    "env",
+                    &["lin", "log"],
+                    1.0,
+                    comp::COMPRESSOR_PARAM_ENV_MODE,
+                ),
+                continuous(
+                    "out",
+                    -36.0,
+                    36.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    comp::COMPRESSOR_PARAM_OUT_DB,
+                ),
+                toggle("makeup", 0.0, comp::COMPRESSOR_PARAM_AUTO_MAKEUP),
+                continuous(
+                    "dry/wet",
+                    0.0,
+                    1.0,
+                    1.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    comp::COMPRESSOR_PARAM_DRY_WET,
+                ),
+                toggle("sc on", 0.0, comp::COMPRESSOR_PARAM_SC_ON),
+                continuous(
+                    "sc gain",
+                    -24.0,
+                    24.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    comp::COMPRESSOR_PARAM_SC_GAIN_DB,
+                ),
+                toggle("sc filter", 0.0, comp::COMPRESSOR_PARAM_SC_FILTER_ON),
+                options(
+                    "sc type",
+                    &["lowpass", "highpass", "bandpass", "notch"],
+                    0.0,
+                    comp::COMPRESSOR_PARAM_SC_FILTER_TYPE,
+                ),
+                continuous(
+                    "sc freq",
+                    30.0,
+                    15000.0,
+                    80.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    comp::COMPRESSOR_PARAM_SC_FREQ,
+                ),
+                continuous(
+                    "sc res",
+                    0.1,
+                    8.0,
+                    0.71,
+                    None,
+                    ParamScaling::Exponential,
+                    comp::COMPRESSOR_PARAM_SC_Q,
+                ),
+                toggle("sc listen", 0.0, comp::COMPRESSOR_PARAM_SC_LISTEN),
+                // Host-routed sidechain source. Labels are patched with the
+                // track list wherever the descriptor is instantiated.
+                ParamDescriptor {
+                    name: "sidechain".to_string(),
+                    min: 0.0,
+                    max: 0.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["off".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: u32::MAX,
+                    node_param_span: 1,
+                    host_control: Some(HostControl::FxSidechain {
+                        input_channel: comp::SIDECHAIN_INPUT_CHANNEL,
+                    }),
+                    ui_metadata: None,
+                },
+                Self::enabled_param(comp::COMPRESSOR_PARAM_ENABLED as u32, 1.0),
             ],
         }
     }
@@ -7794,6 +7911,31 @@ impl EffectSlotSnapshot {
         self.plocks[step][param_idx] = Some(value);
         self.plock_param_ids[step][param_idx] = self.param_node_id(param_idx);
         true
+    }
+
+    pub fn resolved_param_value(&self, step: usize, param_idx: usize, fallback: f32) -> f32 {
+        let default = self.defaults.get(param_idx).copied().unwrap_or(fallback);
+        let Some(value) = self
+            .plocks
+            .get(step)
+            .and_then(|row| row.get(param_idx))
+            .copied()
+            .flatten()
+        else {
+            return default;
+        };
+        let expected_id = self.param_node_id(param_idx);
+        let stored_id = self
+            .plock_param_ids
+            .get(step)
+            .and_then(|row| row.get(param_idx))
+            .copied()
+            .flatten();
+        if expected_id.is_some() && stored_id == expected_id {
+            value
+        } else {
+            default
+        }
     }
 
     pub fn clear_plock(&mut self, step: usize, param_idx: usize) -> bool {

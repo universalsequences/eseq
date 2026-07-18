@@ -57,28 +57,44 @@
 (def macro-set-mapping-display-range (macro mapping endpoint value)
   (let ((scale (get mapping :display-scale))
         (stored (/ value (if scale scale 1.0))))
-    (host-command "macro-set-range"
-      (dict :id (get macro :id)
+    (host-command
+      (if (= (get macro :scope) "rack") "set-rack-macro-range" "macro-set-range")
+      (dict :track SEQ.current-track
+            :id (get macro :id)
             :mapping-idx (get mapping :mapping-idx)
             :min (if (= endpoint :min) stored (get mapping :min))
             :max (if (= endpoint :max) stored (get mapping :max))))))
 
 (def macro-set-mapping-curve (macro mapping curve)
-  (host-command "macro-set-curve"
-    (dict :id (get macro :id)
+  (host-command (if (= (get macro :scope) "rack") "set-rack-macro-curve" "macro-set-curve")
+    (dict :track SEQ.current-track :id (get macro :id)
           :mapping-idx (get mapping :mapping-idx)
           :curve curve)))
 
 (def macro-unmap-row (macro mapping)
-  (host-command "macro-unmap"
-    (dict :id (get macro :id) :mapping-idx (get mapping :mapping-idx))))
+  (host-command (if (= (get macro :scope) "rack") "unmap-rack-macro-param" "macro-unmap")
+    (dict :track SEQ.current-track :id (get macro :id)
+      :mapping-idx (get mapping :mapping-idx))))
+
+(def rack-macro-mapping-table-macro ()
+  (let ((panel (nth SEQ.instrument-panel 0)))
+    (if panel
+      (nth (filter |macro| (= (get macro :id) rack-macro-mapping-selected)
+        (get panel :macros)) 0)
+      false)))
+
+(def active-macro-mapping-table-macros ()
+  (if (>= rack-macro-mapping-selected 0)
+    (let ((macro (rack-macro-mapping-table-macro)))
+      (if macro (list macro) '()))
+    SEQ.macros))
 
 (def macro-mapping-editor-header ()
   (box :height 1.2 :padding 0.12 :background-color :mixer-strip-bg
     (h-stack :gap 0.25 :align :baseline
       (label "Macro" :width 6.0 :font-size 8.5 :color :dim :bg :transparent)
-      (label "Path" :width 8.5 :font-size 8.5 :color :dim :bg :transparent)
-      (label "Name" :width 7.0 :font-size 8.5 :color :dim :bg :transparent)
+      (label "Path" :width 16.5 :font-size 8.5 :color :dim :bg :transparent)
+      (label "Name" :width 10.0 :font-size 8.5 :color :dim :bg :transparent)
       (label "Min" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
       (label "Max" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
       (label "Curve" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
@@ -98,8 +114,8 @@
              :mixer-control-bg))
       (h-stack :gap 0.25 :align :baseline
         (label (get macro :name) :width 6.0 :font-size 9 :color :foreground :bg :transparent)
-        (label (get mapping :path-label) :width 8.5 :font-size 8.5 :color :dim :bg :transparent)
-        (label (get mapping :param-label) :width 7.0 :font-size 8.5
+        (label (get mapping :path-label) :width 16.5 :font-size 8.5 :color :dim :bg :transparent)
+        (label (get mapping :param-label) :width 10.0 :font-size 8.5
           :color (if (get mapping :suspended) :dim :foreground) :bg :transparent)
         (number-picker
           :key (str "macro-mapping-min-" (get macro :id) "-" (get mapping :mapping-idx))
@@ -180,18 +196,22 @@
           (macro-mapping-editor-empty "Macro is not available yet"))))))
 
 (def macro-mapping-table ()
-  (box :width :fill :height :fill :padding 0.65 :background-color :buffer-bg
-    (v-stack :width :fill :gap 0.2
-      (h-stack :width :fill :height 1.3 :align :center
-        (label "MACRO MAPPINGS" :width 35 :font-size 11 :color :foreground :bg :transparent)
-        (button "done" :width 5.0 :height 1.05 :font-size 8.5
-          :background-color (rgba 0.18 0.85 0.42 0.22) :color :foreground
-          :on-click (lambda (event) (macro-clear-mapping-arm))))
-      (macro-mapping-editor-header)
-      (if (= (macro-mapping-editor-row-count SEQ.macros) 0)
-        (macro-mapping-editor-empty "Click a green parameter to map it")
-        (scroll :width :fill :flex 1
-          (macro-mapping-editor-row-list SEQ.macros))))))
+  (let ((macros (active-macro-mapping-table-macros))
+        (rack-active (>= rack-macro-mapping-selected 0)))
+    (box :width :fill :height :fill :padding 0.65 :background-color :buffer-bg
+      (v-stack :width :fill :gap 0.2
+        (h-stack :width :fill :height 1.3 :align :center
+          (label (if rack-active "RACK MACRO MAPPINGS" "MACRO MAPPINGS")
+            :width 35 :font-size 11 :color :foreground :bg :transparent)
+          (button "done" :width 5.0 :height 1.05 :font-size 8.5
+            :background-color (rgba 0.18 0.85 0.42 0.22) :color :foreground
+            :on-click (lambda (event)
+              (if rack-active (rack-macro-clear-mapping-arm) (macro-clear-mapping-arm)))))
+        (macro-mapping-editor-header)
+        (if (= (macro-mapping-editor-row-count macros) 0)
+          (macro-mapping-editor-empty "Click a green parameter to map it")
+          (scroll :width :fill :flex 1
+            (macro-mapping-editor-row-list macros)))))))
 
 (effect-buffer "*macro-mappings*" (macro-mapping-table))
 

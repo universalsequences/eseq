@@ -27,8 +27,8 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{
-    SplitDir, TileBufferTab, TileId, TileLeaf, TileNode, TileSplit, split_ratio_for_point,
-    tile_body_rect, tile_tab_layouts,
+    SplitDir, TileBufferTab, TileFrameCacheKey, TileId, TileLeaf, TileNode, TileSplit,
+    split_ratio_for_point, tile_body_rect, tile_tab_layouts,
 };
 use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
@@ -500,23 +500,7 @@ struct RetainedTileLayout {
     viewport_width_bits: u32,
     viewport_height_bits: u32,
     cached_layout: Arc<LayoutNode>,
-    cached_inactive_frame: Option<(
-        (
-            BufferId,
-            u64,
-            u64,
-            u64,
-            usize,
-            usize,
-            usize,
-            u32,
-            u32,
-            u32,
-            u32,
-            ViewMode,
-        ),
-        crate::backend::RenderFrame,
-    )>,
+    cached_inactive_frame: Option<(TileFrameCacheKey, crate::backend::RenderFrame)>,
     focused_widget_id: Option<u64>,
     focused_widget_node: Option<LayoutNode>,
     widget_scroll_top: f32,
@@ -3638,18 +3622,57 @@ impl Editor {
         }
     }
 
-    pub fn clamp_widget_scroll_offsets(&mut self) {
+    pub fn clamp_widget_scroll_offsets(&mut self) -> (f32, f32) {
         let has_inline_widgets = !self.active_buffer().inline_code_widgets().is_empty();
-        let max_v = self.max_widget_vertical_scroll();
-        let max_h = {
-            let vp = self.runtime.layout_cols_exact();
-            let aspect = self.runtime.layout_aspect();
-            self.runtime
+        let viewport_width = self.runtime.layout_cols_exact();
+        let viewport_height = self.active_leaf().widget_viewport_height.max(0.0);
+        let viewport_height = if viewport_height > 0.0 {
+            viewport_height
+        } else {
+            self.runtime.layout_rows_exact()
+        };
+        let aspect = self.runtime.layout_aspect();
+        let revision = self.runtime.layout_revision();
+        let cache_key = (
+            revision,
+            viewport_width.to_bits(),
+            viewport_height.to_bits(),
+            aspect.to_bits(),
+        );
+        let cached = self
+            .active_leaf()
+            .widget_scroll_limits_cache
+            .filter(|entry| (entry.0, entry.1, entry.2, entry.3) == cache_key)
+            .map(|entry| (entry.4, entry.5));
+        let (max_v, max_h) = cached.unwrap_or_else(|| {
+            const SCROLL_SLOP_ROWS: f32 = 0.5;
+            let (max_v, max_h) = self
+                .runtime
                 .current_layout
                 .as_ref()
-                .map(|layout| (crate::ui::hit::max_extent_exact(layout, aspect).0 - vp).max(0.0))
-                .unwrap_or(0.0)
-        };
+                .map(|layout| {
+                    let vertical_overflow = max_layout_bottom(layout.as_ref()) - viewport_height;
+                    let max_v = if vertical_overflow <= SCROLL_SLOP_ROWS {
+                        0.0
+                    } else {
+                        vertical_overflow.max(0.0)
+                    };
+                    let max_h = (crate::ui::hit::max_extent_exact(layout, aspect).0
+                        - viewport_width)
+                        .max(0.0);
+                    (max_v, max_h)
+                })
+                .unwrap_or((0.0, 0.0));
+            self.active_leaf_mut().widget_scroll_limits_cache = Some((
+                cache_key.0,
+                cache_key.1,
+                cache_key.2,
+                cache_key.3,
+                max_v,
+                max_h,
+            ));
+            (max_v, max_h)
+        });
         let leaf = self.active_leaf_mut();
         leaf.widget_scroll_top = if has_inline_widgets {
             0.0
@@ -3657,6 +3680,7 @@ impl Editor {
             leaf.widget_scroll_top.clamp(0.0, max_v)
         };
         leaf.widget_scroll_left = leaf.widget_scroll_left.clamp(0.0, max_h);
+        (max_v, max_h)
     }
 
     /// Apply smooth (sub-cell) scroll deltas to the widget viewport.
@@ -3875,11 +3899,26 @@ impl Editor {
     pub fn sync_layout_to_active_leaf(&mut self) {
         let buffer_name = self.active_buffer().name.clone();
         let layout = self.runtime.current_layout.clone();
-        self.trace_ui_layout_event(&buffer_name, "active-sync", layout.as_deref());
         let revision = self.runtime.layout_revision();
         let widget_tree_revision = self.active_buffer().widget_tree_revision;
         let viewport_width = self.runtime.layout_cols_exact();
         let viewport_height = self.runtime.layout_rows_exact();
+        let already_synced = {
+            let leaf = self.active_leaf();
+            leaf.layout_revision == revision
+                && leaf.cached_layout_widget_tree_revision == widget_tree_revision
+                && leaf.widget_viewport_width.to_bits() == viewport_width.to_bits()
+                && leaf.widget_viewport_height.to_bits() == viewport_height.to_bits()
+                && match (&leaf.cached_layout, &layout) {
+                    (Some(cached), Some(current)) => Arc::ptr_eq(cached, current),
+                    (None, None) => true,
+                    _ => false,
+                }
+        };
+        if already_synced {
+            return;
+        }
+        self.trace_ui_layout_event(&buffer_name, "active-sync", layout.as_deref());
         let leaf = self.active_leaf_mut();
         leaf.cached_layout = layout;
         leaf.cached_layout_widget_tree_revision = if leaf.cached_layout.is_some() {

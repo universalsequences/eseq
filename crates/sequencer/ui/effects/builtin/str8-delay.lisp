@@ -6,6 +6,7 @@
 
 (def builtin-fx-str8-delay-live? (fx)
   (and builtin-fx-str8-delay-live-active
+       (not (get fx :rack-fx))
        (not (get fx :bus-fx))
        (not (get fx :midi-fx))
        (= builtin-fx-str8-delay-live-slot (get fx :slot-idx))))
@@ -40,7 +41,7 @@
       (set! builtin-fx-str8-delay-live-freq (get event :freq))
       (set! builtin-fx-str8-delay-live-q (get event :q))
       (set! builtin-fx-str8-delay-live-active (= (get event :type) :change-band))
-      (if (or (get fx :bus-fx) (get fx :midi-fx))
+      (if (or (get fx :rack-fx) (get fx :bus-fx) (get fx :midi-fx))
         (do
           (fx-set-effect-value fx freq-p (get event :freq))
           (fx-set-effect-value fx q-p (get event :q)))
@@ -63,8 +64,9 @@
 (def builtin-fx-str8-delay-sync-button (fx p)
   (button "Sync"
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (> (get p :value) 0.5) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
-    :color (if (> (get p :value) 0.5) :black :dim)
+    :background-color (if (fx-param-on-for? fx p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
+    :color (if (fx-param-on-for? fx p) :black :dim)
+        :border-color :transparent
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
@@ -75,6 +77,7 @@
   (button label-text
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
+        :border-color :transparent
     :color (if (= (get p :text-value) label-text) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
@@ -108,7 +111,7 @@
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
       (builtin-fx-str8-delay-sync-button fx sync-p)
-      (if (> (get sync-p :value) 0.5)
+      (if (fx-param-on-for? fx sync-p)
         (v-stack :gap 0.12 :align :center
           (builtin-fx-str8-delay-div-grid fx div-p)
           (builtin-fx-filter-mini-percent fx "ofs" offset-p))
@@ -181,7 +184,7 @@
         (builtin-fx-str8-delay-side fx "Left" left-sync-p left-div-p left-offset-p left-time-p)
         (builtin-fx-str8-delay-side fx "Right" right-sync-p right-div-p right-offset-p right-time-p)
         (v-stack :gap 0.18
-          (box :width 20.4 :height 5.35
+          (box :width 20.4 :height 7.5
             (response-curve-editor
               :mode :filter
               :bands (list (builtin-fx-str8-delay-band fx filter-freq-p filter-q-p))
@@ -192,7 +195,7 @@
               :q-min (get filter-q-p :min)
               :q-max (get filter-q-p :max)
               :background-color (rgba 0.055 0.058 0.06 1.0)
-              :corner-radius 6
+              :corner-radius 16
               :grid-color (rgba 0.34 0.34 0.36 0.55)
               :stroke-color :blue
               :point-color (rgba 1.0 0.62 0.25 1.0)
@@ -203,7 +206,7 @@
               (label "Filter" :font-size 9.0 :width 3.8 :color :dim :bg :transparent)
               (builtin-fx-filter-mini-cutoff fx filter-freq-p)
               (builtin-fx-filter-mini-number fx "wid" filter-q-p))))
-        (box :width 9.2 :height 7.45 :padding 0.36
+        (box :width 9.6 :height 7.45 :padding 0.36
              :background-color :fx-inner-panel-bg :corner-radius 7
           (v-stack :gap 0.16
             (h-stack :gap 0.18 :align :center

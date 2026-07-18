@@ -340,23 +340,29 @@
         (status "Drop a sample file, not a folder")))))
 
 (def seqv-drop-on-track (event)
-  (if (= (get event :drag-type) "instrument")
-    (sbrowser-drop-instrument-on-track event)
-    (seqv-drop-sample-on-track event)))
+  (if (= (get event :drag-type) "sound")
+    (sbrowser-drop-sound-on-track event)
+    (if (= (get event :drag-type) "instrument")
+      (sbrowser-drop-instrument-on-track event)
+      (seqv-drop-sample-on-track event))))
 
 (def seqv-drop-new-track (event)
   (let ((payload (get event :payload)))
     (let ((path (get payload :path))
           (name (get payload :name)))
-      (if (= (get event :drag-type) "instrument")
-        (if name
-          (do
-            (set! sbrowser-loading-instrument-name name)
-            (host-command "add-track-instrument" (dict :name name)))
-          (status "Drop an instrument, not a folder"))
+      (if (= (get event :drag-type) "sound")
         (if path
-          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-          (status "Drop a sample file, not a folder"))))))
+          (host-command "add-track-from-sound" (dict :path path))
+          (status "Drop a Sound item, not a folder"))
+        (if (= (get event :drag-type) "instrument")
+          (if name
+            (do
+              (set! sbrowser-loading-instrument-name name)
+              (host-command "add-track-instrument" (dict :name name)))
+            (status "Drop an instrument, not a folder"))
+          (if path
+            (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+            (status "Drop a sample file, not a folder")))))))
 
 (defwidget seqv-track-container
   :width 1.5 :height 1.5
@@ -483,7 +489,10 @@
       (material
         :lighting (lighting :edge-min -0.45 :edge-max 0.4
           :light (vec3 0.1 -1.2 2.4) :shininess 24.0)
-        :color (if expanded (rgba 0.18 0.18 0.20 1.0) :mixer-control-bg)))
+        :color 
+        (if expanded 
+          (rgba 0.18 0.18 0.20 1.0) 
+          :bg)))
     (sdf/fill
       (sdf/translate -0.48 0
         (sdf/circle 0.12))
@@ -532,7 +541,7 @@
           (end (+ center (* step-w 0.46)))
           (trail-half-w (* 0.5 aspect (- end trail-start)))
           (__half_w (* 0.5 aspect (- end start)))
-          (__half_h 0.12)
+          (__half_h 0.32)
           (__radius 0.07))
       (sdf/layer
         (sdf/fill
@@ -568,60 +577,58 @@
   (if (= hide 1)
     (rgba 0 0 0 0)
     (let ((vcol (rgba variant-r variant-g variant-b 1.0))
-          (seqcol (rgba 0.545 0.545 0.588 0.95))
-          (border (if (= selected 1)
-            (if (= plock-kind 2)
-              (rgba variant-r variant-g variant-b 1.0)
-              (rgba 0.90 0.92 0.96 1.0))
-            (if (= plock-kind 2)
-              (rgba (* variant-r 0.34) (* variant-g 0.34) (* variant-b 0.34) 1.0)
-              (if (= odd 1) (rgba 0.28 0.28 0.28 1.0) (rgba 0.18 0.18 0.18 1.0))))))
-      (sdf/layer
-        (sdf/fill
-          (sdf/translate 0 0.0
-            (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0))
-          (material
-            :lighting (lighting :edge-min -0.5 :edge-max 0.3
-              :light (vec3 0.1 -1.8 2.5) :shininess 92.0)
-            :color (if (= duration 1)
-              (aqua-color
-                (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5)
-                (rgba track-r track-g track-b 1))
-              (rgba 0 0 0 0))))
-        (sdf/fill (sdf/circle 0.65)
-          (material
-            :lighting (lighting :edge-min -0.3 :edge-max 1.0
-              :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
-            :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
-        (sdf/fill (sdf/circle 0.53)
-          (material
-            :color (if (= odd 1)
-              (rgba 0.15 0.155 0.155 0.6)
-              (rgba 0.015 0.016 0.025 0.8))))
-        (sdf/fill
-          (sdf/translate 0 0.70
-            (sdf/rounded-rect 0.52 0.10 0.05))
-          (material
+        (seqcol (rgba 0.545 0.545 0.588 0.95))
+        (border (if (= selected 1)
+            (rgba 0.90 0.92 0.96 1.0)
+            (if (= odd 1) 
+              (rgba 0.28 0.28 0.28 1.0) 
+              (rgba 0.18 0.18 0.18 1.0)))))
+    (sdf/layer
+      (sdf/fill
+        (sdf/translate 0 0.0
+          (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0))
+        (material
+          :lighting (lighting :edge-min -0.5 :edge-max 0.3
+            :light (vec3 0.1 -1.8 2.5) :shininess 92.0)
+          :color (if (= duration 1)
+            (aqua-color
+              (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5)
+              (rgba track-r track-g track-b 1))
+            (rgba 0 0 0 0))))
+      (sdf/fill (sdf/circle 0.65)
+        (material
+          :lighting (lighting :edge-min -0.3 :edge-max 1.0
+            :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
+          :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
+      (sdf/fill (sdf/circle 0.53)
+        (material
+          :color (if (= odd 1)
+            (rgba 0.15 0.155 0.155 0.6)
+            (rgba 0.015 0.016 0.025 0.8))))
+      (sdf/fill
+        (sdf/translate 0 0.70
+          (sdf/rounded-rect 0.52 0.10 0.05))
+        (material
+          :color (if (= plock-kind 2)
+            vcol
+            (if (= plock-kind 1)
+              seqcol
+              (rgba 0 0 0 0)))
+          :shadow (shadow
             :color (if (= plock-kind 2)
-              vcol
-              (if (= plock-kind 1)
-                seqcol
-                (rgba 0 0 0 0)))
-            :shadow (shadow
-              :color (if (= plock-kind 2)
-                (rgba variant-r variant-g variant-b 0.70)
-                (rgba 0 0 0 0))
-              :blur (if (= plock-kind 2) 0.12 0.0)
-              :offset (vec2 0 0))))
-        (sdf/fill (sdf/circle 0.36)
-          (material
-            :lighting (lighting :edge-min -0.35 :edge-max 0.5
-              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
-            :color (if (= active 1)
-              (aqua-color
-                (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
-                (rgba track-r track-g track-b 1.0))
-              (rgba 0 0 0 0))))))))
+              (rgba variant-r variant-g variant-b 0.70)
+              (rgba 0 0 0 0))
+            :blur (if (= plock-kind 2) 0.12 0.0)
+            :offset (vec2 0 0))))
+      (sdf/fill (sdf/circle 0.36)
+        (material
+          :lighting (lighting :edge-min -0.15 :edge-max 0.5
+            :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
+          :color (if (= active 1)
+            (aqua-color
+              (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
+              (rgba track-r track-g track-b 1.0))
+            (rgba 0 0 0 0))))))))
 
 (def seqv-mute-bg (active)
   (if active
@@ -642,17 +649,19 @@
     (seqv-track-header-body i)))
 
 (def seqv-track-volume-control (i)
-  (box
-    :key (str "seqv-track-volume-control-" i)
-    :width 8.2 :height 0.85
-    :background "seqv-track-volume-meter"
-    :level (seqv-track-peak i)
-    :volume (seqv-track-volume-binding i)
-    :track-r (seqv-track-color-r-binding i)
-    :track-g (seqv-track-color-g-binding i)
-    :track-b (seqv-track-color-b-binding i)
-    :on-click (lambda (event) (seqv-set-track-volume-from-event i event))
-    :on-drag (lambda (event) (seqv-set-track-volume-from-event i event))))
+  (v-stack (box :height 0.3 )
+    (box
+      :key (str "seqv-track-volume-control-" i)
+      :width 8.2 :height 1.25
+      :background "seqv-track-volume-meter"
+      :level (seqv-track-peak i)
+      :volume (seqv-track-volume-binding i)
+      :track-r (seqv-track-color-r-binding i)
+      :track-g (seqv-track-color-g-binding i)
+      :track-b (seqv-track-color-b-binding i)
+      :on-click (lambda (event) (seqv-set-track-volume-from-event i event))
+      :on-drag (lambda (event) (seqv-set-track-volume-from-event i event))))
+  )
 
 (def seqv-track-header-body (i)
   (let ((name (nth SEQ.track-names i)))
@@ -779,6 +788,11 @@
           (seqv-set-duration-from-drag track step step))
         (step-pointer-down-for-track track step evt use-selection)))))
 
+(def seqv-step-double-click (track step evt)
+  (do
+    (seq-set-track track)
+    (step-double-click-for-track track step evt)))
+
 (def seqv-step-pointer-up (track step evt)
   (do
     (if (and (= seqv-drag-track track) (= seqv-duration-drag-source nil))
@@ -811,7 +825,7 @@
       (variant-g (seqv-track-step-value SEQ.track-step-variant-g track step 0))
       (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0)))
     (box
-      :width 3.05 :height 1.05
+      :width 3.05 :height 1.15
       :key (str "seqv-step-cell-" track "-" step)
       :on-mouse-down (lambda (evt)
         (if visible
@@ -825,12 +839,16 @@
         (if visible
           (seqv-step-pointer-up track step evt)
           nil))
+      :on-double-click (lambda (evt)
+        (if visible
+          (seqv-step-double-click track step evt)
+          nil))
       :active (seqv-cursor-highlight-binding track step)
       :selected (seqv-track-selected-binding track)
       :hide (if visible 0 1)
       :background "cursor-highlight"
       (box
-        :width 3.05 :height 0.55
+        :width 3.05 :height 0.85
         :odd odd
         :active (bind-seq (str "seq-track-step-active-" track "-" step))
         :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
@@ -1038,6 +1056,17 @@
   (let ((step (seqv-slot-step-index-value track-id slot)))
     (if (>= step 0)
       (seqv-expanded-step-pointer-up track track-id step evt)
+      nil)))
+
+(def seqv-expanded-step-double-click (track track-id step evt)
+  (do
+    (seqv-activate-track-for-edit track)
+    (step-double-click-for-track track step evt)))
+
+(def seqv-expanded-slot-double-click (track track-id slot evt)
+  (let ((step (seqv-slot-step-index-value track-id slot)))
+    (if (>= step 0)
+      (seqv-expanded-step-double-click track track-id step evt)
       nil)))
 
 (def seqv-set-expanded-slot-param (track track-id slot mode slider-value)
@@ -1325,6 +1354,8 @@
                           (seqv-expanded-slot-drag track track-id i evt))
                         :on-mouse-up (lambda (evt)
                           (seqv-expanded-slot-pointer-up track track-id i evt))
+                        :on-double-click (lambda (evt)
+                          (seqv-expanded-slot-double-click track track-id i evt))
                         (metal-track-tick
                           :active active-ref
                           :plocked plocked-ref
@@ -1389,8 +1420,8 @@
           :muted-border-color :mixer-strip-border
           :drop-hover-border-color :mixer-strip-selected-border
           :drop-types (if (seq-track-replaceable-instrument? i)
-            (list "sample" "instrument")
-            (list "sample"))
+            (list "sample" "instrument" "sound")
+            (if (seq-track-sound-replaceable? i) (list "sample" "sound") (list "sample")))
           :drop-meta (dict :kind "track" :track i)
           :on-drop (lambda (event) (seqv-drop-on-track event))
           :padding 0.0145
@@ -1417,7 +1448,7 @@
       :border-color :transparent
       :drop-hover-border-color :mixer-strip-selected-border
       :corner-radius 10
-      :drop-types (list "sample" "instrument")
+      :drop-types (list "sample" "instrument" "sound")
       :drop-meta (dict :kind "new-sample-track")
       :on-drop (lambda (event) (seqv-drop-new-track event))
       (label ""

@@ -146,7 +146,10 @@
   (do
     (set! instrument-panel-tab 0)
     (if (not instrument-mods-open)
-      (do (macro-clear-mapping-arm) (process-map-clear)))
+      (do
+        (macro-clear-mapping-arm)
+        (process-map-clear)
+        (rack-macro-clear-mapping-arm)))
     (set! instrument-mods-open (not instrument-mods-open))))
 
 (def instrument-mods-toggle-button ()
@@ -159,19 +162,26 @@
 
 (def effect-toggle-mods-view (fx)
   (let ((chain (fx-effect-chain-kind fx))
+        (track (if (get fx :bus-fx) -1 (get fx :track-idx)))
         (slot (get fx :slot-idx))
+        (rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1))
         (bus (if (get fx :bus-fx) (get fx :bus-idx) -1)))
     (if (and effect-mods-open
              (= effect-mods-chain chain)
+             (= effect-mods-track track)
              (= effect-mods-slot slot)
+             (= effect-mods-rack-slot rack-slot)
              (= effect-mods-bus bus))
       (set! effect-mods-open false)
       (do
         (macro-clear-mapping-arm)
         (process-map-clear)
+        (rack-macro-clear-mapping-arm)
         (set! effect-mods-open true)
         (set! effect-mods-chain chain)
+        (set! effect-mods-track track)
         (set! effect-mods-slot slot)
+        (set! effect-mods-rack-slot rack-slot)
         (set! effect-mods-bus bus)))))
 
 (def effect-mods-toggle-button (fx)

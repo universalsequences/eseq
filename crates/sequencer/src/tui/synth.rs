@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::prelude::*;
 use std::sync::atomic::Ordering;
 
-use super::command::{apply_command, AppCommand};
+use super::command::{AppCommand, apply_command};
 
 use crate::effects::EffectDescriptor;
 use crate::sequencer::{InstrumentType, RackSlotParam, RackSlotSnapshot};
@@ -11,6 +11,44 @@ use super::{App, InputMode};
 
 pub(super) const SYNTH_MIN_COLUMN_WIDTH: u16 = 42;
 pub(super) const SYNTH_COLUMN_GAP: u16 = 2;
+
+#[derive(Clone, Copy)]
+struct RackSlotInstrumentParamRoute {
+    instrument_type: InstrumentType,
+    node_param_idx: u64,
+    node_param_span: u32,
+    sample_rate: Option<f32>,
+}
+
+#[derive(Clone, Copy)]
+enum TransientRackMacroTarget {
+    SlotGain {
+        slot: usize,
+    },
+    SlotPan {
+        slot: usize,
+    },
+    SlotMute {
+        slot: usize,
+    },
+    SlotInstrumentParam {
+        slot: usize,
+        param_index: usize,
+    },
+    SlotEffectParam {
+        slot: usize,
+        effect_slot: usize,
+        param_index: usize,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct TransientRackMacroMapping {
+    target: TransientRackMacroTarget,
+    range_min: f32,
+    range_max: f32,
+    curve: crate::sequencer::RackMacroCurve,
+}
 
 impl App {
     pub(super) fn source_param_actual_indices(&self, track: usize) -> Vec<usize> {
@@ -1124,13 +1162,28 @@ impl App {
             InstrumentType::Sampler => Some(EffectDescriptor::builtin_sampler()),
             InstrumentType::Custom | InstrumentType::Modulator => {
                 let engine_id = slot.track_sound_state.engine_id?;
-                let engine = self.editor.engine_registry.get(engine_id)?;
-                Some(crate::lisp_host::instrument_descriptor_from_manifest(
-                    &engine.name,
-                    &engine.manifest,
-                ))
+                self.editor
+                    .engine_registry
+                    .get_instrument_descriptor(engine_id)
+                    .cloned()
             }
             InstrumentType::Rack => None,
+        }
+    }
+
+    pub fn rack_slot_cached_instrument_descriptor(
+        &self,
+        slot: &RackSlotSnapshot,
+    ) -> Option<&EffectDescriptor> {
+        match slot.instrument_type {
+            InstrumentType::Custom | InstrumentType::Modulator => {
+                slot.track_sound_state.engine_id.and_then(|engine_id| {
+                    self.editor
+                        .engine_registry
+                        .get_instrument_descriptor(engine_id)
+                })
+            }
+            InstrumentType::Sampler | InstrumentType::Rack => None,
         }
     }
 
@@ -1144,6 +1197,43 @@ impl App {
             .and_then(|rack| rack.as_ref())
             .and_then(|rack| rack.slots.get(slot_idx))
             .cloned()
+    }
+
+    /// Copies only the immutable routing metadata needed to send one live
+    /// parameter value. A rack slot owns large effect descriptors and p-lock
+    /// grids, so cloning the complete authoring snapshot on a pointer-rate
+    /// control path is both unnecessary and disproportionately expensive.
+    fn rack_slot_instrument_param_route(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+    ) -> Option<RackSlotInstrumentParamRoute> {
+        let racks = self.state.pattern.rack_tracks.lock().unwrap();
+        let slot = racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(slot_idx))?;
+        Some(RackSlotInstrumentParamRoute {
+            instrument_type: slot.instrument_type,
+            node_param_idx: slot
+                .instrument_slot
+                .param_node_indices
+                .get(param_idx)
+                .copied()
+                .unwrap_or(0) as u64,
+            node_param_span: slot
+                .instrument_slot
+                .param_node_spans
+                .get(param_idx)
+                .copied()
+                .unwrap_or(1)
+                .max(1),
+            sample_rate: slot
+                .sample_id
+                .as_ref()
+                .map(|(_, _, rate)| (*rate).max(1) as f32),
+        })
     }
 
     fn push_rack_slot_panner_param(&self, track: usize, slot_idx: usize, idx: u64, value: f32) {
@@ -1316,7 +1406,7 @@ impl App {
         param_idx: usize,
         value: f32,
     ) {
-        let Some(slot) = self.rack_slot_snapshot(track, slot_idx) else {
+        let Some(route) = self.rack_slot_instrument_param_route(track, slot_idx, param_idx) else {
             return;
         };
         let Some(nodes) = self
@@ -1327,27 +1417,14 @@ impl App {
         else {
             return;
         };
-        let idx = slot
-            .instrument_slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(0) as u64;
-        let span = slot
-            .instrument_slot
-            .param_node_spans
-            .get(param_idx)
-            .copied()
-            .unwrap_or(1)
-            .max(1);
+        let idx = route.node_param_idx;
+        let span = route.node_param_span;
         if crate::voice_modulator::is_bar_resync_param(idx as u32) {
             self.state.schedule_mod_resync();
         }
-        if slot.instrument_type == InstrumentType::Sampler {
-            let sample_rate = slot
-                .sample_id
-                .as_ref()
-                .map(|(_, _, rate)| (*rate).max(1) as f32)
+        if route.instrument_type == InstrumentType::Sampler {
+            let sample_rate = route
+                .sample_rate
                 .unwrap_or(self.graph.sample_rate.max(1) as f32);
             let (idx, fvalue) = match param_idx {
                 0 => (
@@ -1497,45 +1574,358 @@ impl App {
         slot_exists && wrote
     }
 
+    pub fn rename_rack_macro(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        name: String,
+    ) -> bool {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return false;
+        }
+        self.state
+            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                rack_macro.name = name.clone()
+            })
+    }
+
+    pub fn set_rack_macro_plock(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        step: usize,
+        value: f32,
+    ) -> bool {
+        if step >= crate::sequencer::MAX_STEPS {
+            return false;
+        }
+        self.state
+            .set_rack_macro_plocks_in_current_pattern(track, id, &[step], value)
+    }
+
+    pub fn set_rack_macro_plocks(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        steps: &[usize],
+        value: f32,
+    ) -> bool {
+        self.state
+            .set_rack_macro_plocks_in_current_pattern(track, id, steps, value)
+    }
+
+    pub fn clear_rack_macro_plock(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        step: usize,
+    ) -> bool {
+        if step >= crate::sequencer::MAX_STEPS {
+            return false;
+        }
+        self.state
+            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                rack_macro.plocks[step] = None;
+            })
+    }
+
+    pub fn map_rack_macro(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        mapping: crate::sequencer::RackMacroMapping,
+    ) -> Result<(), String> {
+        if !mapping.range_min.is_finite() || !mapping.range_max.is_finite() {
+            return Err("Rack macro mapping range must be finite".to_string());
+        }
+        let rack = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Clone::clone)
+            .ok_or_else(|| "Track does not contain a rack".to_string())?;
+        if rack
+            .macros
+            .iter()
+            .flat_map(|rack_macro| rack_macro.mappings.iter())
+            .any(|existing| existing.target == mapping.target)
+        {
+            return Err("Rack parameter is already owned by a rack macro".to_string());
+        }
+        if !self
+            .state
+            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                rack_macro.mappings.push(mapping.clone())
+            })
+        {
+            return Err("Rack macro does not exist".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn set_rack_macro_mapping_range(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        mapping_idx: usize,
+        range_min: f32,
+        range_max: f32,
+    ) -> bool {
+        if !range_min.is_finite() || !range_max.is_finite() {
+            return false;
+        }
+        let mapping_exists = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.macros.get(id.index()))
+            .is_some_and(|rack_macro| mapping_idx < rack_macro.mappings.len());
+        if !mapping_exists {
+            return false;
+        }
+        let updated = self
+            .state
+            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                let mapping = &mut rack_macro.mappings[mapping_idx];
+                mapping.range_min = range_min;
+                mapping.range_max = range_max;
+            });
+        if updated {
+            self.state.publish_scheduler_snapshot();
+        }
+        updated
+    }
+
+    pub fn set_rack_macro_mapping_curve(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        mapping_idx: usize,
+        curve: crate::sequencer::RackMacroCurve,
+    ) -> bool {
+        let mapping_exists = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.macros.get(id.index()))
+            .is_some_and(|rack_macro| mapping_idx < rack_macro.mappings.len());
+        if !mapping_exists {
+            return false;
+        }
+        let updated = self
+            .state
+            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                rack_macro.mappings[mapping_idx].curve = curve;
+            });
+        if updated {
+            self.state.publish_scheduler_snapshot();
+        }
+        updated
+    }
+
+    pub fn set_rack_macro_value(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        value: f32,
+    ) -> bool {
+        let value = value.clamp(0.0, 1.0);
+        if !self
+            .state
+            .update_rack_macro_in_current_pattern(track, id, |rack_macro| rack_macro.value = value)
+        {
+            return false;
+        }
+        self.state.set_live_rack_macro_default(track, id, value);
+        self.send_transient_rack_macro_value(track, id, value);
+        true
+    }
+
+    pub(super) fn send_transient_rack_macro_value(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        value: f32,
+    ) -> bool {
+        let value = value.clamp(0.0, 1.0);
+        let mappings = {
+            let racks = self.state.pattern.rack_tracks.lock().unwrap();
+            let Some(rack_macro) = racks
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.macros.get(id.index()))
+            else {
+                return false;
+            };
+            rack_macro
+                .mappings
+                .iter()
+                .filter_map(|mapping| {
+                    let target = match &mapping.target {
+                        crate::sequencer::RackMacroTarget::SlotParam { slot, param } => {
+                            match param.replace('_', "-").as_str() {
+                                "gain" => TransientRackMacroTarget::SlotGain { slot: *slot },
+                                "pan" => TransientRackMacroTarget::SlotPan { slot: *slot },
+                                "mute" => TransientRackMacroTarget::SlotMute { slot: *slot },
+                                _ => return None,
+                            }
+                        }
+                        crate::sequencer::RackMacroTarget::SlotInstrumentParam {
+                            slot,
+                            param_index,
+                            ..
+                        } => TransientRackMacroTarget::SlotInstrumentParam {
+                            slot: *slot,
+                            param_index: *param_index,
+                        },
+                        crate::sequencer::RackMacroTarget::SlotEffectParam {
+                            slot,
+                            effect_slot,
+                            param_index,
+                            ..
+                        } => TransientRackMacroTarget::SlotEffectParam {
+                            slot: *slot,
+                            effect_slot: *effect_slot,
+                            param_index: *param_index,
+                        },
+                    };
+                    Some(TransientRackMacroMapping {
+                        target,
+                        range_min: mapping.range_min,
+                        range_max: mapping.range_max,
+                        curve: mapping.curve,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        for mapping in mappings {
+            let normalized = match mapping.curve {
+                crate::sequencer::RackMacroCurve::Linear => value,
+                crate::sequencer::RackMacroCurve::Exp => value * value,
+                crate::sequencer::RackMacroCurve::Log => value.sqrt(),
+            };
+            let mapped = mapping.range_min + (mapping.range_max - mapping.range_min) * normalized;
+            match mapping.target {
+                TransientRackMacroTarget::SlotGain { slot } => self.push_rack_slot_panner_param(
+                    track,
+                    slot,
+                    crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                    mapped.clamp(0.0, 2.0),
+                ),
+                TransientRackMacroTarget::SlotPan { slot } => self.push_rack_slot_panner_param(
+                    track,
+                    slot,
+                    crate::effects::stereo_panner::STEREO_PANNER_PARAM_PAN,
+                    mapped.clamp(-1.0, 1.0),
+                ),
+                TransientRackMacroTarget::SlotMute { slot } => self.push_rack_slot_panner_param(
+                    track,
+                    slot,
+                    crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                    if mapped >= 0.5 { 1.0 } else { 0.0 },
+                ),
+                TransientRackMacroTarget::SlotInstrumentParam { slot, param_index } => {
+                    self.send_rack_slot_instrument_param(track, slot, param_index, mapped);
+                }
+                TransientRackMacroTarget::SlotEffectParam {
+                    slot,
+                    effect_slot,
+                    param_index,
+                } => {
+                    let _ = self.send_rack_slot_effect_param(
+                        track,
+                        slot,
+                        effect_slot,
+                        param_index,
+                        mapped,
+                    );
+                }
+            }
+        }
+        true
+    }
+
+    pub fn effective_rack_macro_value(
+        &self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        step: Option<usize>,
+    ) -> Option<f32> {
+        let racks = self.state.pattern.rack_tracks.lock().unwrap();
+        let rack_macro = racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.macros.get(id.index()))?;
+        if let Some(value) = step
+            .and_then(|step| rack_macro.plocks.get(step))
+            .and_then(|value| *value)
+        {
+            return Some(value.clamp(0.0, 1.0));
+        }
+        let key = crate::macro_engine::MacroParamKey::for_rack_macro(track, id.index() as u8);
+        Some(
+            self.macro_engine
+                .effective_value(&key, rack_macro.value)
+                .clamp(0.0, 1.0),
+        )
+    }
+
+    pub fn unmap_rack_macro(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        mapping_idx: usize,
+    ) -> bool {
+        let exists = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.macros.get(id.index()))
+            .is_some_and(|rack_macro| mapping_idx < rack_macro.mappings.len());
+        if !exists {
+            return false;
+        }
+        let updated = self
+            .state
+            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                rack_macro.mappings.remove(mapping_idx);
+            });
+        if updated {
+            self.state.publish_scheduler_snapshot();
+        }
+        updated
+    }
+
     fn sync_rack_slot_mod_active_default(
         &mut self,
         track: usize,
         slot_idx: usize,
         changed_param_idx: usize,
     ) {
-        let Some(slot) = self.rack_slot_snapshot(track, slot_idx) else {
+        let Some((active_param_idx, value)) = self.rack_slot_mod_active_value(
+            track,
+            slot_idx,
+            None,
+            changed_param_idx,
+        ) else {
             return;
         };
-        let Some(desc) = self.rack_slot_instrument_descriptor(&slot) else {
-            return;
-        };
-        let Some(active_param_idx) = desc
-            .instrument_modulation_targets
-            .iter()
-            .find(|target| target.depth_param_idx == changed_param_idx)
-            .and_then(|target| target.active_param_idx)
-        else {
-            return;
-        };
-        let active = desc
-            .instrument_modulation_targets
-            .iter()
-            .filter(|target| target.active_param_idx == Some(active_param_idx))
-            .any(|target| {
-                slot.instrument_slot
-                    .defaults
-                    .get(target.depth_param_idx)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        desc.params
-                            .get(target.depth_param_idx)
-                            .map(|param| param.default)
-                            .unwrap_or_default()
-                    })
-                    .abs()
-                    > f32::EPSILON
-            });
-        let value = if active { 1.0 } else { 0.0 };
         if self.set_rack_slot_instrument_default_only(track, slot_idx, active_param_idx, value) {
             self.send_rack_slot_instrument_param(track, slot_idx, active_param_idx, value);
         }
@@ -1548,47 +1938,14 @@ impl App {
         step: usize,
         changed_param_idx: usize,
     ) {
-        let Some(slot) = self.rack_slot_snapshot(track, slot_idx) else {
+        let Some((active_param_idx, value)) = self.rack_slot_mod_active_value(
+            track,
+            slot_idx,
+            Some(step),
+            changed_param_idx,
+        ) else {
             return;
         };
-        let Some(desc) = self.rack_slot_instrument_descriptor(&slot) else {
-            return;
-        };
-        let Some(active_param_idx) = desc
-            .instrument_modulation_targets
-            .iter()
-            .find(|target| target.depth_param_idx == changed_param_idx)
-            .and_then(|target| target.active_param_idx)
-        else {
-            return;
-        };
-        let active = desc
-            .instrument_modulation_targets
-            .iter()
-            .filter(|target| target.active_param_idx == Some(active_param_idx))
-            .any(|target| {
-                slot.instrument_slot
-                    .plocks
-                    .get(step)
-                    .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
-                    .copied()
-                    .flatten()
-                    .unwrap_or_else(|| {
-                        slot.instrument_slot
-                            .defaults
-                            .get(target.depth_param_idx)
-                            .copied()
-                            .unwrap_or_else(|| {
-                                desc.params
-                                    .get(target.depth_param_idx)
-                                    .map(|param| param.default)
-                                    .unwrap_or_default()
-                            })
-                    })
-                    .abs()
-                    > f32::EPSILON
-            });
-        let value = if active { 1.0 } else { 0.0 };
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
             if slot
                 .instrument_slot
@@ -1597,6 +1954,71 @@ impl App {
                 slot.track_sound_state.dirty = true;
             }
         });
+    }
+
+    /// Computes the derived modulation-active parameter while borrowing the
+    /// live rack slot in place. Rack slots contain large p-lock grids and
+    /// effect descriptors; cloning one for every pointer movement made even a
+    /// parameter unrelated to modulation pay for copying the entire slot.
+    fn rack_slot_mod_active_value(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        step: Option<usize>,
+        changed_param_idx: usize,
+    ) -> Option<(usize, f32)> {
+        let racks = self.state.pattern.rack_tracks.lock().unwrap();
+        let slot = racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(slot_idx))?;
+
+        let sampler_descriptor;
+        let descriptor = match slot.instrument_type {
+            InstrumentType::Sampler => {
+                sampler_descriptor = EffectDescriptor::builtin_sampler();
+                &sampler_descriptor
+            }
+            InstrumentType::Custom | InstrumentType::Modulator => {
+                self.rack_slot_cached_instrument_descriptor(slot)?
+            }
+            InstrumentType::Rack => return None,
+        };
+        let active_param_idx = descriptor
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.depth_param_idx == changed_param_idx)
+            .and_then(|target| target.active_param_idx)?;
+        let active = descriptor
+            .instrument_modulation_targets
+            .iter()
+            .filter(|target| target.active_param_idx == Some(active_param_idx))
+            .any(|target| {
+                step.and_then(|step| {
+                    slot.instrument_slot
+                        .plocks
+                        .get(step)
+                        .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
+                        .copied()
+                        .flatten()
+                })
+                .or_else(|| {
+                    slot.instrument_slot
+                        .defaults
+                        .get(target.depth_param_idx)
+                        .copied()
+                })
+                .unwrap_or_else(|| {
+                    descriptor
+                        .params
+                        .get(target.depth_param_idx)
+                        .map(|param| param.default)
+                        .unwrap_or_default()
+                })
+                .abs()
+                    > f32::EPSILON
+            });
+        Some((active_param_idx, if active { 1.0 } else { 0.0 }))
     }
 
     pub(super) fn push_instrument_defaults_for_track(&self, track: usize) {

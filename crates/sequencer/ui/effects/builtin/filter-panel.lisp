@@ -66,7 +66,7 @@
                   :plock-color-b (param-plock-color-b)
                   :width 4.8 :height 1.05 :font-size 9.5)
                 (box :width 0 :height 0))
-              (if (and lfo-sync-p (> (get lfo-sync-p :value) 0.5) lfo-div-p)
+              (if (and lfo-sync-p (fx-param-on-for? fx lfo-sync-p) lfo-div-p)
                 (builtin-fx-filter-mini-option fx lfo-div-p)
                 (if lfo-rate-p (builtin-fx-filter-mini-number fx "rate" lfo-rate-p) (box :width 0 :height 0)))
               (if lfo-wave-p (builtin-fx-filter-mini-option fx lfo-wave-p) (box :width 0 :height 0))

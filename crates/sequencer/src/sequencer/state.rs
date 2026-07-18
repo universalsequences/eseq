@@ -8,22 +8,22 @@ use crate::effects::{
 };
 use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
 use crate::neural::{
-    remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
-    ProjectNeuralNetwork,
+    NeuralVisualizationSnapshot, ProjectNeuralNetwork,
+    remap_neural_network_routes_after_track_delete,
 };
 use crate::plock_variants::{
+    PlockVariantAssignment, PlockVariantDomain, PlockVariantKey, PlockVariantRegistry,
     live_track_key_lock_variant_key, live_track_key_lock_variant_keys, live_track_variant_key,
-    live_track_variant_keys, PlockVariantAssignment, PlockVariantDomain, PlockVariantKey,
-    PlockVariantRegistry,
+    live_track_variant_keys,
 };
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection, RackRouting,
-    StepData, StepParam, SwingPLockData, SwingResolution, SwingResolutionPLockData, Timebase,
-    TimebasePLockData, TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
-    DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
-    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    ChordData, ChordSnapshot, CustomInstrumentRunMode, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
+    InstrumentType, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_STEPS,
+    MAX_TRACKS, ModConnection, NUM_PARAMS, RackRouting, StepData, StepParam, SwingPLockData,
+    SwingResolution, SwingResolutionPLockData, TRACK_PATTERN_WORDS, Timebase, TimebasePLockData,
+    TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
 };
 use super::snapshot::SequencerSnapshot;
 use super::{BusId, TrackOutput};
@@ -34,6 +34,126 @@ pub struct StepSlotPlocks {
 }
 
 pub const RACK_SLOT_PARAM_COUNT: usize = 6;
+pub const RACK_MACRO_COUNT: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RackMacroId(u8);
+
+impl RackMacroId {
+    pub const ALL: [Self; RACK_MACRO_COUNT] = [
+        Self(0),
+        Self(1),
+        Self(2),
+        Self(3),
+        Self(4),
+        Self(5),
+        Self(6),
+        Self(7),
+    ];
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        (index < RACK_MACRO_COUNT).then_some(Self(index as u8))
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    pub fn stable_key(self) -> String {
+        format!("macro_{}", self.index() + 1)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RackMacroCurve {
+    #[default]
+    Linear,
+    Exp,
+    Log,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RackMacroTarget {
+    SlotParam {
+        slot: usize,
+        param: String,
+    },
+    SlotInstrumentParam {
+        slot: usize,
+        param: String,
+        param_index: usize,
+    },
+    SlotEffectParam {
+        slot: usize,
+        effect_slot: usize,
+        param: String,
+        param_index: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RackMacroMapping {
+    pub target: RackMacroTarget,
+    pub range_min: f32,
+    pub range_max: f32,
+    pub curve: RackMacroCurve,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RackMacro {
+    pub id: RackMacroId,
+    pub name: String,
+    pub value: f32,
+    pub mappings: Vec<RackMacroMapping>,
+    pub plocks: Vec<Option<f32>>,
+}
+
+impl RackMacro {
+    fn default_for(id: RackMacroId) -> Self {
+        Self {
+            id,
+            name: format!("Macro {}", id.index() + 1),
+            value: 0.0,
+            mappings: Vec::new(),
+            plocks: vec![None; MAX_STEPS],
+        }
+    }
+
+    pub fn value_at(&self, step: usize) -> f32 {
+        self.plocks
+            .get(step)
+            .and_then(|value| *value)
+            .unwrap_or(self.value)
+            .clamp(0.0, 1.0)
+    }
+}
+
+pub fn default_rack_macros() -> Vec<RackMacro> {
+    RackMacroId::ALL
+        .into_iter()
+        .map(RackMacro::default_for)
+        .collect()
+}
+
+fn remove_rack_macro_slot_targets(macros: &mut [RackMacro], removed_slot: usize) {
+    for rack_macro in macros {
+        rack_macro.mappings.retain(|mapping| match mapping.target {
+            RackMacroTarget::SlotParam { slot, .. }
+            | RackMacroTarget::SlotInstrumentParam { slot, .. }
+            | RackMacroTarget::SlotEffectParam { slot, .. } => slot != removed_slot,
+        });
+        for mapping in &mut rack_macro.mappings {
+            let slot = match &mut mapping.target {
+                RackMacroTarget::SlotParam { slot, .. }
+                | RackMacroTarget::SlotInstrumentParam { slot, .. }
+                | RackMacroTarget::SlotEffectParam { slot, .. } => slot,
+            };
+            if *slot > removed_slot {
+                *slot -= 1;
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RackSlotParam {
@@ -344,6 +464,7 @@ pub struct StepSnapshot {
     pub swing_resolution: Option<SwingResolution>,
     pub effect_plocks: Vec<StepSlotPlocks>,
     pub instrument_plocks: StepSlotPlocks,
+    pub rack_macro_plocks: Vec<Option<f32>>,
     pub rack_slot_param_plocks: Vec<StepSlotPlocks>,
     pub rack_slot_instrument_plocks: Vec<StepSlotPlocks>,
 }
@@ -359,6 +480,7 @@ impl StepSnapshot {
         for value in &mut snapshot.instrument_plocks.params {
             *value = None;
         }
+        snapshot.rack_macro_plocks.fill(None);
         for plocks in &mut snapshot.rack_slot_param_plocks {
             for value in &mut plocks.params {
                 *value = None;
@@ -406,6 +528,130 @@ pub struct PatternSnapshot {
 pub struct RackTrackSnapshot {
     pub routing: RackRouting,
     pub slots: Vec<RackSlotSnapshot>,
+    pub macros: Vec<RackMacro>,
+    pub(crate) runtime_macro_values: Option<Arc<RackMacroRuntimeValues>>,
+    pub(crate) runtime_macro_track: usize,
+}
+
+impl RackTrackSnapshot {
+    pub fn new(routing: RackRouting, slots: Vec<RackSlotSnapshot>, macros: Vec<RackMacro>) -> Self {
+        Self {
+            routing,
+            slots,
+            macros,
+            runtime_macro_values: None,
+            runtime_macro_track: 0,
+        }
+    }
+
+    pub fn normalize_macros(&mut self) {
+        let mut normalized = default_rack_macros();
+        for rack_macro in std::mem::take(&mut self.macros) {
+            if let Some(target) = normalized.get_mut(rack_macro.id.index()) {
+                *target = rack_macro;
+                target.value = target.value.clamp(0.0, 1.0);
+                target.plocks.resize(MAX_STEPS, None);
+                target.plocks.truncate(MAX_STEPS);
+            }
+        }
+        self.macros = normalized;
+    }
+
+    pub(crate) fn attach_runtime_macro_values(
+        &mut self,
+        values: Arc<RackMacroRuntimeValues>,
+        track: usize,
+    ) {
+        self.runtime_macro_values = Some(values);
+        self.runtime_macro_track = track;
+    }
+
+    pub(crate) fn runtime_macro_value_at(&self, id: RackMacroId, step: usize) -> Option<f32> {
+        self.runtime_macro_values
+            .as_ref()
+            .and_then(|values| values.value_at(self.runtime_macro_track, id, step))
+    }
+}
+
+/// Pointer-rate rack macro values shared by immutable scheduler snapshots.
+///
+/// Rack topology and mappings remain snapshot-owned, but default values and
+/// per-step locks are fixed-size scalar control data. Keeping those scalars in
+/// atomics lets the command thread publish a knob drag immediately without
+/// deep-cloning every rack slot, effect descriptor, and p-lock grid.
+#[derive(Debug)]
+pub(crate) struct RackMacroRuntimeValues {
+    defaults: Vec<[AtomicU32; RACK_MACRO_COUNT]>,
+    plocks: Vec<Box<[AtomicU64]>>,
+}
+
+impl RackMacroRuntimeValues {
+    fn new() -> Self {
+        Self {
+            defaults: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())))
+                .collect(),
+            plocks: (0..MAX_TRACKS)
+                .map(|_| {
+                    (0..RACK_MACRO_COUNT * MAX_STEPS)
+                        .map(|_| AtomicU64::new(0))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                })
+                .collect(),
+        }
+    }
+
+    fn encode_plock(value: Option<f32>) -> u64 {
+        value.map_or(0, |value| (1_u64 << 32) | u64::from(value.to_bits()))
+    }
+
+    fn decode_plock(value: u64) -> Option<f32> {
+        (value >> 32 != 0).then(|| f32::from_bits(value as u32))
+    }
+
+    fn set_default(&self, track: usize, id: RackMacroId, value: f32) {
+        if let Some(defaults) = self.defaults.get(track) {
+            defaults[id.index()].store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    fn set_plock(&self, track: usize, id: RackMacroId, step: usize, value: Option<f32>) {
+        let Some(plocks) = self.plocks.get(track) else {
+            return;
+        };
+        let Some(cell) = plocks.get(id.index() * MAX_STEPS + step) else {
+            return;
+        };
+        cell.store(Self::encode_plock(value), Ordering::Relaxed);
+    }
+
+    fn value_at(&self, track: usize, id: RackMacroId, step: usize) -> Option<f32> {
+        let defaults = self.defaults.get(track)?;
+        let plocks = self.plocks.get(track)?;
+        let plock = plocks
+            .get(id.index() * MAX_STEPS + step)
+            .and_then(|cell| Self::decode_plock(cell.load(Ordering::Relaxed)));
+        Some(plock.unwrap_or_else(|| f32::from_bits(defaults[id.index()].load(Ordering::Relaxed))))
+    }
+
+    fn sync_track(&self, track: usize, rack: Option<&RackTrackSnapshot>) {
+        for index in 0..RACK_MACRO_COUNT {
+            let Some(id) = RackMacroId::from_index(index) else {
+                continue;
+            };
+            let rack_macro = rack.and_then(|rack| rack.macros.get(index));
+            self.set_default(track, id, rack_macro.map_or(0.0, |item| item.value));
+            for step in 0..MAX_STEPS {
+                self.set_plock(
+                    track,
+                    id,
+                    step,
+                    rack_macro.and_then(|item| item.plocks.get(step).copied().flatten()),
+                );
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -422,11 +668,42 @@ pub struct RackSlotSnapshot {
     pub max_polyphony: usize,
     pub param_plocks: RackSlotParamPlocks,
     pub instrument_slot: EffectSlotSnapshot,
+    pub effect_slots: Vec<EffectSlotSnapshot>,
+    pub effect_descriptors: Vec<EffectDescriptor>,
+    pub custom_effect_names: Vec<Option<String>>,
     pub track_sound_state: TrackSoundState,
     pub sample_id: Option<(i32, String, u32)>,
 }
 
 impl RackSlotSnapshot {
+    pub fn empty_effect_slots() -> Vec<EffectSlotSnapshot> {
+        (0..crate::lisp_host::MAX_CUSTOM_FX)
+            .map(|_| EffectSlotSnapshot::new_empty())
+            .collect()
+    }
+
+    pub fn empty_effect_names() -> Vec<Option<String>> {
+        vec![None; crate::lisp_host::MAX_CUSTOM_FX]
+    }
+
+    pub fn normalize_effect_chain(&mut self) {
+        self.effect_slots.resize_with(
+            crate::lisp_host::MAX_CUSTOM_FX,
+            EffectSlotSnapshot::new_empty,
+        );
+        self.effect_slots.truncate(crate::lisp_host::MAX_CUSTOM_FX);
+        self.effect_descriptors.resize_with(
+            crate::lisp_host::MAX_CUSTOM_FX,
+            EffectDescriptor::empty_custom_slot,
+        );
+        self.effect_descriptors
+            .truncate(crate::lisp_host::MAX_CUSTOM_FX);
+        self.custom_effect_names
+            .resize(crate::lisp_host::MAX_CUSTOM_FX, None);
+        self.custom_effect_names
+            .truncate(crate::lisp_host::MAX_CUSTOM_FX);
+    }
+
     pub fn param_default(&self, param: RackSlotParam) -> f32 {
         match param {
             RackSlotParam::BaseNote => self.instrument_base_note_offset,
@@ -482,6 +759,9 @@ fn replace_rack_slot_source_preserving_controls(
     let solo = slot.solo;
     let max_polyphony = slot.max_polyphony;
     let param_plocks = slot.param_plocks.clone();
+    let effect_slots = slot.effect_slots.clone();
+    let effect_descriptors = slot.effect_descriptors.clone();
+    let custom_effect_names = slot.custom_effect_names.clone();
 
     *slot = replacement.clone();
     slot.pad_note = pad_note;
@@ -493,6 +773,9 @@ fn replace_rack_slot_source_preserving_controls(
     slot.solo = solo;
     slot.max_polyphony = max_polyphony;
     slot.param_plocks = param_plocks;
+    slot.effect_slots = effect_slots;
+    slot.effect_descriptors = effect_descriptors;
+    slot.custom_effect_names = custom_effect_names;
 }
 
 #[derive(Clone)]
@@ -2822,6 +3105,13 @@ pub struct RuntimeBindingState {
     pub engine_route_lids: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_route_lids_r: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_ext_route_lids: Vec<[[[AtomicU64; EXT_MOD_INPUT_COUNT]; MAX_TRACKS]; MAX_VOICES]>,
+    /// Per-rack-slot routes for shared custom engines. Rack slots use the same
+    /// stable pool identity as sampler rack slots, so multiple slots on one
+    /// track can consume one engine without manufacturing duplicate engines.
+    pub rack_engine_route_lids: Vec<[AtomicU64; MAX_VOICES]>,
+    pub rack_engine_route_lids_r: Vec<[AtomicU64; MAX_VOICES]>,
+    pub rack_engine_route_engine_ids: Vec<AtomicU32>,
+    pub rack_engine_ext_route_lids: Vec<[[AtomicU64; EXT_MOD_INPUT_COUNT]; MAX_VOICES]>,
     pub sampler_analysis_buffer_ids: Vec<AtomicU32>,
     pub sampler_analysis_bpm: Vec<AtomicU32>,
     pub sampler_onset_ptr_lo: Vec<AtomicU32>,
@@ -2860,6 +3150,7 @@ pub struct SequencerState {
     /// Command-thread macro values waiting to be folded into the next
     /// immutable scheduler snapshot. The scheduler never reads this lock.
     live_macro_overrides: Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
+    rack_macro_runtime_values: Arc<RackMacroRuntimeValues>,
     neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     track_output_events: Mutex<Vec<TrackOutputEvent>>,
@@ -3133,6 +3424,18 @@ impl SequencerState {
                         })
                     })
                     .collect(),
+                rack_engine_route_lids: (0..MAX_SAMPLER_POOLS)
+                    .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                    .collect(),
+                rack_engine_route_lids_r: (0..MAX_SAMPLER_POOLS)
+                    .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                    .collect(),
+                rack_engine_route_engine_ids: (0..MAX_SAMPLER_POOLS)
+                    .map(|_| AtomicU32::new(u32::MAX))
+                    .collect(),
+                rack_engine_ext_route_lids: (0..MAX_SAMPLER_POOLS)
+                    .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
+                    .collect(),
                 sampler_analysis_buffer_ids: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(u32::MAX))
                     .collect(),
@@ -3146,6 +3449,7 @@ impl SequencerState {
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
             live_macro_overrides: Mutex::new(HashMap::new()),
+            rack_macro_runtime_values: Arc::new(RackMacroRuntimeValues::new()),
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             graph_visualizations: Mutex::new(Vec::new()),
             track_output_events: Mutex::new(Vec::new()),
@@ -3822,6 +4126,177 @@ impl SequencerState {
         }
     }
 
+    pub fn replace_instrument_container_with_rack(
+        &self,
+        track: usize,
+        rack_track: RackTrackSnapshot,
+    ) -> bool {
+        if self.validate_instrument_source_reset_target(track).is_err() {
+            return false;
+        }
+        self.set_rack_track_for_all_pattern_snapshots(track, rack_track);
+        self.pattern.instrument_slots[track].clear();
+        self.pattern.instrument_run_modes[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.runtime.instrument_run_mode_flags[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.runtime.instrument_type_flags[track]
+            .store(InstrumentType::Rack.runtime_flag(), Ordering::Release);
+        self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Release);
+        true
+    }
+
+    /// Fold a flat track's instrument and insert chain into a one-slot rack in
+    /// every stored pattern. Per-pattern instrument/effect values are retained;
+    /// only their ownership moves from the track container to the rack slot.
+    pub fn validate_group_flat_track_to_rack(&self, track: usize) -> Result<(), String> {
+        self.validate_instrument_source_reset_target(track)?;
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let effective_pattern_id = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no stored pattern pool", track + 1))?;
+        if !pool.patterns.contains_key(&effective_pattern_id) {
+            return Err(format!(
+                "Track {} effective pattern is missing from its pool",
+                track + 1
+            ));
+        }
+        for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
+            let Some(pattern_id) = scene.cells.get(track).copied().flatten() else {
+                continue;
+            };
+            if !pool.contains(pattern_id) {
+                return Err(format!(
+                    "Track {} scene {} references a missing pattern",
+                    track + 1,
+                    scene_idx + 1
+                ));
+            }
+        }
+        if let Some(pattern_id) = scenes.track_overrides.get(track).copied().flatten() {
+            if !pool.contains(pattern_id) {
+                return Err(format!(
+                    "Track {} override references a missing pattern",
+                    track + 1
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn group_flat_track_to_rack(
+        &self,
+        track: usize,
+        instrument_type: InstrumentType,
+        instrument_run_mode: CustomInstrumentRunMode,
+        engine_id: Option<usize>,
+        effect_descriptors: &[EffectDescriptor],
+        custom_effect_names: &[Option<String>],
+    ) -> Option<RackTrackSnapshot> {
+        self.validate_group_flat_track_to_rack(track).ok()?;
+        let live_instrument =
+            EffectSlotSnapshot::capture(self.pattern.instrument_slots.get(track)?);
+        let live_effects = self
+            .pattern
+            .effect_chains
+            .get(track)?
+            .iter()
+            .map(EffectSlotSnapshot::capture)
+            .collect::<Vec<_>>();
+
+        let make_slot = |data: &TrackPatternData| {
+            let mut track_sound_state = data.track_sound_state.clone();
+            track_sound_state.engine_id = engine_id;
+            let mut slot = RackSlotSnapshot {
+                instrument_type,
+                instrument_run_mode,
+                instrument_base_note_offset: data.instrument_base_note_offset,
+                pad_note: None,
+                choke_group: None,
+                gain: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                max_polyphony: crate::voice::MAX_VOICES,
+                param_plocks: RackSlotParamPlocks::new(),
+                instrument_slot: data.instrument_slot.clone(),
+                effect_slots: data.effect_slots.clone(),
+                effect_descriptors: effect_descriptors.to_vec(),
+                custom_effect_names: custom_effect_names.to_vec(),
+                track_sound_state,
+                sample_id: (instrument_type == InstrumentType::Sampler)
+                    .then(|| data.sample_id.clone()),
+            };
+            slot.normalize_effect_chain();
+            slot
+        };
+
+        let live_rack = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let effective_id = scenes.effective_pattern_id(track)?;
+            let pool = scenes.track_pools.get_mut(track)?;
+            let mut effective_rack = None;
+            // Pattern ids are stable identities shared by scene cells and the
+            // optional launched-pattern override. Migrating each pool entry in
+            // place preserves those mappings without cloning or re-keying any
+            // pattern.
+            for (pattern_id, data) in pool.patterns.iter_mut() {
+                let slot = make_slot(data);
+                if *pattern_id == effective_id {
+                    effective_rack = Some(RackTrackSnapshot {
+                        routing: RackRouting::Broadcast,
+                        slots: vec![slot.clone()],
+                        macros: default_rack_macros(),
+                        runtime_macro_values: None,
+                        runtime_macro_track: 0,
+                    });
+                }
+                prepare_track_pattern_data_for_rack(data);
+                data.effect_slots = (0..crate::lisp_host::MAX_CUSTOM_FX)
+                    .map(|_| EffectSlotSnapshot::new_empty())
+                    .collect();
+                data.rack_track = Some(RackTrackSnapshot {
+                    routing: RackRouting::Broadcast,
+                    slots: vec![slot],
+                    macros: default_rack_macros(),
+                    runtime_macro_values: None,
+                    runtime_macro_track: 0,
+                });
+            }
+            effective_rack?
+        };
+
+        let mut live_rack = live_rack;
+        live_rack.slots[0].instrument_slot = live_instrument;
+        live_rack.slots[0].effect_slots = live_effects;
+        live_rack.slots[0].normalize_effect_chain();
+        self.pattern.rack_tracks.lock().unwrap()[track] = Some(live_rack.clone());
+        self.pattern.instrument_slots[track].clear();
+        for slot in &self.pattern.effect_chains[track] {
+            slot.clear();
+        }
+        self.pattern.instrument_run_modes[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.runtime.instrument_run_mode_flags[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.runtime.instrument_type_flags[track]
+            .store(InstrumentType::Rack.runtime_flag(), Ordering::Release);
+        self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Release);
+        Some(live_rack)
+    }
+
     pub fn append_rack_slot_to_current_pattern(
         &self,
         track: usize,
@@ -3860,6 +4335,9 @@ impl SequencerState {
                     *live_rack_track = Some(RackTrackSnapshot {
                         routing,
                         slots: vec![slot.clone()],
+                        macros: default_rack_macros(),
+                        runtime_macro_values: None,
+                        runtime_macro_track: 0,
                     });
                 }
             }
@@ -3883,6 +4361,9 @@ impl SequencerState {
                 data.rack_track = Some(RackTrackSnapshot {
                     routing,
                     slots: vec![slot],
+                    macros: default_rack_macros(),
+                    runtime_macro_values: None,
+                    runtime_macro_track: 0,
                 });
             }
         }
@@ -3902,6 +4383,9 @@ impl SequencerState {
                     *live_rack_track = Some(RackTrackSnapshot {
                         routing,
                         slots: vec![slot.clone()],
+                        macros: default_rack_macros(),
+                        runtime_macro_values: None,
+                        runtime_macro_track: 0,
                     });
                 }
             }
@@ -3918,6 +4402,9 @@ impl SequencerState {
                     data.rack_track = Some(RackTrackSnapshot {
                         routing,
                         slots: vec![slot.clone()],
+                        macros: default_rack_macros(),
+                        runtime_macro_values: None,
+                        runtime_macro_track: 0,
                     });
                 }
             }
@@ -3934,6 +4421,7 @@ impl SequencerState {
         {
             if slot_idx < live_rack_track.slots.len() {
                 live_rack_track.slots.remove(slot_idx);
+                remove_rack_macro_slot_targets(&mut live_rack_track.macros, slot_idx);
                 removed = true;
             }
         }
@@ -3947,6 +4435,7 @@ impl SequencerState {
                 if let Some(rack_track) = data.rack_track.as_mut() {
                     if slot_idx < rack_track.slots.len() {
                         rack_track.slots.remove(slot_idx);
+                        remove_rack_macro_slot_targets(&mut rack_track.macros, slot_idx);
                     }
                 }
             }
@@ -3983,6 +4472,7 @@ impl SequencerState {
         if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
         {
             live_rack_track.slots.remove(slot_idx);
+            remove_rack_macro_slot_targets(&mut live_rack_track.macros, slot_idx);
         }
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
@@ -3999,6 +4489,7 @@ impl SequencerState {
             .as_mut()
             .expect("validated current rack track before rack slot removal");
         rack_track.slots.remove(slot_idx);
+        remove_rack_macro_slot_targets(&mut rack_track.macros, slot_idx);
         true
     }
 
@@ -4148,6 +4639,258 @@ impl SequencerState {
             return false;
         };
         update(slot);
+        true
+    }
+
+    pub fn update_rack_macro_in_current_pattern<F>(
+        &self,
+        track: usize,
+        id: RackMacroId,
+        update: F,
+    ) -> bool
+    where
+        F: Fn(&mut RackMacro),
+    {
+        let index = id.index();
+        {
+            let racks = self.pattern.rack_tracks.lock().unwrap();
+            if racks
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.macros.get(index))
+                .is_none()
+            {
+                return false;
+            }
+        }
+        {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(pattern_id) = scenes.effective_pattern_id(track) else {
+                return false;
+            };
+            if scenes
+                .track_pools
+                .get(track)
+                .and_then(|pool| pool.get(pattern_id))
+                .and_then(|data| data.rack_track.as_ref())
+                .and_then(|rack| rack.macros.get(index))
+                .is_none()
+            {
+                return false;
+            }
+        }
+        if let Some(rack_macro) = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get_mut(track)
+            .and_then(Option::as_mut)
+            .and_then(|rack| rack.macros.get_mut(index))
+        {
+            update(rack_macro);
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pattern_id = scenes
+            .effective_pattern_id(track)
+            .expect("validated rack pattern");
+        let rack_macro = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .and_then(|data| data.rack_track.as_mut())
+            .and_then(|rack| rack.macros.get_mut(index))
+            .expect("validated rack macro");
+        update(rack_macro);
+        true
+    }
+
+    /// Set one rack macro's parameter locks in both live and persisted views as
+    /// a single transaction. Macro-knob drags commonly target many selected
+    /// steps, so validating and locking the two rack snapshots once avoids
+    /// repeating the full state transaction for every selected step.
+    pub fn set_rack_macro_plocks_in_current_pattern(
+        &self,
+        track: usize,
+        id: RackMacroId,
+        steps: &[usize],
+        value: f32,
+    ) -> bool {
+        let valid_steps = steps
+            .iter()
+            .copied()
+            .filter(|step| *step < MAX_STEPS)
+            .collect::<Vec<_>>();
+        if valid_steps.is_empty() {
+            return false;
+        }
+        let value = value.clamp(0.0, 1.0);
+        let updated = self.update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+            for &step in &valid_steps {
+                rack_macro.plocks[step] = Some(value);
+            }
+        });
+        if updated {
+            for step in valid_steps {
+                self.rack_macro_runtime_values
+                    .set_plock(track, id, step, Some(value));
+            }
+        }
+        updated
+    }
+
+    pub fn set_live_rack_macro_default(&self, track: usize, id: RackMacroId, value: f32) {
+        self.rack_macro_runtime_values.set_default(track, id, value);
+    }
+
+    pub(crate) fn rack_macro_runtime_values(&self) -> Arc<RackMacroRuntimeValues> {
+        Arc::clone(&self.rack_macro_runtime_values)
+    }
+
+    pub(crate) fn sync_rack_macro_runtime_track(
+        &self,
+        track: usize,
+        rack: Option<&RackTrackSnapshot>,
+    ) {
+        self.rack_macro_runtime_values.sync_track(track, rack);
+    }
+
+    pub fn update_rack_macros_for_all_pattern_snapshots<F>(&self, track: usize, update: F)
+    where
+        F: Fn(&mut Vec<RackMacro>),
+    {
+        if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            update(&mut rack.macros);
+        }
+        if let Some(pool) = self
+            .pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .track_pools
+            .get_mut(track)
+        {
+            for data in pool.patterns.values_mut() {
+                if let Some(rack) = data.rack_track.as_mut() {
+                    update(&mut rack.macros);
+                }
+            }
+        }
+    }
+
+    /// Apply an edit to both the scheduler's live rack snapshot and the
+    /// effective pattern that owns it. Validation happens before either copy
+    /// is changed so a malformed pattern cannot leave the two views split.
+    pub fn update_rack_slot_in_current_pattern<F>(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        update: F,
+    ) -> bool
+    where
+        F: Fn(&mut RackSlotSnapshot),
+    {
+        {
+            let rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+            let Some(Some(rack)) = rack_tracks.get(track) else {
+                return false;
+            };
+            if rack.slots.get(slot_idx).is_none() {
+                return false;
+            }
+        }
+        {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(pattern_id) = scenes.effective_pattern_id(track) else {
+                return false;
+            };
+            let Some(slot) = scenes
+                .track_pools
+                .get(track)
+                .and_then(|pool| pool.get(pattern_id))
+                .and_then(|data| data.rack_track.as_ref())
+                .and_then(|rack| rack.slots.get(slot_idx))
+            else {
+                return false;
+            };
+            let _ = slot;
+        }
+
+        if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            update(&mut rack.slots[slot_idx]);
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pattern_id = scenes
+            .effective_pattern_id(track)
+            .expect("validated effective rack pattern before mutation");
+        let slot = scenes.track_pools[track]
+            .get_mut(pattern_id)
+            .and_then(|data| data.rack_track.as_mut())
+            .and_then(|rack| rack.slots.get_mut(slot_idx))
+            .expect("validated current rack slot before mutation");
+        update(slot);
+        true
+    }
+
+    /// Apply a structural rack-slot edit to the live scheduler snapshot and
+    /// every stored pattern for the track. Rack instruments and their effect
+    /// nodes are graph-owned device identity; only parameter values and locks
+    /// vary per pattern. Adding, removing, or moving a device therefore must
+    /// not leave another scene pointing at an empty or stale graph node.
+    pub fn update_rack_slot_in_all_pattern_snapshots<F>(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        update: F,
+    ) -> bool
+    where
+        F: Fn(&mut RackSlotSnapshot),
+    {
+        {
+            let rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+            let Some(Some(live_rack)) = rack_tracks.get(track) else {
+                return false;
+            };
+            if live_rack.slots.get(slot_idx).is_none() {
+                return false;
+            }
+        }
+        {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(pool) = scenes.track_pools.get(track) else {
+                return false;
+            };
+            if pool.patterns.values().any(|data| {
+                data.rack_track
+                    .as_ref()
+                    .and_then(|rack| rack.slots.get(slot_idx))
+                    .is_none()
+            }) {
+                return false;
+            }
+        }
+
+        let mut rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+        let live_slot = rack_tracks[track]
+            .as_mut()
+            .and_then(|rack| rack.slots.get_mut(slot_idx))
+            .expect("validated live rack slot before structural mutation");
+        update(live_slot);
+        drop(rack_tracks);
+
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .expect("validated rack pattern pool before structural mutation");
+        for data in pool.patterns.values_mut() {
+            let slot = data
+                .rack_track
+                .as_mut()
+                .and_then(|rack| rack.slots.get_mut(slot_idx))
+                .expect("validated stored rack slot before structural mutation");
+            update(slot);
+        }
         true
     }
 
@@ -6826,6 +7569,7 @@ impl SequencerState {
                     .plocks
                     .clear_param(step, param_idx);
             }
+            self.clear_rack_macro_plocks_for_step(track, step);
             if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
                 for slot in &mut rack.slots {
                     slot.param_plocks.clear_step(step);
@@ -6869,7 +7613,7 @@ impl SequencerState {
         for param_idx in 0..instrument_param_count {
             instrument_plocks.push(instrument_slot.plocks.get(step, param_idx));
         }
-        let (rack_slot_param_plocks, rack_slot_instrument_plocks) = self
+        let (rack_macro_plocks, rack_slot_param_plocks, rack_slot_instrument_plocks) = self
             .pattern
             .rack_tracks
             .lock()
@@ -6877,6 +7621,11 @@ impl SequencerState {
             .get(track)
             .and_then(|rack| rack.as_ref())
             .map(|rack| {
+                let macro_plocks = rack
+                    .macros
+                    .iter()
+                    .map(|rack_macro| rack_macro.plocks.get(step).copied().flatten())
+                    .collect();
                 let slot_params = rack
                     .slots
                     .iter()
@@ -6906,7 +7655,7 @@ impl SequencerState {
                         StepSlotPlocks { params }
                     })
                     .collect();
-                (slot_params, instrument_params)
+                (macro_plocks, slot_params, instrument_params)
             })
             .unwrap_or_default();
 
@@ -6924,6 +7673,7 @@ impl SequencerState {
             instrument_plocks: StepSlotPlocks {
                 params: instrument_plocks,
             },
+            rack_macro_plocks,
             rack_slot_param_plocks,
             rack_slot_instrument_plocks,
         }
@@ -6951,6 +7701,7 @@ impl SequencerState {
                 .plocks
                 .clear_param(step, param_idx);
         }
+        self.clear_rack_macro_plocks_for_step(track, step);
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             for slot in &mut rack.slots {
                 slot.param_plocks.clear_step(step);
@@ -7123,6 +7874,64 @@ impl SequencerState {
         })
     }
 
+    fn clear_rack_macro_plocks_for_step(&self, track: usize, step: usize) -> bool {
+        let ids = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .map(|rack| {
+                rack.macros
+                    .iter()
+                    .filter(|rack_macro| rack_macro.plocks.get(step).is_some_and(Option::is_some))
+                    .map(|rack_macro| rack_macro.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut changed = false;
+        for id in ids {
+            changed |= self.update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                rack_macro.plocks[step] = None;
+            });
+        }
+        changed
+    }
+
+    fn copy_rack_macro_plocks_between_steps(
+        &self,
+        track: usize,
+        source_step: usize,
+        target_step: usize,
+    ) -> bool {
+        let values = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .map(|rack| {
+                rack.macros
+                    .iter()
+                    .filter_map(|rack_macro| {
+                        let source = rack_macro.plocks.get(source_step).copied().flatten();
+                        let target = rack_macro.plocks.get(target_step).copied().flatten();
+                        (source != target).then_some((rack_macro.id, source))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut changed = false;
+        for (id, value) in values {
+            changed |= self.update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                rack_macro.plocks[target_step] = value;
+            });
+        }
+        changed
+    }
+
     fn clear_variant_locks_for_step_inner(&self, track: usize, step: usize) -> bool {
         let mut changed = clear_track_variant_locks(self, track, step);
         for slot in &self.pattern.midi_fx_slots[track] {
@@ -7132,6 +7941,7 @@ impl SequencerState {
             changed |= clear_live_slot_variant_locks(slot, step);
         }
         changed |= clear_live_slot_variant_locks(&self.pattern.instrument_slots[track], step);
+        changed |= self.clear_rack_macro_plocks_for_step(track, step);
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             for slot in &mut rack.slots {
                 changed |= clear_rack_slot_variant_locks(slot, step);
@@ -7158,6 +7968,7 @@ impl SequencerState {
             source_step,
             target_step,
         );
+        changed |= self.copy_rack_macro_plocks_between_steps(track, source_step, target_step);
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             for slot in &mut rack.slots {
                 changed |= copy_rack_slot_variant_locks(slot, source_step, target_step);
@@ -7306,6 +8117,14 @@ impl SequencerState {
                 }
             }
         }
+        for (macro_idx, value) in snapshot.rack_macro_plocks.iter().copied().enumerate() {
+            let Some(id) = RackMacroId::from_index(macro_idx) else {
+                continue;
+            };
+            self.update_rack_macro_in_current_pattern(track, id, |rack_macro| {
+                rack_macro.plocks[step] = value;
+            });
+        }
     }
 
     pub fn restore_step_snapshot(&self, track: usize, step: usize, snapshot: &StepSnapshot) {
@@ -7326,11 +8145,7 @@ impl SequencerState {
         for (i, &step) in steps.iter().enumerate() {
             let src = if direction > 0 {
                 // Rotate right: slot i gets content from slot i-1 (last wraps to first)
-                if i == 0 {
-                    n - 1
-                } else {
-                    i - 1
-                }
+                if i == 0 { n - 1 } else { i - 1 }
             } else {
                 // Rotate left: slot i gets content from slot i+1 (first wraps to last)
                 (i + 1) % n
@@ -7707,8 +8522,8 @@ fn copy_snapshot_slot_variant_locks(
 mod tests {
     use super::*;
     use crate::effects::{
-        EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
-        ParamScaling, BUILTIN_SLOT_COUNT,
+        BUILTIN_SLOT_COUNT, EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor,
+        ParamKind, ParamScaling,
     };
     use crate::neural::ParamNodeId;
     use crate::plock_variants::{PlockVariantEntry, PlockVariantRegistryEntry};
@@ -8067,6 +8882,82 @@ mod tests {
     }
 
     #[test]
+    fn group_flat_track_to_rack_migrates_every_pattern_without_rekeying_scene_mappings() {
+        let mut first = sample_pattern_snapshot(1);
+        first.instrument_types[0] = InstrumentType::Custom;
+        first.instrument_slots[0].defaults[0] = 0.11;
+        first.effect_slots[0][0].defaults[0] = 0.21;
+        let mut second = first.clone();
+        second.instrument_slots[0].defaults[0] = 0.32;
+        second.effect_slots[0][0].defaults[0] = 0.42;
+
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(vec![first, second], 0);
+        let (scene_pattern_ids_before, override_pattern_id, launched) = {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            let override_id = scenes.fork_track_pattern(0).expect("track pattern fork");
+            let launched = scenes.track_pools[0]
+                .get_mut(override_id)
+                .expect("forked pattern");
+            launched.instrument_slot.defaults[0] = 0.53;
+            launched.effect_slots[0].defaults[0] = 0.63;
+            let launched = launched.clone();
+            (
+                scenes
+                    .scenes
+                    .iter()
+                    .map(|scene| scene.cells[0])
+                    .collect::<Vec<_>>(),
+                override_id,
+                launched,
+            )
+        };
+        launched.restore_to(&state, 0);
+
+        state
+            .group_flat_track_to_rack(
+                0,
+                InstrumentType::Custom,
+                CustomInstrumentRunMode::Instrument,
+                Some(7),
+                &[EffectDescriptor::builtin_filter()],
+                &[Some("filter".to_string())],
+            )
+            .expect("flat track should migrate");
+
+        let scenes = state.pattern.scenes.lock().unwrap();
+        assert_eq!(
+            scenes
+                .scenes
+                .iter()
+                .map(|scene| scene.cells[0])
+                .collect::<Vec<_>>(),
+            scene_pattern_ids_before,
+            "scene cells must retain their stable pattern ids"
+        );
+        assert_eq!(scenes.track_overrides[0], Some(override_pattern_id));
+        assert_eq!(scenes.track_pools[0].patterns.len(), 3);
+
+        let expected = [
+            (scene_pattern_ids_before[0].unwrap(), 0.11, 0.21),
+            (scene_pattern_ids_before[1].unwrap(), 0.32, 0.42),
+            (override_pattern_id, 0.53, 0.63),
+        ];
+        for (pattern_id, instrument_default, effect_default) in expected {
+            let pattern = scenes.track_pools[0]
+                .get(pattern_id)
+                .expect("migrated pattern");
+            assert_eq!(pattern.instrument_type, InstrumentType::Rack);
+            assert_eq!(pattern.instrument_slot.node_id, 0);
+            assert!(pattern.effect_slots.iter().all(|slot| slot.node_id == 0));
+            let slot = &pattern.rack_track.as_ref().expect("rack pattern").slots[0];
+            assert_eq!(slot.instrument_slot.defaults[0], instrument_default);
+            assert_eq!(slot.effect_slots[0].defaults[0], effect_default);
+            assert_eq!(slot.track_sound_state.engine_id, Some(7));
+        }
+    }
+
+    #[test]
     fn instrument_swap_reset_clears_only_instrument_state_in_every_pattern() {
         let descriptor = EffectDescriptor::builtin_filter();
         let mut snapshots = (0..3)
@@ -8205,10 +9096,11 @@ mod tests {
             );
             assert!(slot.plocks.iter().flatten().all(Option::is_none));
             assert!(slot.key_locks.is_empty());
-            assert!(slot
-                .tensor_params
-                .iter()
-                .all(|tensor| tensor.plocks.is_empty()));
+            assert!(
+                slot.tensor_params
+                    .iter()
+                    .all(|tensor| tensor.plocks.is_empty())
+            );
             assert_eq!(actual.instrument_types[0], InstrumentType::Custom);
             assert_eq!(actual.sample_ids[0], (-1, String::new(), 44_100));
             assert_eq!(
@@ -8222,11 +9114,13 @@ mod tests {
             let variants = &actual.plock_variant_registries[0];
             assert_eq!(variants.entries.len(), 1);
             assert_eq!(variants.entries[0].name.as_deref(), Some("effect identity"));
-            assert!(variants.entries[0]
-                .key
-                .entries
-                .iter()
-                .all(|entry| entry.domain == PlockVariantDomain::Effect));
+            assert!(
+                variants.entries[0]
+                    .key
+                    .entries
+                    .iter()
+                    .all(|entry| entry.domain == PlockVariantDomain::Effect)
+            );
             assert!(actual.key_lock_variant_registries[0].entries.is_empty());
 
             let bindings = &actual.process_chains[0].slots[0].bindings;
@@ -8239,10 +9133,12 @@ mod tests {
                 bindings["survives"],
                 Some(ParamTarget::EffectParam { .. })
             ));
-            assert!(actual.neural_networks[0].neurons[0]
-                .output_overrides
-                .instrument
-                .is_empty());
+            assert!(
+                actual.neural_networks[0].neurons[0]
+                    .output_overrides
+                    .instrument
+                    .is_empty()
+            );
             assert_eq!(
                 actual.neural_networks[0].neurons[0]
                     .output_overrides
@@ -8314,9 +9210,9 @@ mod tests {
     }
 
     fn sample_rack_track_snapshot() -> RackTrackSnapshot {
-        RackTrackSnapshot {
-            routing: RackRouting::Broadcast,
-            slots: vec![RackSlotSnapshot {
+        RackTrackSnapshot::new(
+            RackRouting::Broadcast,
+            vec![RackSlotSnapshot {
                 instrument_type: InstrumentType::Custom,
                 instrument_run_mode: CustomInstrumentRunMode::Instrument,
                 instrument_base_note_offset: 7.0,
@@ -8329,6 +9225,9 @@ mod tests {
                 max_polyphony: 3,
                 param_plocks: RackSlotParamPlocks::new(),
                 instrument_slot: sample_effect_slot_snapshot(77),
+                effect_slots: RackSlotSnapshot::empty_effect_slots(),
+                effect_descriptors: EffectDescriptor::default_full_chain(),
+                custom_effect_names: RackSlotSnapshot::empty_effect_names(),
                 track_sound_state: TrackSoundState {
                     loaded_preset: Some("rack-lead".to_string()),
                     dirty: true,
@@ -8336,7 +9235,8 @@ mod tests {
                 },
                 sample_id: None,
             }],
-        }
+            default_rack_macros(),
+        )
     }
 
     fn sample_sampler_rack_slot(
@@ -8359,6 +9259,9 @@ mod tests {
             max_polyphony: 2,
             param_plocks: RackSlotParamPlocks::new(),
             instrument_slot: sample_effect_slot_snapshot(instrument_slot_id),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
             track_sound_state: TrackSoundState::default(),
             sample_id: Some((buffer_id, sample_name.to_string(), sample_rate)),
         }
@@ -8956,9 +9859,15 @@ mod tests {
         initial.slots[0].mute = true;
         initial.slots[0].solo = false;
         initial.slots[0].max_polyphony = 6;
-        assert!(initial.slots[0]
-            .param_plocks
-            .set(4, RackSlotParam::Gain, 0.25));
+        let rack_fx = EffectDescriptor::builtin_ott();
+        initial.slots[0].effect_descriptors[0] = rack_fx.clone();
+        initial.slots[0].effect_slots[0] = EffectSlotSnapshot::new_default(&rack_fx, 701);
+        initial.slots[0].custom_effect_names[0] = Some("builtin:OTT".to_string());
+        assert!(
+            initial.slots[0]
+                .param_plocks
+                .set(4, RackSlotParam::Gain, 0.25)
+        );
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let replacement = RackSlotSnapshot {
@@ -8974,6 +9883,9 @@ mod tests {
             max_polyphony: 1,
             param_plocks: RackSlotParamPlocks::new(),
             instrument_slot: sample_effect_slot_snapshot(88),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
             track_sound_state: TrackSoundState::default(),
             sample_id: Some((123, "replacement".to_string(), 48_000)),
         };
@@ -9035,9 +9947,11 @@ mod tests {
         initial.slots[0].mute = true;
         initial.slots[0].solo = false;
         initial.slots[0].max_polyphony = 6;
-        assert!(initial.slots[0]
-            .param_plocks
-            .set(4, RackSlotParam::Gain, 0.25));
+        assert!(
+            initial.slots[0]
+                .param_plocks
+                .set(4, RackSlotParam::Gain, 0.25)
+        );
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let mut replacement = sample_sampler_rack_slot(321, "replacement", 48_000, 88, Some(9));
@@ -9064,6 +9978,12 @@ mod tests {
         assert!(live.slots[0].mute);
         assert!(!live.slots[0].solo);
         assert_eq!(live.slots[0].max_polyphony, 6);
+        assert_eq!(live.slots[0].effect_slots[0].node_id, 701);
+        assert_eq!(live.slots[0].effect_descriptors[0].name, "OTT");
+        assert_eq!(
+            live.slots[0].custom_effect_names[0].as_deref(),
+            Some("builtin:OTT")
+        );
         assert_eq!(
             live.slots[0].param_plocks.get(4, RackSlotParam::Gain),
             Some(0.25)
@@ -9103,8 +10023,12 @@ mod tests {
         state.restore_current_pattern_from_repository().unwrap();
 
         let descriptor = EffectDescriptor::builtin_sampler();
-        assert!(state
-            .sync_rack_slot_instrument_bindings_for_current_pattern(0, &[(descriptor, 999, 1000)]));
+        assert!(
+            state.sync_rack_slot_instrument_bindings_for_current_pattern(
+                0,
+                &[(descriptor, 999, 1000)]
+            )
+        );
 
         let live = state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref()
@@ -9129,26 +10053,28 @@ mod tests {
         let mut second = PatternSnapshot::new_default(1, &[]);
         first.instrument_types[0] = InstrumentType::Rack;
         second.instrument_types[0] = InstrumentType::Rack;
-        first.rack_tracks[0] = Some(RackTrackSnapshot {
-            routing: RackRouting::Broadcast,
-            slots: vec![sample_sampler_rack_slot(
+        first.rack_tracks[0] = Some(RackTrackSnapshot::new(
+            RackRouting::Broadcast,
+            vec![sample_sampler_rack_slot(
                 101,
                 "pattern-one",
                 44_100,
                 11,
                 None,
             )],
-        });
-        second.rack_tracks[0] = Some(RackTrackSnapshot {
-            routing: RackRouting::Broadcast,
-            slots: vec![sample_sampler_rack_slot(
+            default_rack_macros(),
+        ));
+        second.rack_tracks[0] = Some(RackTrackSnapshot::new(
+            RackRouting::Broadcast,
+            vec![sample_sampler_rack_slot(
                 202,
                 "pattern-two",
                 44_100,
                 22,
                 None,
             )],
-        });
+            default_rack_macros(),
+        ));
         state.replace_pattern_repository(vec![first, second], 0);
         state.restore_current_pattern_from_repository().unwrap();
 
@@ -10878,10 +11804,12 @@ mod tests {
             &names,
             &instrument_types,
         ));
-        assert!(state
-            .track_pattern_cells(0)
-            .into_iter()
-            .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden));
+        assert!(
+            state
+                .track_pattern_cells(0)
+                .into_iter()
+                .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden)
+        );
 
         assert!(state.set_scene_cell(
             0,
@@ -11008,10 +11936,12 @@ mod tests {
         ));
         assert_eq!(state.scene_track_pattern_id(1, 0), None);
         assert!(!state.is_scene_silenced(0));
-        assert!(state
-            .track_pattern_cells(0)
-            .iter()
-            .all(|cell| cell.pattern_id != second_id));
+        assert!(
+            state
+                .track_pattern_cells(0)
+                .iter()
+                .all(|cell| cell.pattern_id != second_id)
+        );
 
         assert!(state.delete_track_pattern(
             0,
@@ -11330,6 +12260,13 @@ mod tests {
     #[test]
     fn step_snapshot_capture_clear_restore_preserves_rack_slot_instrument_plocks() {
         let state = make_state_with_rack_slot();
+        let macro_id = RackMacroId::from_index(0).expect("macro 1 id");
+        assert!(
+            state.update_rack_macro_in_current_pattern(0, macro_id, |rack_macro| {
+                rack_macro.plocks[2] = Some(0.25);
+                rack_macro.plocks[4] = Some(0.75);
+            })
+        );
         {
             let mut racks = state.pattern.rack_tracks.lock().unwrap();
             let slot = &mut racks[0].as_mut().unwrap().slots[0];
@@ -11345,6 +12282,7 @@ mod tests {
             Some(0.42)
         );
         assert_eq!(snap.rack_slot_instrument_plocks[0].params[0], Some(0.42));
+        assert_eq!(snap.rack_macro_plocks[0], Some(0.25));
 
         state.clear_step_payload(0, 2);
         assert_eq!(
@@ -11357,6 +12295,14 @@ mod tests {
         );
         assert_eq!(rack_slot_plock_value(&state, 0, 0, 2, 0), None);
         assert_eq!(rack_slot_plock_value(&state, 0, 0, 4, 0), Some(0.84));
+        assert_eq!(
+            state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .macros[0]
+                .plocks[2],
+            None
+        );
 
         state.restore_step_snapshot(0, 5, &snap);
         assert_eq!(
@@ -11364,6 +12310,88 @@ mod tests {
             Some(0.42)
         );
         assert_eq!(rack_slot_plock_value(&state, 0, 0, 5, 0), Some(0.42));
+        assert_eq!(
+            state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .macros[0]
+                .plocks[5],
+            Some(0.25)
+        );
+    }
+
+    #[test]
+    fn rack_macro_plocks_participate_in_variant_stamp_and_clear() {
+        let state = make_state_with_rack_slot();
+        let macro_id = RackMacroId::from_index(0).expect("macro 1 id");
+        assert!(
+            state.update_rack_macro_in_current_pattern(0, macro_id, |rack_macro| {
+                rack_macro.plocks[2] = Some(0.65);
+            })
+        );
+        let key = crate::plock_variants::live_track_variant_key(&state, 0, 2)
+            .expect("rack macro variant key");
+
+        assert!(state.stamp_variant_key_to_steps(0, &key, &[5]));
+        assert_eq!(
+            state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .macros[0]
+                .plocks[5],
+            Some(0.65)
+        );
+
+        assert!(state.clear_variant_locks_for_steps(0, &[5]));
+        assert_eq!(
+            state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .macros[0]
+                .plocks[5],
+            None
+        );
+    }
+
+    #[test]
+    fn rack_macro_plock_batch_updates_live_and_current_pattern_atomically() {
+        let state = make_state_with_rack_slot();
+        let macro_id = RackMacroId::from_index(0).expect("macro 1 id");
+
+        assert!(state.set_rack_macro_plocks_in_current_pattern(
+            0,
+            macro_id,
+            &[1, 3, 5, MAX_STEPS],
+            1.25,
+        ));
+
+        let live_plocks = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .macros[0]
+            .plocks
+            .clone();
+        let scenes = state.pattern.scenes.lock().unwrap();
+        let pattern_id = scenes.effective_pattern_id(0).expect("current pattern");
+        let persisted_plocks = &scenes.track_pools[0]
+            .get(pattern_id)
+            .expect("current pattern data")
+            .rack_track
+            .as_ref()
+            .expect("current rack")
+            .macros[0]
+            .plocks;
+
+        assert_eq!(live_plocks, *persisted_plocks);
+        for step in [1, 3, 5] {
+            assert_eq!(live_plocks[step], Some(1.0));
+        }
+        assert!(
+            live_plocks
+                .iter()
+                .enumerate()
+                .all(|(step, value)| [1, 3, 5].contains(&step) || value.is_none())
+        );
     }
 
     #[test]

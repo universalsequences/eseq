@@ -434,6 +434,20 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
             })
         }
         Some("fx-effect") | Some("effect") => {
+            if value_string_field(payload, "chain").as_deref() == Some("rack") {
+                let track = value_number_field(payload, "track")
+                    .ok_or_else(|| "rack fx-effect delete target expects :track".to_string())?;
+                let rack_slot = value_number_field(payload, "rack-slot")
+                    .ok_or_else(|| "rack fx-effect delete target expects :rack-slot".to_string())?;
+                let effect_slot = value_number_field(payload, "effect-slot").ok_or_else(|| {
+                    "rack fx-effect delete target expects :effect-slot".to_string()
+                })?;
+                return Ok(ActiveDeleteTarget::RackEffect {
+                    track,
+                    rack_slot,
+                    effect_slot,
+                });
+            }
             let chain = parse_fx_delete_chain(payload)
                 .ok_or_else(|| "fx-effect delete target expects :chain".to_string())?;
             let slot = value_number_field(payload, "slot")
@@ -482,6 +496,7 @@ fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
         Some(ActiveDeleteTarget::TrackPattern { .. }) => Value::String("track-pattern".to_string()),
         Some(ActiveDeleteTarget::ModRoute { .. }) => Value::String("mod-route".to_string()),
         Some(ActiveDeleteTarget::FxEffect { .. }) => Value::String("fx-effect".to_string()),
+        Some(ActiveDeleteTarget::RackEffect { .. }) => Value::String("fx-effect".to_string()),
         Some(ActiveDeleteTarget::RackSlot { .. }) => Value::String("rack-slot".to_string()),
         None => Value::Bool(false),
     }
@@ -575,6 +590,24 @@ mod delete_target_tests {
             )
             .expect("rack slot target"),
             ActiveDeleteTarget::RackSlot { track: 2, slot: 3 }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("fx-effect".to_string()),
+                &map_value([
+                    ("chain", Value::String("rack".to_string())),
+                    ("track", Value::Number(2.0)),
+                    ("rack-slot", Value::Number(3.0)),
+                    ("effect-slot", Value::Number(1.0)),
+                ]),
+            )
+            .expect("rack fx target"),
+            ActiveDeleteTarget::RackEffect {
+                track: 2,
+                rack_slot: 3,
+                effect_slot: 1,
+            }
         );
     }
 
@@ -1232,6 +1265,7 @@ pub(crate) fn init_runtime(
                     "project-instrument-engines",
                     build_string_list(&project_instrument_engine_names(app)),
                 ),
+                ("sound-presets", build_sound_presets_value()),
                 ("current-project-name", Value::String(String::new())),
                 // Editor mode state (for inline instrument/effect creation/editing)
                 ("editor-active", Value::Bool(false)),
@@ -1660,6 +1694,50 @@ pub(crate) fn init_runtime(
                 };
                 ctx.enqueue_command(HostCommand::Custom { name, payload });
             }
+            ActiveDeleteTarget::RackEffect {
+                track,
+                rack_slot,
+                effect_slot,
+            } => {
+                if current_buffer != "*fx*" {
+                    return Ok(Value::Bool(false));
+                }
+                let valid = st
+                    .pattern
+                    .rack_tracks
+                    .lock()
+                    .unwrap()
+                    .get(track)
+                    .and_then(Option::as_ref)
+                    .and_then(|rack| rack.slots.get(rack_slot))
+                    .and_then(|slot| slot.effect_slots.get(effect_slot))
+                    .is_some_and(|effect| effect.node_id != 0);
+                if !valid {
+                    ctx.set_status("Cannot delete missing rack-slot effect");
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(track as f64))),
+                );
+                map.insert(
+                    "rack-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(rack_slot as f64))),
+                );
+                map.insert(
+                    "effect-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(effect_slot as f64))),
+                );
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-rack-slot-effect".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
             ActiveDeleteTarget::RackSlot { track, slot } => {
                 if current_buffer != "*fx*" {
                     return Ok(Value::Bool(false));
@@ -1744,6 +1822,16 @@ pub(crate) fn init_runtime(
             payload: Value::Map(map),
         });
         Ok(Value::Bool(true))
+    });
+
+    // now-ms — wall-clock milliseconds for gesture timing (hold-to-select)
+    runtime.register_native("now-ms", |_args, _ctx| {
+        Ok(Value::Number(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+        ))
     });
 
     // seq-toggle-step — toggle step on current track

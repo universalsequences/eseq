@@ -38,6 +38,7 @@ mod draw;
 mod effect_params;
 mod effects;
 mod effects_draw;
+mod fx_chain;
 mod graph;
 mod hooks;
 mod input;
@@ -257,6 +258,7 @@ pub struct EngineDescriptor {
 #[derive(Default)]
 pub struct EngineRegistry {
     pub engines: Vec<EngineDescriptor>,
+    instrument_descriptors: Vec<EffectDescriptor>,
 }
 
 impl EngineRegistry {
@@ -270,22 +272,34 @@ impl EngineRegistry {
         self.engines.get(engine_id)
     }
 
+    pub fn get_instrument_descriptor(&self, engine_id: usize) -> Option<&EffectDescriptor> {
+        self.instrument_descriptors.get(engine_id)
+    }
+
     pub fn replace_at(&mut self, engine_id: usize, entry: EngineDescriptor) {
         if engine_id < self.engines.len() {
+            let descriptor =
+                crate::lisp_host::instrument_descriptor_from_manifest(&entry.name, &entry.manifest);
             self.engines[engine_id] = entry;
+            self.instrument_descriptors[engine_id] = descriptor;
         }
     }
 
     pub fn upsert(&mut self, entry: EngineDescriptor) -> usize {
+        let descriptor =
+            crate::lisp_host::instrument_descriptor_from_manifest(&entry.name, &entry.manifest);
         if !entry.shared_runtime {
             self.engines.push(entry);
+            self.instrument_descriptors.push(descriptor);
             return self.engines.len() - 1;
         }
         if let Some(existing_idx) = self.find_by_name_and_source(&entry.name, &entry.source) {
             self.engines[existing_idx] = entry;
+            self.instrument_descriptors[existing_idx] = descriptor;
             existing_idx
         } else {
             self.engines.push(entry);
+            self.instrument_descriptors.push(descriptor);
             self.engines.len() - 1
         }
     }
@@ -338,6 +352,42 @@ mod engine_registry_tests {
         assert_eq!(first, second);
         assert_eq!(registry.engines.len(), 1);
         assert_eq!(registry.engines[first].lib_index, 1);
+    }
+
+    #[test]
+    fn replacing_an_engine_refreshes_its_cached_instrument_descriptor() {
+        let mut registry = EngineRegistry::default();
+        let engine_id = registry.upsert(EngineDescriptor {
+            name: "old/".to_string(),
+            source: "old source".to_string(),
+            manifest: manifest(),
+            lib_index: 0,
+            shared_runtime: false,
+        });
+        assert_eq!(
+            registry
+                .get_instrument_descriptor(engine_id)
+                .map(|descriptor| descriptor.name.as_str()),
+            Some("old/")
+        );
+
+        registry.replace_at(
+            engine_id,
+            EngineDescriptor {
+                name: "new/".to_string(),
+                source: "new source".to_string(),
+                manifest: manifest(),
+                lib_index: 1,
+                shared_runtime: false,
+            },
+        );
+
+        assert_eq!(
+            registry
+                .get_instrument_descriptor(engine_id)
+                .map(|descriptor| descriptor.name.as_str()),
+            Some("new/")
+        );
     }
 
     #[test]
@@ -406,8 +456,7 @@ pub struct EditorState {
     pending_project_load: Option<PendingProjectLoad>,
     pub dylib_cache: DylibCacheManager,
     lisp_libs: Vec<LoadedDGenLib>,
-    track_effect_leases: Vec<Vec<Option<DylibLease>>>,
-    bus_effect_leases: Vec<Vec<Option<DylibLease>>>,
+    effect_chain_leases: fx_chain::FxChainLeaseStore,
     pub instrument_libs: Vec<LoadedDGenLib>,
     instrument_lib_leases: Vec<Option<DylibLease>>,
     pub picker_cursor: usize,
@@ -488,6 +537,7 @@ pub struct GraphState {
     /// GraphController::sync_current_pattern_mod_routes so scene switches can
     /// diff instead of disconnecting every possible track pair.
     pub applied_mod_routes: Vec<(i32, i32)>,
+    pub deferred_rack_teardowns: Vec<graph::DeferredRackTeardown>,
 }
 
 impl GraphState {
@@ -601,6 +651,7 @@ pub struct TrackNodeIds {
     pub mod_env_id: i32,
     pub bus_send_ids: Vec<BusSendNodeIds>,
     pub rack_slots: Vec<RackSlotNodeIds>,
+    pub rack_signature: Option<graph::RackTopologySignature>,
 }
 
 #[derive(Clone)]
@@ -1495,8 +1546,7 @@ impl App {
                 pending_project_load: None,
                 dylib_cache: DylibCacheManager::workspace_default(),
                 lisp_libs: Vec::new(),
-                track_effect_leases: Vec::new(),
-                bus_effect_leases: Vec::new(),
+                effect_chain_leases: fx_chain::FxChainLeaseStore::default(),
                 instrument_libs: Vec::new(),
                 instrument_lib_leases: Vec::new(),
                 picker_cursor: 0,
@@ -1568,6 +1618,7 @@ impl App {
                 record_armed: Vec::new(),
                 keyboard_tx,
                 applied_mod_routes: Vec::new(),
+                deferred_rack_teardowns: Vec::new(),
             },
         };
         app.ensure_bus_pattern_bank_len(1);

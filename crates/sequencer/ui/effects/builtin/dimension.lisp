@@ -38,8 +38,8 @@
 (def builtin-fx-dimension-mode-button (fx p label-text)
   (button label-text
     :width 1.95 :height 1.55 :padding 0 :font-size 9.5
-    :background-color (if (> (get p :value) 0.5) (dimension-cream) :mixer-control-bg)
-    :color (if (> (get p :value) 0.5) :black :dim)
+    :background-color (if (fx-param-on-for? fx p) (dimension-cream) :mixer-control-bg)
+    :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
@@ -47,8 +47,8 @@
     :on-click |x y r| (fx-toggle-effect-value fx p)))
 
 (def builtin-fx-dimension-off-button (fx b1 b2 b3 b4)
-  (let ((all-off (and (< (get b1 :value) 0.5) (< (get b2 :value) 0.5)
-                      (< (get b3 :value) 0.5) (< (get b4 :value) 0.5))))
+  (let ((all-off (and (not (fx-param-on-for? fx b1)) (not (fx-param-on-for? fx b2))
+                      (not (fx-param-on-for? fx b3)) (not (fx-param-on-for? fx b4)))))
     (button "0"
       :width 1.95 :height 1.55 :padding 0 :font-size 9.5
       :background-color (if all-off (dimension-red) :mixer-control-bg)

@@ -7,8 +7,8 @@ use crate::macro_engine::MacroParamKey;
 use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
-    CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
-    TrackParamsSnapshot, MAX_STEPS, NUM_PARAMS,
+    CustomInstrumentRunMode, InstrumentType, MAX_STEPS, ModConnection, NUM_PARAMS, StepParam,
+    SwingResolution, Timebase, TrackParamsSnapshot,
 };
 use super::state::{RackTrackSnapshot, SequencerState, TrackPatternData};
 
@@ -211,6 +211,11 @@ impl SequencerSnapshot {
                 &effect_slots,
                 live_project_lane_overrides.get(track_idx),
             );
+            let mut rack_track = live_rack_tracks.get(track_idx).cloned().unwrap_or(None);
+            state.sync_rack_macro_runtime_track(track_idx, rack_track.as_ref());
+            if let Some(rack) = rack_track.as_mut() {
+                rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track_idx);
+            }
             tracks.push(SequencerTrackSnapshot {
                 params,
                 scene_silenced: state.is_scene_silenced(track_idx),
@@ -218,7 +223,7 @@ impl SequencerSnapshot {
                 instrument_run_mode,
                 instrument_base_note_offset,
                 engine_id,
-                rack_track: live_rack_tracks.get(track_idx).cloned().unwrap_or(None),
+                rack_track,
                 process_chain,
                 effect_descriptors,
                 effect_slots,
@@ -283,6 +288,13 @@ impl SequencerSnapshot {
             })
             .collect();
 
+        for (track_idx, track) in tracks.iter_mut().enumerate() {
+            state.sync_rack_macro_runtime_track(track_idx, track.rack_track.as_ref());
+            if let Some(rack) = track.rack_track.as_mut() {
+                rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track_idx);
+            }
+        }
+
         apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
 
         Self {
@@ -304,6 +316,16 @@ fn apply_macro_overrides(
     overrides: &HashMap<MacroParamKey, f32>,
 ) {
     for (track_idx, track) in tracks.iter_mut().enumerate() {
+        if let Some(rack) = track.rack_track.as_mut() {
+            for rack_macro in &mut rack.macros {
+                if let Some(value) = overrides.get(&MacroParamKey::for_rack_macro(
+                    track_idx,
+                    rack_macro.id.index() as u8,
+                )) {
+                    rack_macro.value = value.clamp(0.0, 1.0);
+                }
+            }
+        }
         apply_slot_macro_overrides(
             &mut track.instrument_slot,
             overrides,

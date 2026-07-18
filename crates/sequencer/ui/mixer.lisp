@@ -149,15 +149,19 @@
             (name (get payload :name)))
         (do
           (mixer-v2-clear-delete-target)
-          (if (= (get event :drag-type) "instrument")
-            (if name
-              (do
-                (set! sbrowser-loading-instrument-name name)
-                (host-command "add-track-instrument" (dict :name name)))
-              (status "Drop an instrument, not a folder"))
+          (if (= (get event :drag-type) "sound")
             (if path
-              (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-              (status "Drop a sample file, not a folder"))))))))
+              (host-command "add-track-from-sound" (dict :path path))
+              (status "Drop a Sound item, not a folder"))
+            (if (= (get event :drag-type) "instrument")
+              (if name
+                (do
+                  (set! sbrowser-loading-instrument-name name)
+                  (host-command "add-track-instrument" (dict :name name)))
+                (status "Drop an instrument, not a folder"))
+              (if path
+                (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+                (status "Drop a sample file, not a folder")))))))))
 
 ;; Drag a track badge onto a group container -> add it to that group.
 (def mixer-v2-drop-track-into-group (event gidx)
@@ -195,18 +199,22 @@
 
 (def mixer-v2-drop-on-track (event)
   (let ((drag-type (get event :drag-type)))
-    (if (= drag-type "instrument")
-      (sbrowser-drop-instrument-on-track event)
-      (if (= drag-type "sample")
-        (mixer-v2-drop-sample-on-track event)
-        (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
-          (mixer-v2-drop-effect-on-track event)
-          (status "Unsupported drop"))))))
+    (if (= drag-type "sound")
+      (sbrowser-drop-sound-on-track event)
+      (if (= drag-type "instrument")
+        (sbrowser-drop-instrument-on-track event)
+        (if (= drag-type "sample")
+          (mixer-v2-drop-sample-on-track event)
+          (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
+            (mixer-v2-drop-effect-on-track event)
+            (status "Unsupported drop")))))))
 
 (def mixer-v2-track-drop-types (i)
   (if (seq-track-replaceable-instrument? i)
-    (list "sample" "instrument" "audio-effect" "midi-effect")
-    (list "sample" "audio-effect" "midi-effect")))
+    (list "sample" "instrument" "sound" "audio-effect" "midi-effect")
+    (if (seq-track-sound-replaceable? i)
+      (list "sample" "sound" "audio-effect" "midi-effect")
+      (list "sample" "audio-effect" "midi-effect"))))
 
 (def mixer-v2-drop-effect-on-bus (event)
   (let ((payload (get event :payload))
@@ -722,16 +730,19 @@
     (h-stack :gap 0.35
       (button (str (+ i 1))
         :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
         :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
         :color (if muted :dim :black)
         :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-mute i))))
       (button "S"
         :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
         :background-color (mixer-v2-button-bg (nth SEQ.track-solos i))
         :color (if (nth SEQ.track-solos i) :black :dim)
         :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-solo i))))
       (button "R"
         :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
         :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
         :color (if (nth SEQ.record-armed i) :black :dim)
         :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))))
@@ -934,11 +945,13 @@
           (button (mixer-v2-bus-mute-label i)
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if (nth SEQ.bus-mutes i) :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
+        :border-color :transparent
             :color (if (nth SEQ.bus-mutes i) :dim :black)
             :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.bus-solos i))
+        :border-color :transparent
             :color (if (nth SEQ.bus-solos i) :black :dim)
             :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-solo i))))
           (box :width 2.1 :height 1.0))
@@ -1156,7 +1169,7 @@
     :corner-radius 10
     :padding 0.5
     :align :center
-    :drop-types (list "sample" "instrument" "track-badge")
+    :drop-types (list "sample" "instrument" "sound" "track-badge")
     :drop-meta (dict :kind "new-sample-track")
     :on-drop (lambda (event) (mixer-v2-drop-sample-new-track event))
     (label "Drop sounds here"

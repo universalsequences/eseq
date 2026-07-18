@@ -14,16 +14,26 @@
 (def ott-button-on   () (rgba 0.94 0.69 0.32 1.0))
 
 (def builtin-fx-ott-source (fx)
-  (if (get fx :bus-fx)
+  (if (get fx :rack-fx)
+    (dict :kind :rack-effect :index (get fx :track-idx)
+          :rack-slot (get fx :rack-slot) :slot (get fx :slot-idx))
+    (if (get fx :bus-fx)
     (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
-    (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx))))
+    (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx)))))
 
 ;; Row height shared by every column so the three bands stay aligned with the
 ;; display rows.
 (def ott-band-row-h () 2.2)
 
+(def builtin-fx-ott-param-wrapper (fx p control body)
+  (param-mod-wrapper fx p
+    (str "ott-" control "-" (get fx :track-idx) "-" (get fx :rack-slot)
+      "-" (get fx :slot-idx) "-" (get p :idx))
+    body))
+
 (def builtin-fx-ott-knob (fx label-text p)
-  (knob-number :label label-text
+  (builtin-fx-ott-param-wrapper fx p "knob"
+    (knob-number :label label-text
     :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals 2 :unit "dB"
     :font-size 9.0 :label-font-size 8.0
@@ -34,11 +44,12 @@
     :plock-color-g (param-plock-color-g)
     :plock-color-b (param-plock-color-b)
     :width 5.6 :height (ott-band-row-h) :knob-size 1.5
-    :track-color '(rgba 0.4, 0.4, 0.4, 1)
-    :on-change (lambda (v) (fx-set-effect-value fx p v))))
+      :track-color '(rgba 0.4, 0.4, 0.4, 1)
+      :on-change (lambda (v) (fx-set-effect-value fx p v)))))
 
 (def builtin-fx-ott-percent-knob (fx label-text p)
-  (knob-number :label label-text
+  (builtin-fx-ott-param-wrapper fx p "percent-knob"
+    (knob-number :label label-text
     :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0 :unit "%"
     :font-size 9.0 :label-font-size 8.0
@@ -49,19 +60,20 @@
     :plock-color-g (param-plock-color-g)
     :plock-color-b (param-plock-color-b)
     :width 5.6 :height (ott-band-row-h) :knob-size 1.5
-    :track-color '(rgba 0.4, 0.4, 0.4, 1)
-    :on-change (lambda (v) (fx-set-effect-value fx p v))))
+      :track-color '(rgba 0.4, 0.4, 0.4, 1)
+      :on-change (lambda (v) (fx-set-effect-value fx p v)))))
 
 (def builtin-fx-ott-field (fx p decimals unit-text color width)
-  (number-picker :value (fx-param-value p)
+  (builtin-fx-ott-param-wrapper fx p "field"
+    (number-picker :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals :unit unit-text
     :noui true :font-size 9.0 :text-color color
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
     :plock-color-b (param-plock-color-b)
-    :on-change (lambda (v) (fx-set-effect-value fx p v))
-    :width width :height 1.0))
+      :on-change (lambda (v) (fx-set-effect-value fx p v))
+      :width width :height 1.0)))
 
 ;; Threshold above ratio, in the band color, one per band row.
 (def builtin-fx-ott-thr-ratio-cell (fx thr-p ratio-p color)
@@ -79,15 +91,16 @@
       (builtin-fx-ott-field fx release-p 0 "ms" color 4.4))))
 
 (def builtin-fx-ott-toggle (fx p label-text w)
-  (button label-text
+  (builtin-fx-ott-param-wrapper fx p "toggle"
+    (button label-text
     :width w :height 1.0 :padding 0 :font-size 8.0
-    :background-color (if (> (get p :value) 0.5) (ott-button-on) :mixer-control-bg)
-    :color (if (> (get p :value) 0.5) :black :dim)
+    :background-color (if (fx-param-on-for? fx p) (ott-button-on) :mixer-control-bg)
+    :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
-    :on-click |x y r| (fx-toggle-effect-value fx p)))
+      :plock-color-b (param-plock-color-b)
+      :on-click |x y r| (fx-toggle-effect-value fx p))))
 
 ;; One Split Freq row: split button + crossover field (high/low bands) or a
 ;; plain label (mid), with the band activator and solo stacked beside it.

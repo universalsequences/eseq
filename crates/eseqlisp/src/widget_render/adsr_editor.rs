@@ -22,10 +22,34 @@ const RELEASE_START: f32 = 0.68;
 const ATTACK_ORIGIN: f32 = 0.03;
 const ENVELOPE_Y_INSET: f32 = 0.08;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct AdsrInteractionState {
     hovered_handle: Option<i32>,
     active_handle: Option<i32>,
+    last_drag_envelope: Option<AdsrEnvelope>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AdsrEnvelope {
+    attack: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32,
+}
+
+impl AdsrEnvelope {
+    fn from_node(node: &LayoutNode) -> Self {
+        Self {
+            attack: prop_ms(&node.props, "attack", 4.0),
+            decay: prop_ms(&node.props, "decay", 400.0),
+            sustain: prop_unit(&node.props, "sustain", 0.5),
+            release: prop_ms(&node.props, "release", 300.0),
+        }
+    }
+
+    fn into_value(self, active: Option<&str>) -> Value {
+        env_map(self.attack, self.decay, self.sustain, self.release, active)
+    }
 }
 
 thread_local! {
@@ -195,7 +219,7 @@ fn solve_norm_for_x(target_x: f32, mut x_for_norm: impl FnMut(f32) -> f32) -> f3
     (lo + hi) * 0.5
 }
 
-fn event_for_drag(node: &LayoutNode, handle_idx: i32, col: f32, row: f32) -> Value {
+fn envelope_for_drag(node: &LayoutNode, handle_idx: i32, col: f32, row: f32) -> AdsrEnvelope {
     let attack_max = super::get_f32_prop(&node.props, "attack-max", ATTACK_MAX_DEFAULT).max(1.0);
     let decay_max = super::get_f32_prop(&node.props, "decay-max", DECAY_MAX_DEFAULT).max(1.0);
     let release_max = super::get_f32_prop(&node.props, "release-max", RELEASE_MAX_DEFAULT).max(1.0);
@@ -232,24 +256,12 @@ fn event_for_drag(node: &LayoutNode, handle_idx: i32, col: f32, row: f32) -> Val
         _ => {}
     }
 
-    let active = match handle_idx {
-        1 => Some("attack"),
-        2 => Some("decay"),
-        3 => Some("sustain"),
-        4 => Some("release"),
-        _ => None,
-    };
-    env_map(attack, decay, sustain, release, active)
-}
-
-fn current_env(node: &LayoutNode) -> Value {
-    env_map(
-        prop_ms(&node.props, "attack", 4.0),
-        prop_ms(&node.props, "decay", 400.0),
-        prop_unit(&node.props, "sustain", 0.5),
-        prop_ms(&node.props, "release", 300.0),
-        None,
-    )
+    AdsrEnvelope {
+        attack,
+        decay,
+        sustain,
+        release,
+    }
 }
 
 impl WidgetDefinition for AdsrEditorWidget {
@@ -342,24 +354,38 @@ impl WidgetDefinition for AdsrEditorWidget {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 update_interaction_state(node.widget_id, |state| {
-                    state.active_handle = (handle_idx > 0).then_some(handle_idx)
+                    state.active_handle = (handle_idx > 0).then_some(handle_idx);
+                    state.last_drag_envelope = None;
                 });
                 MouseEventOutcome::Consume
             }
             MouseEventKind::Drag(MouseButton::Left) if handle_idx > 0 => {
+                let envelope = envelope_for_drag(node, handle_idx, local_col, local_row);
                 update_interaction_state(node.widget_id, |state| {
                     state.hovered_handle = Some(handle_idx);
                     state.active_handle = Some(handle_idx);
+                    state.last_drag_envelope = Some(envelope);
                 });
-                MouseEventOutcome::Dispatch(WidgetEvent::Custom(event_for_drag(
-                    node, handle_idx, local_col, local_row,
-                )))
+                let active = match handle_idx {
+                    1 => Some("attack"),
+                    2 => Some("decay"),
+                    3 => Some("sustain"),
+                    4 => Some("release"),
+                    _ => None,
+                };
+                MouseEventOutcome::Dispatch(WidgetEvent::Custom(envelope.into_value(active)))
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let was_active = interaction_state(node.widget_id).active_handle.is_some();
-                update_interaction_state(node.widget_id, |state| state.active_handle = None);
-                if was_active {
-                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(current_env(node)))
+                let state = interaction_state(node.widget_id);
+                update_interaction_state(node.widget_id, |state| {
+                    state.active_handle = None;
+                    state.last_drag_envelope = None;
+                });
+                if state.active_handle.is_some() {
+                    let envelope = state
+                        .last_drag_envelope
+                        .unwrap_or_else(|| AdsrEnvelope::from_node(node));
+                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(envelope.into_value(None)))
                 } else {
                     MouseEventOutcome::Consume
                 }
@@ -620,6 +646,35 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 mod tests {
     use super::*;
 
+    fn test_node(widget_id: u64) -> LayoutNode {
+        LayoutNode {
+            widget_id,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "adsr-editor".to_string(),
+            rect: Rect {
+                col: 0.0,
+                row: 0.0,
+                width: 40.0,
+                height: 8.0,
+            },
+            props: HashMap::from([
+                ("attack".to_string(), Value::Number(10.0)),
+                ("decay".to_string(), Value::Number(200.0)),
+                ("sustain".to_string(), Value::Number(0.5)),
+                ("release".to_string(), Value::Number(300.0)),
+                (
+                    "on-change".to_string(),
+                    Value::Symbol("handler".to_string()),
+                ),
+            ]),
+            children: Vec::new(),
+            focusable: false,
+        }
+    }
+
     fn map_value(value: &Value, key: &str) -> Value {
         let Value::Map(map) = value else {
             panic!("expected map");
@@ -690,6 +745,61 @@ mod tests {
 
         let released = env_map(5.0, 120.0, 0.7, 300.0, None);
         assert_eq!(map_value(&released, "active"), Value::Bool(false));
+    }
+
+    #[test]
+    fn release_commits_last_drag_envelope_instead_of_stale_layout_props() {
+        let node = test_node(9_001);
+        let gesture = Value::Number(1.0);
+        let widget = AdsrEditorWidget;
+        let down = widget.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            1.0,
+            1.0,
+            None,
+            Some(&gesture),
+            KeyModifiers::NONE,
+            1.0,
+            1.0,
+        );
+        assert!(matches!(down, MouseEventOutcome::Consume));
+
+        let drag = widget.mouse_event(
+            &node,
+            MouseEventKind::Drag(MouseButton::Left),
+            18.0,
+            1.0,
+            None,
+            Some(&gesture),
+            KeyModifiers::NONE,
+            1.0,
+            1.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(drag_env)) = drag else {
+            panic!("ADSR drag should dispatch an envelope");
+        };
+        let dragged_attack = map_value(&drag_env, "attack");
+        assert_ne!(dragged_attack, Value::Number(10.0));
+
+        // The layout props intentionally remain at the pre-drag value, matching
+        // rack-slot parameters that do not have a live reactive value field.
+        let release = widget.mouse_event(
+            &node,
+            MouseEventKind::Up(MouseButton::Left),
+            18.0,
+            1.0,
+            None,
+            Some(&gesture),
+            KeyModifiers::NONE,
+            1.0,
+            1.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(release_env)) = release else {
+            panic!("ADSR release should commit an envelope");
+        };
+        assert_eq!(map_value(&release_env, "attack"), dragged_attack);
+        assert_eq!(map_value(&release_env, "active"), Value::Bool(false));
     }
 
     #[cfg(target_os = "macos")]

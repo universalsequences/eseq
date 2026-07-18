@@ -100,6 +100,7 @@ LiveGraph *create_live_graph(int initial_capacity, int block_size,
   atomic_init(&lg->active_edit_batch_serial, 0);
   atomic_init(&lg->next_edit_batch_serial, 1);
   atomic_init(&lg->committed_edit_batch_serial, 0);
+  atomic_init(&lg->applied_edit_batch_serial, 0);
 
   // Initialize watch list system
   lg->watch.capacity = 16;
@@ -451,6 +452,20 @@ uint32_t graph_edit_queue_available(const LiveGraph *lg) {
   uint32_t used = head - tail;
   uint32_t usable_capacity = queue->cap - 1;
   return used < usable_capacity ? usable_capacity - used : 0;
+}
+
+uint64_t graph_edit_current_batch_serial(const LiveGraph *lg) {
+  if (!lg)
+    return 0;
+  return atomic_load_explicit(&lg->active_edit_batch_serial,
+                              memory_order_acquire);
+}
+
+uint64_t graph_edit_applied_batch_serial(const LiveGraph *lg) {
+  if (!lg)
+    return 0;
+  return atomic_load_explicit(&lg->applied_edit_batch_serial,
+                              memory_order_acquire);
 }
 
 int create_buffer(LiveGraph *lg, int size, int channel_count,

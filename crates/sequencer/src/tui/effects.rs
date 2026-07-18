@@ -10,10 +10,13 @@ use crate::effects::{
     BUILTIN_SLOT_COUNT,
 };
 use crate::lisp_host::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
-use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType};
+use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType, RackRouting};
 use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
 
+use super::fx_chain::{
+    push_fx_param, rewire_fx_chain, FxChainLocator, FxGraphEditBatch, FxLeaseSlotRemoval,
+};
 use super::{
     App, CompileTarget, EffectTab, HookCallback, HookUnit, InputMode, PendingCompile,
     PendingEditor, Region,
@@ -46,26 +49,18 @@ struct BusEffectEntry {
     custom_name: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-struct CustomEffectEdge {
-    source_id: i32,
-    source_channels: usize,
-    dest_id: i32,
-    dest_channels: usize,
-}
-
-fn adapted_audio_port_connections(
-    source_channels: usize,
-    destination_channels: usize,
-) -> Vec<(i32, i32)> {
-    let source_channels = source_channels.max(1).min(2);
-    let destination_channels = destination_channels.max(1).min(2);
-    match (source_channels, destination_channels) {
-        (1, 2) => vec![(0, 0), (0, 1)],
-        (2, 1) => vec![(0, 0), (1, 0)],
-        _ => (0..source_channels.min(destination_channels))
-            .map(|channel| (channel as i32, channel as i32))
-            .collect(),
+/// Patch any host-routed sidechain params on a descriptor with the current
+/// source-track labels. Builtin descriptors (e.g. Compressor) ship with a
+/// placeholder "off"-only enum; lisp effects get theirs from
+/// `build_effect_descriptor`.
+fn patch_sidechain_labels(desc: &mut EffectDescriptor, labels: &[String]) {
+    for param in &mut desc.params {
+        if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
+            param.max = labels.len().saturating_sub(1) as f32;
+            param.kind = ParamKind::Enum {
+                labels: labels.to_vec(),
+            };
+        }
     }
 }
 
@@ -77,81 +72,18 @@ fn instrument_display_name(name: &str) -> String {
         .to_string()
 }
 
-fn empty_track_effect_lease_slots() -> Vec<Option<lisp_host::DylibLease>> {
-    std::iter::repeat_with(|| None)
-        .take(BUILTIN_SLOT_COUNT + MAX_CUSTOM_FX)
-        .collect()
-}
-
-fn empty_bus_effect_lease_slots() -> Vec<Option<lisp_host::DylibLease>> {
-    std::iter::repeat_with(|| None)
-        .take(MAX_CUSTOM_FX)
-        .collect()
-}
-
-fn insert_empty_lease_slot<T>(row: &mut [Option<T>], slot_idx: usize) {
-    if slot_idx >= row.len() {
-        return;
-    }
-    let last = row.len().saturating_sub(1);
-    for idx in (slot_idx + 1..=last).rev() {
-        row[idx] = row[idx - 1].take();
-    }
-    row[slot_idx] = None;
-}
-
-fn remove_lease_slot<T>(row: &mut [Option<T>], slot_idx: usize) {
-    if slot_idx >= row.len() {
-        return;
-    }
-    row[slot_idx] = None;
-    for idx in slot_idx..row.len().saturating_sub(1) {
-        row[idx] = row[idx + 1].take();
-    }
-    if let Some(last) = row.last_mut() {
-        *last = None;
-    }
-}
-
-fn move_lease_slot<T>(row: &mut [Option<T>], source_slot: usize, target_slot: usize) {
-    if source_slot >= row.len() || target_slot >= row.len() || source_slot == target_slot {
-        return;
-    }
-    let lease = row[source_slot].take();
-    if source_slot < target_slot {
-        for idx in source_slot..target_slot {
-            row[idx] = row[idx + 1].take();
-        }
-    } else {
-        for idx in (target_slot + 1..=source_slot).rev() {
-            row[idx] = row[idx - 1].take();
-        }
-    }
-    row[target_slot] = lease;
-}
-
 impl App {
-    fn ensure_track_effect_lease_capacity(&mut self, track: usize) {
-        while self.editor.track_effect_leases.len() <= track {
-            self.editor
-                .track_effect_leases
-                .push(empty_track_effect_lease_slots());
-        }
-        if self.editor.track_effect_leases[track].len() < BUILTIN_SLOT_COUNT + MAX_CUSTOM_FX {
-            self.editor.track_effect_leases[track]
-                .resize_with(BUILTIN_SLOT_COUNT + MAX_CUSTOM_FX, || None);
-        }
+    pub(super) fn reclaim_applied_effect_leases(&mut self) {
+        let applied =
+            unsafe { crate::audiograph::graph_edit_applied_batch_serial(self.graph.lg.0) };
+        self.editor.effect_chain_leases.reclaim_applied(applied);
     }
 
-    fn ensure_bus_effect_lease_capacity(&mut self, bus_idx: usize) {
-        while self.editor.bus_effect_leases.len() <= bus_idx {
-            self.editor
-                .bus_effect_leases
-                .push(empty_bus_effect_lease_slots());
-        }
-        if self.editor.bus_effect_leases[bus_idx].len() < MAX_CUSTOM_FX {
-            self.editor.bus_effect_leases[bus_idx].resize_with(MAX_CUSTOM_FX, || None);
-        }
+    fn bus_fx_locator(&self, bus_idx: usize) -> Result<FxChainLocator, String> {
+        self.buses
+            .get(bus_idx)
+            .map(|bus| FxChainLocator::Bus(bus.id))
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))
     }
 
     pub(super) fn set_track_effect_lease(
@@ -159,45 +91,25 @@ impl App {
         track: usize,
         slot_idx: usize,
         lease: Option<lisp_host::DylibLease>,
-    ) {
-        self.ensure_track_effect_lease_capacity(track);
-        if let Some(slot) = self
-            .editor
-            .track_effect_leases
-            .get_mut(track)
-            .and_then(|row| row.get_mut(slot_idx))
-        {
-            *slot = lease;
-        }
+        retire_after: u64,
+    ) -> Result<(), String> {
+        self.reclaim_applied_effect_leases();
+        self.editor.effect_chain_leases.set(
+            FxChainLocator::Track(track),
+            slot_idx,
+            lease,
+            retire_after,
+        )
     }
 
-    pub(super) fn set_bus_effect_lease(
+    pub(super) fn insert_empty_track_effect_lease_slot(
         &mut self,
-        bus_idx: usize,
+        track: usize,
         slot_idx: usize,
-        lease: Option<lisp_host::DylibLease>,
-    ) {
-        self.ensure_bus_effect_lease_capacity(bus_idx);
-        if let Some(slot) = self
-            .editor
-            .bus_effect_leases
-            .get_mut(bus_idx)
-            .and_then(|row| row.get_mut(slot_idx))
-        {
-            *slot = lease;
-        }
-    }
-
-    pub(super) fn insert_empty_track_effect_lease_slot(&mut self, track: usize, slot_idx: usize) {
-        self.ensure_track_effect_lease_capacity(track);
-        let row = &mut self.editor.track_effect_leases[track];
-        insert_empty_lease_slot(row, slot_idx);
-    }
-
-    pub(super) fn remove_track_effect_lease_slot(&mut self, track: usize, slot_idx: usize) {
-        self.ensure_track_effect_lease_capacity(track);
-        let row = &mut self.editor.track_effect_leases[track];
-        remove_lease_slot(row, slot_idx);
+    ) -> Result<(), String> {
+        self.editor
+            .effect_chain_leases
+            .insert_empty_slot(FxChainLocator::Track(track), slot_idx)
     }
 
     pub(super) fn move_track_effect_lease_slot(
@@ -205,16 +117,23 @@ impl App {
         track: usize,
         source_slot: usize,
         target_slot: usize,
-    ) {
-        self.ensure_track_effect_lease_capacity(track);
-        let row = &mut self.editor.track_effect_leases[track];
-        move_lease_slot(row, source_slot, target_slot);
+    ) -> Result<(), String> {
+        self.editor.effect_chain_leases.move_slot(
+            FxChainLocator::Track(track),
+            source_slot,
+            target_slot,
+        )
     }
 
-    pub(super) fn insert_empty_bus_effect_lease_slot(&mut self, bus_idx: usize, slot_idx: usize) {
-        self.ensure_bus_effect_lease_capacity(bus_idx);
-        let row = &mut self.editor.bus_effect_leases[bus_idx];
-        insert_empty_lease_slot(row, slot_idx);
+    pub(super) fn insert_empty_bus_effect_lease_slot(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+    ) -> Result<(), String> {
+        let locator = self.bus_fx_locator(bus_idx)?;
+        self.editor
+            .effect_chain_leases
+            .insert_empty_slot(locator, slot_idx)
     }
 
     pub(super) fn move_bus_effect_lease_slot(
@@ -222,10 +141,11 @@ impl App {
         bus_idx: usize,
         source_slot: usize,
         target_slot: usize,
-    ) {
-        self.ensure_bus_effect_lease_capacity(bus_idx);
-        let row = &mut self.editor.bus_effect_leases[bus_idx];
-        move_lease_slot(row, source_slot, target_slot);
+    ) -> Result<(), String> {
+        let locator = self.bus_fx_locator(bus_idx)?;
+        self.editor
+            .effect_chain_leases
+            .move_slot(locator, source_slot, target_slot)
     }
 
     fn compile_saved_effect(&self, name: &str) -> Result<lisp_host::CompileResult, String> {
@@ -386,11 +306,9 @@ impl App {
             .manifest
             .clone();
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-        let engine_id =
-            self.register_dedicated_instrument_engine(name, &source, &manifest, lib_index)?;
         Ok(PreparedRackInstrument {
             name: name.to_string(),
-            engine_id,
+            engine_id: cache_idx,
             manifest,
             lib_index,
             run_mode,
@@ -415,6 +333,40 @@ impl App {
                 prepared.run_mode,
             )
         }
+    }
+
+    pub fn replace_rack_slot_with_saved_instrument_sync(
+        &mut self,
+        track: usize,
+        slot: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Rack) {
+            return Err("Current track is not a rack".to_string());
+        }
+        let rack = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| "Rack track has no rack metadata".to_string())?;
+        if rack.routing != RackRouting::Broadcast || rack.slots.get(slot).is_none() {
+            return Err("Invalid instrument rack layer".to_string());
+        }
+
+        let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
+        self.graph_controller().replace_rack_slot_with_custom(
+            track,
+            slot,
+            &prepared.name,
+            prepared.engine_id,
+            &prepared.manifest,
+            prepared.run_mode,
+        )
     }
 
     pub fn add_saved_instrument_slot_to_drum_rack_pad_sync(
@@ -483,7 +435,7 @@ impl App {
                 None => {
                     return Some(Err(format!(
                         "Instrument engine {cache_idx} references missing library {lib_index}"
-                    )))
+                    )));
                 }
             };
         let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
@@ -957,100 +909,6 @@ impl App {
         }
     }
 
-    fn custom_effect_edges(&self, track: usize) -> Vec<CustomEffectEdge> {
-        let mut edges = Vec::new();
-        let mut prev_id = self.graph.track_node_ids[track].pan_id;
-        let mut prev_channels = 2usize;
-        for offset in 0..MAX_CUSTOM_FX {
-            let slot_idx = BUILTIN_SLOT_COUNT + offset;
-            let Some(slot) = self.state.pattern.effect_chains[track].get(slot_idx) else {
-                continue;
-            };
-            let node_id = slot.node_id.load(Ordering::Relaxed);
-            if node_id == 0 {
-                continue;
-            }
-            let desc = &self.graph.effect_descriptors[track][slot_idx];
-            edges.push(CustomEffectEdge {
-                source_id: prev_id,
-                source_channels: prev_channels,
-                dest_id: node_id as i32,
-                dest_channels: desc.input_channels.max(1),
-            });
-            prev_id = node_id as i32;
-            prev_channels = desc.output_channels.max(1);
-        }
-        edges.push(CustomEffectEdge {
-            source_id: prev_id,
-            source_channels: prev_channels,
-            dest_id: self.graph.track_node_ids[track].delay_id,
-            dest_channels: 2,
-        });
-        edges
-    }
-
-    unsafe fn disconnect_custom_effect_edge(&self, edge: CustomEffectEdge) {
-        for src_port in 0..2 {
-            for dst_port in 0..2 {
-                let _ = crate::audiograph::graph_disconnect(
-                    self.graph.lg.0,
-                    edge.source_id,
-                    src_port,
-                    edge.dest_id,
-                    dst_port,
-                );
-            }
-        }
-    }
-
-    unsafe fn connect_custom_effect_edge(&self, edge: CustomEffectEdge) {
-        let source_channels = edge.source_channels.max(1).min(2);
-        let dest_channels = edge.dest_channels.max(1).min(2);
-        if source_channels <= 1 {
-            for dst_port in 0..dest_channels {
-                let _ = crate::audiograph::graph_connect(
-                    self.graph.lg.0,
-                    edge.source_id,
-                    0,
-                    edge.dest_id,
-                    dst_port as i32,
-                );
-            }
-        } else if dest_channels <= 1 {
-            for src_port in 0..source_channels {
-                let _ = crate::audiograph::graph_connect(
-                    self.graph.lg.0,
-                    edge.source_id,
-                    src_port as i32,
-                    edge.dest_id,
-                    0,
-                );
-            }
-        } else {
-            for ch in 0..source_channels.min(dest_channels) {
-                let _ = crate::audiograph::graph_connect(
-                    self.graph.lg.0,
-                    edge.source_id,
-                    ch as i32,
-                    edge.dest_id,
-                    ch as i32,
-                );
-            }
-        }
-    }
-
-    fn reconnect_custom_effect_chain(&self, old_edges: Vec<CustomEffectEdge>, track: usize) {
-        unsafe {
-            for edge in old_edges {
-                self.disconnect_custom_effect_edge(edge);
-            }
-            for edge in self.custom_effect_edges(track) {
-                self.disconnect_custom_effect_edge(edge);
-                self.connect_custom_effect_edge(edge);
-            }
-        }
-    }
-
     fn publish_effect_reorder(&mut self) {
         self.state.save_current_pattern_snapshot(
             self.tracks.len(),
@@ -1143,7 +1001,7 @@ impl App {
         if entries.len() >= MAX_CUSTOM_FX {
             return Err("No free effect slots available".to_string());
         }
-        let old_edges = self.custom_effect_edges(track);
+        let old_host = self.fx_chain_host(FxChainLocator::Track(track))?;
         let target_offset = target_slot.saturating_sub(BUILTIN_SLOT_COUNT);
         let insert_offset = target_offset.min(entries.len());
         entries.insert(
@@ -1154,9 +1012,13 @@ impl App {
             },
         );
         self.write_custom_effect_entries(track, &entries);
-        self.reconnect_custom_effect_chain(old_edges, track);
+        let new_host = self.fx_chain_host(FxChainLocator::Track(track))?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        }
         let slot_idx = BUILTIN_SLOT_COUNT + insert_offset;
-        self.insert_empty_track_effect_lease_slot(track, slot_idx);
+        self.insert_empty_track_effect_lease_slot(track, slot_idx)?;
         self.sync_other_pattern_effect_insert(track, slot_idx);
         Ok(slot_idx)
     }
@@ -1220,12 +1082,16 @@ impl App {
             entries.insert(source_offset, entry);
             return Ok(source_slot);
         }
-        let old_edges = self.custom_effect_edges(track);
+        let old_host = self.fx_chain_host(FxChainLocator::Track(track))?;
         entries.insert(target_offset, entry);
         self.write_custom_effect_entries(track, &entries);
-        self.reconnect_custom_effect_chain(old_edges, track);
+        let new_host = self.fx_chain_host(FxChainLocator::Track(track))?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        }
         let slot_idx = BUILTIN_SLOT_COUNT + target_offset;
-        self.move_track_effect_lease_slot(track, source_slot, slot_idx);
+        self.move_track_effect_lease_slot(track, source_slot, slot_idx)?;
         self.sync_other_pattern_effect_move(track, source_slot, slot_idx);
         self.publish_effect_reorder();
         Ok(slot_idx)
@@ -1301,116 +1167,15 @@ impl App {
         Ok(target_idx)
     }
 
-    fn find_custom_slot_predecessor(&self, track: usize, offset: usize) -> (i32, usize) {
-        let chain = &self.state.pattern.effect_chains[track];
-        for i in (0..offset).rev() {
-            let idx = BUILTIN_SLOT_COUNT + i;
-            if idx < chain.len() {
-                let nid = chain[idx].node_id.load(Ordering::Relaxed);
-                if nid != 0 {
-                    let channels = self.graph.effect_descriptors[track][idx]
-                        .output_channels
-                        .max(1);
-                    return (nid as i32, channels);
-                }
-            }
-        }
-        (self.graph.track_node_ids[track].pan_id, 2)
-    }
-
-    fn find_custom_slot_successor(&self, track: usize, offset: usize) -> (i32, usize) {
-        let chain = &self.state.pattern.effect_chains[track];
-        for i in (offset + 1)..MAX_CUSTOM_FX {
-            let idx = BUILTIN_SLOT_COUNT + i;
-            if idx < chain.len() {
-                let nid = chain[idx].node_id.load(Ordering::Relaxed);
-                if nid != 0 {
-                    let channels = self.graph.effect_descriptors[track][idx]
-                        .input_channels
-                        .max(1);
-                    return (nid as i32, channels);
-                }
-            }
-        }
-        (self.graph.track_node_ids[track].delay_id, 2)
-    }
-
     fn resolve_custom_slot_wiring(
         &self,
         track: usize,
         slot_idx: usize,
-    ) -> (usize, i32, usize, i32, usize, Option<i32>) {
-        let offset = slot_idx - BUILTIN_SLOT_COUNT;
-        let slot_id = track * MAX_CUSTOM_FX + offset;
-        let (predecessor_id, predecessor_outputs) =
-            self.find_custom_slot_predecessor(track, offset);
-        let (successor_id, successor_inputs) = self.find_custom_slot_successor(track, offset);
-        let existing_node = self.state.pattern.effect_chains[track]
-            .get(slot_idx)
-            .map(|slot| slot.node_id.load(Ordering::Relaxed))
-            .unwrap_or(0);
-        let existing = if existing_node != 0 {
-            Some(existing_node as i32)
-        } else {
-            None
-        };
-        (
-            slot_id,
-            predecessor_id,
-            predecessor_outputs,
-            successor_id,
-            successor_inputs,
-            existing,
-        )
+    ) -> Result<(usize, i32, usize, i32, usize, Option<i32>), String> {
+        self.resolve_fx_slot(FxChainLocator::Track(track), slot_idx)
     }
 
-    unsafe fn connect_builtin_effect_chain(
-        &self,
-        predecessor_id: i32,
-        predecessor_outputs: usize,
-        effect_id: i32,
-        effect_inputs: usize,
-        effect_outputs: usize,
-        successor_id: i32,
-        successor_inputs: usize,
-    ) {
-        for src_port in 0..2 {
-            for dst_port in 0..2 {
-                crate::audiograph::graph_disconnect(
-                    self.graph.lg.0,
-                    predecessor_id,
-                    src_port,
-                    successor_id,
-                    dst_port,
-                );
-            }
-        }
-
-        for (src_port, dst_port) in
-            adapted_audio_port_connections(predecessor_outputs, effect_inputs)
-        {
-            let _ = crate::audiograph::graph_connect(
-                self.graph.lg.0,
-                predecessor_id,
-                src_port,
-                effect_id,
-                dst_port,
-            );
-        }
-
-        for (src_port, dst_port) in adapted_audio_port_connections(effect_outputs, successor_inputs)
-        {
-            let _ = crate::audiograph::graph_connect(
-                self.graph.lg.0,
-                effect_id,
-                src_port,
-                successor_id,
-                dst_port,
-            );
-        }
-    }
-
-    fn create_builtin_effect_node(
+    pub(super) fn create_builtin_effect_node(
         &self,
         slot_id: usize,
         desc: &EffectDescriptor,
@@ -1508,7 +1273,11 @@ impl App {
         }
     }
 
-    fn create_effect_modulator_node(&self, name: &str, slot_id: usize) -> Result<i32, String> {
+    pub(super) fn create_effect_modulator_node(
+        &self,
+        name: &str,
+        slot_id: usize,
+    ) -> Result<i32, String> {
         let mod_name = CString::new(format!("{}_{}_mod", name.to_lowercase(), slot_id)).unwrap();
         let mod_id = unsafe {
             crate::audiograph::add_node(
@@ -1539,7 +1308,7 @@ impl App {
         }
     }
 
-    unsafe fn connect_effect_modulator_for_descriptor(
+    pub(super) unsafe fn connect_effect_modulator_for_descriptor(
         &self,
         modulator_node_id: i32,
         effect_node_id: i32,
@@ -1752,45 +1521,11 @@ impl App {
         if crate::effects::conv_reverb::is_dgen_builtin(name) {
             return self.load_dgen_builtin_to_slot_sync(track, slot_idx, name);
         }
-        let desc = EffectDescriptor::builtin_insert(name)
+        let mut desc = EffectDescriptor::builtin_insert(name)
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_custom_slot_wiring(track, slot_idx);
-        let node_id = self.create_builtin_effect_node(slot_id, &desc)?;
-        let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
-        let modulator_node_id = if desc.instrument_modulation_targets.is_empty() {
-            None
-        } else {
-            Some(self.create_effect_modulator_node(&desc.name, slot_id)?)
-        };
-        let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
-        unsafe {
-            if let Some(old_id) = existing {
-                lisp_host::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
-                crate::effects::conv_reverb::clear_instance(old_id);
-            }
-            if let Some(old_mod_id) = existing_modulator {
-                lisp_host::remove_effect_modulator(self.graph.lg.0, old_mod_id);
-            }
-            self.connect_builtin_effect_chain(
-                pred,
-                pred_outputs,
-                node_id,
-                desc.input_channels,
-                desc.output_channels,
-                succ,
-                succ_inputs,
-            );
-            if let Some(mod_id) = modulator_node_id {
-                self.connect_effect_modulator_for_descriptor(
-                    mod_id,
-                    node_id,
-                    &desc,
-                    ext_mod_inputs.as_ref(),
-                )?;
-            }
-        }
-        self.set_track_effect_lease(track, slot_idx, None);
+        patch_sidechain_labels(&mut desc, &self.effect_sidechain_labels(track));
+        let (node_id, modulator_node_id) =
+            self.install_builtin_fx_node(FxChainLocator::Track(track), slot_idx, &desc)?;
         self.apply_builtin_effect_to_slot_with_modulator(
             track,
             slot_idx,
@@ -1920,6 +1655,23 @@ impl App {
             .and_then(|bus| bus.effect_slots.get(slot_idx))
             .map(|slot| slot.node_id as i32)
             .ok_or_else(|| format!("Bus {} effect slot {} not found", bus_idx + 1, slot_idx + 1))?;
+        self.apply_conv_reverb_ir_to_node(node_id, abs_path, reference)
+    }
+
+    pub fn set_conv_reverb_ir_rack_slot(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        abs_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        let node_id = self
+            .rack_slot_effect_snapshot(track, rack_slot)?
+            .effect_slots
+            .get(effect_slot)
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Rack-slot effect not found".to_string())?;
         self.apply_conv_reverb_ir_to_node(node_id, abs_path, reference)
     }
 
@@ -2061,18 +1813,6 @@ impl App {
             .map(|nodes| nodes.mod_in_clip_ids)
     }
 
-    fn bus_effect_ext_mod_input_nodes(
-        &self,
-        bus_idx: usize,
-    ) -> Option<[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]> {
-        let bus_id = self.buses.get(bus_idx)?.id;
-        self.graph
-            .bus_node_ids
-            .iter()
-            .find(|nodes| nodes.id == bus_id)
-            .map(|nodes| nodes.mod_in_clip_ids)
-    }
-
     fn current_effect_modulator_node(&self, track: usize, slot_idx: usize) -> Option<i32> {
         self.state
             .pattern
@@ -2178,12 +1918,7 @@ impl App {
             if !disconnected {
                 eprintln!(
                     "sidechain: disconnect failed effect_node={} track={} slot={} old_track={} src_port={} dst_port={}",
-                    node_id,
-                    track,
-                    slot_idx,
-                    old_track,
-                    source_port,
-                    *input_channel as i32,
+                    node_id, track, slot_idx, old_track, source_port, *input_channel as i32,
                 );
             }
         }
@@ -2202,12 +1937,7 @@ impl App {
             if !connected {
                 eprintln!(
                     "sidechain: connect failed effect_node={} track={} slot={} new_track={} src_port={} dst_port={}",
-                    node_id,
-                    track,
-                    slot_idx,
-                    new_track,
-                    source_port,
-                    *input_channel as i32,
+                    node_id, track, slot_idx, new_track, source_port, *input_channel as i32,
                 );
             }
         }
@@ -2387,14 +2117,21 @@ impl App {
             return;
         }
         let track = self.ui.cursor_track;
-        let (
+        let Ok((
             slot_id,
             predecessor_id,
             predecessor_outputs,
             successor_id,
             successor_inputs,
             existing,
-        ) = self.resolve_custom_slot_wiring(track, slot_idx);
+        )) = self.resolve_custom_slot_wiring(track, slot_idx)
+        else {
+            self.editor.status_message = Some((
+                "Cannot resolve the selected track FX chain".to_string(),
+                Instant::now(),
+            ));
+            return;
+        };
 
         let result = lisp_host::run_embedded_effect_editor_flow(
             self.graph.sample_rate,
@@ -2443,7 +2180,17 @@ impl App {
                     self.ui.focused_region = Region::Params;
                     self.ui.params_column = 1;
                     self.editor.lisp_libs.push(lib);
-                    self.set_track_effect_lease(track, slot_idx, lease);
+                    if let Err(error) = self.set_track_effect_lease(
+                        track,
+                        slot_idx,
+                        lease,
+                        node_ids.replacement_batch_serial,
+                    ) {
+                        self.editor.status_message = Some((
+                            format!("Error retaining effect lease: {error}"),
+                            Instant::now(),
+                        ));
+                    }
                 }
                 Err(error) => {
                     self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
@@ -2488,6 +2235,7 @@ impl App {
 
     /// Poll for async compile completion. Returns a status message if something finished.
     pub fn poll_pending_compile(&mut self) -> Option<String> {
+        self.reclaim_applied_effect_leases();
         let pending = self.editor.pending_compile.as_ref()?;
         match pending.receiver.try_recv() {
             Ok(Ok(compile_result)) => {
@@ -2549,37 +2297,9 @@ impl App {
         if slot_idx >= self.graph.effect_descriptors[track].len() {
             return Err("Invalid effect slot".to_string());
         }
-        let lisp_host::CompileResult {
-            manifest,
-            lib,
-            lease,
-        } = result;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_custom_slot_wiring(track, slot_idx);
-
-        let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
-        let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
-        let node_ids = unsafe {
-            lisp_host::add_effect_to_chain_at(
-                self.graph.lg.0,
-                slot_id,
-                &manifest,
-                &lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
-                existing,
-                existing_modulator,
-                ext_mod_inputs.as_ref(),
-            )
-        }?;
-        if let Some(old_node_id) = existing {
-            crate::effects::conv_reverb::clear_instance(old_node_id);
-        }
+        let (manifest, node_ids) =
+            self.install_compiled_fx_node(FxChainLocator::Track(track), slot_idx, result)?;
         self.apply_effect_to_slot(track, slot_idx, node_ids, name, &manifest);
-        self.editor.lisp_libs.push(lib);
-        self.set_track_effect_lease(track, slot_idx, lease);
         self.ui.effect_tab = EffectTab::Slot(slot_idx);
         self.ui.effect_param_cursor = 0;
         self.ui.effect_scroll_offset = 0;
@@ -2710,62 +2430,6 @@ impl App {
         Ok(())
     }
 
-    fn bus_effect_edges(&self, bus_idx: usize) -> Result<Vec<CustomEffectEdge>, String> {
-        let bus_nodes = self
-            .graph
-            .bus_node_ids
-            .get(bus_idx)
-            .ok_or_else(|| format!("Bus {} graph nodes not found", bus_idx + 1))?;
-        let bus = self
-            .buses
-            .get(bus_idx)
-            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
-        let mut edges = Vec::new();
-        let mut prev_id = bus_nodes.gate_id;
-        let mut prev_channels = 2usize;
-        for slot_idx in 0..MAX_CUSTOM_FX {
-            let Some(slot) = bus.effect_slots.get(slot_idx) else {
-                continue;
-            };
-            if slot.node_id == 0 {
-                continue;
-            }
-            let desc = &bus.effect_descriptors[slot_idx];
-            edges.push(CustomEffectEdge {
-                source_id: prev_id,
-                source_channels: prev_channels,
-                dest_id: slot.node_id as i32,
-                dest_channels: desc.input_channels.max(1),
-            });
-            prev_id = slot.node_id as i32;
-            prev_channels = desc.output_channels.max(1);
-        }
-        edges.push(CustomEffectEdge {
-            source_id: prev_id,
-            source_channels: prev_channels,
-            dest_id: bus_nodes.volume_id,
-            dest_channels: 2,
-        });
-        Ok(edges)
-    }
-
-    fn reconnect_bus_effect_chain(
-        &self,
-        old_edges: Vec<CustomEffectEdge>,
-        bus_idx: usize,
-    ) -> Result<(), String> {
-        unsafe {
-            for edge in old_edges {
-                self.disconnect_custom_effect_edge(edge);
-            }
-            for edge in self.bus_effect_edges(bus_idx)? {
-                self.disconnect_custom_effect_edge(edge);
-                self.connect_custom_effect_edge(edge);
-            }
-        }
-        Ok(())
-    }
-
     fn prepare_bus_effect_insert_slot(
         &mut self,
         bus_idx: usize,
@@ -2804,10 +2468,15 @@ impl App {
         new_to_old.insert(insert_offset, None);
         new_to_old.resize(MAX_CUSTOM_FX, None);
         new_to_old.truncate(MAX_CUSTOM_FX);
-        let old_edges = self.bus_effect_edges(bus_idx)?;
+        let locator = self.bus_fx_locator(bus_idx)?;
+        let old_host = self.fx_chain_host(locator)?;
         self.write_bus_effect_entries(bus_idx, &entries)?;
-        self.reconnect_bus_effect_chain(old_edges, bus_idx)?;
-        self.insert_empty_bus_effect_lease_slot(bus_idx, insert_offset);
+        let new_host = self.fx_chain_host(locator)?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        }
+        self.insert_empty_bus_effect_lease_slot(bus_idx, insert_offset)?;
         self.remap_other_bus_pattern_effect_slots(bus_idx, &new_to_old, &snapshot_before_remap);
         Ok(insert_offset)
     }
@@ -2888,11 +2557,16 @@ impl App {
         new_to_old.insert(target_offset, source_physical_slot);
         new_to_old.resize(MAX_CUSTOM_FX, None);
         new_to_old.truncate(MAX_CUSTOM_FX);
-        let old_edges = self.bus_effect_edges(bus_idx)?;
+        let locator = self.bus_fx_locator(bus_idx)?;
+        let old_host = self.fx_chain_host(locator)?;
         entries.insert(target_offset, entry);
         self.write_bus_effect_entries(bus_idx, &entries)?;
-        self.reconnect_bus_effect_chain(old_edges, bus_idx)?;
-        self.move_bus_effect_lease_slot(bus_idx, source_offset, target_offset);
+        let new_host = self.fx_chain_host(locator)?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        }
+        self.move_bus_effect_lease_slot(bus_idx, source_offset, target_offset)?;
         self.remap_other_bus_pattern_effect_slots(bus_idx, &new_to_old, &snapshot_before_remap);
         self.push_all_delay_bpm();
         Ok(target_offset)
@@ -2955,50 +2629,12 @@ impl App {
         if crate::effects::conv_reverb::is_dgen_builtin(name) {
             return self.load_dgen_builtin_bus_to_slot_sync(bus_idx, slot_idx, name);
         }
-        let desc = EffectDescriptor::builtin_insert(name)
+        let mut desc = EffectDescriptor::builtin_insert(name)
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
-        let node_id = self.create_builtin_effect_node(slot_id, &desc)?;
-        let existing_modulator = self
-            .buses
-            .get(bus_idx)
-            .and_then(|bus| bus.effect_slots.get(slot_idx))
-            .map(|slot| slot.modulator_node_id as i32)
-            .filter(|node_id| *node_id > 0);
-        let modulator_node_id = if desc.instrument_modulation_targets.is_empty() {
-            None
-        } else {
-            Some(self.create_effect_modulator_node(&desc.name, slot_id)?)
-        };
-        let ext_mod_inputs = self.bus_effect_ext_mod_input_nodes(bus_idx);
-        unsafe {
-            if let Some(old_id) = existing {
-                lisp_host::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
-                crate::effects::conv_reverb::clear_instance(old_id);
-            }
-            if let Some(old_mod_id) = existing_modulator {
-                lisp_host::remove_effect_modulator(self.graph.lg.0, old_mod_id);
-            }
-            self.connect_builtin_effect_chain(
-                pred,
-                pred_outputs,
-                node_id,
-                desc.input_channels,
-                desc.output_channels,
-                succ,
-                succ_inputs,
-            );
-            if let Some(mod_id) = modulator_node_id {
-                self.connect_effect_modulator_for_descriptor(
-                    mod_id,
-                    node_id,
-                    &desc,
-                    ext_mod_inputs.as_ref(),
-                )?;
-            }
-        }
-        self.set_bus_effect_lease(bus_idx, slot_idx, None);
+        patch_sidechain_labels(&mut desc, &self.bus_effect_sidechain_labels());
+        let locator = self.bus_fx_locator(bus_idx)?;
+        let (node_id, modulator_node_id) =
+            self.install_builtin_fx_node(locator, slot_idx, &desc)?;
         let bus = self
             .buses
             .get_mut(bus_idx)
@@ -3049,38 +2685,8 @@ impl App {
                 bus_idx + 1
             ));
         }
-        let lisp_host::CompileResult {
-            manifest,
-            lib,
-            lease,
-        } = result;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
-        let existing_modulator = self
-            .buses
-            .get(bus_idx)
-            .and_then(|bus| bus.effect_slots.get(slot_idx))
-            .map(|slot| slot.modulator_node_id as i32)
-            .filter(|node_id| *node_id > 0);
-        let ext_mod_inputs = self.bus_effect_ext_mod_input_nodes(bus_idx);
-        let node_ids = unsafe {
-            lisp_host::add_effect_to_chain_at(
-                self.graph.lg.0,
-                slot_id,
-                &manifest,
-                &lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
-                existing,
-                existing_modulator,
-                ext_mod_inputs.as_ref(),
-            )
-        }?;
-        if let Some(old_node_id) = existing {
-            crate::effects::conv_reverb::clear_instance(old_node_id);
-        }
+        let locator = self.bus_fx_locator(bus_idx)?;
+        let (manifest, node_ids) = self.install_compiled_fx_node(locator, slot_idx, result)?;
         let desc = self.build_bus_effect_descriptor(name, &manifest);
         let bus = self
             .buses
@@ -3098,8 +2704,6 @@ impl App {
         }
         self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
         self.push_all_delay_bpm();
-        self.editor.lisp_libs.push(lib);
-        self.set_bus_effect_lease(bus_idx, slot_idx, lease);
         Ok(())
     }
 
@@ -3108,39 +2712,8 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
     ) -> Result<(), String> {
-        let (node_id, modulator_node_id, pred, pred_outputs, succ, succ_inputs) = {
-            let bus = self
-                .buses
-                .get(bus_idx)
-                .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
-            let (node_id, modulator_node_id) = bus
-                .effect_slots
-                .get(slot_idx)
-                .map(|slot| (slot.node_id, slot.modulator_node_id))
-                .unwrap_or((0, 0));
-            if node_id == 0 {
-                (0, 0, 0, 0, 0, 0)
-            } else {
-                let (_, pred, pred_outputs, succ, succ_inputs, _) =
-                    self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
-                (
-                    node_id,
-                    modulator_node_id,
-                    pred,
-                    pred_outputs,
-                    succ,
-                    succ_inputs,
-                )
-            }
-        };
-        if node_id != 0 {
-            unsafe {
-                lisp_host::remove_effect_from_chain(self.graph.lg.0, node_id as i32, pred, succ);
-                lisp_host::remove_effect_modulator(self.graph.lg.0, modulator_node_id as i32);
-            }
-            crate::effects::conv_reverb::clear_instance(node_id as i32);
-            self.connect_bus_effect_gap(pred, pred_outputs, succ, succ_inputs);
-        }
+        let locator = self.bus_fx_locator(bus_idx)?;
+        self.remove_fx_slot_node(locator, slot_idx, FxLeaseSlotRemoval::Clear)?;
         let bus = self
             .buses
             .get_mut(bus_idx)
@@ -3153,32 +2726,10 @@ impl App {
         if slot_idx < bus.custom_effect_names.len() {
             bus.custom_effect_names[slot_idx] = None;
         }
-        self.set_bus_effect_lease(bus_idx, slot_idx, None);
         let live_snapshot = self.capture_bus_pattern_snapshot();
         self.state
             .clear_bus_effect_slot_in_other_scene_patterns(bus_idx, slot_idx, &live_snapshot);
         Ok(())
-    }
-
-    fn connect_bus_effect_gap(
-        &self,
-        predecessor_id: i32,
-        predecessor_outputs: usize,
-        successor_id: i32,
-        successor_inputs: usize,
-    ) {
-        let channels = predecessor_outputs.min(successor_inputs).max(1).min(2);
-        for ch in 0..channels {
-            unsafe {
-                crate::audiograph::graph_connect(
-                    self.graph.lg.0,
-                    predecessor_id,
-                    ch as i32,
-                    successor_id,
-                    ch as i32,
-                );
-            }
-        }
     }
 
     pub fn set_bus_effect_param(
@@ -3222,7 +2773,8 @@ impl App {
                 stored_value,
             )
         };
-        self.push_bus_effect_param_to_graph(
+        push_fx_param(
+            self.graph.lg.0,
             node_id,
             modulator_node_id,
             node_param_idx,
@@ -3267,42 +2819,6 @@ impl App {
         }
         self.sync_bus_effect_mod_active_plocks(bus_idx, step, slot_idx);
         Ok(())
-    }
-
-    pub(super) fn push_bus_effect_param_to_graph(
-        &self,
-        node_id: u32,
-        modulator_node_id: u32,
-        node_param_idx: u32,
-        node_param_span: u32,
-        value: f32,
-    ) {
-        let Some((logical_id, node_param_idx)) =
-            (if node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
-                (modulator_node_id != 0).then_some((
-                    modulator_node_id as u64,
-                    node_param_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
-                ))
-            } else if node_id != 0 && node_param_idx != u32::MAX {
-                Some((node_id as u64, node_param_idx as u64))
-            } else {
-                None
-            })
-        else {
-            return;
-        };
-        unsafe {
-            for lane in 0..node_param_span.max(1) as u64 {
-                crate::audiograph::params_push_wrapper(
-                    self.graph.lg.0,
-                    crate::audiograph::ParamMsg {
-                        logical_id,
-                        idx: node_param_idx + lane,
-                        fvalue: value,
-                    },
-                );
-            }
-        }
     }
 
     fn sync_bus_effect_mod_active_defaults(&mut self, bus_idx: usize, slot_idx: usize) {
@@ -3357,7 +2873,8 @@ impl App {
             return;
         };
         for (_, node_param_idx, node_param_span, active) in updates {
-            self.push_bus_effect_param_to_graph(
+            push_fx_param(
+                self.graph.lg.0,
                 node_id,
                 modulator_node_id,
                 node_param_idx,
@@ -3434,65 +2951,13 @@ impl App {
             .buses
             .get(bus_idx)
             .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
-        let bus_nodes = self
-            .graph
-            .bus_node_ids
-            .iter()
-            .find(|nodes| nodes.id == bus.id)
-            .ok_or_else(|| {
-                format!(
-                    "Graph nodes for bus '{}' ({}) not found",
-                    bus.name, bus.id.0
-                )
-            })?;
         if slot_idx >= bus.effect_descriptors.len() || slot_idx >= bus.effect_slots.len() {
             return Err(format!("Bus effect slot {} out of range", slot_idx + 1));
         }
 
-        // Bus state is reconstructed from each project, while graph bus nodes can
-        // survive a project reload.  Their vector positions therefore are not a
-        // durable identity.  Keep both graph lookup and effect instance identity
-        // tied to BusId so an effect cannot silently attach to another bus after
-        // the project changes the bus ordering.
-        let bus_identity = usize::try_from(bus.id.0)
-            .map_err(|_| format!("Bus id {} is too large for this platform", bus.id.0))?;
-        let slot_id = crate::sequencer::MAX_TRACKS
-            .checked_add(bus_identity)
-            .and_then(|identity| identity.checked_mul(MAX_CUSTOM_FX))
-            .and_then(|base| base.checked_add(slot_idx))
-            .ok_or_else(|| format!("Effect slot identity overflow for bus id {}", bus.id.0))?;
-        let mut predecessor_id = bus_nodes.gate_id;
-        let mut predecessor_outputs = 2;
-        for idx in (0..slot_idx).rev() {
-            let node_id = bus.effect_slots[idx].node_id;
-            if node_id != 0 {
-                predecessor_id = node_id as i32;
-                predecessor_outputs = bus.effect_descriptors[idx].output_channels.max(1);
-                break;
-            }
-        }
-
-        let mut successor_id = bus_nodes.volume_id;
-        let mut successor_inputs = 2;
-        for idx in (slot_idx + 1)..bus.effect_slots.len() {
-            let node_id = bus.effect_slots[idx].node_id;
-            if node_id != 0 {
-                successor_id = node_id as i32;
-                successor_inputs = bus.effect_descriptors[idx].input_channels.max(1);
-                break;
-            }
-        }
-
-        let existing_node = bus.effect_slots[slot_idx].node_id;
-        let existing = (existing_node != 0).then_some(existing_node as i32);
-        Ok((
-            slot_id,
-            predecessor_id,
-            predecessor_outputs,
-            successor_id,
-            successor_inputs,
-            existing,
-        ))
+        // Resolve by BusId rather than vector position: bus ordering is project
+        // state, while graph nodes may survive project reconstruction.
+        self.resolve_fx_slot(FxChainLocator::Bus(bus.id), slot_idx)
     }
 
     pub fn bus_effect_param_option_index(
@@ -3553,30 +3018,682 @@ impl App {
             ) {
                 continue;
             }
-            let (logical_id, node_param_idx) =
-                if param.node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
-                    if slot.modulator_node_id == 0 {
-                        continue;
+            push_fx_param(
+                self.graph.lg.0,
+                slot.node_id,
+                slot.modulator_node_id,
+                param.node_param_idx,
+                param.node_param_span,
+                slot.defaults[param_idx],
+            );
+        }
+    }
+
+    fn rack_slot_fx_locator(track: usize, rack_slot: usize) -> FxChainLocator {
+        FxChainLocator::RackSlot {
+            track,
+            slot: rack_slot,
+        }
+    }
+
+    fn rack_slot_effect_snapshot(
+        &self,
+        track: usize,
+        rack_slot: usize,
+    ) -> Result<crate::sequencer::RackSlotSnapshot, String> {
+        self.state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(rack_slot))
+            .cloned()
+            .ok_or_else(|| format!("Track {} rack slot {} not found", track + 1, rack_slot + 1))
+    }
+
+    fn write_rack_slot_effect(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        descriptor: EffectDescriptor,
+        snapshot: EffectSlotSnapshot,
+        custom_name: Option<String>,
+    ) -> Result<(), String> {
+        if effect_slot >= MAX_CUSTOM_FX {
+            return Err(format!(
+                "Rack-slot effect slot {} is out of range",
+                effect_slot + 1
+            ));
+        }
+        let updated =
+            self.state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.normalize_effect_chain();
+                    slot.effect_descriptors[effect_slot] = descriptor.clone();
+                    slot.effect_slots[effect_slot] = snapshot.clone();
+                    slot.custom_effect_names[effect_slot] = custom_name.clone();
+                });
+        if !updated {
+            return Err("Failed to update rack-slot FX state".to_string());
+        }
+        self.graph_controller()
+            .refresh_rack_signature_from_live_state(track);
+        Ok(())
+    }
+
+    pub fn next_free_rack_slot_effect_slot(&self, track: usize, rack_slot: usize) -> Option<usize> {
+        self.rack_slot_effect_snapshot(track, rack_slot)
+            .ok()?
+            .effect_slots
+            .iter()
+            .position(|slot| slot.node_id == 0)
+    }
+
+    pub fn add_builtin_rack_slot_effect_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let effect_slot = self
+            .next_free_rack_slot_effect_slot(track, rack_slot)
+            .ok_or_else(|| "No free rack-slot effect slots available".to_string())?;
+        self.load_builtin_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, name)?;
+        Ok(effect_slot)
+    }
+
+    pub fn add_rack_slot_effect_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let effect_slot = self
+            .next_free_rack_slot_effect_slot(track, rack_slot)
+            .ok_or_else(|| "No free rack-slot effect slots available".to_string())?;
+        self.load_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, name)?;
+        Ok(effect_slot)
+    }
+
+    fn prepare_rack_slot_effect_insert_slot(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        target_slot: usize,
+    ) -> Result<usize, String> {
+        if target_slot >= MAX_CUSTOM_FX {
+            return Err("Rack-slot FX insert target is out of range".to_string());
+        }
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let old_host = self.fx_chain_host(locator)?;
+        if old_host.slots[target_slot].node_id == 0 {
+            return Err("Rack-slot FX insert target is empty".to_string());
+        }
+        if old_host.slots.iter().all(|slot| slot.node_id != 0) {
+            return Err("No free rack-slot effect slots available".to_string());
+        }
+        let updated =
+            self.state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.normalize_effect_chain();
+                    slot.effect_slots
+                        .insert(target_slot, EffectSlotSnapshot::new_empty());
+                    slot.effect_slots.truncate(MAX_CUSTOM_FX);
+                    slot.effect_descriptors
+                        .insert(target_slot, EffectDescriptor::empty_custom_slot());
+                    slot.effect_descriptors.truncate(MAX_CUSTOM_FX);
+                    slot.custom_effect_names.insert(target_slot, None);
+                    slot.custom_effect_names.truncate(MAX_CUSTOM_FX);
+                });
+        if !updated {
+            return Err("Failed to update rack-slot FX state".to_string());
+        }
+        self.graph_controller()
+            .refresh_rack_signature_from_live_state(track);
+        self.state
+            .update_rack_macros_for_all_pattern_snapshots(track, |macros| {
+                for mapping in macros
+                    .iter_mut()
+                    .flat_map(|rack_macro| &mut rack_macro.mappings)
+                {
+                    if let crate::sequencer::RackMacroTarget::SlotEffectParam {
+                        slot,
+                        effect_slot,
+                        ..
+                    } = &mut mapping.target
+                    {
+                        if *slot == rack_slot && *effect_slot >= target_slot {
+                            *effect_slot += 1;
+                        }
                     }
-                    (
-                        slot.modulator_node_id as u64,
-                        param.node_param_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
-                    )
-                } else {
-                    (slot.node_id as u64, param.node_param_idx as u64)
-                };
-            unsafe {
-                for lane in 0..param.node_param_span.max(1) as u64 {
-                    crate::audiograph::params_push_wrapper(
-                        self.graph.lg.0,
-                        crate::audiograph::ParamMsg {
-                            logical_id,
-                            idx: node_param_idx + lane,
-                            fvalue: slot.defaults[param_idx],
-                        },
-                    );
                 }
+            });
+        let new_host = self.fx_chain_host(locator)?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        }
+        self.editor
+            .effect_chain_leases
+            .insert_empty_slot(locator, target_slot)?;
+        Ok(target_slot)
+    }
+
+    pub fn insert_builtin_rack_slot_effect_before_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        if EffectDescriptor::builtin_insert(name).is_none()
+            && !crate::effects::conv_reverb::is_dgen_builtin(name)
+        {
+            return Err(format!("Unknown built-in effect '{name}'"));
+        }
+        let effect_slot =
+            self.prepare_rack_slot_effect_insert_slot(track, rack_slot, target_slot)?;
+        self.load_builtin_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, name)?;
+        Ok(effect_slot)
+    }
+
+    pub fn insert_rack_slot_effect_before_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let result = self.compile_saved_effect(name)?;
+        let effect_slot =
+            self.prepare_rack_slot_effect_insert_slot(track, rack_slot, target_slot)?;
+        self.apply_compiled_rack_slot_effect_to_slot_sync(
+            track,
+            rack_slot,
+            effect_slot,
+            name,
+            result,
+        )?;
+        Ok(effect_slot)
+    }
+
+    pub fn load_builtin_rack_slot_effect_to_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        if crate::effects::conv_reverb::is_dgen_builtin(name) {
+            let result = self.editor.dylib_cache.acquire(
+                lisp_host::DGenCompileKind::Effect,
+                lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+                crate::effects::conv_reverb::dsp_source(),
+                self.graph.sample_rate,
+                None,
+            )?;
+            let ir_slots =
+                crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+            self.apply_compiled_rack_slot_effect_to_slot_sync(
+                track,
+                rack_slot,
+                effect_slot,
+                name,
+                result,
+            )?;
+            let node_id = self
+                .rack_slot_effect_snapshot(track, rack_slot)?
+                .effect_slots[effect_slot]
+                .node_id as i32;
+            match ir_slots {
+                Some(slots) => crate::effects::conv_reverb::record_ir_slots(node_id, slots),
+                None => return Err(format!("'{name}' compiled without the expected IR tensors")),
             }
+            if let Some(path) = crate::effects::conv_reverb::default_ir_path() {
+                self.set_conv_reverb_ir_rack_slot(
+                    track,
+                    rack_slot,
+                    effect_slot,
+                    &path,
+                    crate::effects::conv_reverb::DEFAULT_IR_REF,
+                )?;
+            }
+            return Ok(());
+        }
+        let descriptor = EffectDescriptor::builtin_insert(name)
+            .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let (node_id, modulator_node_id) =
+            self.install_builtin_fx_node(locator, effect_slot, &descriptor)?;
+        let snapshot = EffectSlotSnapshot::new_default_with_modulator(
+            &descriptor,
+            node_id as u32,
+            modulator_node_id.unwrap_or(0) as u32,
+        );
+        let project_name = EffectDescriptor::builtin_insert_project_name(&descriptor.name);
+        self.write_rack_slot_effect(
+            track,
+            rack_slot,
+            effect_slot,
+            descriptor,
+            snapshot,
+            project_name,
+        )?;
+        self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
+        self.push_all_delay_bpm();
+        Ok(())
+    }
+
+    pub fn load_rack_slot_effect_to_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        let result = self.compile_saved_effect(name)?;
+        self.apply_compiled_rack_slot_effect_to_slot_sync(
+            track,
+            rack_slot,
+            effect_slot,
+            name,
+            result,
+        )
+    }
+
+    fn apply_compiled_rack_slot_effect_to_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        name: &str,
+        result: lisp_host::CompileResult,
+    ) -> Result<(), String> {
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let (manifest, node_ids) = self.install_compiled_fx_node(locator, effect_slot, result)?;
+        let mut descriptor = EffectDescriptor::from_lisp_manifest(
+            name,
+            &manifest.params,
+            manifest.n_inputs,
+            manifest.n_outputs,
+        );
+        descriptor.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
+            &manifest.tensors,
+            &manifest.tensor_init_data,
+        );
+        lisp_host::append_effect_host_modulation_controls(&mut descriptor, &manifest);
+        let snapshot = EffectSlotSnapshot::new_default_with_modulator(
+            &descriptor,
+            node_ids.effect_node_id as u32,
+            node_ids.modulator_node_id.unwrap_or(0) as u32,
+        );
+        self.write_rack_slot_effect(
+            track,
+            rack_slot,
+            effect_slot,
+            descriptor,
+            snapshot,
+            Some(name.to_string()),
+        )?;
+        self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
+        self.push_all_delay_bpm();
+        Ok(())
+    }
+
+    pub fn delete_rack_slot_effect_slot(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+    ) -> Result<(), String> {
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        self.remove_fx_slot_node(locator, effect_slot, FxLeaseSlotRemoval::Shift)?;
+        let updated =
+            self.state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.normalize_effect_chain();
+                    slot.effect_slots.remove(effect_slot);
+                    slot.effect_slots.push(EffectSlotSnapshot::new_empty());
+                    slot.effect_descriptors.remove(effect_slot);
+                    slot.effect_descriptors
+                        .push(EffectDescriptor::empty_custom_slot());
+                    slot.custom_effect_names.remove(effect_slot);
+                    slot.custom_effect_names.push(None);
+                });
+        if updated {
+            self.state.update_rack_macros_for_all_pattern_snapshots(track, |macros| {
+                for rack_macro in macros {
+                    rack_macro.mappings.retain(|mapping| !matches!(mapping.target,
+                        crate::sequencer::RackMacroTarget::SlotEffectParam { slot, effect_slot: mapped, .. }
+                        if slot == rack_slot && mapped == effect_slot));
+                    for mapping in &mut rack_macro.mappings {
+                        if let crate::sequencer::RackMacroTarget::SlotEffectParam { slot, effect_slot: mapped, .. } = &mut mapping.target {
+                            if *slot == rack_slot && *mapped > effect_slot { *mapped -= 1; }
+                        }
+                    }
+                }
+            });
+            self.graph_controller()
+                .refresh_rack_signature_from_live_state(track);
+        }
+        updated
+            .then_some(())
+            .ok_or_else(|| "Failed to update rack-slot FX state".to_string())
+    }
+
+    pub fn move_rack_slot_effect_slot_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) -> Result<(), String> {
+        if source_slot >= MAX_CUSTOM_FX || target_slot >= MAX_CUSTOM_FX {
+            return Err("Rack-slot FX move is out of range".to_string());
+        }
+        if source_slot == target_slot {
+            return Ok(());
+        }
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let old_host = self.fx_chain_host(locator)?;
+        if old_host.slots[source_slot].node_id == 0 {
+            return Err("Source rack-slot effect is empty".to_string());
+        }
+        let updated =
+            self.state
+                .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                    slot.normalize_effect_chain();
+                    let effect = slot.effect_slots.remove(source_slot);
+                    slot.effect_slots.insert(target_slot, effect);
+                    let descriptor = slot.effect_descriptors.remove(source_slot);
+                    slot.effect_descriptors.insert(target_slot, descriptor);
+                    let name = slot.custom_effect_names.remove(source_slot);
+                    slot.custom_effect_names.insert(target_slot, name);
+                });
+        if !updated {
+            return Err("Failed to move rack-slot effect state".to_string());
+        }
+        self.graph_controller()
+            .refresh_rack_signature_from_live_state(track);
+        self.state
+            .update_rack_macros_for_all_pattern_snapshots(track, |macros| {
+                for mapping in macros
+                    .iter_mut()
+                    .flat_map(|rack_macro| &mut rack_macro.mappings)
+                {
+                    if let crate::sequencer::RackMacroTarget::SlotEffectParam {
+                        slot,
+                        effect_slot,
+                        ..
+                    } = &mut mapping.target
+                    {
+                        if *slot != rack_slot {
+                            continue;
+                        }
+                        *effect_slot = if *effect_slot == source_slot {
+                            target_slot
+                        } else if source_slot < target_slot
+                            && *effect_slot > source_slot
+                            && *effect_slot <= target_slot
+                        {
+                            *effect_slot - 1
+                        } else if target_slot < source_slot
+                            && *effect_slot >= target_slot
+                            && *effect_slot < source_slot
+                        {
+                            *effect_slot + 1
+                        } else {
+                            *effect_slot
+                        };
+                    }
+                }
+            });
+        let new_host = self.fx_chain_host(locator)?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        }
+        self.editor
+            .effect_chain_leases
+            .move_slot(locator, source_slot, target_slot)?;
+        Ok(())
+    }
+
+    pub fn set_rack_slot_effect_param(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let descriptor = rack
+            .effect_descriptors
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+        let param = descriptor
+            .params
+            .get(param_idx)
+            .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+        if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
+            return Err("Sidechain routing into rack-slot effects is not supported".to_string());
+        }
+        if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+            return Err(
+                "Rack-slot effect modulation does not support envelope sources".to_string(),
+            );
+        }
+        let stored_value = value.clamp(param.min, param.max);
+        let node_id = rack.effect_slots[effect_slot].node_id;
+        let modulator_node_id = rack.effect_slots[effect_slot].modulator_node_id;
+        let node_param_idx = param.node_param_idx;
+        let node_param_span = param.node_param_span.max(1);
+        if !self
+            .state
+            .update_rack_slot_in_current_pattern(track, rack_slot, |slot| {
+                if let Some(value) = slot
+                    .effect_slots
+                    .get_mut(effect_slot)
+                    .and_then(|effect| effect.defaults.get_mut(param_idx))
+                {
+                    *value = stored_value;
+                }
+            })
+        {
+            return Err("Failed to update rack-slot effect parameter".to_string());
+        }
+        push_fx_param(
+            self.graph.lg.0,
+            node_id,
+            modulator_node_id,
+            node_param_idx,
+            node_param_span,
+            stored_value,
+        );
+        Ok(())
+    }
+
+    pub fn send_rack_slot_effect_param(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let descriptor = rack
+            .effect_descriptors
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+        let param = descriptor
+            .params
+            .get(param_idx)
+            .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+        let effect = rack
+            .effect_slots
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect state is out of range".to_string())?;
+        push_fx_param(
+            self.graph.lg.0,
+            effect.node_id,
+            effect.modulator_node_id,
+            param.node_param_idx,
+            param.node_param_span.max(1),
+            value.clamp(param.min, param.max),
+        );
+        Ok(())
+    }
+
+    pub fn set_rack_slot_effect_plocks(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        steps: &[usize],
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        if steps.is_empty() {
+            return Err("No steps are selected for rack-slot effect parameter locks".to_string());
+        }
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let descriptor = rack
+            .effect_descriptors
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+        let param = descriptor
+            .params
+            .get(param_idx)
+            .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+        if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
+            return Err("Sidechain routing into rack-slot effects is not supported".to_string());
+        }
+        if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+            return Err(
+                "Rack-slot effect modulation does not support envelope sources".to_string(),
+            );
+        }
+        let effect = rack
+            .effect_slots
+            .get(effect_slot)
+            .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+        if param_idx >= effect.num_params as usize
+            || steps
+                .iter()
+                .any(|step| *step >= crate::sequencer::MAX_STEPS)
+        {
+            return Err("Rack-slot effect parameter-lock target is out of range".to_string());
+        }
+        let stored_value = value.clamp(param.min, param.max);
+        let updated = self.state.update_rack_slot_in_current_pattern(
+            track,
+            rack_slot,
+            |rack_slot_snapshot| {
+                let effect = &mut rack_slot_snapshot.effect_slots[effect_slot];
+                for &step in steps {
+                    let wrote = effect.set_plock(step, param_idx, stored_value);
+                    debug_assert!(wrote, "validated rack-slot effect p-lock target");
+                }
+            },
+        );
+        if !updated {
+            return Err("Failed to set rack-slot effect parameter locks".to_string());
+        }
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    fn rack_slot_effect_option_value(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+        label: &str,
+    ) -> Result<f32, String> {
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let param = rack
+            .effect_descriptors
+            .get(effect_slot)
+            .and_then(|descriptor| descriptor.params.get(param_idx))
+            .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+        match &param.kind {
+            ParamKind::Enum { labels } => labels
+                .iter()
+                .position(|item| item.eq_ignore_ascii_case(label))
+                .map(|idx| idx as f32)
+                .ok_or_else(|| format!("Unknown rack-slot effect option '{label}'")),
+            ParamKind::Boolean => match label.to_ascii_lowercase().as_str() {
+                "on" => Ok(1.0),
+                "off" => Ok(0.0),
+                _ => Err(format!("Unknown rack-slot effect option '{label}'")),
+            },
+            ParamKind::Continuous { .. } => Err(format!(
+                "Rack-slot effect parameter '{}' is not an option",
+                param.name
+            )),
+        }
+    }
+
+    pub fn set_rack_slot_effect_param_option(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        param_idx: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        let value =
+            self.rack_slot_effect_option_value(track, rack_slot, effect_slot, param_idx, label)?;
+        self.set_rack_slot_effect_param(track, rack_slot, effect_slot, param_idx, value)
+    }
+
+    pub fn set_rack_slot_effect_plock_option(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        steps: &[usize],
+        param_idx: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        let value =
+            self.rack_slot_effect_option_value(track, rack_slot, effect_slot, param_idx, label)?;
+        self.set_rack_slot_effect_plocks(track, rack_slot, effect_slot, steps, param_idx, value)
+    }
+
+    pub fn push_rack_slot_effect_defaults(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+    ) {
+        let Ok(rack) = self.rack_slot_effect_snapshot(track, rack_slot) else {
+            return;
+        };
+        let Some(slot) = rack.effect_slots.get(effect_slot) else {
+            return;
+        };
+        let Some(descriptor) = rack.effect_descriptors.get(effect_slot) else {
+            return;
+        };
+        for (param_idx, param) in descriptor.params.iter().enumerate() {
+            if param.node_param_idx == u32::MAX || param_idx >= slot.defaults.len() {
+                continue;
+            }
+            push_fx_param(
+                self.graph.lg.0,
+                slot.node_id,
+                slot.modulator_node_id,
+                param.node_param_idx,
+                param.node_param_span,
+                slot.defaults[param_idx],
+            );
         }
     }
 
@@ -4286,15 +4403,6 @@ mod tests {
     }
 
     #[test]
-    fn audio_port_adapter_duplicates_mono_and_folds_stereo() {
-        assert_eq!(adapted_audio_port_connections(1, 1), vec![(0, 0)]);
-        assert_eq!(adapted_audio_port_connections(1, 2), vec![(0, 0), (0, 1)]);
-        assert_eq!(adapted_audio_port_connections(2, 1), vec![(0, 0), (1, 0)]);
-        assert_eq!(adapted_audio_port_connections(2, 2), vec![(0, 0), (1, 1)]);
-        assert_eq!(adapted_audio_port_connections(4, 4), vec![(0, 0), (1, 1)]);
-    }
-
-    #[test]
     fn bus_effect_wiring_resolves_graph_nodes_by_bus_id_after_reordering() {
         let mut app = test_app_with_track_count(0);
         let first_id = crate::sequencer::BusId(41);
@@ -4501,6 +4609,7 @@ mod tests {
             mod_env_id: 0,
             bus_send_ids: Vec::new(),
             rack_slots: Vec::new(),
+            rack_signature: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
@@ -4520,32 +4629,107 @@ mod tests {
     }
 
     #[test]
-    fn dylib_cache_lease_slot_insert_shifts_right_and_drops_tail() {
-        let mut row = vec![Some(1), Some(2), None, Some(4)];
+    fn bus_builtin_effects_add_move_and_delete_through_shared_host() {
+        let graph = TestLiveGraph::new("bus-fx-chain-host-lifecycle-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("FX Test");
+        let bus_idx = app
+            .buses
+            .iter()
+            .position(|bus| bus.id == bus_id)
+            .expect("new bus should exist");
 
-        insert_empty_lease_slot(&mut row, 1);
+        let filter_slot = app
+            .add_builtin_bus_effect_sync(bus_idx, "Filter")
+            .expect("filter should install on bus host");
+        let ott_slot = app
+            .add_builtin_bus_effect_sync(bus_idx, "OTT")
+            .expect("OTT should install after filter");
+        assert!(app.buses[bus_idx].effect_slots[filter_slot].node_id > 0);
+        assert!(app.buses[bus_idx].effect_slots[ott_slot].node_id > 0);
 
-        assert_eq!(row, vec![Some(1), None, Some(2), None]);
+        let moved_slot = app
+            .move_bus_effect_slot_sync(bus_idx, ott_slot, Some(filter_slot))
+            .expect("bus effect move should rewire through the shared host");
+        assert_eq!(moved_slot, filter_slot);
+        assert_eq!(
+            app.buses[bus_idx].effect_descriptors[moved_slot].name,
+            "OTT"
+        );
+
+        app.delete_bus_effect_slot(bus_idx, moved_slot)
+            .expect("bus effect delete should rewire through the shared host");
+        assert_eq!(app.buses[bus_idx].effect_slots[moved_slot].node_id, 0);
+        graph.process_block();
     }
 
     #[test]
-    fn dylib_cache_lease_slot_remove_shifts_left_and_clears_tail() {
-        let mut row = vec![Some(1), Some(2), Some(3), None];
+    fn track_builtin_effects_add_move_and_delete_through_shared_host() {
+        let graph = TestLiveGraph::new("track-fx-chain-host-lifecycle-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 1);
+        app.tracks = vec!["Track 1".to_string()];
+        let pan_id = graph.add_gain(1.0, "track_fx_pan");
+        let delay_name = CString::new("track_fx_delay").unwrap();
+        let delay_id = unsafe {
+            crate::audiograph::add_node(
+                graph.ptr.0,
+                crate::effects::delay::delay_vtable(),
+                crate::effects::delay::DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
+                delay_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert!(delay_id > 0);
+        app.graph.track_node_ids = vec![crate::tui::TrackNodeIds {
+            sampler_ids: Vec::new(),
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: 0,
+            voice_sum_r_id: 0,
+            pan_id,
+            filter_id: 0,
+            delay_id,
+            send_id: 0,
+            mod_out_id: 0,
+            mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            mod_env_id: 0,
+            bus_send_ids: Vec::new(),
+            rack_slots: Vec::new(),
+            rack_signature: None,
+        }];
+        app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+        app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
 
-        remove_lease_slot(&mut row, 1);
+        let filter_slot = app
+            .add_builtin_effect_sync(0, "Filter")
+            .expect("filter should install on track host");
+        let ott_slot = app
+            .add_builtin_effect_sync(0, "OTT")
+            .expect("OTT should install after filter");
+        let filter_node_id = app.state.pattern.effect_chains[0][filter_slot]
+            .node_id
+            .load(Ordering::Relaxed);
+        let moved_slot = app
+            .move_effect_slot_sync(0, ott_slot, Some(filter_slot))
+            .expect("track effect move should rewire through the shared host");
+        assert_eq!(moved_slot, filter_slot);
+        assert_eq!(app.graph.effect_descriptors[0][moved_slot].name, "OTT");
 
-        assert_eq!(row, vec![Some(1), Some(3), None, None]);
-    }
-
-    #[test]
-    fn dylib_cache_lease_slot_move_preserves_relative_order() {
-        let mut row = vec![Some(1), Some(2), Some(3), Some(4)];
-
-        move_lease_slot(&mut row, 0, 2);
-        assert_eq!(row, vec![Some(2), Some(3), Some(1), Some(4)]);
-
-        move_lease_slot(&mut row, 3, 1);
-        assert_eq!(row, vec![Some(2), Some(4), Some(3), Some(1)]);
+        app.graph_controller()
+            .delete_custom_effect_slot(0, moved_slot)
+            .expect("track effect delete should rewire through the shared host");
+        assert_eq!(
+            app.state.pattern.effect_chains[0][moved_slot]
+                .node_id
+                .load(Ordering::Relaxed),
+            filter_node_id,
+            "deleting the moved first slot should shift the remaining filter into it",
+        );
+        assert_eq!(app.graph.effect_descriptors[0][moved_slot].name, "Filter");
+        graph.process_block();
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::effects::{EffectSlotSnapshot, TensorParamSnapshot};
+use crate::effects::{EffectDescriptor, EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::macro_engine::{
     Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping, SceneMacroConfig, StealQuantize,
@@ -20,7 +20,32 @@ use crate::sequencer::{
 use crate::track_color::TrackColor;
 
 const PROJECTS_DIR: &str = "projects";
-const PROJECT_FILE_VERSION: u32 = 1;
+const SOUNDS_DIR: &str = "sounds";
+const RACK_PRESETS_DIR: &str = "presets/racks";
+// Version history:
+//   1 — original format; dgenlisp node-state header was 6 slots, so saved
+//       `param_node_indices` for dgen slots are `6 + cell_id`.
+//   2 — dgenlisp header grew to 10 slots (node-owned process identity);
+//       dgen `param_node_indices` are `10 + cell_id`. Version-1 files are
+//       migrated on load (see `migrate_legacy_dgen_param_node_indices`).
+const PROJECT_FILE_VERSION: u32 = 2;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectSoundPreset {
+    pub version: u32,
+    pub metadata: ProjectSoundMetadata,
+    pub track: ProjectTrack,
+    pub rack: ProjectRackTrackPattern,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ProjectSoundMetadata {
+    pub name: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub author: String,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectFile {
@@ -681,6 +706,70 @@ pub struct ProjectRackTrackPattern {
     pub routing: ProjectRackRouting,
     #[serde(default)]
     pub slots: Vec<ProjectRackSlotPattern>,
+    #[serde(default = "default_project_rack_macros")]
+    pub macros: Vec<ProjectRackMacro>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackMacro {
+    pub id: u8,
+    pub name: String,
+    #[serde(default)]
+    pub value: f32,
+    #[serde(default)]
+    pub mappings: Vec<ProjectRackMacroMapping>,
+    #[serde(default)]
+    pub plocks: Vec<Option<f32>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackMacroMapping {
+    pub target: ProjectRackMacroTarget,
+    pub range_min: f32,
+    pub range_max: f32,
+    #[serde(default)]
+    pub curve: ProjectRackMacroCurve,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectRackMacroTarget {
+    SlotParam {
+        slot: usize,
+        param: String,
+    },
+    SlotInstrumentParam {
+        slot: usize,
+        param: String,
+        param_index: usize,
+    },
+    SlotEffectParam {
+        slot: usize,
+        effect_slot: usize,
+        param: String,
+        param_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRackMacroCurve {
+    #[default]
+    Linear,
+    Exp,
+    Log,
+}
+
+pub(crate) fn default_project_rack_macros() -> Vec<ProjectRackMacro> {
+    (0..crate::sequencer::RACK_MACRO_COUNT)
+        .map(|id| ProjectRackMacro {
+            id: id as u8,
+            name: format!("Macro {}", id + 1),
+            value: 0.0,
+            mappings: Vec::new(),
+            plocks: vec![None; crate::sequencer::MAX_STEPS],
+        })
+        .collect()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -708,6 +797,10 @@ pub struct ProjectRackSlotPattern {
     pub param_plocks: Vec<Vec<Option<f32>>>,
     #[serde(default)]
     pub instrument_slot: ProjectEffectSlot,
+    #[serde(default)]
+    pub effect_slots: Vec<ProjectEffectSlot>,
+    #[serde(default)]
+    pub custom_effects: Vec<Option<String>>,
     #[serde(default)]
     pub track_sound_state: ProjectTrackSoundState,
     #[serde(default)]
@@ -1114,19 +1207,148 @@ impl From<RackTrackSnapshot> for ProjectRackTrackPattern {
                 .into_iter()
                 .map(ProjectRackSlotPattern::from)
                 .collect(),
+            macros: value
+                .macros
+                .into_iter()
+                .map(ProjectRackMacro::from)
+                .collect(),
         }
     }
 }
 
 impl From<ProjectRackTrackPattern> for RackTrackSnapshot {
     fn from(value: ProjectRackTrackPattern) -> Self {
-        Self {
+        let mut rack = Self {
             routing: RackRouting::from(value.routing),
             slots: value
                 .slots
                 .into_iter()
                 .map(RackSlotSnapshot::from)
                 .collect(),
+            macros: value
+                .macros
+                .into_iter()
+                .filter_map(|value| value.try_into().ok())
+                .collect(),
+            runtime_macro_values: None,
+            runtime_macro_track: 0,
+        };
+        rack.normalize_macros();
+        rack
+    }
+}
+
+impl From<crate::sequencer::RackMacro> for ProjectRackMacro {
+    fn from(value: crate::sequencer::RackMacro) -> Self {
+        Self {
+            id: value.id.index() as u8,
+            name: value.name,
+            value: value.value,
+            mappings: value
+                .mappings
+                .into_iter()
+                .map(ProjectRackMacroMapping::from)
+                .collect(),
+            plocks: value.plocks,
+        }
+    }
+}
+
+impl TryFrom<ProjectRackMacro> for crate::sequencer::RackMacro {
+    type Error = ();
+    fn try_from(value: ProjectRackMacro) -> Result<Self, Self::Error> {
+        let id = crate::sequencer::RackMacroId::from_index(value.id as usize).ok_or(())?;
+        Ok(Self {
+            id,
+            name: value.name,
+            value: value.value.clamp(0.0, 1.0),
+            mappings: value.mappings.into_iter().map(Into::into).collect(),
+            plocks: value.plocks,
+        })
+    }
+}
+
+impl From<crate::sequencer::RackMacroMapping> for ProjectRackMacroMapping {
+    fn from(value: crate::sequencer::RackMacroMapping) -> Self {
+        Self {
+            target: value.target.into(),
+            range_min: value.range_min,
+            range_max: value.range_max,
+            curve: match value.curve {
+                crate::sequencer::RackMacroCurve::Linear => ProjectRackMacroCurve::Linear,
+                crate::sequencer::RackMacroCurve::Exp => ProjectRackMacroCurve::Exp,
+                crate::sequencer::RackMacroCurve::Log => ProjectRackMacroCurve::Log,
+            },
+        }
+    }
+}
+impl From<ProjectRackMacroMapping> for crate::sequencer::RackMacroMapping {
+    fn from(value: ProjectRackMacroMapping) -> Self {
+        Self {
+            target: value.target.into(),
+            range_min: value.range_min,
+            range_max: value.range_max,
+            curve: match value.curve {
+                ProjectRackMacroCurve::Linear => crate::sequencer::RackMacroCurve::Linear,
+                ProjectRackMacroCurve::Exp => crate::sequencer::RackMacroCurve::Exp,
+                ProjectRackMacroCurve::Log => crate::sequencer::RackMacroCurve::Log,
+            },
+        }
+    }
+}
+impl From<crate::sequencer::RackMacroTarget> for ProjectRackMacroTarget {
+    fn from(value: crate::sequencer::RackMacroTarget) -> Self {
+        match value {
+            crate::sequencer::RackMacroTarget::SlotParam { slot, param } => {
+                Self::SlotParam { slot, param }
+            }
+            crate::sequencer::RackMacroTarget::SlotInstrumentParam {
+                slot,
+                param,
+                param_index,
+            } => Self::SlotInstrumentParam {
+                slot,
+                param,
+                param_index,
+            },
+            crate::sequencer::RackMacroTarget::SlotEffectParam {
+                slot,
+                effect_slot,
+                param,
+                param_index,
+            } => Self::SlotEffectParam {
+                slot,
+                effect_slot,
+                param,
+                param_index,
+            },
+        }
+    }
+}
+impl From<ProjectRackMacroTarget> for crate::sequencer::RackMacroTarget {
+    fn from(value: ProjectRackMacroTarget) -> Self {
+        match value {
+            ProjectRackMacroTarget::SlotParam { slot, param } => Self::SlotParam { slot, param },
+            ProjectRackMacroTarget::SlotInstrumentParam {
+                slot,
+                param,
+                param_index,
+            } => Self::SlotInstrumentParam {
+                slot,
+                param,
+                param_index,
+            },
+            ProjectRackMacroTarget::SlotEffectParam {
+                slot,
+                effect_slot,
+                param,
+                param_index,
+            } => Self::SlotEffectParam {
+                slot,
+                effect_slot,
+                param,
+                param_index,
+            },
         }
     }
 }
@@ -1150,6 +1372,12 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
             max_polyphony: value.max_polyphony,
             param_plocks: value.param_plocks.rows,
             instrument_slot: ProjectEffectSlot::from(&value.instrument_slot),
+            effect_slots: value
+                .effect_slots
+                .iter()
+                .map(ProjectEffectSlot::from)
+                .collect(),
+            custom_effects: value.custom_effect_names,
             track_sound_state: ProjectTrackSoundState::from(value.track_sound_state),
             sample_path,
             sample_name,
@@ -1163,7 +1391,7 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             .sample_name
             .filter(|name| !name.trim().is_empty())
             .map(|name| (-1, name, 44_100));
-        Self {
+        let mut slot = Self {
             instrument_type: InstrumentType::from(value.instrument_type),
             instrument_run_mode: CustomInstrumentRunMode::from(value.instrument_run_mode),
             instrument_base_note_offset: value.instrument_base_note_offset,
@@ -1176,9 +1404,18 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             max_polyphony: value.max_polyphony.clamp(1, crate::voice::MAX_VOICES),
             param_plocks: RackSlotParamPlocks::from_rows(value.param_plocks),
             instrument_slot: value.instrument_slot.into_snapshot_with_node_ids(0, 0),
+            effect_slots: value
+                .effect_slots
+                .into_iter()
+                .map(|slot| slot.into_snapshot_with_node_ids(0, 0))
+                .collect(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: value.custom_effects,
             track_sound_state: value.track_sound_state.into_track_sound_state(None),
             sample_id,
-        }
+        };
+        slot.normalize_effect_chain();
+        slot
     }
 }
 
@@ -1281,6 +1518,101 @@ pub fn load_project(name: &str) -> std::io::Result<ProjectFile> {
             format!("Failed to parse project '{}': {error}", path.display()),
         )
     })
+}
+
+pub fn save_sound_preset(name: &str, sound: &ProjectSoundPreset) -> std::io::Result<PathBuf> {
+    save_container_preset(Path::new(SOUNDS_DIR), "sound", "Sound", name, sound)
+}
+
+pub fn save_rack_preset(name: &str, preset: &ProjectSoundPreset) -> std::io::Result<PathBuf> {
+    save_container_preset(
+        Path::new(RACK_PRESETS_DIR),
+        "rackpreset",
+        "rack preset",
+        name,
+        preset,
+    )
+}
+
+fn save_container_preset(
+    directory: &Path,
+    extension: &str,
+    kind: &str,
+    name: &str,
+    preset: &ProjectSoundPreset,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(directory)?;
+    let path = directory.join(format!("{}.{}", sanitize_project_name(name), extension));
+    let json = serde_json::to_string(preset).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to serialize {kind} '{}': {error}", path.display()),
+        )
+    })?;
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
+pub fn load_sound_preset(path: &Path) -> std::io::Result<ProjectSoundPreset> {
+    load_container_preset(path, "Sound")
+}
+
+pub fn load_rack_preset(name: &str) -> std::io::Result<ProjectSoundPreset> {
+    let path = rack_preset_path(name);
+    load_container_preset(&path, "rack preset")
+}
+
+pub fn rack_preset_path(name: &str) -> PathBuf {
+    Path::new(RACK_PRESETS_DIR).join(format!("{}.rackpreset", sanitize_project_name(name)))
+}
+
+fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoundPreset> {
+    let src = std::fs::read_to_string(path)?;
+    let sound: ProjectSoundPreset = serde_json::from_str(&src).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Failed to parse {kind} '{}': {error}", path.display()),
+        )
+    })?;
+    if !matches!(sound.track, ProjectTrack::Rack { .. }) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{kind} '{}' does not contain a rack track", path.display()),
+        ));
+    }
+    Ok(sound)
+}
+
+pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
+    std::fs::create_dir_all(RACK_PRESETS_DIR)?;
+    let mut names = std::fs::read_dir(RACK_PRESETS_DIR)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rackpreset"))
+        .filter_map(|path| {
+            let fallback = path.file_stem()?.to_str()?.to_owned();
+            let preset = load_container_preset(&path, "rack preset").ok()?;
+            let name = preset.metadata.name.trim();
+            Some(if name.is_empty() {
+                fallback
+            } else {
+                name.to_owned()
+            })
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names)
+}
+
+pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(SOUNDS_DIR)?;
+    let mut paths = std::fs::read_dir(SOUNDS_DIR)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sound"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
 }
 
 pub fn sanitize_project_name(name: &str) -> String {
@@ -2736,6 +3068,8 @@ mod tests {
                         "pan": -0.25,
                         "max_polyphony": 3,
                         "instrument_slot": {"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]},
+                        "effect_slots": [{"num_params":1,"defaults":[0.75],"plocks":[],"param_node_indices":[4]}],
+                        "custom_effects": ["builtin:OTT"],
                         "track_sound_state": {"loaded_preset":"wide","dirty":true}
                     }]
                 }]
@@ -2767,6 +3101,22 @@ mod tests {
             Some("wide")
         );
         assert!(rack.slots[0].track_sound_state.dirty);
+        assert_eq!(rack.slots[0].effect_slots.len(), 1);
+        assert_eq!(rack.slots[0].effect_slots[0].defaults, vec![0.75]);
+        assert_eq!(
+            rack.slots[0].custom_effects,
+            vec![Some("builtin:OTT".to_string())]
+        );
+        let runtime_slot = RackSlotSnapshot::from(rack.slots[0].clone());
+        assert_eq!(
+            runtime_slot.effect_slots.len(),
+            crate::lisp_host::MAX_CUSTOM_FX
+        );
+        assert_eq!(runtime_slot.effect_slots[0].defaults, vec![0.75]);
+        assert_eq!(
+            runtime_slot.custom_effect_names[0].as_deref(),
+            Some("builtin:OTT")
+        );
     }
 
     #[test]
@@ -2873,6 +3223,145 @@ mod tests {
         assert_eq!(restored_rack.routing, ProjectRackRouting::ByPitch);
         assert_eq!(restored_rack.slots[0].pad_note, Some(0));
         assert_eq!(restored_rack.slots[1].pad_note, Some(2));
+    }
+
+    #[test]
+    fn rack_macro_bank_roundtrips_stable_ids_names_plocks_and_relative_targets() {
+        let mut macros = default_project_rack_macros();
+        macros[0].name = "Wonky".to_string();
+        macros[0].value = 0.4;
+        macros[0].plocks[3] = Some(0.8);
+        macros[0].mappings.push(ProjectRackMacroMapping {
+            target: ProjectRackMacroTarget::SlotEffectParam {
+                slot: 1,
+                effect_slot: 2,
+                param: "feedback".to_string(),
+                param_index: 4,
+            },
+            range_min: 0.1,
+            range_max: 0.9,
+            curve: ProjectRackMacroCurve::Exp,
+        });
+        let rack = ProjectRackTrackPattern {
+            routing: ProjectRackRouting::Broadcast,
+            slots: Vec::new(),
+            macros,
+        };
+        let json = serde_json::to_string(&rack).unwrap();
+        let restored: ProjectRackTrackPattern = serde_json::from_str(&json).unwrap();
+        let runtime = RackTrackSnapshot::from(restored);
+        assert_eq!(runtime.macros.len(), crate::sequencer::RACK_MACRO_COUNT);
+        assert_eq!(runtime.macros[0].id.stable_key(), "macro_1");
+        assert_eq!(runtime.macros[0].name, "Wonky");
+        assert_eq!(runtime.macros[0].plocks[3], Some(0.8));
+        assert!(matches!(
+            runtime.macros[0].mappings[0].target,
+            crate::sequencer::RackMacroTarget::SlotEffectParam {
+                slot: 1,
+                effect_slot: 2,
+                param_index: 4,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sound_preset_roundtrips_rack_sources_metadata_and_slot_fx() {
+        let sound = ProjectSoundPreset {
+            version: project_file_version(),
+            metadata: ProjectSoundMetadata {
+                name: "Wide Plate".to_string(),
+                tags: vec!["pad".to_string(), "wide".to_string()],
+                author: "Test".to_string(),
+            },
+            track: ProjectTrack::Rack {
+                routing: ProjectRackRouting::Broadcast,
+                slots: vec![ProjectRackTrackSlot {
+                    instrument_type: ProjectInstrumentType::Sampler,
+                    sample_path: Some("samples/pad.wav".to_string()),
+                    sample_name: Some("pad".to_string()),
+                    instrument_name: None,
+                }],
+                color: None,
+                collapsed: false,
+            },
+            rack: ProjectRackTrackPattern {
+                macros: default_project_rack_macros(),
+                routing: ProjectRackRouting::Broadcast,
+                slots: vec![ProjectRackSlotPattern {
+                    instrument_type: ProjectInstrumentType::Sampler,
+                    instrument_run_mode: ProjectCustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 4,
+                    param_plocks: Vec::new(),
+                    instrument_slot: ProjectEffectSlot::default(),
+                    effect_slots: vec![ProjectEffectSlot {
+                        num_params: 1,
+                        defaults: vec![0.42],
+                        ..ProjectEffectSlot::default()
+                    }],
+                    custom_effects: vec![Some("builtin:OTT".to_string())],
+                    track_sound_state: ProjectTrackSoundState::default(),
+                    sample_path: Some("samples/pad.wav".to_string()),
+                    sample_name: Some("pad".to_string()),
+                }],
+            },
+        };
+        let json = serde_json::to_string(&sound).expect("serialize Sound preset");
+        let restored: ProjectSoundPreset =
+            serde_json::from_str(&json).expect("deserialize Sound preset");
+        assert_eq!(restored.metadata.tags, vec!["pad", "wide"]);
+        assert_eq!(restored.rack.slots[0].effect_slots[0].defaults, vec![0.42]);
+        assert_eq!(
+            restored.rack.slots[0].custom_effects[0].as_deref(),
+            Some("builtin:OTT")
+        );
+    }
+
+    #[test]
+    fn container_preset_storage_roundtrips_validated_rack_payload() {
+        let directory = std::env::temp_dir().join(format!(
+            "eseq-rack-preset-storage-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let sound = ProjectSoundPreset {
+            version: project_file_version(),
+            metadata: ProjectSoundMetadata {
+                name: "Wide Rack".to_string(),
+                tags: Vec::new(),
+                author: String::new(),
+            },
+            track: ProjectTrack::Rack {
+                routing: ProjectRackRouting::Broadcast,
+                slots: Vec::new(),
+                color: None,
+                collapsed: false,
+            },
+            rack: ProjectRackTrackPattern {
+                macros: default_project_rack_macros(),
+                routing: ProjectRackRouting::Broadcast,
+                slots: Vec::new(),
+            },
+        };
+
+        let path =
+            save_container_preset(&directory, "rackpreset", "rack preset", "Wide Rack", &sound)
+                .expect("save rack preset payload");
+        let restored = load_container_preset(&path, "rack preset")
+            .expect("load validated rack preset payload");
+        assert_eq!(restored.metadata.name, "Wide Rack");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("Wide-Rack.rackpreset")
+        );
+        std::fs::remove_dir_all(&directory).expect("clean rack preset test directory");
     }
 
     #[test]

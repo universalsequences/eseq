@@ -205,9 +205,13 @@
         (status "Drop a sample file, not a folder")))))
 
 (def sbrowser-drop-sound-on-track (event)
-  (if (= (get event :drag-type) "instrument")
-    (sbrowser-drop-instrument-on-track event)
-    (sbrowser-drop-sample-on-track event)))
+  (if (= (get event :drag-type) "sound")
+    (host-command "load-sound-onto-track"
+      (dict :track (get (get event :target) :track)
+            :path (get (get event :payload) :path)))
+    (if (= (get event :drag-type) "instrument")
+      (sbrowser-drop-instrument-on-track event)
+      (sbrowser-drop-sample-on-track event))))
 
 (def sbrowser-activate-instrument (name)
   (if (seq-track-replaceable-instrument? SEQ.current-track)
@@ -376,25 +380,27 @@
       (set! sbrowser-selected-tags (list)))))
 
 (def sbrowser-next-tab-name ()
-  (if (= sbrowser-tab "samples") "instruments"
+  (if (= sbrowser-tab "samples") "sounds"
+    (if (= sbrowser-tab "sounds") "instruments"
     (if (= sbrowser-tab "instruments") "audio-fx"
       (if (= sbrowser-tab "audio-fx") "midi-fx"
         (if (= sbrowser-tab "midi-fx") "presets"
           (if (= sbrowser-tab "presets") "scripts"
             (if (= sbrowser-tab "scripts") "projects"
-              "samples")))))))
+              "samples"))))))))
 
 (def sbrowser-next-tab ()
   (sbrowser-select-tab (sbrowser-next-tab-name)))
 
 (def sbrowser-active-tree-key ()
   (if (= sbrowser-tab "samples") "samples-tab-tree"
+    (if (= sbrowser-tab "sounds") "sounds-tab-tree"
     (if (= sbrowser-tab "instruments") "instruments-tab-tree"
       (if (= sbrowser-tab "audio-fx") "audio-fx-tab-tree"
         (if (= sbrowser-tab "midi-fx") "midi-fx-tab-tree"
           (if (= sbrowser-tab "presets") "presets-tab-tree"
             (if (= sbrowser-tab "scripts") "scripts-tab-tree"
-              "projects-tab-tree")))))))
+              "projects-tab-tree"))))))))
 
 (def sbrowser-list-contains? (items value)
   (> (len (filter (lambda (item) (= item value)) items)) 0))
@@ -435,12 +441,13 @@
 
 (def sbrowser-search-placeholder ()
   (if (= sbrowser-tab "samples") "Search samples..."
+    (if (= sbrowser-tab "sounds") "Search sounds..."
     (if (= sbrowser-tab "instruments") "Search instruments..."
       (if (= sbrowser-tab "audio-fx") "Search audio effects..."
         (if (= sbrowser-tab "midi-fx") "Search MIDI effects..."
           (if (= sbrowser-tab "presets") "Search presets..."
             (if (= sbrowser-tab "scripts") "Search scripts..."
-              "Search projects...")))))))
+              "Search projects..."))))))))
 
 (def sbrowser-empty-message (message)
   (box :width :fill :height :fill :padding 1
@@ -751,12 +758,48 @@
 (def sbrowser-tab-items ()
   (list
     (dict :name "samples" :label "Samples" :icon :waveform)
+    (dict :name "sounds" :label "Sounds" :icon :piano)
     (dict :name "instruments" :label "Instruments" :icon :piano)
     (dict :name "audio-fx" :label "Audio FX" :icon :sliders)
     (dict :name "midi-fx" :label "MIDI FX" :icon :note-arrow)
     (dict :name "presets" :label "Presets" :icon :dial)
     (dict :name "scripts" :label "Scripts" :icon :folder)
     (dict :name "projects" :label "Projects" :icon :folder)))
+
+(def sbrowser-visible-sounds ()
+  (if (= sbrowser-filter "") SEQ.sound-presets
+    (filter (lambda (item)
+      (string-contains? (lowercase (get item :label)) (lowercase sbrowser-filter)))
+      SEQ.sound-presets)))
+
+(def sbrowser-load-sound (item)
+  (if (= SEQ.num-tracks 0)
+    (status "Create a track before loading a Sound")
+    (host-command "load-sound-onto-track"
+      (dict :track SEQ.current-track :path (get item :path)))))
+
+(def sbrowser-sounds-panel ()
+  (let ((items (sbrowser-visible-sounds)))
+    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+      (if (= (len items) 0)
+        (sbrowser-empty-message "No Sounds found. Drag an instrument preset onto the Sounds tab to add one.")
+        (scroll :key "sounds-tab-scroll" :width :fill :flex 1
+          (tree :key "sounds-tab-tree"
+                :width :fill
+                :background-color :buffer-bg
+                :items items
+                :focusable true
+                :drag-type "sound"
+                :on-activate (lambda (item) (sbrowser-load-sound item))))))))
+
+(def sbrowser-drop-preset-on-sounds (event)
+  (if (= (get event :drag-type) "instrument-preset")
+    (let ((name (get (get event :payload) :label)))
+      (if name
+        (host-command "promote-preset-to-sound"
+          (dict :track SEQ.sidebar-track-index :name name))
+        (status "Drop a preset item onto Sounds")))
+    false))
 
 (def sbrowser-tab-button (name label icon)
   (button label
@@ -774,6 +817,10 @@
     :highlight-color '(rgba 1 1 1 0.0)
     :shadow-color '(rgba 0 0 0 0.0)
     :corner-radius 8
+    :drop-types (if (= name "sounds") (list "instrument-preset") (list))
+    :drop-meta (dict :kind "browser-tab" :name name)
+    :drop-hover-background-color '(rgba 0.15 0.45 0.70 0.28)
+    :on-drop (lambda (event) (sbrowser-drop-preset-on-sounds event))
     :on-click |x y r| (sbrowser-select-tab name)
     :color :widget-label-fg
     :active-color :blue))
@@ -915,6 +962,7 @@
                 :selected-label SEQ.sidebar-loaded-preset
                 :expand-all false
                 :focusable true
+                :drag-type "instrument-preset"
                 :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
                 :on-activate (lambda (item) (sbrowser-load-preset (get item :label))))))))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
@@ -992,12 +1040,13 @@
 
 (def sbrowser-active-tab-panel ()
   (if (= sbrowser-tab "samples") (sbrowser-samples-panel)
+    (if (= sbrowser-tab "sounds") (sbrowser-sounds-panel)
     (if (= sbrowser-tab "instruments") (sbrowser-instruments-panel)
       (if (= sbrowser-tab "audio-fx") (sbrowser-audio-fx-panel)
         (if (= sbrowser-tab "midi-fx") (sbrowser-midi-fx-panel)
           (if (= sbrowser-tab "presets") (sbrowser-presets-tab-panel)
             (if (= sbrowser-tab "scripts") (sbrowser-scripts-tab-panel)
-              (sbrowser-projects-tab-panel))))))))
+              (sbrowser-projects-tab-panel)))))))))
 
 (def sbrowser-tabbed-content ()
   (h-stack :key "browser-tabbed-content" :width :fill :gap 0.5 :flex 1 :align :stretch

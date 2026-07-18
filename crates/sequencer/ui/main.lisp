@@ -919,6 +919,12 @@
     (get evt :meta)
     (get evt :ctrl)))
 
+(def cmd-click? (evt)
+  (or (get evt :cmd)
+    (get evt :super)
+    (get evt :meta)
+    (get evt :ctrl)))
+
 (def sequencer-cursor-step-changed (track step)
   nil)
 
@@ -931,6 +937,38 @@
 (defstate step-click-pending nil)
 (defstate step-move-last nil)
 (defstate step-toggle-drag-value nil)
+(defstate step-click-was-active nil)
+(defstate step-press-ms nil)
+(defstate step-press-step nil)
+(defstate step-drag-progressed nil)
+(defstate step-hold-select nil)
+(defstate step-cmd-drag-last nil)
+
+; Finder-style shift extension: anchor at the prior keyboard anchor if any,
+; else the cursor step when a selection exists, else the clicked step.
+(def step-shift-anchor (step)
+  (if (not (= step-key-select-anchor nil))
+    step-key-select-anchor
+    (if (seq-has-selection?) cursor-step step)))
+
+(def step-hold-select-ms 300)
+
+; Press-and-hold (~300ms) before dragging turns the drag into a selection
+; sweep instead of a move/paint. Once a move or paint has already advanced
+; past the pressed step, the hold can no longer engage.
+(def step-hold-select-maybe-engage (step evt)
+  (if (and (not step-hold-select)
+        (not (selection-click? evt))
+        (not step-drag-progressed)
+        (not (= step-press-ms nil))
+        (>= (- (now-ms) step-press-ms) step-hold-select-ms))
+    (do
+      (set! step-hold-select true)
+      (set! step-click-pending nil)
+      (set! step-move-last nil)
+      (set! step-toggle-drag-value nil)
+      (set! step-drag-anchor (if (= step-press-step nil) step step-press-step)))
+    nil))
 
 (def step-selected? (step)
   (and (seq-has-selection?) (nth SEQ.selected-steps step)))
@@ -938,11 +976,25 @@
 (def step-select-drag-start (step evt)
   (do
     (cool-off-follow)
-    (set! step-key-select-anchor nil)
-    (set-track-cursor-step step)
     (set! step-click-pending nil)
-    (set! step-drag-anchor step)
-    (seq-select-step-range step step)))
+    (set! step-press-ms nil)
+    (set! step-press-step nil)
+    (set! step-drag-progressed nil)
+    (set! step-hold-select nil)
+    (if (cmd-click? evt)
+      (do
+        (set! step-key-select-anchor nil)
+        (set-track-cursor-step step)
+        (set! step-drag-anchor nil)
+        (set! step-cmd-drag-last step)
+        (seq-select-step step))
+      (let ((anchor (step-shift-anchor step)))
+        (do
+          (set! step-key-select-anchor anchor)
+          (set-track-cursor-step step)
+          (set! step-drag-anchor anchor)
+          (set! step-cmd-drag-last nil)
+          (seq-select-step-range anchor step))))))
 
 (def step-set-cursor-if (update-cursor step)
   (if update-cursor
@@ -950,33 +1002,44 @@
     nil))
 
 (def step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
-  (if (selection-click? evt)
-    (do
-      (set! step-click-pending nil)
-      (set! step-move-last nil)
-      (set! step-toggle-drag-value nil)
-      (cool-off-follow)
-      (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
-      (step-set-cursor-if update-cursor step)
-      (seq-select-step-range step-drag-anchor step))
-    (if (not (= step-toggle-drag-value nil))
+  (do
+    (step-hold-select-maybe-engage step evt)
+    (if (or (selection-click? evt) step-hold-select)
       (do
         (set! step-click-pending nil)
+        (set! step-move-last nil)
+        (set! step-toggle-drag-value nil)
         (cool-off-follow)
         (step-set-cursor-if update-cursor step)
-        (if (= (seq-track-step-active? track step) step-toggle-drag-value)
-          nil
-          (seq-toggle-step step)))
-      (if (= step-move-last nil)
-        nil
-        (if (= step step-move-last)
-          nil
+        (if (and (cmd-click? evt) (not step-hold-select))
+          (if (= step step-cmd-drag-last)
+            nil
+            (do
+              (set! step-cmd-drag-last step)
+              (if (step-selected? step) nil (seq-select-step step))))
+          (do
+            (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
+            (seq-select-step-range step-drag-anchor step))))
+      (do
+        (if (= step step-press-step) nil (set! step-drag-progressed true))
+        (if (not (= step-toggle-drag-value nil))
           (do
             (set! step-click-pending nil)
             (cool-off-follow)
-            (seq-move-step-drag step-move-last step)
-            (set! step-move-last step)
-            (step-set-cursor-if update-cursor step)))))))
+            (step-set-cursor-if update-cursor step)
+            (if (= (seq-track-step-active? track step) step-toggle-drag-value)
+              nil
+              (seq-toggle-step step)))
+          (if (= step-move-last nil)
+            nil
+            (if (= step step-move-last)
+              nil
+              (do
+                (set! step-click-pending nil)
+                (cool-off-follow)
+                (seq-move-step-drag step-move-last step)
+                (set! step-move-last step)
+                (step-set-cursor-if update-cursor step)))))))))
 
 (def step-select-drag-over-for-track (track step evt)
   (step-select-drag-over-for-track-with-cursor track step evt true))
@@ -994,10 +1057,15 @@
       (cool-off-follow)
       (set-track-cursor-step step)
       (set! step-drag-anchor nil)
+      (set! step-press-ms (now-ms))
+      (set! step-press-step step)
+      (set! step-drag-progressed nil)
+      (set! step-hold-select nil)
       (if (or (seq-track-step-active? track step) (and use-selection (step-selected? step)))
         (do
           (set! step-move-last step)
           (set! step-click-pending step)
+          (set! step-click-was-active (seq-track-step-active? track step))
           (set! step-toggle-drag-value nil))
         (do
           (set! step-move-last nil)
@@ -1011,12 +1079,33 @@
 (def step-pointer-up (step evt)
   (do
     (if (and (= step-click-pending step) (not (selection-click? evt)))
-      (seq-toggle-step step)
+      (if step-click-was-active
+        (seq-select-step-range step step)
+        (seq-toggle-step step))
       nil)
+    (set! step-click-was-active nil)
     (set! step-click-pending nil)
     (set! step-drag-anchor nil)
     (set! step-move-last nil)
-    (set! step-toggle-drag-value nil)))
+    (set! step-toggle-drag-value nil)
+    (set! step-press-ms nil)
+    (set! step-press-step nil)
+    (set! step-drag-progressed nil)
+    (set! step-hold-select nil)
+    (set! step-cmd-drag-last nil)))
+
+(def step-double-click-for-track (track step evt)
+  (if (and (not (selection-click? evt)) (seq-track-step-active? track step))
+    (seq-toggle-step step)
+    nil))
+
+(def step-double-click (step evt)
+  (step-double-click-for-track SEQ.current-track step evt))
+
+(def bus-step-double-click (step evt)
+  (if (and (not (selection-click? evt)) (bus-step-active? step))
+    (bus-toggle-step step)
+    nil))
 
 (def seq-set-step-param-from-step (step param value)
   (if (step-selected? step)
@@ -1543,6 +1632,10 @@
   (host-command "select-bus-step-range"
     (dict :bus selected-bus :start start :end end)))
 
+(def bus-select-step (step)
+  (host-command "select-bus-step"
+    (dict :bus selected-bus :step step)))
+
 (def bus-select-all-steps ()
   (host-command "select-all-bus-steps" (dict :bus selected-bus)))
 
@@ -1560,38 +1653,65 @@
 (def bus-step-select-drag-start (step evt)
   (do
     (cool-off-follow)
-    (set! cursor-step step)
     (set! step-click-pending nil)
-    (set! step-drag-anchor step)
-    (bus-select-step-range step step)))
+    (set! step-press-ms nil)
+    (set! step-press-step nil)
+    (set! step-drag-progressed nil)
+    (set! step-hold-select nil)
+    (if (cmd-click? evt)
+      (do
+        (set! step-key-select-anchor nil)
+        (set! cursor-step step)
+        (set! step-drag-anchor nil)
+        (set! step-cmd-drag-last step)
+        (bus-select-step step))
+      (let ((anchor (step-shift-anchor step)))
+        (do
+          (set! step-key-select-anchor anchor)
+          (set! cursor-step step)
+          (set! step-drag-anchor anchor)
+          (set! step-cmd-drag-last nil)
+          (bus-select-step-range anchor step))))))
 
 (def bus-step-select-drag-over (step evt)
-  (if (selection-click? evt)
-    (do
-      (set! step-click-pending nil)
-      (set! step-move-last nil)
-      (cool-off-follow)
-      (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
-      (set! cursor-step step)
-      (bus-select-step-range step-drag-anchor step))
-    (if (not (= step-toggle-drag-value nil))
+  (do
+    (step-hold-select-maybe-engage step evt)
+    (if (or (selection-click? evt) step-hold-select)
       (do
         (set! step-click-pending nil)
+        (set! step-move-last nil)
+        (set! step-toggle-drag-value nil)
         (cool-off-follow)
         (set! cursor-step step)
-        (if (= (bus-step-active? step) step-toggle-drag-value)
-          nil
-          (bus-set-step-active step step-toggle-drag-value)))
-      (if (= step-move-last nil)
-        nil
-        (if (= step step-move-last)
-          nil
+        (if (and (cmd-click? evt) (not step-hold-select))
+          (if (= step step-cmd-drag-last)
+            nil
+            (do
+              (set! step-cmd-drag-last step)
+              (if (step-selected? step) nil (bus-select-step step))))
+          (do
+            (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
+            (bus-select-step-range step-drag-anchor step))))
+      (do
+        (if (= step step-press-step) nil (set! step-drag-progressed true))
+        (if (not (= step-toggle-drag-value nil))
           (do
             (set! step-click-pending nil)
             (cool-off-follow)
-            (bus-move-step-drag step-move-last step)
-            (set! step-move-last step)
-            (set! cursor-step step)))))))
+            (set! cursor-step step)
+            (if (= (bus-step-active? step) step-toggle-drag-value)
+              nil
+              (bus-set-step-active step step-toggle-drag-value)))
+          (if (= step-move-last nil)
+            nil
+            (if (= step step-move-last)
+              nil
+              (do
+                (set! step-click-pending nil)
+                (cool-off-follow)
+                (bus-move-step-drag step-move-last step)
+                (set! step-move-last step)
+                (set! cursor-step step)))))))))
 
 (def bus-step-pointer-down (step evt)
   (if (selection-click? evt)
@@ -1600,10 +1720,15 @@
       (cool-off-follow)
       (set! cursor-step step)
       (set! step-drag-anchor nil)
+      (set! step-press-ms (now-ms))
+      (set! step-press-step step)
+      (set! step-drag-progressed nil)
+      (set! step-hold-select nil)
       (if (or (bus-step-active? step) (step-selected? step))
         (do
           (set! step-move-last step)
           (set! step-click-pending step)
+          (set! step-click-was-active (bus-step-active? step))
           (set! step-toggle-drag-value nil))
         (do
           (set! step-move-last nil)
@@ -1614,12 +1739,20 @@
 (def bus-step-pointer-up (step evt)
   (do
     (if (and (= step-click-pending step) (not (selection-click? evt)))
-      (bus-toggle-step step)
+      (if step-click-was-active
+        (bus-select-step-range step step)
+        (bus-toggle-step step))
       nil)
+    (set! step-click-was-active nil)
     (set! step-click-pending nil)
     (set! step-drag-anchor nil)
     (set! step-move-last nil)
-    (set! step-toggle-drag-value nil)))
+    (set! step-toggle-drag-value nil)
+    (set! step-press-ms nil)
+    (set! step-press-step nil)
+    (set! step-drag-progressed nil)
+    (set! step-hold-select nil)
+    (set! step-cmd-drag-last nil)))
 
 (def bus-set-sequencer-param (param value)
   (host-command "set-bus-sequencer-param"

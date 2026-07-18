@@ -3,11 +3,12 @@ use std::sync::atomic::Ordering;
 
 use crate::effects::reverb;
 use crate::effects::{
-    BUILTIN_SLOT_COUNT, EffectDescriptor, EffectSlotState, ParamKind, SyncDivision,
+    EffectDescriptor, EffectSlotState, ParamKind, SyncDivision, BUILTIN_SLOT_COUNT,
 };
 
-use super::command::{AppCommand, apply_command};
+use super::command::{apply_command, AppCommand};
 use super::draw::rect_contains;
+use super::fx_chain::push_fx_param;
 use super::{App, EffectPaneEntry, EffectTab, InputMode, ParamMouseDragTarget};
 
 const SCENE_MACRO_DIFF_EPSILON: f32 = 1.0e-5;
@@ -149,6 +150,44 @@ fn append_scene_effect_mappings(
             ) {
                 mappings.push(mapping);
             }
+        }
+    }
+}
+
+fn append_scene_rack_macro_mappings(
+    app: &App,
+    track: usize,
+    target: &crate::sequencer::TrackPatternData,
+    mappings: &mut Vec<crate::macro_engine::MacroMapping>,
+) {
+    let live_racks = app.state.pattern.rack_tracks.lock().unwrap();
+    let (Some(Some(live_rack)), Some(target_rack)) =
+        (live_racks.get(track), target.rack_track.as_ref())
+    else {
+        return;
+    };
+    for live_macro in &live_rack.macros {
+        let Some(target_macro) = target_rack
+            .macros
+            .iter()
+            .find(|target_macro| target_macro.id == live_macro.id)
+        else {
+            continue;
+        };
+        if (live_macro.value - target_macro.value).abs() <= SCENE_MACRO_DIFF_EPSILON {
+            continue;
+        }
+        let target = crate::process::ParamTarget::RackMacroParam {
+            macro_id: live_macro.id.index() as u8,
+        };
+        if let Ok(mapping) = crate::macro_engine::MacroMapping::new(
+            track,
+            target,
+            live_macro.value,
+            target_macro.value,
+            crate::macro_engine::MacroCurve::Linear,
+        ) {
+            mappings.push(mapping);
         }
     }
 }
@@ -710,33 +749,14 @@ impl App {
         {
             return;
         }
-        let idx = slot.resolve_node_idx(param_idx);
-        let (logical_id, idx) = if idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE {
-            let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed);
-            if modulator_node_id == 0 {
-                return;
-            }
-            (
-                modulator_node_id as u64,
-                idx - crate::voice_modulator::MOD_PARAM_BASE as u64,
-            )
-        } else {
-            let node_id = slot.node_id.load(Ordering::Relaxed);
-            if node_id == 0 {
-                return;
-            }
-            (node_id as u64, idx)
-        };
-        unsafe {
-            crate::audiograph::params_push_wrapper(
-                self.graph.lg.0,
-                crate::audiograph::ParamMsg {
-                    idx,
-                    logical_id,
-                    fvalue: value,
-                },
-            );
-        }
+        push_fx_param(
+            self.graph.lg.0,
+            slot.node_id.load(Ordering::Relaxed),
+            slot.modulator_node_id.load(Ordering::Relaxed),
+            slot.resolve_node_idx(param_idx) as u32,
+            1,
+            value,
+        );
     }
 
     pub fn effective_slot_param_value(
@@ -823,7 +843,8 @@ impl App {
         else {
             return;
         };
-        self.push_bus_effect_param_to_graph(
+        push_fx_param(
+            self.graph.lg.0,
             slot.node_id,
             slot.modulator_node_id,
             param.node_param_idx,
@@ -979,6 +1000,7 @@ impl App {
                 .with_scene_track_pattern(config.target_scene, track, |target| {
                     append_scene_instrument_mappings(self, track, target, &mut mappings);
                     append_scene_effect_mappings(self, track, target, &mut mappings);
+                    append_scene_rack_macro_mappings(self, track, target, &mut mappings);
                 });
         }
         let current_bus_snapshot = self.capture_bus_pattern_snapshot();
@@ -1079,6 +1101,31 @@ impl App {
                         continue;
                     };
                     self.send_effective_bus_slot_param(bus_idx, slot, param_idx);
+                }
+                (
+                    crate::macro_engine::ParamScope::Track(track),
+                    crate::process::ParamTarget::RackMacroParam { macro_id },
+                ) => {
+                    let Some(id) = crate::sequencer::RackMacroId::from_index(macro_id as usize)
+                    else {
+                        continue;
+                    };
+                    let base = self
+                        .state
+                        .pattern
+                        .rack_tracks
+                        .lock()
+                        .unwrap()
+                        .get(track)
+                        .and_then(Option::as_ref)
+                        .and_then(|rack| rack.macros.get(id.index()))
+                        .map(|rack_macro| rack_macro.value);
+                    let Some(base) = base else {
+                        continue;
+                    };
+                    let key = crate::macro_engine::MacroParamKey::for_rack_macro(track, macro_id);
+                    let value = self.macro_engine.effective_value(&key, base);
+                    self.send_transient_rack_macro_value(track, id, value);
                 }
                 _ => {}
             }

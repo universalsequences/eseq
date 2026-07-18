@@ -10,6 +10,7 @@ use super::{
     App, BrowserState, InputMode, PresetPromptKind, Region, SidebarMode, SidebarTab, UiState,
 };
 use crate::lisp_host;
+use crate::sequencer::InstrumentType;
 
 // ── Sample Browser tree ──
 
@@ -575,14 +576,20 @@ impl App {
     }
 
     pub(super) fn visible_preset_items(&self) -> Vec<String> {
-        let Some(name) = self.current_custom_instrument_name() else {
-            return Vec::new();
+        let mut items = if self.graph.track_instrument_types.get(self.ui.cursor_track)
+            == Some(&InstrumentType::Rack)
+        {
+            crate::project::list_rack_presets().unwrap_or_default()
+        } else {
+            let Some(name) = self.current_custom_instrument_name() else {
+                return Vec::new();
+            };
+            lisp_host::load_instrument_presets(name)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|preset| preset.name)
+                .collect::<Vec<_>>()
         };
-        let mut items: Vec<String> = lisp_host::load_instrument_presets(name)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|p| p.name)
-            .collect();
         items.sort();
         if self.preset_browser.filter.is_empty() {
             return items;
@@ -674,13 +681,27 @@ impl App {
     }
 
     pub(super) fn load_selected_preset_into_track(&mut self) {
-        let Some(instrument_name) = self.current_custom_instrument_name() else {
-            return;
-        };
         let Some(selected_name) = self.selected_preset_name() else {
             return;
         };
-        let presets = match lisp_host::load_instrument_presets(instrument_name) {
+        let track = self.ui.cursor_track;
+        if self.graph.track_instrument_types.get(track) == Some(&InstrumentType::Rack) {
+            match self.load_rack_preset_onto_track(track, &selected_name) {
+                Ok(()) => {
+                    self.editor.status_message =
+                        Some((format!("Loaded preset '{selected_name}'"), Instant::now()));
+                }
+                Err(error) => {
+                    self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
+                }
+            }
+            return;
+        }
+        let Some(instrument_name) = self.current_custom_instrument_name() else {
+            return;
+        };
+        let instrument_name = instrument_name.to_string();
+        let presets = match lisp_host::load_instrument_presets(&instrument_name) {
             Ok(p) => p,
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
@@ -690,7 +711,6 @@ impl App {
         let Some(preset) = presets.into_iter().find(|p| p.name == selected_name) else {
             return;
         };
-        let track = self.ui.cursor_track;
         let Some(desc) = self.current_instrument_descriptor() else {
             return;
         };
@@ -718,14 +738,34 @@ impl App {
             Some((format!("Loaded preset '{}'", preset.name), Instant::now()));
     }
 
-    pub fn save_current_track_as_preset(&mut self, preset_name: &str, overwrite: bool) {
-        let Some(instrument_name) = self.current_custom_instrument_name() else {
-            return;
-        };
+    pub fn save_current_track_as_preset(
+        &mut self,
+        preset_name: &str,
+        overwrite: bool,
+    ) -> Result<(), String> {
         let track = self.ui.cursor_track;
-        let Some(desc) = self.current_instrument_descriptor() else {
-            return;
+        if self.graph.track_instrument_types.get(track) == Some(&InstrumentType::Rack) {
+            return match self.save_rack_preset(track, preset_name, overwrite) {
+                Ok(_) => {
+                    self.editor.status_message =
+                        Some((format!("Saved preset '{}'", preset_name), Instant::now()));
+                    self.clamp_preset_browser();
+                    Ok(())
+                }
+                Err(error) => {
+                    self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
+                    Err(error)
+                }
+            };
+        }
+        let Some(instrument_name) = self.current_custom_instrument_name() else {
+            return Err("Current track does not support instrument presets".to_string());
         };
+        let instrument_name = instrument_name.to_string();
+        let Some(desc) = self.current_instrument_descriptor() else {
+            return Err("Instrument descriptor unavailable".to_string());
+        };
+        let desc = desc.clone();
         let slot = &self.state.pattern.instrument_slots[track];
         let mut params = std::collections::BTreeMap::new();
         for (idx, param) in desc.params.iter().enumerate() {
@@ -739,14 +779,14 @@ impl App {
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
             params,
-            key_locks: crate::effects::capture_key_locks_by_param_name(slot, desc),
+            key_locks: crate::effects::capture_key_locks_by_param_name(slot, &desc),
         };
 
-        let mut presets = match lisp_host::load_instrument_presets(instrument_name) {
+        let mut presets = match lisp_host::load_instrument_presets(&instrument_name) {
             Ok(p) => p,
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
-                return;
+                return Err(e.to_string());
             }
         };
 
@@ -758,23 +798,25 @@ impl App {
                     format!("Preset '{}' already exists", preset_name),
                     Instant::now(),
                 ));
-                return;
+                return Err(format!("Preset '{preset_name}' already exists"));
             }
         } else {
             presets.push(preset);
             presets.sort_by(|a, b| a.name.cmp(&b.name));
         }
 
-        match lisp_host::save_instrument_presets(instrument_name, &presets) {
+        match lisp_host::save_instrument_presets(&instrument_name, &presets) {
             Ok(()) => {
                 let engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
                 self.set_track_sound_state(track, engine_id, Some(preset_name.to_string()), false);
                 self.editor.status_message =
                     Some((format!("Saved preset '{}'", preset_name), Instant::now()));
                 self.clamp_preset_browser();
+                Ok(())
             }
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
+                Err(e.to_string())
             }
         }
     }
@@ -786,7 +828,7 @@ impl App {
                 Some(("No loaded preset to overwrite".to_string(), Instant::now()));
             return;
         };
-        self.save_current_track_as_preset(&name, true);
+        let _ = self.save_current_track_as_preset(&name, true);
     }
 
     pub(super) fn revert_loaded_preset(&mut self) {
@@ -814,7 +856,7 @@ impl App {
                 if !name.is_empty() {
                     match self.ui.preset_prompt_kind {
                         PresetPromptKind::SaveNew => {
-                            self.save_current_track_as_preset(&name, false)
+                            let _ = self.save_current_track_as_preset(&name, false);
                         }
                     }
                 }
