@@ -75,6 +75,7 @@
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (space-echo-orange) :mixer-control-bg)
     :color (if (= (get p :text-value) label-text) :black :dim)
+    :border-color :transparent
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
@@ -121,13 +122,14 @@
 
 (def builtin-fx-space-echo-mode-button (fx p index short-label)
   (let ((selected (= (round (fx-param-numeric-value p)) index))
-        (reverb-mode (> index 5)))
+      (reverb-mode (> index 5)))
     (button short-label
-      :width 2.55 :height 1.30 :padding 0 :font-size 8.5
+      :width 3.0 :height 1.30 :padding 0 :font-size 8.5
       :background-color (if selected
-                          (if reverb-mode (space-echo-green) (space-echo-orange))
-                          :mixer-control-bg)
+        (if reverb-mode (space-echo-green) (space-echo-orange))
+        :mixer-control-bg)
       :color (if selected :black :dim)
+      :border-color :transparent
       :plock-active (if (param-plock-active? fx p) 1 0)
       :plock-color-r (param-plock-color-r)
       :plock-color-g (param-plock-color-g)
@@ -188,8 +190,9 @@
 (def builtin-fx-space-echo-spring-button (fx p index short-label)
   (let ((selected (= (round (fx-param-numeric-value p)) index)))
     (button short-label
-      :width 3.35 :height 0.92 :padding 0 :font-size 8.0
+      :width 4.35 :height 0.92 :padding 0 :font-size 8.0
       :background-color (if selected (space-echo-green) :mixer-control-bg)
+      :border-color :transparent
       :color (if selected :black :dim)
       :plock-active (if (param-plock-active? fx p) 1 0)
       :plock-color-r (param-plock-color-r)

@@ -2235,6 +2235,14 @@ pub(crate) fn sampler_selection_time_field(track: usize, marker: &str) -> String
     format!("track-{track}-sampler-selection-{marker}-time")
 }
 
+pub(crate) fn rack_slot_sampler_selection_time_field(
+    track: usize,
+    slot_idx: usize,
+    marker: &str,
+) -> String {
+    format!("track-{track}-rack-slot-{slot_idx}-sampler-selection-{marker}-time")
+}
+
 pub(crate) fn instrument_base_note_value_field(track: usize) -> String {
     format!("track-{track}-instrument-base-note")
 }
@@ -2607,6 +2615,42 @@ fn set_rack_value_field_updates(
     })
 }
 
+fn rack_slot_sample_duration(app: &tui::App, slot: &sequencer::sequencer::RackSlotSnapshot) -> f64 {
+    let Some((buffer_id, sample_name, _)) = slot.sample_id.as_ref() else {
+        return 1.0;
+    };
+    app.sample_buffer_path_registry
+        .get(buffer_id)
+        .or_else(|| app.sample_path_registry.get(sample_name))
+        .and_then(|path| {
+            eseqlisp::audio::sample::get_registered_sample(&path.display().to_string())
+        })
+        .map(|sample| sample.duration_seconds)
+        .unwrap_or(1.0)
+}
+
+fn rack_sampler_selection_update(
+    app: &tui::App,
+    track: usize,
+    slot_idx: usize,
+    slot: &sequencer::sequencer::RackSlotSnapshot,
+    param_idx: usize,
+    stored_value: f32,
+) -> Option<(String, Value)> {
+    if slot.instrument_type != sequencer::sequencer::InstrumentType::Sampler {
+        return None;
+    }
+    let marker = match param_idx {
+        2 => "start",
+        3 => "end",
+        _ => return None,
+    };
+    Some((
+        rack_slot_sampler_selection_time_field(track, slot_idx, marker),
+        Value::Number(stored_value as f64 * rack_slot_sample_duration(app, slot)),
+    ))
+}
+
 pub(crate) fn sync_rack_slot_control_value_field(
     rt: &mut Runtime,
     app: &tui::App,
@@ -2649,7 +2693,7 @@ pub(crate) fn sync_rack_slot_instrument_param_value_field(
     param_idx: usize,
     display_step: Option<usize>,
 ) -> bool {
-    let (name, value) = {
+    let (name, value, selection_update) = {
         let racks = app.state.pattern.rack_tracks.lock().unwrap();
         let Some(rack) = racks.get(track).and_then(Option::as_ref) else {
             return false;
@@ -2663,21 +2707,23 @@ pub(crate) fn sync_rack_slot_instrument_param_value_field(
         let Some(param) = descriptor.params.get(param_idx) else {
             return false;
         };
-        let stored = rack_slot_param_value(
-            rack,
-            slot_idx,
-            slot,
-            &descriptor,
-            param_idx,
-            display_step,
-        );
-        (param.name.clone(), param.stored_to_user(stored))
+        let stored =
+            rack_slot_param_value(rack, slot_idx, slot, &descriptor, param_idx, display_step);
+        (
+            param.name.clone(),
+            param.stored_to_user(stored),
+            rack_sampler_selection_update(app, track, slot_idx, slot, param_idx, stored),
+        )
     };
-    reactive_set_needs_ui(rt.set_reactive(
+    let mut needs_ui = reactive_set_needs_ui(rt.set_reactive(
         "SEQ",
         &rack_slot_instrument_param_value_field(track, slot_idx, param_idx, &name),
         Value::Number(value as f64),
-    ))
+    ));
+    if let Some((field, value)) = selection_update {
+        needs_ui |= reactive_set_needs_ui(rt.set_reactive("SEQ", &field, value));
+    }
+    needs_ui
 }
 
 pub(crate) fn sync_rack_slot_effect_param_value_field(
@@ -2770,6 +2816,11 @@ pub(crate) fn sync_rack_panel_param_value_fields(
                         ),
                         Value::Number(param.stored_to_user(value) as f64),
                     ));
+                    if let Some(update) =
+                        rack_sampler_selection_update(app, track, slot_idx, slot, param_idx, value)
+                    {
+                        updates.push(update);
+                    }
                 }
             }
 
@@ -2890,6 +2941,16 @@ pub(crate) fn sync_rack_macro_target_value_fields(
                         ),
                         Value::Number(param.stored_to_user(stored) as f64),
                     ));
+                    if let Some(update) = rack_sampler_selection_update(
+                        app,
+                        track,
+                        *slot,
+                        slot_data,
+                        *param_index,
+                        stored,
+                    ) {
+                        updates.push(update);
+                    }
                 }
                 sequencer::sequencer::RackMacroTarget::SlotEffectParam {
                     slot,
@@ -8915,9 +8976,19 @@ fn build_selected_rack_slot_instrument_value(
             "start-time".to_string(),
             value_cell(Value::Number(start_raw as f64 * sample_duration)),
         );
+        insert_string_prop(
+            &mut panel_map,
+            "start-time-field",
+            rack_slot_sampler_selection_time_field(track, slot_idx, "start"),
+        );
         panel_map.insert(
             "end-time".to_string(),
             value_cell(Value::Number(end_raw as f64 * sample_duration)),
+        );
+        insert_string_prop(
+            &mut panel_map,
+            "end-time-field",
+            rack_slot_sampler_selection_time_field(track, slot_idx, "end"),
         );
         panel_map.insert(
             "duration".to_string(),
@@ -21749,6 +21820,68 @@ mod tests {
             rack_slot_value(&cleared_panel, 0, "gain"),
             Some(Value::Number(0.75)),
             "clearing selection should restore the rack row default gain display"
+        );
+    }
+
+    #[test]
+    fn rack_sampler_waveform_selection_tracks_live_start_and_end_values() {
+        let app = test_app_with_rack_panel();
+        assert!(app
+            .state
+            .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                slot.instrument_slot.defaults[2] = 0.57;
+                slot.instrument_slot.defaults[3] = 0.82;
+            },));
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let panel = build_instrument_panel_value(&app, 0, &selected);
+        let Value::List(racks) = &panel else {
+            panic!("rack panel should be a list");
+        };
+        let Value::Map(rack) = &*racks[0].borrow() else {
+            panic!("rack panel entry should be a map");
+        };
+        let Value::Map(instrument) = &*rack
+            .get("selected-instrument")
+            .expect("rack panel should expose its selected sampler")
+            .borrow()
+        else {
+            panic!("selected rack instrument should be a map");
+        };
+        let start_field = rack_slot_sampler_selection_time_field(0, 0, "start");
+        let end_field = rack_slot_sampler_selection_time_field(0, 0, "end");
+        assert_eq!(
+            instrument
+                .get("start-time-field")
+                .map(|value| value.borrow().clone()),
+            Some(Value::String(start_field.clone()))
+        );
+        assert_eq!(
+            instrument
+                .get("end-time-field")
+                .map(|value| value.borrow().clone()),
+            Some(Value::String(end_field.clone()))
+        );
+
+        let mut runtime = Runtime::new();
+        sync_rack_panel_param_value_fields(&mut runtime, &app, 0, None);
+        assert_eq!(
+            runtime.eval_str(&format!("SEQ.{start_field}")),
+            Ok(Some(Value::Number(0.57_f32 as f64)))
+        );
+        assert_eq!(
+            runtime.eval_str(&format!("SEQ.{end_field}")),
+            Ok(Some(Value::Number(0.82_f32 as f64)))
+        );
+
+        assert!(app
+            .state
+            .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| slot
+                .instrument_slot
+                .defaults[2] = 0.25,));
+        sync_rack_slot_instrument_param_value_field(&mut runtime, &app, 0, 0, 2, None);
+        assert_eq!(
+            runtime.eval_str(&format!("SEQ.{start_field}")),
+            Ok(Some(Value::Number(0.25)))
         );
     }
 
