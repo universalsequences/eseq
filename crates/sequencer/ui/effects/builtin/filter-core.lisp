@@ -140,13 +140,13 @@
       :plock-color-b (param-plock-color-b)
       :width width :height 1.05 :font-size 9.5)))
 
-(def builtin-fx-filter-sync-label (p)
-  (if (> (get p :value) 0.5) "sync" "free"))
+(def builtin-fx-filter-sync-label (fx p)
+  (if (fx-param-on-for? fx p) "sync" "free"))
 
 (def builtin-fx-filter-sync-control (fx p)
   (h-stack :gap 0.22 :align :center
     (label "sync" :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (dropdown :value (builtin-fx-filter-sync-label p)
+    (dropdown :value (builtin-fx-filter-sync-label fx p)
       :options '("free" "sync")
       :on-change (lambda (v) (fx-set-effect-value fx p (if (= v "sync") 1 0)))
       :plock-active (if (param-plock-active? fx p) 1 0)

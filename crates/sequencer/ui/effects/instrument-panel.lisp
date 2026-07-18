@@ -13,9 +13,15 @@
 (defwidget rack-macro-view-icon
   :width 2.25 :height 1.05 :paint-margin 0.15 :state (active)
   :shader
-  (let ((disc-color (if (= active 1) (rgba 1.0 0.58 0.25 1.0) (rgba 0.24 0.25 0.26 1.0)))
-        (glyph-color (if (= active 1) (rgba 0.10 0.10 0.11 1.0) (rgba 0.72 0.73 0.74 1.0))))
+  (let (
+      (disc-border (if (= active 1)
+          (rgba 1.0 0.58 0.25 1.0)
+          :white
+          ))      
+      (disc-color (if (= active 1) (rgba 1.0 0.58 0.25 1.0) (rgba 0.24 0.25 0.26 1.0)))
+      (glyph-color (if (= active 1) (rgba 0.10 0.10 0.11 1.0) (rgba 0.72 0.73 0.74 1.0))))
     (sdf/layer
+      (sdf/fill (sdf/circle 0.72) (material :color disc-border))
       (sdf/fill (sdf/circle 0.68) (material :color disc-color))
       (sdf/fill (sdf/circle 0.31) (material :color glyph-color))
       (sdf/fill (sdf/circle 0.23) (material :color disc-color))
@@ -29,7 +35,8 @@
   :shader
   (let ((disc-color (if (= active 1)
           (rgba 1.0 0.58 0.25 1.0)
-          (rgba 0.24 0.25 0.26 1.0)))
+          (rgba 0.24 0.25 0.26 1.0)
+          ))
       (disc-border (if (= active 1)
           (rgba 1.0 0.58 0.25 1.0)
           :white

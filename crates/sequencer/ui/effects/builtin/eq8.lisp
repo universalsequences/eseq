@@ -58,7 +58,7 @@
       :q (fx-param-value-for fx q-p)
       :q-min (param-control-min fx q-p)
       :q-max (param-control-max fx q-p)
-      :enabled (> (fx-param-value-for fx enabled-p) 0.5)
+      :enabled (fx-param-on-for? fx enabled-p)
       :selected (= selected-band band))))
 
 (def builtin-fx-eq8-bands (fx params)

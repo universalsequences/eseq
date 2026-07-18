@@ -95,8 +95,13 @@
 (def custom-ui-set-param (p value)
   (custom-ui-set-param-in-scope (custom-ui-current-scope) p value))
 
-(def custom-ui-param-value (p)
+(def custom-ui-param-binding (p)
   (fx-param-value-for (custom-ui-current-fx) p))
+
+;; Public custom-UI calculations have historically consumed a number here.
+;; Keep that contract distinct from the binding passed directly to widgets.
+(def custom-ui-param-value (p)
+  (reactive-value (custom-ui-param-binding p)))
 
 (def custom-ui-param-control-min (p)
   (param-control-min (custom-ui-current-fx) p))

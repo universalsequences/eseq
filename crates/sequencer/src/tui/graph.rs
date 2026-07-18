@@ -2440,6 +2440,15 @@ impl GraphController<'_> {
                 engine_id.ok_or_else(|| "Custom track has no engine binding".to_string())?;
             self.validated_engine_route_ids_for_track(engine_id, track)?;
         }
+        if !self.app.state.save_current_pattern_snapshot(
+            self.app.tracks.len(),
+            &self.app.graph.track_buffer_ids,
+            &self.app.graph.track_sample_rates,
+            &self.app.tracks,
+            &self.app.graph.track_instrument_types,
+        ) {
+            return Err("Failed to save the active track pattern before grouping".to_string());
+        }
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let mixer = self.create_rack_slot_mixer(
             &format!("{}_rack1", track_name),
@@ -7763,6 +7772,9 @@ mod tests {
             .add_builtin_effect_sync(0, "OTT")
             .expect("custom track should accept OTT");
         app.state.pattern.instrument_slots[0].defaults.set(0, 0.73);
+        app.state.pattern.effect_chains[0][effect_slot]
+            .defaults
+            .set(0, 0.63);
         let instrument_before = EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]);
         let effect_node = app.state.pattern.effect_chains[0][effect_slot]
             .node_id
@@ -7808,6 +7820,12 @@ mod tests {
                         && slot.track_sound_state.engine_id == Some(engine_id)
                 })
         }));
+        let stored_slot = &stored_patterns[0].rack_tracks[0]
+            .as_ref()
+            .expect("stored rack")
+            .slots[0];
+        assert_eq!(stored_slot.instrument_slot.defaults[0], 0.73);
+        assert_eq!(stored_slot.effect_slots[effect_slot].defaults[0], 0.63);
         assert_eq!(
             app.graph.engine_node_ids[engine_id]
                 .as_ref()

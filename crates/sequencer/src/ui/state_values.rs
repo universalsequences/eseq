@@ -46507,6 +46507,36 @@ mod tests {
             panic!("md-hat custom UI status after refresh: {status}");
         }
 
+        let numeric_param_value = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(> (custom-ui-param-value
+                       (inst-param (nth SEQ.instrument-panel 0) "engine"))
+                      0.5)"#,
+            )
+            .expect("custom UI numeric parameter API should support arithmetic");
+        assert_eq!(numeric_param_value, Some(Value::Bool(true)));
+        let bound_param_value = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(custom-ui-param-binding
+                    (inst-param (nth SEQ.instrument-panel 0) "engine"))"#,
+            )
+            .expect("custom UI widget parameter API should return a binding");
+        assert!(
+            matches!(bound_param_value, Some(Value::ReactiveRef { .. })),
+            "custom UI widget values must retain their reactive binding, got {bound_param_value:?}"
+        );
+        let binding_backed_effect_toggle = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-param-on-for?
+                    false
+                    (dict :value 0 :value-field "md-hat-test-engine"))"#,
+            )
+            .expect("effect boolean helper should dereference value-field bindings");
+        assert_eq!(binding_backed_effect_toggle, Some(Value::Bool(true)));
+
         let fx_id = editor
             .buffers
             .iter()

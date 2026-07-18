@@ -64,8 +64,8 @@
 (def builtin-fx-str8-delay-sync-button (fx p)
   (button "Sync"
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (> (get p :value) 0.5) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
-    :color (if (> (get p :value) 0.5) :black :dim)
+    :background-color (if (fx-param-on-for? fx p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
+    :color (if (fx-param-on-for? fx p) :black :dim)
         :border-color :transparent
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
@@ -111,7 +111,7 @@
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
       (builtin-fx-str8-delay-sync-button fx sync-p)
-      (if (> (get sync-p :value) 0.5)
+      (if (fx-param-on-for? fx sync-p)
         (v-stack :gap 0.12 :align :center
           (builtin-fx-str8-delay-div-grid fx div-p)
           (builtin-fx-filter-mini-percent fx "ofs" offset-p))

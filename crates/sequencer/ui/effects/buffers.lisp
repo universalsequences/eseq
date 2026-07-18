@@ -88,15 +88,14 @@
   `(v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
       (if (> (len SEQ.process-slots) 0)
-        (process-chain-panel)
-        (box :width 0 :height 0))
+        (process-chain-panel))
       (each SEQ.instrument-panel |inst inst-idx|
         (if (= (get inst :type) "rack")
           (h-stack :gap 0.2 :height fx-fixed-panel-height :align :stretch
             (instrument-panel inst)
             (if rack-panel-selected-chain-open
               (h-stack :debug-name "rack-selected-chain-fx"
-                       :gap 1 :height fx-fixed-panel-height :align :stretch
+                :gap 1 :height fx-fixed-panel-height :align :stretch
                 (rack-selected-fx-panel inst)
                 (rack-slot-fx-drop-panel inst)
                 (rack-slot-track-fx-divider))

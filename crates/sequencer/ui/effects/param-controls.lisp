@@ -655,8 +655,14 @@
 (def fx-param-numeric-value (p)
   (reactive-value (fx-param-value p)))
 
+(def fx-param-numeric-value-for (fx p)
+  (reactive-value (fx-param-value-for fx p)))
+
 (def fx-param-on? (p)
   (> (fx-param-numeric-value p) 0.5))
+
+(def fx-param-on-for? (fx p)
+  (> (fx-param-numeric-value-for fx p) 0.5))
 
 (def instrument-mod-selected-slot ()
   (if (> instrument-selected-mod-slot 0) instrument-selected-mod-slot 1))

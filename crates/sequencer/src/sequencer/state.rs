@@ -4150,6 +4150,26 @@ impl SequencerState {
                 track + 1
             ));
         }
+        for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
+            let Some(pattern_id) = scene.cells.get(track).copied().flatten() else {
+                continue;
+            };
+            if !pool.contains(pattern_id) {
+                return Err(format!(
+                    "Track {} scene {} references a missing pattern",
+                    track + 1,
+                    scene_idx + 1
+                ));
+            }
+        }
+        if let Some(pattern_id) = scenes.track_overrides.get(track).copied().flatten() {
+            if !pool.contains(pattern_id) {
+                return Err(format!(
+                    "Track {} override references a missing pattern",
+                    track + 1
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -4205,6 +4225,10 @@ impl SequencerState {
             let effective_id = scenes.effective_pattern_id(track)?;
             let pool = scenes.track_pools.get_mut(track)?;
             let mut effective_rack = None;
+            // Pattern ids are stable identities shared by scene cells and the
+            // optional launched-pattern override. Migrating each pool entry in
+            // place preserves those mappings without cloning or re-keying any
+            // pattern.
             for (pattern_id, data) in pool.patterns.iter_mut() {
                 let slot = make_slot(data);
                 if *pattern_id == effective_id {
@@ -8835,6 +8859,82 @@ mod tests {
             project_process_chain: crate::process::TrackProcessChain::default(),
             plock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
             key_lock_variant_registries: vec![PlockVariantRegistry::default(); num_tracks],
+        }
+    }
+
+    #[test]
+    fn group_flat_track_to_rack_migrates_every_pattern_without_rekeying_scene_mappings() {
+        let mut first = sample_pattern_snapshot(1);
+        first.instrument_types[0] = InstrumentType::Custom;
+        first.instrument_slots[0].defaults[0] = 0.11;
+        first.effect_slots[0][0].defaults[0] = 0.21;
+        let mut second = first.clone();
+        second.instrument_slots[0].defaults[0] = 0.32;
+        second.effect_slots[0][0].defaults[0] = 0.42;
+
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(vec![first, second], 0);
+        let (scene_pattern_ids_before, override_pattern_id, launched) = {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            let override_id = scenes.fork_track_pattern(0).expect("track pattern fork");
+            let launched = scenes.track_pools[0]
+                .get_mut(override_id)
+                .expect("forked pattern");
+            launched.instrument_slot.defaults[0] = 0.53;
+            launched.effect_slots[0].defaults[0] = 0.63;
+            let launched = launched.clone();
+            (
+                scenes
+                    .scenes
+                    .iter()
+                    .map(|scene| scene.cells[0])
+                    .collect::<Vec<_>>(),
+                override_id,
+                launched,
+            )
+        };
+        launched.restore_to(&state, 0);
+
+        state
+            .group_flat_track_to_rack(
+                0,
+                InstrumentType::Custom,
+                CustomInstrumentRunMode::Instrument,
+                Some(7),
+                &[EffectDescriptor::builtin_filter()],
+                &[Some("filter".to_string())],
+            )
+            .expect("flat track should migrate");
+
+        let scenes = state.pattern.scenes.lock().unwrap();
+        assert_eq!(
+            scenes
+                .scenes
+                .iter()
+                .map(|scene| scene.cells[0])
+                .collect::<Vec<_>>(),
+            scene_pattern_ids_before,
+            "scene cells must retain their stable pattern ids"
+        );
+        assert_eq!(scenes.track_overrides[0], Some(override_pattern_id));
+        assert_eq!(scenes.track_pools[0].patterns.len(), 3);
+
+        let expected = [
+            (scene_pattern_ids_before[0].unwrap(), 0.11, 0.21),
+            (scene_pattern_ids_before[1].unwrap(), 0.32, 0.42),
+            (override_pattern_id, 0.53, 0.63),
+        ];
+        for (pattern_id, instrument_default, effect_default) in expected {
+            let pattern = scenes.track_pools[0]
+                .get(pattern_id)
+                .expect("migrated pattern");
+            assert_eq!(pattern.instrument_type, InstrumentType::Rack);
+            assert_eq!(pattern.instrument_slot.node_id, 0);
+            assert!(pattern.effect_slots.iter().all(|slot| slot.node_id == 0));
+            let slot = &pattern.rack_track.as_ref().expect("rack pattern").slots[0];
+            assert_eq!(slot.instrument_slot.defaults[0], instrument_default);
+            assert_eq!(slot.effect_slots[0].defaults[0], effect_default);
+            assert_eq!(slot.track_sound_state.engine_id, Some(7));
         }
     }
 

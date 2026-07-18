@@ -69,7 +69,7 @@
 ;; ── Mode section (display + Phaser/Flanger/Doubler + per-mode controls) ──
 
 (def builtin-fx-phaser-flanger-mode-button (fx p index label-text)
-  (let ((selected (= (round (get p :value)) index)))
+  (let ((selected (= (round (fx-param-numeric-value p)) index)))
     (button label-text
       :width 4.85 :height 1.15 :padding 0 :font-size 8.5
       :background-color (if selected (phaser-flanger-orange) :mixer-control-bg)
@@ -140,7 +140,7 @@
         :width 6.4 :height 1.05 :font-size 9.0))))
 
 (def builtin-fx-phaser-flanger-mode-controls (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p)
-  (let ((m (round (get mode-p :value))))
+  (let ((m (round (fx-param-numeric-value mode-p))))
     (if (= m 0)
       (v-stack :gap 0.16 :align :center
         (h-stack :gap 0.45 :align :start
@@ -168,9 +168,9 @@
 (def builtin-fx-phaser-flanger-sync-button (fx p)
   (button "Sync"
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (> (get p :value) 0.5) (phaser-flanger-orange) :mixer-control-bg)
+    :background-color (if (fx-param-on-for? fx p) (phaser-flanger-orange) :mixer-control-bg)
     :border-color :transparent
-    :color (if (> (get p :value) 0.5) :black :dim)
+    :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)
@@ -236,7 +236,7 @@
       (label "LFO" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (builtin-fx-phaser-flanger-sync-button fx sync-p)
       (h-stack :gap 0.30 :align :start
-        (if (> (get sync-p :value) 0.5)
+        (if (fx-param-on-for? fx sync-p)
           (builtin-fx-phaser-flanger-div-grid fx div-p)
           (v-stack :gap 0.30 :align :center
             (box :height 0.8)
@@ -248,8 +248,8 @@
 (def builtin-fx-phaser-flanger-invert-button (fx p)
   (button "Ø"
     :width 1.45 :height 1.05 :padding 0 :font-size 9.5
-    :background-color (if (> (get p :value) 0.5) (phaser-flanger-orange) :mixer-control-bg)
-    :color (if (> (get p :value) 0.5) :black :dim)
+    :background-color (if (fx-param-on-for? fx p) (phaser-flanger-orange) :mixer-control-bg)
+    :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)

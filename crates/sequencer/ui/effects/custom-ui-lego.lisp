@@ -221,6 +221,7 @@
   (box :width width :height 1.18 :v-align :end
     (badge title
       :width width :height 0.82 :padding 0 :font-size 9.2
+      :border-color :transparent
       :variant :secondary
       :color accent)))
 
@@ -237,7 +238,7 @@
       (custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (custom-ui-param-value p)
+            :value (custom-ui-param-binding p)
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
             :base-value (custom-ui-param-base-value-prop p)
             :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
@@ -271,7 +272,7 @@
       (custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (custom-ui-param-value p)
+            :value (custom-ui-param-binding p)
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
             :base-value (custom-ui-param-base-value-prop p)
             :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
@@ -313,7 +314,7 @@
         (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (number-picker :value (custom-ui-param-value p)
+            (number-picker :value (custom-ui-param-binding p)
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
@@ -334,7 +335,7 @@
         (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (number-picker :value (custom-ui-param-value p)
+            (number-picker :value (custom-ui-param-binding p)
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
@@ -355,7 +356,7 @@
         (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.0 :gap 0.06 :align :start
             (label title :font-size 7.4 :width width :height 0.68 :color :dim :bg :transparent)
-            (number-picker :value (custom-ui-param-value p)
+            (number-picker :value (custom-ui-param-binding p)
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 9.0
@@ -396,7 +397,7 @@
         (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (dropdown :value-index (custom-ui-param-value p)
+            (dropdown :value-index (custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
               :bg-color :instrument-control-bg
@@ -425,7 +426,7 @@
         (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (dropdown :value-index (custom-ui-param-value p)
+            (dropdown :value-index (custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
               :bg-color :instrument-control-bg
@@ -455,7 +456,7 @@
       (custom-ui-param-mod-wrapper p (str "custom-ui-lego-micro-option-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-micro-option-" (custom-ui-scope-name) "-" name)
           (box :width width :height 1.18 :v-align :end
-            (dropdown :value-index (custom-ui-param-value p)
+            (dropdown :value-index (custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
               :bg-color '(rgba 0.1 0.1 0.1 1) ;:instrument-control-bg
@@ -507,7 +508,7 @@
       (subtree :key (str "custom-ui-lego-micro-base-note-" (custom-ui-scope-name))
         (v-stack :width width :height 1.18 :gap 0.16 :align :start
           (label "note" :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
-          (number-picker :value (custom-ui-param-value p)
+          (number-picker :value (custom-ui-param-binding p)
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 9.0
@@ -528,7 +529,7 @@
         (subtree :key (str "custom-ui-lego-row-" (custom-ui-scope-name) "-" name)
           (h-stack :width :fill :height 0.86 :gap 0.35 :align :baseline
             (label title :font-size 8.8 :width 6.2 :color :dim :bg :transparent)
-            (number-picker :value (custom-ui-param-value p)
+            (number-picker :value (custom-ui-param-binding p)
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
@@ -548,7 +549,7 @@
       (subtree :key (str "custom-ui-lego-base-note-" (custom-ui-scope-name))
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
           (label "note" :font-size 8.2 :width width :color :dim :bg :transparent)
-          (number-picker :value (custom-ui-param-value p)
+          (number-picker :value (custom-ui-param-binding p)
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 10.2
@@ -569,7 +570,7 @@
         (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label title :font-size 10 :color :dim :bg :transparent)
-            (number-picker :value (custom-ui-param-value p)
+            (number-picker :value (custom-ui-param-binding p)
               :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.5
@@ -593,7 +594,7 @@
           (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
             (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
               (label title :font-size 10 :color :dim :bg :transparent)
-              (number-picker :value (custom-ui-param-value p)
+              (number-picker :value (custom-ui-param-binding p)
                 :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
                 :unit unit
                 :noui true :font-size 10.5
@@ -920,7 +921,7 @@
           (vslider :width 0.1 :height height
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p)
             :origin (custom-ui-param-control-min p)
-            :value (custom-ui-param-value p)
+            :value (custom-ui-param-binding p)
             :color :white
             :fill accent
             :dot-color (rgba 0.16 0.16 0.18 1.0)
@@ -937,7 +938,7 @@
     (if p
       (v-stack :width width :gap 0.10 :align :center
         (ui-lego-vfader-s section name 0.7 fader-height accent)
-        (number-picker :value (custom-ui-param-value p)
+        (number-picker :value (custom-ui-param-binding p)
           :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
           :unit unit
           :noui true :font-size 8.6

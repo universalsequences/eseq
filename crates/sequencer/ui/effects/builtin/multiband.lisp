@@ -94,8 +94,8 @@
   (builtin-fx-ott-param-wrapper fx p "toggle"
     (button label-text
     :width w :height 1.0 :padding 0 :font-size 8.0
-    :background-color (if (> (get p :value) 0.5) (ott-button-on) :mixer-control-bg)
-    :color (if (> (get p :value) 0.5) :black :dim)
+    :background-color (if (fx-param-on-for? fx p) (ott-button-on) :mixer-control-bg)
+    :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
     :plock-color-g (param-plock-color-g)

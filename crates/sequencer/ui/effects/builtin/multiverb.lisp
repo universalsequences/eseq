@@ -28,7 +28,7 @@
                           (= name "mod rate") (= name "mod depth") (= name "mod shape")))))
 
 (def builtin-fx-multiverb-label-color (mode-p p)
-  (let ((mode (round (get mode-p :value))))
+  (let ((mode (round (fx-param-numeric-value mode-p))))
     (if (builtin-fx-multiverb-characteristic? mode (get p :name))
       (builtin-fx-multiverb-accent mode)
       :dim)))
@@ -85,7 +85,7 @@
 ;; ── Modes and factory settings ──
 
 (def builtin-fx-multiverb-mode-button (fx p index label-text)
-  (let ((selected (= (round (get p :value)) index)))
+  (let ((selected (= (round (fx-param-numeric-value p)) index)))
     (button label-text
       :debug-name (str "multiverb-mode-" label-text)
       :width 2.72 :height 1.20 :padding 0 :font-size 8.5
@@ -183,7 +183,7 @@
     :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.28 :align :center
       (label "MULTIVERB" :font-size 9.0 :width 11.8
-        :color (builtin-fx-multiverb-accent (round (get mode-p :value))) :bg :transparent)
+        :color (builtin-fx-multiverb-accent (round (fx-param-numeric-value mode-p))) :bg :transparent)
       (h-stack :gap 0.14
         (builtin-fx-multiverb-mode-button fx mode-p 0 "Plate")
         (builtin-fx-multiverb-mode-button fx mode-p 1 "Hall")
