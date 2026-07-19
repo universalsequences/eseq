@@ -6767,6 +6767,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_selected_tracks: HashSet<usize> = HashSet::new();
     let mut prev_groups: Vec<sequencer::project::ProjectTrackGroup> = Vec::new();
     let mut prev_track_peak_levels: Vec<f64> = Vec::new();
+    let mut prev_rack_slot_peak_levels: Vec<Vec<f64>> = Vec::new();
     let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
     let mut prev_modulator_phases: Vec<f64> = Vec::new();
     let mut prev_modulator_levels: Vec<f64> = Vec::new();
@@ -6788,6 +6789,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cached_peak_l_level = 0.0f64;
     let mut cached_peak_r_level = 0.0f64;
     let mut cached_track_peak_levels = vec![0.0; track_names.len()];
+    let mut cached_rack_slot_peak_levels: Vec<Vec<f64>> = Vec::new();
     let mut cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
     let mut prev_queued_transport_scene: Option<usize> = None;
     let (mut cached_modulator_phases, mut cached_modulator_levels) =
@@ -9851,6 +9853,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: map_bool(map, "value"),
                                     },
                                 );
+                                // Without republishing the scheduler snapshot,
+                                // per-trigger panner pushes clobber the new
+                                // mute with the stale snapshot's value.
+                                rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
@@ -9880,6 +9886,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: map_bool(map, "value"),
                                     },
                                 );
+                                rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
@@ -19231,6 +19238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
                 cached_track_peak_levels =
                     read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
+                cached_rack_slot_peak_levels = read_rack_slot_peak_levels(app.graph.lg, &app);
                 cached_bus_peak_levels =
                     read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
                 (cached_modulator_phases, cached_modulator_levels) =
@@ -19510,6 +19518,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 prev_track_peak_levels = cached_track_peak_levels.clone();
+            }
+            if cached_rack_slot_peak_levels != prev_rack_slot_peak_levels {
+                if track_meter_visible {
+                    needs_reactive_cycle |= sync_rack_slot_peak_field_delta(
+                        editor.runtime_mut(),
+                        &prev_rack_slot_peak_levels,
+                        &cached_rack_slot_peak_levels,
+                    );
+                }
+                prev_rack_slot_peak_levels = cached_rack_slot_peak_levels.clone();
             }
             if cached_bus_peak_levels != prev_bus_peak_levels {
                 if mixer_visible {

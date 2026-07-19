@@ -1564,6 +1564,58 @@
               (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
   )
 
+(def seqv-drum-slot-name-max-chars 14)
+
+(def seqv-drum-slot-name-display (name)
+  (if (> (len name) seqv-drum-slot-name-max-chars)
+    (str (substring name 0 (- seqv-drum-slot-name-max-chars 2)) "..")
+    name))
+
+;; Slot gain spans 0..2 (unity at 1), so the meter shows gain/2 and drags map
+;; the widget's -1..1 sx straight onto the gain range.
+(def seqv-drum-slot-gain-max 2.0)
+
+(def seqv-drum-slot-set-gain-from-event (track-idx sound event)
+  (let ((sx (get event :sx)))
+    (if (= sx nil)
+      nil
+      (host-command "set-rack-slot-gain"
+        (dict :track track-idx
+          :slot (get sound :slot-idx)
+          :value (max 0.0 (min seqv-drum-slot-gain-max (+ sx 1.0))))))))
+
+(def seqv-drum-slot-flag (sound field-key)
+  (let ((field (get sound field-key)))
+    (if field (reactive-value (bind-seq field)) false)))
+
+(def seqv-drum-slot-toggle (label-text track-idx sound param command active)
+  (button label-text
+    :key (str "seqv-drum-slot-" param "-" track-idx "-" (get sound :slot-idx))
+    
+    :width 1.55 :height 1.2    
+    :padding 0 :font-size 10
+    ;:border-color :transparent
+    :background-color (if active (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+    :color (if active :black :dim)
+    :on-click |x y r| (host-command command
+      (dict :track track-idx :slot (get sound :slot-idx) :value (not active)))))
+
+(def seqv-drum-slot-volume-control (track-idx sound)
+  (let ((gain-field (get sound :gain-field))
+      (peak-field (get sound :peak-field))
+      (gain (if gain-field (reactive-value (bind-seq gain-field)) 1.0)))
+    (box
+      :key (str "seqv-drum-slot-volume-" track-idx "-" (get sound :slot-idx))
+      :width 5.4 :height 1.1
+      :background "seqv-track-volume-meter"
+      :level (if peak-field (bind-seq peak-field) 0)
+      :volume (* 0.5 gain)
+      :track-r (seqv-track-color-r-binding track-idx)
+      :track-g (seqv-track-color-g-binding track-idx)
+      :track-b (seqv-track-color-b-binding track-idx)
+      :on-click (lambda (event) (seqv-drum-slot-set-gain-from-event track-idx sound event))
+      :on-drag (lambda (event) (seqv-drum-slot-set-gain-from-event track-idx sound event)))))
+
 (def seqv-drum-track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))
       (rows (max 1 (floor (/ (+ num-steps (- sequencer-row-width 1)) sequencer-row-width))))
@@ -1572,12 +1624,29 @@
       (box :background-color :buffer-bg
         (v-stack :gap 0.5
           (each sounds |sound|
-            (let ((pad-note (get sound :transpose)))
+            (let ((pad-note (get sound :transpose))
+                (muted (seqv-drum-slot-flag sound :mute-field))
+                (soloed (seqv-drum-slot-flag sound :solo-field)))
               (h-stack
-                :gap 0.6
-                :align :center
+                :gap 0.45
+                :align :baseline
                 :key (str "seqv-drum-lane-" track-idx "-" pad-note)
                 :debug-name "seqv-drum-slot-lane"
+                ;; per-slot gutter mirrors the track-header order: M, S, name, volume
+                (box :width 3.25)
+                (seqv-drum-slot-toggle "M" track-idx sound "mute" "set-rack-slot-mute" muted)
+                (seqv-drum-slot-toggle "S" track-idx sound "solo" "set-rack-slot-solo" soloed)
+                (label
+                  (seqv-drum-slot-name-display (get sound :name))
+                  :key (str "seqv-drum-lane-label-" track-idx "-" pad-note)
+                  :debug-name "seqv-drum-slot-label"
+                  :width 8.6
+                  ;:height 1.55
+                  :bg :transparent
+                  :font-size 10
+                  :h-align :left
+                  :color (if muted :dark-gray :dim))
+                (seqv-drum-slot-volume-control track-idx sound)
                 (v-stack :gap -0.04
                   (each (range 0 rows) |row|
                     (v-stack :gap -0.16
@@ -1592,16 +1661,7 @@
                       (seqv-playhead-row
                         track-idx
                         (nth SEQ.track-ids track-idx)
-                        row))))
-                (label
-                  (get sound :name)
-                  :key (str "seqv-drum-lane-label-" track-idx "-" pad-note)
-                  :debug-name "seqv-drum-slot-label"
-                  :width 10.0
-                  :height 1.55
-                  :font-size 10
-                  :h-align :left
-                  :color :dim))))))))
+                        row)))))))))))
   )
 
 (effect-buffer "*sequencer*"
@@ -1639,13 +1699,20 @@
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
                 (seqv-track-actions i))
               (seqv-expanded-track-editor i (nth SEQ.track-ids i)))
-            (h-stack :width :fill :gap 0.6 :align :start
-              (seqv-track-header i)
-              (if (seqv-track-drum-rack? i)
-                (seqv-drum-track-grid i)
-                (seqv-track-grid i))
-              (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-              (seqv-track-actions i))))))
+            (if (seqv-track-drum-rack? i)
+              ;; Drum racks put the rack header on its own row so the slot
+              ;; lanes get the full width for their per-slot gutters.
+              (v-stack :width :fill :gap 0.2
+                (h-stack :width :fill :gap 0.6 :align :start
+                  (seqv-track-header i)
+                  (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+                  (seqv-track-actions i))
+                (seqv-drum-track-grid i))
+              (h-stack :width :fill :gap 0.6 :align :start
+                (seqv-track-header i)
+                (seqv-track-grid i)
+                (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+                (seqv-track-actions i)))))))
     (box :key "sequencer-new-track-drop-zone"
       :width :fill :height 2.4 :flex 1
       :background-color :transparent

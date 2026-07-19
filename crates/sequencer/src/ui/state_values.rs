@@ -4760,6 +4760,67 @@ pub(crate) fn read_track_peak_levels(
     read_panner_peak_levels(lg, pan_ids)
 }
 
+pub(crate) fn rack_slot_peak_field(track: usize, slot_idx: usize) -> String {
+    format!("rack-slot-peak-{track}-{slot_idx}")
+}
+
+/// Per-track, per-slot peak levels read from each rack slot's panner node.
+/// Tracks without a rack yield an empty inner vec.
+pub(crate) fn read_rack_slot_peak_levels(
+    lg: sequencer::audiograph::LiveGraphPtr,
+    app: &tui::App,
+) -> Vec<Vec<f64>> {
+    app.graph
+        .track_node_ids
+        .iter()
+        .map(|track_nodes| {
+            track_nodes
+                .rack_slots
+                .iter()
+                .map(|nodes| read_panner_peak_level(lg, nodes.slot_pan_id))
+                .collect()
+        })
+        .collect()
+}
+
+pub(crate) fn sync_rack_slot_peak_field_delta(
+    rt: &mut Runtime,
+    previous: &[Vec<f64>],
+    levels: &[Vec<f64>],
+) -> bool {
+    let mut effects_dirty = false;
+    for (track, slots) in levels.iter().enumerate() {
+        let prev_slots = previous.get(track);
+        for (slot_idx, &level) in slots.iter().enumerate() {
+            let changed = prev_slots
+                .and_then(|prev| prev.get(slot_idx))
+                .is_none_or(|&old_level| old_level != level);
+            if changed {
+                effects_dirty |= rt
+                    .set_reactive(
+                        "SEQ",
+                        &rack_slot_peak_field(track, slot_idx),
+                        Value::Number(level),
+                    )
+                    .effects_dirty;
+            }
+        }
+        // Zero out slots that disappeared so stale meters don't stick.
+        if let Some(prev) = prev_slots {
+            for slot_idx in slots.len()..prev.len() {
+                effects_dirty |= rt
+                    .set_reactive(
+                        "SEQ",
+                        &rack_slot_peak_field(track, slot_idx),
+                        Value::Number(0.0),
+                    )
+                    .effects_dirty;
+            }
+        }
+    }
+    effects_dirty
+}
+
 pub(crate) fn read_bus_peak_levels(
     lg: sequencer::audiograph::LiveGraphPtr,
     bus_nodes: &[tui::BusNodeIds],
@@ -8458,6 +8519,7 @@ pub(crate) fn build_track_drum_racks_value(app: &tui::App) -> Value {
 /// sequencer, compact sequencer, and step inspector name the same sound.
 pub(crate) struct DrumRackSoundOption {
     pub(crate) pad_note: i32,
+    slot_idx: usize,
     name: String,
     label: String,
     short_label: String,
@@ -8504,6 +8566,7 @@ pub(crate) fn drum_rack_sound_options(app: &tui::App, track: usize) -> Vec<DrumR
             let name = instrument_display_name(&rack_slot_raw_name(app, slot_idx, slot));
             Some(DrumRackSoundOption {
                 pad_note,
+                slot_idx,
                 label: format!("{} · {name}", drum_rack_pad_label(pad_note)),
                 short_label: drum_rack_sound_short_label(&name),
                 name,
@@ -8514,11 +8577,47 @@ pub(crate) fn drum_rack_sound_options(app: &tui::App, track: usize) -> Vec<DrumR
     options
 }
 
-fn drum_rack_sound_value(option: DrumRackSoundOption) -> Rc<RefCell<Value>> {
+fn drum_rack_sound_value(track: usize, option: DrumRackSoundOption) -> Rc<RefCell<Value>> {
     let mut value = HashMap::new();
     value.insert(
         "transpose".to_string(),
         value_cell(Value::Number(option.pad_note as f64)),
+    );
+    value.insert(
+        "slot-idx".to_string(),
+        value_cell(Value::Number(option.slot_idx as f64)),
+    );
+    insert_string_prop(
+        &mut value,
+        "gain-field",
+        rack_slot_value_field(
+            track,
+            option.slot_idx,
+            sequencer::sequencer::RackSlotParam::Gain,
+        ),
+    );
+    insert_string_prop(
+        &mut value,
+        "mute-field",
+        rack_slot_value_field(
+            track,
+            option.slot_idx,
+            sequencer::sequencer::RackSlotParam::Mute,
+        ),
+    );
+    insert_string_prop(
+        &mut value,
+        "solo-field",
+        rack_slot_value_field(
+            track,
+            option.slot_idx,
+            sequencer::sequencer::RackSlotParam::Solo,
+        ),
+    );
+    insert_string_prop(
+        &mut value,
+        "peak-field",
+        rack_slot_peak_field(track, option.slot_idx),
     );
     insert_string_prop(&mut value, "name", option.name);
     insert_string_prop(&mut value, "label", option.label);
@@ -8532,7 +8631,7 @@ pub(crate) fn build_all_track_drum_sounds_value(app: &tui::App) -> Value {
             .map(|track| {
                 let sounds = drum_rack_sound_options(app, track)
                     .into_iter()
-                    .map(drum_rack_sound_value)
+                    .map(|option| drum_rack_sound_value(track, option))
                     .collect();
                 value_cell(Value::List(sounds))
             })
@@ -24661,11 +24760,39 @@ mod tests {
         test_list(values.iter().cloned().map(Value::String).collect())
     }
 
-    fn test_drum_sound(transpose: f64, name: &str, label: &str, short_label: &str) -> Value {
+    fn test_drum_sound(
+        slot_idx: usize,
+        transpose: f64,
+        name: &str,
+        label: &str,
+        short_label: &str,
+    ) -> Value {
         let mut sound = HashMap::new();
         sound.insert(
             "transpose".to_string(),
             Rc::new(RefCell::new(Value::Number(transpose))),
+        );
+        sound.insert(
+            "slot-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+        );
+        for (key, param) in [
+            ("gain-field", sequencer::sequencer::RackSlotParam::Gain),
+            ("mute-field", sequencer::sequencer::RackSlotParam::Mute),
+            ("solo-field", sequencer::sequencer::RackSlotParam::Solo),
+        ] {
+            sound.insert(
+                key.to_string(),
+                Rc::new(RefCell::new(Value::String(rack_slot_value_field(
+                    0, slot_idx, param,
+                )))),
+            );
+        }
+        sound.insert(
+            "peak-field".to_string(),
+            Rc::new(RefCell::new(Value::String(rack_slot_peak_field(
+                0, slot_idx,
+            )))),
         );
         sound.insert(
             "name".to_string(),
@@ -28643,8 +28770,8 @@ mod tests {
             "SEQ",
             "track-drum-sounds",
             test_list(vec![test_list(vec![
-                test_drum_sound(0.0, "Kick", "C4 · Kick", "Kic"),
-                test_drum_sound(12.0, "Snare", "C5 · Snare", "Sna"),
+                test_drum_sound(0, 0.0, "Kick", "C4 · Kick", "Kic"),
+                test_drum_sound(1, 12.0, "Snare", "C5 · Snare", "Sna"),
             ])]),
         );
         for pad_note in [0, 12] {
@@ -28756,8 +28883,23 @@ mod tests {
             Some(&Value::String("Kick".to_string()))
         );
         assert!(
-            kick_label.rect.col >= kick_step.rect.col + kick_step.rect.width,
-            "the slot label should be placed to the right of the steps"
+            kick_label.rect.col + kick_label.rect.width <= kick_step.rect.col,
+            "the slot label should be placed to the left of the steps"
+        );
+        let kick_mute = find_layout_node_by_stable_key(&compact_layout, "seqv-drum-slot-mute-0-0")
+            .expect("the Kick lane should expose a per-slot mute toggle");
+        assert_finite_nonzero_rect(kick_mute, "Kick lane mute toggle");
+        assert!(
+            kick_mute.rect.col < kick_label.rect.col,
+            "the per-slot mute toggle should sit before the slot name"
+        );
+        let kick_volume =
+            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-slot-volume-0-0")
+                .expect("the Kick lane should expose a per-slot volume control");
+        assert_finite_nonzero_rect(kick_volume, "Kick lane volume control");
+        assert!(
+            kick_volume.rect.col + kick_volume.rect.width <= kick_step.rect.col,
+            "the per-slot volume control should sit before the steps"
         );
         editor
             .runtime_mut()
@@ -28861,6 +29003,7 @@ mod tests {
             "SEQ",
             "track-drum-sounds",
             test_list(vec![test_list(vec![test_drum_sound(
+                0,
                 12.0,
                 "Snare",
                 "C5 · Snare",
