@@ -609,16 +609,22 @@
         (sdf/translate 0 0.70
           (sdf/rounded-rect 0.52 0.10 0.05))
         (material
-          :color (if (= plock-kind 2)
-            vcol
-            (if (= plock-kind 1)
-              seqcol
-              (rgba 0 0 0 0)))
+          :color (if (= active 1)
+            (if (= plock-kind 2)
+              vcol
+              (if (= plock-kind 1)
+                seqcol
+                (rgba 0 0 0 0)))
+            (rgba 0 0 0 0))
           :shadow (shadow
-            :color (if (= plock-kind 2)
-              (rgba variant-r variant-g variant-b 0.70)
+            :color (if (= active 1)
+              (if (= plock-kind 2)
+                (rgba variant-r variant-g variant-b 0.70)
+                (rgba 0 0 0 0))
               (rgba 0 0 0 0))
-            :blur (if (= plock-kind 2) 0.12 0.0)
+            :blur (if (= active 1)
+              (if (= plock-kind 2) 0.12 0.0)
+              0.0)
             :offset (vec2 0 0))))
       (sdf/fill (sdf/circle 0.66)
         (material
@@ -745,6 +751,7 @@
 
 (defstate seqv-drag-track nil)
 (defstate seqv-duration-drag-source nil)
+(defstate seqv-drum-drag-pad nil)
 
 (def seqv-duration-edge? (evt)
   (let ((sx (get evt :sx)))
@@ -803,6 +810,60 @@
     (set! seqv-drag-track nil)
     (set! seqv-duration-drag-source nil)))
 
+(def seqv-set-drum-duration-from-drag (track pad-note source step)
+  (do
+    (seq-set-track track)
+    (seq-set-drum-lane-step-duration
+      track
+      pad-note
+      source
+      (max 1 (min 32 (+ (- step source) 1))))))
+
+(def seqv-drum-step-select-drag-over (track pad-note step evt)
+  (if (and (= seqv-drag-track track)
+        (= seqv-drum-drag-pad pad-note)
+        (not (= seqv-duration-drag-source nil)))
+    (seqv-set-drum-duration-from-drag
+      track pad-note seqv-duration-drag-source step)
+    (if (and (= seqv-drag-track track) (= seqv-drum-drag-pad pad-note))
+      (drum-step-select-drag-over track pad-note step evt)
+      nil)))
+
+(def seqv-drum-step-pointer-down (track pad-note step evt)
+  (do
+    (set! selected-bus -1)
+    (seq-set-track track)
+    (set! seqv-drag-track track)
+    (set! seqv-drum-drag-pad pad-note)
+    (if (and (seq-drum-lane-step-active? track pad-note step)
+          (not (selection-click? evt))
+          (seqv-duration-edge? evt))
+      (do
+        (set! seqv-duration-drag-source step)
+        (set! step-click-pending nil)
+        (set! step-drag-anchor nil)
+        (set! step-move-last nil)
+        (cool-off-follow)
+        (drum-step-set-cursor track pad-note step)
+        (seqv-set-drum-duration-from-drag track pad-note step step))
+      (drum-step-pointer-down track pad-note step evt))))
+
+(def seqv-drum-step-pointer-up (track pad-note step evt)
+  (do
+    (if (and (= seqv-drag-track track)
+          (= seqv-drum-drag-pad pad-note)
+          (= seqv-duration-drag-source nil))
+      (drum-step-pointer-up track pad-note step evt)
+      nil)
+    (set! seqv-drag-track nil)
+    (set! seqv-drum-drag-pad nil)
+    (set! seqv-duration-drag-source nil)))
+
+(def seqv-drum-step-double-click (track pad-note step evt)
+  (do
+    (seq-set-track track)
+    (drum-step-double-click track pad-note step evt)))
+
 ;; Single tight step button (no slider, no number).
 (def seqv-track-step-value (lists track step fallback)
   (let ((track-list (if (< track (len lists)) (nth lists track) '())))
@@ -810,74 +871,19 @@
       (nth track-list step)
       fallback)))
 
-(defmacro seqv-drum-hit-shape (offset sides radius)
-  `(let ((x (- x ,offset))
-         (__n ,sides)
-         (__radius ,radius))
-     (if (> __n 12)
-       (sdf/circle __radius)
-       (if (> __n 3)
-         (sdf/rounded-rect __radius __radius (* 0.10 __radius))
-         (max (- y (* 0.85 __radius))
-              (- (abs x) (* 0.48 y) (* 0.57 __radius)))))))
-
-(defmacro seqv-drum-hit-layer (shape visible stroke-width)
-  `(if (> ,visible 0)
-     (sdf/stroke ,shape ,stroke-width (rgba 0.96 0.97 1.0 0.96))
-     (rgba 0 0 0 0)))
-
-(defwidget seqv-drum-hit-glyph-widget
-  :width 4.05 :height 1.85
-  :state (count sides-0 sides-1 sides-2)
-  :bindable (count sides-0 sides-1 sides-2)
-  :shader
-  (let ((__radius (if (> count 1) 0.15 0.25))
-        (__spacing (if (> count 1) 0.34 0.0))
-        (__stroke (if (> count 1) 0.035 0.05)))
-    (let ((__origin (* -0.5 __spacing (- count 1))))
-    (sdf/layer
-      (seqv-drum-hit-layer
-        (seqv-drum-hit-shape __origin sides-0 __radius)
-        count __stroke)
-      (seqv-drum-hit-layer
-        (seqv-drum-hit-shape (+ __origin __spacing) sides-1 __radius)
-        (- count 1) __stroke)
-      (seqv-drum-hit-layer
-        (seqv-drum-hit-shape (+ __origin (* 2 __spacing)) sides-2 __radius)
-        (- count 2) __stroke)))))
-
-(def seqv-empty-drum-hit-glyph ()
-  (dict :sides 24))
-
-(def seqv-drum-hit-glyph (track step)
-  (let ((glyphs (seqv-track-drum-step-glyphs track step))
-        (visible-count (min 3 (len (seqv-track-drum-step-glyphs track step)))))
-    (let ((g0 (seqv-list-ref glyphs 0 (seqv-empty-drum-hit-glyph)))
-          (g1 (seqv-list-ref glyphs 1 (seqv-empty-drum-hit-glyph)))
-          (g2 (seqv-list-ref glyphs 2 (seqv-empty-drum-hit-glyph))))
-      (seqv-drum-hit-glyph-widget
-      :key (str "seqv-drum-step-glyph-" track "-" step)
-      :debug-name "seqv-drum-step-glyph"
-      :count visible-count
-      :sides-0 (get g0 :sides)
-      :sides-1 (get g1 :sides)
-      :sides-2 (get g2 :sides)))))
+(def seqv-step-odd (step)
+  (let ((odd1 (mod (floor (/ step 4)) 2))
+      (odd2 (mod (floor (/ step 32)) 2)))
+    (if (= odd2 1) (if (= odd1 1) 0 1) odd1)))
 
 (def seqv-step-cell (track step visible)
-  (let (
-      (odd1 (mod (floor (/ step 4)) 2))
-      (odd2 (mod (floor (/ step 32)) 2))
-      (odd (if (= odd2 1) (if (= odd1 1) 0 1) odd1))
-      ;; Bindings (mute dim baked in Rust-side) so mute/solo/color changes
-      ;; recolor cells without rerunning the whole track-row subtree.
-      (track-r (bind-seq-nth "track-color-r-effective" track))
+  (let ((track-r (bind-seq-nth "track-color-r-effective" track))
       (track-g (bind-seq-nth "track-color-g-effective" track))
       (track-b (bind-seq-nth "track-color-b-effective" track))
       (plock-kind (seqv-track-step-value SEQ.track-step-plock-kinds track step 0))
       (variant-r (seqv-track-step-value SEQ.track-step-variant-r track step 0))
       (variant-g (seqv-track-step-value SEQ.track-step-variant-g track step 0))
-      (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0))
-      (drum-rack (seqv-track-drum-rack? track)))
+      (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0)))
     (box
       :width 3.05 :height 1.55
       :key (str "seqv-step-cell-" track "-" step)
@@ -902,21 +908,69 @@
       :hide (if visible 0 1)
       :background "cursor-highlight"
       (box
-          :width 3.05 :height 1.55
-          :align :center
-          :odd odd
-          :active (bind-seq (str "seq-track-step-active-" track "-" step))
-          :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
-          :plock-kind plock-kind
-          :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
-          :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
-          :hide (if visible 0 1)
-          :track-r track-r :track-g track-g :track-b track-b
-          :variant-r variant-r :variant-g variant-g :variant-b variant-b
-          :background "seqv-step-shell"
-          (if drum-rack
-            (seqv-drum-hit-glyph track step)
-            (box :width 0 :height 0))))))
+        :width 3.05 :height 1.55
+        :align :center
+        :odd (seqv-step-odd step)
+        :active (bind-seq (str "seq-track-step-active-" track "-" step))
+        :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
+        :plock-kind plock-kind
+        :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
+        :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
+        :hide (if visible 0 1)
+        :track-r track-r :track-g track-g :track-b track-b
+        :variant-r variant-r :variant-g variant-g :variant-b variant-b
+        :background "seqv-step-shell"))))
+
+(def seqv-drum-lane-step-cell (track pad-note step visible)
+  (let ((track-r (bind-seq-nth "track-color-r-effective" track))
+      (track-g (bind-seq-nth "track-color-g-effective" track))
+      (track-b (bind-seq-nth "track-color-b-effective" track))
+      (plock-kind (seqv-track-step-value SEQ.track-step-plock-kinds track step 0))
+      (variant-r (seqv-track-step-value SEQ.track-step-variant-r track step 0))
+      (variant-g (seqv-track-step-value SEQ.track-step-variant-g track step 0))
+      (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0)))
+    (box
+      :width 3.05 :height 1.55
+      :key (str "seqv-drum-lane-step-" track "-" pad-note "-" step)
+      :debug-name "seqv-drum-lane-step"
+      :on-mouse-down (lambda (evt)
+        (if visible
+          (seqv-drum-step-pointer-down track pad-note step evt)
+          nil))
+      :on-drag (lambda (evt)
+        (if visible
+          (seqv-drum-step-select-drag-over track pad-note step evt)
+          nil))
+      :on-mouse-up (lambda (evt)
+        (if visible
+          (seqv-drum-step-pointer-up track pad-note step evt)
+          nil))
+      :on-double-click (lambda (evt)
+        (if visible
+          (seqv-drum-step-double-click track pad-note step evt)
+          nil))
+      :active (if (and (= drum-step-cursor-track track)
+                    (= drum-step-cursor-pad pad-note))
+        (seqv-cursor-highlight-binding track step)
+        0)
+      :selected (seqv-track-selected-binding track)
+      :hide (if visible 0 1)
+      :background "cursor-highlight"
+      (box
+        :width 3.05 :height 1.55
+        :align :center
+        :odd (seqv-step-odd step)
+        :active (bind-seq (str "drum-lane-step-active-" track "-" pad-note "-" step))
+        :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
+        :plock-kind plock-kind
+        :selected (bind-seq
+          (str "drum-lane-step-selected-" track "-" pad-note "-" step))
+        :duration (bind-seq
+          (str "drum-lane-step-duration-" track "-" pad-note "-" step))
+        :hide (if visible 0 1)
+        :track-r track-r :track-g track-g :track-b track-b
+        :variant-r variant-r :variant-g variant-g :variant-b variant-b
+        :background "seqv-step-shell"))))
 
 (def seqv-playhead-row (track track-id row)
   (box
@@ -1510,6 +1564,46 @@
               (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
   )
 
+(def seqv-drum-track-grid (track-idx)
+  (let ((num-steps (nth SEQ.track-num-steps track-idx))
+      (rows (max 1 (floor (/ (+ num-steps (- sequencer-row-width 1)) sequencer-row-width))))
+      (sounds (seqv-track-drum-sounds track-idx)))
+    (box :padding 0.15
+      (box :background-color :buffer-bg
+        (v-stack :gap 0.5
+          (each sounds |sound|
+            (let ((pad-note (get sound :transpose)))
+              (h-stack
+                :gap 0.6
+                :align :center
+                :key (str "seqv-drum-lane-" track-idx "-" pad-note)
+                :debug-name "seqv-drum-slot-lane"
+                (v-stack :gap -0.04
+                  (each (range 0 rows) |row|
+                    (v-stack :gap -0.16
+                      (h-stack :gap 0.0
+                        (each (range 0 sequencer-row-width) |col|
+                          (let ((step (+ (* row sequencer-row-width) col)))
+                            (seqv-drum-lane-step-cell
+                              track-idx
+                              pad-note
+                              step
+                              (< step num-steps)))))
+                      (seqv-playhead-row
+                        track-idx
+                        (nth SEQ.track-ids track-idx)
+                        row))))
+                (label
+                  (get sound :name)
+                  :key (str "seqv-drum-lane-label-" track-idx "-" pad-note)
+                  :debug-name "seqv-drum-slot-label"
+                  :width 10.0
+                  :height 1.55
+                  :font-size 10
+                  :h-align :left
+                  :color :dim))))))))
+  )
+
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.00 :gap 0.0
     (each (seq-visible-track-indices) |i|
@@ -1547,7 +1641,9 @@
               (seqv-expanded-track-editor i (nth SEQ.track-ids i)))
             (h-stack :width :fill :gap 0.6 :align :start
               (seqv-track-header i)
-              (seqv-track-grid i)
+              (if (seqv-track-drum-rack? i)
+                (seqv-drum-track-grid i)
+                (seqv-track-grid i))
               (box :flex 1 :width 0 :height 0.1 :bg :transparent)
               (seqv-track-actions i))))))
     (box :key "sequencer-new-track-drop-zone"

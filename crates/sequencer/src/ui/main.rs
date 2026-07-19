@@ -2089,6 +2089,7 @@ fn sync_single_step_structural_bindings(
             Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
         )
         .effects_dirty;
+    dirty |= sync_drum_lane_step_binding_fields(rt, state, app, track, Some(step));
     for viewport in expanded_step_projection.viewports_for_track(track) {
         if let Some(slot) = visible_slot_for_step(viewport, step) {
             dirty |= sync_expanded_step_slot(
@@ -2124,6 +2125,33 @@ fn sync_track_duration_span_binding_fields(
                 Value::Bool(step < num_steps && track_step_duration_covered(state, track, step)),
             )
             .effects_dirty;
+    }
+    dirty
+}
+
+fn sync_drum_lane_duration_span_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+    track: usize,
+    start_step: usize,
+) -> bool {
+    let mut dirty = false;
+    for sound in drum_rack_sound_options(app, track) {
+        for step in start_step.min(MAX_STEPS)..MAX_STEPS {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &drum_lane_step_duration_field(track, sound.pad_note, step),
+                    Value::Bool(drum_lane_step_duration_covered(
+                        state,
+                        track,
+                        sound.pad_note,
+                        step,
+                    )),
+                )
+                .effects_dirty;
+        }
     }
     dirty
 }
@@ -2799,6 +2827,9 @@ fn apply_ui_invalidations(
                 StepInvalidation::DurationSpan => {
                     needs_reactive_cycle |=
                         sync_track_duration_span_binding_fields(rt, state, track, step);
+                    needs_reactive_cycle |= sync_drum_lane_duration_span_binding_fields(
+                        rt, state, app, track, step,
+                    );
                 }
                 StepInvalidation::Active
                 | StepInvalidation::Payload

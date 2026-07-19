@@ -7739,6 +7739,255 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
     }
 
+    fn drum_lane_notes(&self, track: usize, step: usize) -> Vec<(f32, f32, f32)> {
+        if track >= MAX_TRACKS
+            || step >= MAX_STEPS
+            || !self.pattern.patterns[track].is_active(step)
+        {
+            return Vec::new();
+        }
+
+        let step_duration = self.pattern.step_data[track]
+            .get(step, StepParam::Duration)
+            .max(0.0);
+        let step_delay = self.pattern.step_data[track].get(step, StepParam::Delay);
+        let chord_count = self.pattern.chord_data[track].count(step);
+        if chord_count == 0 {
+            return vec![(
+                self.pattern.step_data[track].get(step, StepParam::Transpose),
+                step_duration,
+                step_delay,
+            )];
+        }
+
+        (0..chord_count)
+            .map(|voice| {
+                let duration = self.pattern.chord_data[track].get_duration(step, voice);
+                (
+                    self.pattern.chord_data[track].get(step, voice),
+                    if duration > 0.0 {
+                        duration
+                    } else {
+                        step_duration
+                    },
+                    self.pattern.chord_data[track].get_delay(step, voice),
+                )
+            })
+            .collect()
+    }
+
+    fn write_drum_lane_notes(
+        &self,
+        track: usize,
+        step: usize,
+        mut notes: Vec<(f32, f32, f32)>,
+    ) {
+        if notes.is_empty() {
+            self.clear_step_payload_inner(track, step);
+            return;
+        }
+
+        notes.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.pattern.chord_data[track].clear_step(step);
+        let max_duration = notes
+            .iter()
+            .map(|(_, duration, _)| *duration)
+            .fold(0.0, f32::max);
+        if notes.len() > 1 {
+            for (note, duration, delay) in &notes {
+                self.pattern.chord_data[track].add_note_with_timing(
+                    step, *note, *duration, *delay,
+                );
+            }
+        }
+        self.pattern.step_data[track].set(step, StepParam::Transpose, notes[0].0);
+        self.pattern.step_data[track].set(step, StepParam::Duration, max_duration);
+        self.pattern.step_data[track].set(
+            step,
+            StepParam::Delay,
+            if notes.len() == 1 { notes[0].2 } else { 0.0 },
+        );
+        self.pattern.patterns[track].set_step_active(step, true);
+    }
+
+    pub fn drum_lane_step_duration(
+        &self,
+        track: usize,
+        step: usize,
+        pad_note: i32,
+    ) -> Option<f32> {
+        self.drum_lane_notes(track, step)
+            .into_iter()
+            .find(|(note, _, _)| note.round() as i32 == pad_note)
+            .map(|(_, duration, _)| duration)
+    }
+
+    /// Set the duration of one drum-pad voice without changing the durations
+    /// of simultaneous hits stored in the same polyphonic step.
+    pub fn set_drum_lane_step_duration(
+        &self,
+        track: usize,
+        step: usize,
+        pad_note: i32,
+        duration: f32,
+    ) -> Option<f32> {
+        if track >= MAX_TRACKS || step >= MAX_STEPS {
+            return None;
+        }
+        let duration = duration.clamp(StepParam::Duration.min(), StepParam::Duration.max());
+        let mut notes = self.drum_lane_notes(track, step);
+        let (_, note_duration, _) = notes
+            .iter_mut()
+            .find(|(note, _, _)| note.round() as i32 == pad_note)?;
+        *note_duration = duration;
+        self.write_drum_lane_notes(track, step, notes);
+        self.publish_scheduler_snapshot();
+        Some(duration)
+    }
+
+    /// Toggle one pitch lane within a polyphonic step. Drum-rack lanes are a
+    /// projection of the existing step/chord representation: a single hit is
+    /// stored in the step transpose field, while simultaneous hits are stored
+    /// in chord data. Removing the final lane clears the complete step payload,
+    /// matching the normal step-toggle behavior.
+    pub fn toggle_drum_lane_step(&self, track: usize, step: usize, pad_note: i32) -> bool {
+        if track >= MAX_TRACKS || step >= MAX_STEPS {
+            return false;
+        }
+
+        let transpose = pad_note as f32;
+        let step_duration = self.pattern.step_data[track]
+            .get(step, StepParam::Duration)
+            .max(0.0);
+        let step_delay = self.pattern.step_data[track].get(step, StepParam::Delay);
+        let mut notes = self.drum_lane_notes(track, step);
+
+        let existing = notes
+            .iter()
+            .position(|(note, _, _)| note.round() as i32 == pad_note);
+        let activated = if let Some(index) = existing {
+            notes.remove(index);
+            false
+        } else if notes.len() < MAX_VOICES {
+            notes.push((transpose, step_duration, step_delay));
+            true
+        } else {
+            return false;
+        };
+
+        self.write_drum_lane_notes(track, step, notes);
+        self.publish_scheduler_snapshot();
+        activated
+    }
+
+    /// Move one or more hits in a single drum-pad lane without disturbing
+    /// simultaneous hits belonging to other pads. Destination hits in this
+    /// lane are replaced, matching the overwrite behavior of normal step drag.
+    pub fn move_drum_lane_steps(
+        &self,
+        track: usize,
+        pad_note: i32,
+        steps: &[usize],
+        delta: isize,
+    ) -> bool {
+        if track >= MAX_TRACKS || delta == 0 || steps.is_empty() {
+            return false;
+        }
+        let mut sources = steps.to_vec();
+        sources.sort_unstable();
+        sources.dedup();
+        if sources.iter().any(|step| *step >= MAX_STEPS) {
+            return false;
+        }
+        let destinations = sources
+            .iter()
+            .map(|step| *step as isize + delta)
+            .collect::<Vec<_>>();
+        if destinations
+            .iter()
+            .any(|step| *step < 0 || *step >= MAX_STEPS as isize)
+        {
+            return false;
+        }
+
+        let moved = sources
+            .iter()
+            .filter_map(|step| {
+                let notes = self.drum_lane_notes(track, *step);
+                notes
+                    .iter()
+                    .find(|(note, _, _)| note.round() as i32 == pad_note)
+                    .copied()
+                    .map(|note| {
+                        (
+                            *step,
+                            note,
+                            (notes.len() == 1).then(|| self.capture_step_snapshot(track, *step)),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        if moved.is_empty() {
+            return false;
+        }
+
+        for (step, _, _) in &moved {
+            let notes = self
+                .drum_lane_notes(track, *step)
+                .into_iter()
+                .filter(|(note, _, _)| note.round() as i32 != pad_note)
+                .collect();
+            self.write_drum_lane_notes(track, *step, notes);
+        }
+        for (step, note, exclusive_snapshot) in moved {
+            let destination = (step as isize + delta) as usize;
+            let mut notes = self
+                .drum_lane_notes(track, destination)
+                .into_iter()
+                .filter(|(existing, _, _)| existing.round() as i32 != pad_note)
+                .collect::<Vec<_>>();
+            if notes.is_empty() {
+                if let Some(snapshot) = exclusive_snapshot {
+                    self.restore_step_snapshot_inner(track, destination, &snapshot);
+                    continue;
+                }
+            }
+            notes.push(note);
+            self.write_drum_lane_notes(track, destination, notes);
+        }
+        self.publish_scheduler_snapshot();
+        true
+    }
+
+    /// Clear selected hits from one drum-pad lane while retaining every other
+    /// pad hit and the shared payload of steps that remain active.
+    pub fn clear_drum_lane_steps(&self, track: usize, pad_note: i32, steps: &[usize]) -> usize {
+        if track >= MAX_TRACKS {
+            return 0;
+        }
+        let mut cleared = 0;
+        for step in steps.iter().copied().filter(|step| *step < MAX_STEPS) {
+            let notes = self.drum_lane_notes(track, step);
+            let retained = notes
+                .iter()
+                .copied()
+                .filter(|(note, _, _)| note.round() as i32 != pad_note)
+                .collect::<Vec<_>>();
+            if retained.len() != notes.len() {
+                self.write_drum_lane_notes(track, step, retained);
+                cleared += 1;
+            }
+        }
+        if cleared > 0 {
+            self.publish_scheduler_snapshot();
+        }
+        cleared
+    }
+
     pub fn capture_step_snapshot(&self, track: usize, step: usize) -> StepSnapshot {
         let mut params = [0.0; NUM_PARAMS];
         for param in StepParam::ALL {
@@ -13194,6 +13443,107 @@ mod tests {
         // step 4 was never populated — clearing it should not panic
         state.clear_step_payload(0, 4);
         assert_step_is_default(&state, 0, 4);
+    }
+
+    #[test]
+    fn drum_lane_steps_expand_and_collapse_polyphonic_step_storage() {
+        let state = make_state_with_instrument();
+        let track = 0;
+        let step = 3;
+
+        assert!(state.toggle_drum_lane_step(track, step, 0));
+        assert!(state.pattern.patterns[track].is_active(step));
+        assert_eq!(
+            state.pattern.step_data[track].get(step, StepParam::Transpose),
+            0.0
+        );
+        assert_eq!(state.pattern.chord_data[track].count(step), 0);
+
+        assert!(state.toggle_drum_lane_step(track, step, 12));
+        assert_eq!(state.pattern.chord_data[track].count(step), 2);
+        assert_eq!(state.pattern.chord_data[track].get(step, 0), 0.0);
+        assert_eq!(state.pattern.chord_data[track].get(step, 1), 12.0);
+        assert_eq!(
+            state.set_drum_lane_step_duration(track, step, 0, 4.0),
+            Some(4.0)
+        );
+        assert_eq!(
+            state.set_drum_lane_step_duration(track, step, 12, 2.0),
+            Some(2.0)
+        );
+        assert_eq!(state.drum_lane_step_duration(track, step, 0), Some(4.0));
+        assert_eq!(state.drum_lane_step_duration(track, step, 12), Some(2.0));
+
+        assert!(!state.toggle_drum_lane_step(track, step, 0));
+        assert!(state.pattern.patterns[track].is_active(step));
+        assert_eq!(state.pattern.chord_data[track].count(step), 0);
+        assert_eq!(
+            state.pattern.step_data[track].get(step, StepParam::Transpose),
+            12.0
+        );
+
+        assert!(!state.toggle_drum_lane_step(track, step, 12));
+        assert_step_is_default(&state, track, step);
+    }
+
+    #[test]
+    fn drum_lane_drag_moves_only_the_requested_pad_hits() {
+        let state = make_state_with_instrument();
+        let track = 0;
+
+        assert!(state.toggle_drum_lane_step(track, 2, 0));
+        assert!(state.toggle_drum_lane_step(track, 2, 12));
+        assert!(state.toggle_drum_lane_step(track, 4, 0));
+        assert!(state.toggle_drum_lane_step(track, 6, 12));
+        assert!(state.toggle_drum_lane_step(track, 8, 24));
+        state.pattern.step_data[track].set(8, StepParam::Velocity, 0.42);
+
+        assert!(state.move_drum_lane_steps(track, 0, &[2, 4], 2));
+        assert!(state.move_drum_lane_steps(track, 24, &[8], 2));
+
+        assert!(state.pattern.patterns[track].is_active(2));
+        assert_eq!(state.pattern.chord_data[track].count(2), 0);
+        assert_eq!(
+            state.pattern.step_data[track]
+                .get(2, StepParam::Transpose)
+                .round() as i32,
+            12,
+            "the other pad hit at the source must remain"
+        );
+        assert!(state.pattern.patterns[track].is_active(4));
+        assert_eq!(
+            state.pattern.step_data[track]
+                .get(4, StepParam::Transpose)
+                .round() as i32,
+            0,
+            "the first selected hit should move to step 4"
+        );
+        assert_eq!(state.pattern.chord_data[track].count(6), 2);
+        let notes = (0..2)
+            .map(|voice| {
+                state.pattern.chord_data[track]
+                    .get(6, voice)
+                    .round() as i32
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(notes, vec![0, 12], "the destination's other pad must remain");
+        assert!(!state.pattern.patterns[track].is_active(8));
+        assert!(state.pattern.patterns[track].is_active(10));
+        assert_eq!(
+            state.pattern.step_data[track].get(10, StepParam::Velocity),
+            0.42,
+            "a lone hit moved to an empty destination should retain its full step payload"
+        );
+        assert_eq!(state.clear_drum_lane_steps(track, 0, &[6]), 1);
+        assert!(state.pattern.patterns[track].is_active(6));
+        assert_eq!(state.pattern.chord_data[track].count(6), 0);
+        assert_eq!(
+            state.pattern.step_data[track]
+                .get(6, StepParam::Transpose)
+                .round() as i32,
+            12,
+            "deleting a selected lane hit must retain the other pad at that step"
+        );
     }
 
     #[test]

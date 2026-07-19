@@ -7,6 +7,34 @@ pub(crate) struct RuntimeInit {
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct DrumLaneStepSelection {
+    track: usize,
+    pad_note: i32,
+    step: usize,
+}
+
+fn write_drum_lane_selection(
+    bindings: &eseqlisp::reactive::ReactiveBindingStore,
+    selection: DrumLaneStepSelection,
+    selected: bool,
+) {
+    bindings.write_float(
+        "SEQ",
+        &drum_lane_step_selected_field(selection.track, selection.pad_note, selection.step),
+        if selected { 1.0 } else { 0.0 },
+    );
+}
+
+fn clear_drum_lane_selection(
+    bindings: &eseqlisp::reactive::ReactiveBindingStore,
+    selected: &mut HashSet<DrumLaneStepSelection>,
+) {
+    for selection in selected.drain() {
+        write_drum_lane_selection(bindings, selection, false);
+    }
+}
+
 fn value_number_field(value: &Value, field: &str) -> Option<usize> {
     let Value::Map(map) = value else {
         return None;
@@ -727,6 +755,7 @@ pub(crate) fn init_runtime(
 
     let track_count = track_names.len();
     let effect_descriptors = app.graph.effect_descriptors.clone();
+    let selected_drum_lane_steps = Arc::new(Mutex::new(HashSet::<DrumLaneStepSelection>::new()));
     state.set_scratch_runtime_descriptors(
         app.graph.effect_descriptors.clone(),
         app.graph.instrument_descriptors.clone(),
@@ -795,10 +824,6 @@ pub(crate) fn init_runtime(
                 ("track-instrument-types", build_track_instrument_types(&app)),
                 ("track-drum-racks", build_track_drum_racks_value(&app)),
                 ("track-drum-sounds", build_all_track_drum_sounds_value(&app)),
-                (
-                    "track-drum-step-glyphs",
-                    build_all_track_drum_step_glyphs_value(&state, &app),
-                ),
                 (
                     "track-mod-output-available",
                     build_track_mod_output_available(&app),
@@ -1403,6 +1428,41 @@ pub(crate) fn init_runtime(
                         Value::Bool(step == track_active_playhead_step(&state, track)),
                     ));
                 }
+                for sound in drum_rack_sound_options(&app, track) {
+                    for step in 0..MAX_STEPS {
+                        fields.push((
+                            Box::leak(
+                                drum_lane_step_active_field(track, sound.pad_note, step)
+                                    .into_boxed_str(),
+                            ),
+                            Value::Bool(drum_lane_step_active(
+                                &state,
+                                track,
+                                sound.pad_note,
+                                step,
+                            )),
+                        ));
+                        fields.push((
+                            Box::leak(
+                                drum_lane_step_selected_field(track, sound.pad_note, step)
+                                    .into_boxed_str(),
+                            ),
+                            Value::Bool(false),
+                        ));
+                        fields.push((
+                            Box::leak(
+                                drum_lane_step_duration_field(track, sound.pad_note, step)
+                                    .into_boxed_str(),
+                            ),
+                            Value::Bool(drum_lane_step_duration_covered(
+                                &state,
+                                track,
+                                sound.pad_note,
+                                step,
+                            )),
+                        ));
+                    }
+                }
             }
             fields
         },
@@ -1931,6 +1991,85 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
     });
 
+    // seq-toggle-drum-lane-step — toggle one occupied pad lane at a track step
+    let st = state.clone();
+    let sel = selected_steps.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    let fx_ep = fx_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
+    let drum_selection_bindings = runtime.reactive_binding_store();
+    runtime.register_native("seq-toggle-drum-lane-step", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(pad_note)),
+            Some(Value::Number(step)),
+        ) = (args.first(), args.get(1), args.get(2))
+        else {
+            return Err(
+                "seq-toggle-drum-lane-step: expected (track pad-note step)".into(),
+            );
+        };
+        let track = *track as usize;
+        let pad_note = pad_note.round() as i32;
+        let step = *step as usize;
+        if track >= st.active_track_count() {
+            return Err(format!(
+                "seq-toggle-drum-lane-step: track {track} out of range"
+            ));
+        }
+        if step >= MAX_STEPS {
+            return Err(format!(
+                "seq-toggle-drum-lane-step: step {step} out of range"
+            ));
+        }
+        let occupied = st
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .is_some_and(|rack| {
+                rack.routing == sequencer::sequencer::RackRouting::ByPitch
+                    && rack
+                        .slots
+                        .iter()
+                        .any(|slot| slot.pad_note == Some(pad_note))
+            });
+        if !occupied {
+            return Err(format!(
+                "seq-toggle-drum-lane-step: pad note {pad_note} is not occupied on track {track}"
+            ));
+        }
+
+        let active = st.toggle_drum_lane_step(track, step, pad_note);
+        {
+            let mut set = sel.lock().unwrap();
+            if !set.is_empty() {
+                set.clear();
+                fx_ep.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        clear_drum_lane_selection(
+            &drum_selection_bindings,
+            &mut drum_sel.lock().unwrap(),
+        );
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        for change in [
+            StepInvalidation::Active,
+            StepInvalidation::Payload,
+            StepInvalidation::PlockPresence,
+        ] {
+            ui_inv.push(UiInvalidation::Step {
+                track,
+                step,
+                change,
+            });
+        }
+        Ok(Value::Bool(active))
+    });
+
     let st = state.clone();
     runtime.register_native("seq-track-step-active?", move |args, _ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(step))) = (args.first(), args.get(1))
@@ -1943,6 +2082,49 @@ pub(crate) fn init_runtime(
             return Ok(Value::Bool(false));
         }
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
+    });
+
+    let st = state.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-set-drum-lane-step-duration", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(pad_note)),
+            Some(Value::Number(step)),
+            Some(Value::Number(duration)),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err(
+                "seq-set-drum-lane-step-duration: expected (track pad-note step duration)".into(),
+            );
+        };
+        let track = *track as usize;
+        let pad_note = pad_note.round() as i32;
+        let step = *step as usize;
+        if track >= st.active_track_count() || step >= MAX_STEPS {
+            return Ok(Value::Bool(false));
+        }
+        let Some(duration) = st.set_drum_lane_step_duration(
+            track,
+            step,
+            pad_note,
+            *duration as f32,
+        ) else {
+            return Ok(Value::Bool(false));
+        };
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::Param(StepParam::Duration.into()),
+        });
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::DurationSpan,
+        });
+        Ok(Value::Number(duration as f64))
     });
 
     // seq-set-step-param — set param on current track
@@ -2977,12 +3159,279 @@ pub(crate) fn init_runtime(
         ))
     });
 
+    let st = state.clone();
+    runtime.register_native("seq-drum-lane-step-active?", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(pad_note)),
+            Some(Value::Number(step)),
+        ) = (args.first(), args.get(1), args.get(2))
+        else {
+            return Err(
+                "seq-drum-lane-step-active?: expected (track pad-note step)".into(),
+            );
+        };
+        Ok(Value::Bool(drum_lane_step_active(
+            &st,
+            *track as usize,
+            pad_note.round() as i32,
+            *step as usize,
+        )))
+    });
+
+    let drum_sel = selected_drum_lane_steps.clone();
+    runtime.register_native("seq-drum-lane-step-selected?", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(pad_note)),
+            Some(Value::Number(step)),
+        ) = (args.first(), args.get(1), args.get(2))
+        else {
+            return Err(
+                "seq-drum-lane-step-selected?: expected (track pad-note step)".into(),
+            );
+        };
+        Ok(Value::Bool(
+            drum_sel.lock().unwrap().contains(&DrumLaneStepSelection {
+                track: *track as usize,
+                pad_note: pad_note.round() as i32,
+                step: *step as usize,
+            }),
+        ))
+    });
+
+    let drum_sel = selected_drum_lane_steps.clone();
+    runtime.register_native("seq-drum-lane-has-selection?", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(pad_note))) =
+            (args.first(), args.get(1))
+        else {
+            return Err("seq-drum-lane-has-selection?: expected (track pad-note)".into());
+        };
+        let track = *track as usize;
+        let pad_note = pad_note.round() as i32;
+        Ok(Value::Bool(drum_sel.lock().unwrap().iter().any(
+            |selection| selection.track == track && selection.pad_note == pad_note,
+        )))
+    });
+
+    let drum_sel = selected_drum_lane_steps.clone();
+    let normal_sel = selected_steps.clone();
+    let ct = current_track.clone();
+    let ui_inv = ui_invalidations.clone();
+    let bindings = runtime.reactive_binding_store();
+    runtime.register_native("seq-select-drum-lane-step", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(pad_note)),
+            Some(Value::Number(step)),
+        ) = (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-select-drum-lane-step: expected (track pad-note step)".into());
+        };
+        let selection = DrumLaneStepSelection {
+            track: *track as usize,
+            pad_note: pad_note.round() as i32,
+            step: *step as usize,
+        };
+        if selection.step >= MAX_STEPS {
+            return Ok(Value::Bool(false));
+        }
+        let mut set = drum_sel.lock().unwrap();
+        let different_lane = set.iter().any(|selected| {
+            selected.track != selection.track || selected.pad_note != selection.pad_note
+        });
+        if different_lane {
+            clear_drum_lane_selection(&bindings, &mut set);
+        }
+        let selected = if set.insert(selection) {
+            true
+        } else {
+            set.remove(&selection);
+            false
+        };
+        write_drum_lane_selection(&bindings, selection, selected);
+        drop(set);
+
+        let mut normal = normal_sel.lock().unwrap();
+        if !normal.is_empty() {
+            let mut changed_steps = normal.drain().collect::<Vec<_>>();
+            changed_steps.sort_unstable();
+            drop(normal);
+            ui_inv.push(UiInvalidation::StepSelection {
+                track: ct.load(Ordering::Relaxed),
+                changed_steps,
+            });
+        }
+        Ok(Value::Bool(selected))
+    });
+
+    let st = state.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
+    let normal_sel = selected_steps.clone();
+    let ct = current_track.clone();
+    let ui_inv = ui_invalidations.clone();
+    let bindings = runtime.reactive_binding_store();
+    runtime.register_native("seq-select-drum-lane-step-range", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(pad_note)),
+            Some(Value::Number(a)),
+            Some(Value::Number(b)),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err(
+                "seq-select-drum-lane-step-range: expected (track pad-note start end)".into(),
+            );
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Ok(Value::Number(0.0));
+        }
+        let pad_note = pad_note.round() as i32;
+        let num_steps = st.pattern.track_params[track].get_num_steps().min(MAX_STEPS);
+        if num_steps == 0 {
+            return Ok(Value::Number(0.0));
+        }
+        let a = (*a as usize).min(num_steps - 1);
+        let b = (*b as usize).min(num_steps - 1);
+        let lo = a.min(b);
+        let hi = a.max(b);
+        let next = (lo..=hi)
+            .map(|step| DrumLaneStepSelection {
+                track,
+                pad_note,
+                step,
+            })
+            .collect::<HashSet<_>>();
+        let mut set = drum_sel.lock().unwrap();
+        for selection in set.difference(&next) {
+            write_drum_lane_selection(&bindings, *selection, false);
+        }
+        for selection in next.difference(&set) {
+            write_drum_lane_selection(&bindings, *selection, true);
+        }
+        *set = next;
+        drop(set);
+
+        let mut normal = normal_sel.lock().unwrap();
+        if !normal.is_empty() {
+            let mut changed_steps = normal.drain().collect::<Vec<_>>();
+            changed_steps.sort_unstable();
+            drop(normal);
+            ui_inv.push(UiInvalidation::StepSelection {
+                track: ct.load(Ordering::Relaxed),
+                changed_steps,
+            });
+        }
+        Ok(Value::Number((hi - lo + 1) as f64))
+    });
+
+    let drum_sel = selected_drum_lane_steps.clone();
+    let bindings = runtime.reactive_binding_store();
+    runtime.register_native("seq-clear-drum-lane-selection", move |_args, _ctx| {
+        clear_drum_lane_selection(&bindings, &mut drum_sel.lock().unwrap());
+        Ok(Value::Nil)
+    });
+
+    let st = state.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
+    let bindings = runtime.reactive_binding_store();
+    runtime.register_native("seq-move-drum-lane-step-drag", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(pad_note)),
+            Some(Value::Number(start)),
+            Some(Value::Number(target)),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err(
+                "seq-move-drum-lane-step-drag: expected (track pad-note start target)".into(),
+            );
+        };
+        let track = *track as usize;
+        let pad_note = pad_note.round() as i32;
+        let start = *start as usize;
+        let target = *target as usize;
+        if track >= st.active_track_count() || start == target {
+            return Ok(Value::Bool(false));
+        }
+        let num_steps = st.pattern.track_params[track].get_num_steps().min(MAX_STEPS);
+        if start >= num_steps || target >= num_steps {
+            return Ok(Value::Bool(false));
+        }
+        let delta = target as isize - start as isize;
+        let clicked = DrumLaneStepSelection {
+            track,
+            pad_note,
+            step: start,
+        };
+        let (steps, move_selection) = {
+            let set = drum_sel.lock().unwrap();
+            if set.contains(&clicked) {
+                let mut steps = set
+                    .iter()
+                    .filter(|selection| {
+                        selection.track == track && selection.pad_note == pad_note
+                    })
+                    .map(|selection| selection.step)
+                    .collect::<Vec<_>>();
+                steps.sort_unstable();
+                (steps, true)
+            } else {
+                (vec![start], false)
+            }
+        };
+        let new_steps = steps
+            .iter()
+            .map(|step| *step as isize + delta)
+            .collect::<Vec<_>>();
+        if new_steps
+            .iter()
+            .any(|step| *step < 0 || *step >= num_steps as isize)
+        {
+            return Ok(Value::Bool(false));
+        }
+        if !st.move_drum_lane_steps(track, pad_note, &steps, delta) {
+            return Ok(Value::Bool(false));
+        }
+        if move_selection {
+            let mut set = drum_sel.lock().unwrap();
+            for step in &steps {
+                let selection = DrumLaneStepSelection {
+                    track,
+                    pad_note,
+                    step: *step,
+                };
+                set.remove(&selection);
+                write_drum_lane_selection(&bindings, selection, false);
+            }
+            for step in new_steps {
+                let selection = DrumLaneStepSelection {
+                    track,
+                    pad_note,
+                    step: step as usize,
+                };
+                set.insert(selection);
+                write_drum_lane_selection(&bindings, selection, true);
+            }
+        }
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+            track,
+        }));
+        Ok(Value::Bool(true))
+    });
+
     // ── Selection natives ──
 
     // seq-select-step — toggle step in/out of selection
     let sel = selected_steps.clone();
     let ct = current_track.clone();
     let ui_inv = ui_invalidations.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
+    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-select-step", move |args, _ctx| {
         let Some(Value::Number(step)) = args.first() else {
             return Err("seq-select-step: expected step number".into());
@@ -2993,6 +3442,10 @@ pub(crate) fn init_runtime(
         if was_selected {
             set.remove(&step);
         }
+        clear_drum_lane_selection(
+            &drum_selection_bindings,
+            &mut drum_sel.lock().unwrap(),
+        );
         ui_inv.push(UiInvalidation::StepSelection {
             track: ct.load(Ordering::Relaxed),
             changed_steps: vec![step],
@@ -3005,6 +3458,8 @@ pub(crate) fn init_runtime(
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_inv = ui_invalidations.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
+    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-select-step-range", move |args, _ctx| {
         let (Some(Value::Number(a)), Some(Value::Number(b))) = (args.first(), args.get(1)) else {
             return Err("seq-select-step-range: expected start and end steps".into());
@@ -3018,6 +3473,10 @@ pub(crate) fn init_runtime(
         let b = (*b as usize).min(num_steps - 1);
         let lo = a.min(b);
         let hi = a.max(b);
+        clear_drum_lane_selection(
+            &drum_selection_bindings,
+            &mut drum_sel.lock().unwrap(),
+        );
         let len = hi - lo + 1;
         let mut set = sel.lock().unwrap();
         if set.len() == len && (lo..=hi).all(|step| set.contains(&step)) {
@@ -3042,11 +3501,16 @@ pub(crate) fn init_runtime(
     let sel = selected_steps.clone();
     let ct = current_track.clone();
     let ui_inv = ui_invalidations.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
+    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-clear-selection", move |_args, _ctx| {
         let mut selected = sel.lock().unwrap();
-        if selected.is_empty() {
+        let mut drum_selected = drum_sel.lock().unwrap();
+        if selected.is_empty() && drum_selected.is_empty() {
             return Ok(Value::Nil);
         }
+        clear_drum_lane_selection(&drum_selection_bindings, &mut drum_selected);
+        drop(drum_selected);
         let mut changed_steps = selected.drain().collect::<Vec<_>>();
         changed_steps.sort_unstable();
         drop(selected);
@@ -3059,8 +3523,11 @@ pub(crate) fn init_runtime(
 
     // seq-has-selection?
     let sel = selected_steps.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
     runtime.register_native("seq-has-selection?", move |_args, _ctx| {
-        Ok(Value::Bool(!sel.lock().unwrap().is_empty()))
+        Ok(Value::Bool(
+            !sel.lock().unwrap().is_empty() || !drum_sel.lock().unwrap().is_empty(),
+        ))
     });
 
     // seq-select-all-steps — select every step in the current track pattern
@@ -3091,9 +3558,38 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
+    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-delete-selected-steps", move |_args, _ctx| {
+        let drum_steps = {
+            let mut selected = drum_sel.lock().unwrap();
+            if selected.is_empty() {
+                None
+            } else {
+                let first = *selected.iter().next().unwrap();
+                let mut steps = selected
+                    .iter()
+                    .filter(|selection| {
+                        selection.track == first.track && selection.pad_note == first.pad_note
+                    })
+                    .map(|selection| selection.step)
+                    .collect::<Vec<_>>();
+                steps.sort_unstable();
+                clear_drum_lane_selection(&drum_selection_bindings, &mut selected);
+                Some((first.track, first.pad_note, steps))
+            }
+        };
+        if let Some((track, pad_note, steps)) = drum_steps {
+            let cleared = st.clear_drum_lane_steps(track, pad_note, &steps);
+            *auto_follow_override.lock().unwrap() =
+                Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+            ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+                track,
+            }));
+            return Ok(Value::Number(cleared as f64));
+        }
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
             let mut set = sel.lock().unwrap();
@@ -3200,8 +3696,10 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
+    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-shift-selected-steps", move |args, _ctx| {
         let Some(Value::Number(direction)) = args.first() else {
             return Err("seq-shift-selected-steps: expected direction".into());
@@ -3209,6 +3707,60 @@ pub(crate) fn init_runtime(
         let direction = (*direction).round() as isize;
         if direction == 0 {
             return Ok(Value::Nil);
+        }
+        let delta = direction.signum();
+        let drum_selection = {
+            let set = drum_sel.lock().unwrap();
+            set.iter().next().copied().map(|first| {
+                let mut steps = set
+                    .iter()
+                    .filter(|selection| {
+                        selection.track == first.track && selection.pad_note == first.pad_note
+                    })
+                    .map(|selection| selection.step)
+                    .collect::<Vec<_>>();
+                steps.sort_unstable();
+                (first.track, first.pad_note, steps)
+            })
+        };
+        if let Some((track, pad_note, steps)) = drum_selection {
+            let num_steps = st.pattern.track_params[track].get_num_steps().min(MAX_STEPS);
+            let can_shift = if delta < 0 {
+                steps.first().is_some_and(|step| *step > 0)
+            } else {
+                steps
+                    .last()
+                    .is_some_and(|step| step.saturating_add(1) < num_steps)
+            };
+            if !can_shift || !st.move_drum_lane_steps(track, pad_note, &steps, delta) {
+                return Ok(Value::Bool(false));
+            }
+            let mut set = drum_sel.lock().unwrap();
+            for step in &steps {
+                let selection = DrumLaneStepSelection {
+                    track,
+                    pad_note,
+                    step: *step,
+                };
+                set.remove(&selection);
+                write_drum_lane_selection(&drum_selection_bindings, selection, false);
+            }
+            for step in steps {
+                let selection = DrumLaneStepSelection {
+                    track,
+                    pad_note,
+                    step: (step as isize + delta) as usize,
+                };
+                set.insert(selection);
+                write_drum_lane_selection(&drum_selection_bindings, selection, true);
+            }
+            drop(set);
+            *auto_follow_override.lock().unwrap() =
+                Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+            ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+                track,
+            }));
+            return Ok(Value::Bool(true));
         }
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
@@ -3221,7 +3773,6 @@ pub(crate) fn init_runtime(
             return Ok(Value::Bool(false));
         }
         let num_steps = st.pattern.track_params[track].get_num_steps();
-        let delta = direction.signum();
         let can_shift = if delta < 0 {
             steps[0] > 0
         } else {

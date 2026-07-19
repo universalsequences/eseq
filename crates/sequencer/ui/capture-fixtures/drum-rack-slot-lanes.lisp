@@ -1,4 +1,4 @@
-;; Compact drum-rack capture for reviewing monochrome pad-shape outlines.
+;; Compact drum-rack capture for reviewing one labeled step lane per slot.
 (capture-project
   (track :drum-rack :name "Drum Rack" :num-steps 16
     :samples (
@@ -11,12 +11,14 @@
 
 (seq-toggle-step 0)
 (seq-set-step-param 0 :transpose 0)
+(seq-set-step-param 0 :duration 4)
 (seq-toggle-step 2)
 (seq-set-step-param 2 :transpose 1)
 (seq-toggle-step 4)
 (seq-set-step-param 4 :transpose 2)
 (seq-toggle-step 7)
 (seq-set-step-param 7 :transpose 3)
+(seq-set-step-param 7 :duration 3)
 (seq-toggle-step 10)
 (seq-set-step-param 10 :transpose 4)
 (seq-toggle-step 13)

@@ -1102,6 +1102,158 @@
 (def step-double-click (step evt)
   (step-double-click-for-track SEQ.current-track step evt))
 
+(defstate drum-step-gesture-track nil)
+(defstate drum-step-gesture-pad nil)
+(defstate drum-step-cursor-track nil)
+(defstate drum-step-cursor-pad nil)
+
+(def drum-step-gesture-lane? (track pad-note)
+  (and (= drum-step-gesture-track track)
+    (= drum-step-gesture-pad pad-note)))
+
+(def drum-step-set-cursor (track pad-note step)
+  (do
+    (seq-set-track track)
+    (set! drum-step-cursor-track track)
+    (set! drum-step-cursor-pad pad-note)
+    (set-track-cursor-step step)))
+
+(def drum-step-selected? (track pad-note step)
+  (seq-drum-lane-step-selected? track pad-note step))
+
+(def drum-step-shift-anchor (track pad-note step)
+  (if (and (not (= step-key-select-anchor nil))
+        (seq-drum-lane-has-selection? track pad-note))
+    step-key-select-anchor
+    (if (seq-drum-lane-has-selection? track pad-note) cursor-step step)))
+
+(def drum-step-select-drag-start (track pad-note step evt)
+  (do
+    (cool-off-follow)
+    (drum-step-set-cursor track pad-note step)
+    (set! drum-step-gesture-track track)
+    (set! drum-step-gesture-pad pad-note)
+    (set! step-click-pending nil)
+    (set! step-press-ms nil)
+    (set! step-press-step nil)
+    (set! step-drag-progressed nil)
+    (set! step-hold-select nil)
+    (if (cmd-click? evt)
+      (do
+        (set! step-key-select-anchor nil)
+        (set! step-drag-anchor nil)
+        (set! step-cmd-drag-last step)
+        (seq-select-drum-lane-step track pad-note step))
+      (let ((anchor (drum-step-shift-anchor track pad-note step)))
+        (do
+          (set! step-key-select-anchor anchor)
+          (set! step-drag-anchor anchor)
+          (set! step-cmd-drag-last nil)
+          (seq-select-drum-lane-step-range track pad-note anchor step))))))
+
+(def drum-step-select-drag-over (track pad-note step evt)
+  (if (drum-step-gesture-lane? track pad-note)
+    (do
+      (step-hold-select-maybe-engage step evt)
+      (if (or (selection-click? evt) step-hold-select)
+        (do
+          (set! step-click-pending nil)
+          (set! step-move-last nil)
+          (set! step-toggle-drag-value nil)
+          (cool-off-follow)
+          (drum-step-set-cursor track pad-note step)
+          (if (and (cmd-click? evt) (not step-hold-select))
+            (if (= step step-cmd-drag-last)
+              nil
+              (do
+                (set! step-cmd-drag-last step)
+                (if (drum-step-selected? track pad-note step)
+                  nil
+                  (seq-select-drum-lane-step track pad-note step))))
+            (do
+              (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
+              (seq-select-drum-lane-step-range
+                track pad-note step-drag-anchor step))))
+        (do
+          (if (= step step-press-step) nil (set! step-drag-progressed true))
+          (if (not (= step-toggle-drag-value nil))
+            (do
+              (set! step-click-pending nil)
+              (cool-off-follow)
+              (drum-step-set-cursor track pad-note step)
+              (if (= (seq-drum-lane-step-active? track pad-note step)
+                    step-toggle-drag-value)
+                nil
+                (seq-toggle-drum-lane-step track pad-note step)))
+            (if (= step-move-last nil)
+              nil
+              (if (= step step-move-last)
+                nil
+                (do
+                  (set! step-click-pending nil)
+                  (cool-off-follow)
+                  (seq-move-drum-lane-step-drag
+                    track pad-note step-move-last step)
+                  (set! step-move-last step)
+                  (drum-step-set-cursor track pad-note step))))))))
+    nil))
+
+(def drum-step-pointer-down (track pad-note step evt)
+  (do
+    (set! drum-step-gesture-track track)
+    (set! drum-step-gesture-pad pad-note)
+    (if (selection-click? evt)
+      (drum-step-select-drag-start track pad-note step evt)
+      (do
+        (cool-off-follow)
+        (drum-step-set-cursor track pad-note step)
+        (set! step-drag-anchor nil)
+        (set! step-press-ms (now-ms))
+        (set! step-press-step step)
+        (set! step-drag-progressed nil)
+        (set! step-hold-select nil)
+        (if (or (seq-drum-lane-step-active? track pad-note step)
+              (drum-step-selected? track pad-note step))
+          (do
+            (set! step-move-last step)
+            (set! step-click-pending step)
+            (set! step-click-was-active
+              (seq-drum-lane-step-active? track pad-note step))
+            (set! step-toggle-drag-value nil))
+          (do
+            (set! step-move-last nil)
+            (set! step-click-pending nil)
+            (set! step-toggle-drag-value true)
+            (drum-step-select-drag-over track pad-note step evt)))))))
+
+(def drum-step-pointer-up (track pad-note step evt)
+  (do
+    (if (and (drum-step-gesture-lane? track pad-note)
+          (= step-click-pending step)
+          (not (selection-click? evt)))
+      (if step-click-was-active
+        (seq-select-drum-lane-step-range track pad-note step step)
+        (seq-toggle-drum-lane-step track pad-note step))
+      nil)
+    (set! step-click-was-active nil)
+    (set! step-click-pending nil)
+    (set! step-drag-anchor nil)
+    (set! step-move-last nil)
+    (set! step-toggle-drag-value nil)
+    (set! step-press-ms nil)
+    (set! step-press-step nil)
+    (set! step-drag-progressed nil)
+    (set! step-hold-select nil)
+    (set! step-cmd-drag-last nil)
+    (set! drum-step-gesture-track nil)
+    (set! drum-step-gesture-pad nil)))
+
+(def drum-step-double-click (track pad-note step evt)
+  (if (and (not (selection-click? evt))
+        (seq-drum-lane-step-active? track pad-note step))
+    (seq-toggle-drum-lane-step track pad-note step)
+    nil))
+
 (def bus-step-double-click (step evt)
   (if (and (not (selection-click? evt)) (bus-step-active? step))
     (bus-toggle-step step)
@@ -1251,9 +1403,6 @@
     (if (> (len matches) 0)
       (get (nth matches 0) :transpose)
       (if (> (len sounds) 0) (get (nth sounds 0) :transpose) 0))))
-
-(def seqv-track-drum-step-glyphs (track step)
-  (seqv-track-step-value SEQ.track-drum-step-glyphs track step '()))
 
 (def seqv-process-lane-mode-offset 7)
 

@@ -245,6 +245,18 @@ pub(crate) fn track_step_active_field(track: usize, step: usize) -> String {
     format!("seq-track-step-active-{track}-{step}")
 }
 
+pub(crate) fn drum_lane_step_active_field(track: usize, pad_note: i32, step: usize) -> String {
+    format!("drum-lane-step-active-{track}-{pad_note}-{step}")
+}
+
+pub(crate) fn drum_lane_step_selected_field(track: usize, pad_note: i32, step: usize) -> String {
+    format!("drum-lane-step-selected-{track}-{pad_note}-{step}")
+}
+
+pub(crate) fn drum_lane_step_duration_field(track: usize, pad_note: i32, step: usize) -> String {
+    format!("drum-lane-step-duration-{track}-{pad_note}-{step}")
+}
+
 /// Registry field caching a hex digest of all four per-step binding lanes for
 /// a track. When it is unchanged, the per-step field writes are skipped
 /// entirely; single-step sync paths invalidate it by writing Nil.
@@ -3607,11 +3619,7 @@ fn sync_all_track_sequencer_state_inner(
         "track-drum-sounds",
         build_all_track_drum_sounds_value(app),
     );
-    rt.set_reactive(
-        "SEQ",
-        "track-drum-step-glyphs",
-        build_all_track_drum_step_glyphs_value(state, app),
-    );
+    sync_all_drum_lane_step_binding_fields(rt, state, app);
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_transposes = started.expect("profile timer").elapsed();
     }
@@ -4397,11 +4405,7 @@ pub(crate) fn sync_track_mixer_state(
         "track-drum-sounds",
         build_all_track_drum_sounds_value(app),
     );
-    rt.set_reactive(
-        "SEQ",
-        "track-drum-step-glyphs",
-        build_all_track_drum_step_glyphs_value(state, app),
-    );
+    sync_all_drum_lane_step_binding_fields(rt, state, app);
     rt.set_reactive(
         "SEQ",
         "track-mod-output-available",
@@ -4518,7 +4522,6 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-drum-racks", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-drum-sounds", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-drum-step-glyphs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
@@ -5174,7 +5177,6 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-transposes", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-drum-racks", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-drum-sounds", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-drum-step-glyphs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-delays", Value::List(vec![]));
@@ -8455,8 +8457,9 @@ pub(crate) fn build_track_drum_racks_value(app: &tui::App) -> Value {
 /// The sequencer treats a drum-rack transpose as the pad note that routes to
 /// a slot. Keep this display mapping in one place so the pad grid, expanded
 /// sequencer, compact sequencer, and step inspector name the same sound.
-struct DrumRackSoundOption {
-    pad_note: i32,
+pub(crate) struct DrumRackSoundOption {
+    pub(crate) pad_note: i32,
+    name: String,
     label: String,
     short_label: String,
 }
@@ -8477,7 +8480,10 @@ fn drum_rack_sound_short_label(name: &str) -> String {
     }
 }
 
-fn drum_rack_sound_options(app: &tui::App, track: usize) -> Vec<DrumRackSoundOption> {
+pub(crate) fn drum_rack_sound_options(
+    app: &tui::App,
+    track: usize,
+) -> Vec<DrumRackSoundOption> {
     let rack = app
         .state
         .pattern
@@ -8504,6 +8510,7 @@ fn drum_rack_sound_options(app: &tui::App, track: usize) -> Vec<DrumRackSoundOpt
                 pad_note,
                 label: format!("{} · {name}", drum_rack_pad_label(pad_note)),
                 short_label: drum_rack_sound_short_label(&name),
+                name,
             })
         })
         .collect::<Vec<_>>();
@@ -8517,6 +8524,7 @@ fn drum_rack_sound_value(option: DrumRackSoundOption) -> Rc<RefCell<Value>> {
         "transpose".to_string(),
         value_cell(Value::Number(option.pad_note as f64)),
     );
+    insert_string_prop(&mut value, "name", option.name);
     insert_string_prop(&mut value, "label", option.label);
     insert_string_prop(&mut value, "short-label", option.short_label);
     Rc::new(RefCell::new(Value::Map(value)))
@@ -8536,69 +8544,110 @@ pub(crate) fn build_all_track_drum_sounds_value(app: &tui::App) -> Value {
     )
 }
 
-fn drum_rack_hit_glyph_value(pad_note: i32) -> Rc<RefCell<Value>> {
-    // At compact-sequencer scale, these three silhouettes stay recognizable.
-    // The marker is intentionally monochrome so it does not compete with the
-    // track color and active-step illumination.
-    const SIDES: [u8; 3] = [3, 4, 24];
-    let identity =
-        pad_note.rem_euclid(sequencer::sequencer::DRUM_RACK_TOTAL_PAD_NOTES as i32) as usize;
-    let sides = SIDES[identity % SIDES.len()];
-    let mut glyph = HashMap::new();
-    glyph.insert(
-        "pad-note".to_string(),
-        value_cell(Value::Number(pad_note as f64)),
-    );
-    glyph.insert("sides".to_string(), value_cell(Value::Number(sides as f64)));
-    value_cell(Value::Map(glyph))
+pub(crate) fn drum_lane_step_active(
+    state: &Arc<SequencerState>,
+    track: usize,
+    pad_note: i32,
+    step: usize,
+) -> bool {
+    if track >= state.pattern.patterns.len()
+        || step >= MAX_STEPS
+        || !state.pattern.patterns[track].is_active(step)
+    {
+        return false;
+    }
+    let count = state.pattern.chord_data[track].count(step);
+    if count == 0 {
+        return state.pattern.step_data[track]
+            .get(step, StepParam::Transpose)
+            .round() as i32
+            == pad_note;
+    }
+    (0..count).any(|voice| {
+        state.pattern.chord_data[track].get(step, voice).round() as i32 == pad_note
+    })
 }
 
-pub(crate) fn build_all_track_drum_step_glyphs_value(
+pub(crate) fn drum_lane_step_duration_covered(
+    state: &Arc<SequencerState>,
+    track: usize,
+    pad_note: i32,
+    target_step: usize,
+) -> bool {
+    if track >= state.pattern.patterns.len() || target_step >= MAX_STEPS {
+        return false;
+    }
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    target_step < num_steps
+        && (0..=target_step).any(|source_step| {
+            state
+                .drum_lane_step_duration(track, source_step, pad_note)
+                .is_some_and(|duration| duration > (target_step - source_step) as f32)
+        })
+}
+
+pub(crate) fn sync_drum_lane_step_binding_fields(
+    rt: &mut Runtime,
     state: &Arc<SequencerState>,
     app: &tui::App,
-) -> Value {
-    Value::List(
-        (0..app.tracks.len())
-            .map(|track| {
-                let available_notes = drum_rack_sound_options(app, track)
-                    .into_iter()
-                    .map(|sound| sound.pad_note)
-                    .collect::<HashSet<_>>();
-                let glyphs = (0..MAX_STEPS)
-                    .map(|step| {
-                        if available_notes.is_empty()
-                            || !state.pattern.patterns[track].is_active(step)
-                        {
-                            return value_cell(Value::List(vec![]));
-                        }
-                        let count = state.pattern.chord_data[track].count(step);
-                        let mut transposes = if count > 0 {
-                            (0..count)
-                                .map(|voice| {
-                                    state.pattern.chord_data[track].get(step, voice).round() as i32
-                                })
-                                .collect::<Vec<_>>()
-                        } else {
-                            vec![
-                                state.pattern.step_data[track]
-                                    .get(step, StepParam::Transpose)
-                                    .round() as i32,
-                            ]
-                        };
-                        transposes.sort_unstable();
-                        transposes.dedup();
-                        let step_glyphs = transposes
-                            .into_iter()
-                            .filter(|transpose| available_notes.contains(transpose))
-                            .map(drum_rack_hit_glyph_value)
-                            .collect();
-                        value_cell(Value::List(step_glyphs))
-                    })
-                    .collect();
-                value_cell(Value::List(glyphs))
-            })
-            .collect(),
-    )
+    track: usize,
+    only_step: Option<usize>,
+) -> bool {
+    if track >= app.tracks.len() {
+        return false;
+    }
+    let mut registered_fields = match rt.global_value("SEQ") {
+        Some(Value::Map(fields)) => fields.keys().cloned().collect::<HashSet<_>>(),
+        _ => HashSet::new(),
+    };
+    let steps = only_step.map_or(0..MAX_STEPS, |step| step..step.saturating_add(1).min(MAX_STEPS));
+    let mut dirty = false;
+    for sound in drum_rack_sound_options(app, track) {
+        for step in steps.clone() {
+            let selected_field =
+                drum_lane_step_selected_field(track, sound.pad_note, step);
+            if registered_fields.insert(selected_field.clone()) {
+                dirty |= rt
+                    .set_reactive("SEQ", &selected_field, Value::Bool(false))
+                    .effects_dirty;
+            }
+            let duration_field = drum_lane_step_duration_field(track, sound.pad_note, step);
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &duration_field,
+                    Value::Bool(drum_lane_step_duration_covered(
+                        state,
+                        track,
+                        sound.pad_note,
+                        step,
+                    )),
+                )
+                .effects_dirty;
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &drum_lane_step_active_field(track, sound.pad_note, step),
+                    Value::Bool(drum_lane_step_active(state, track, sound.pad_note, step)),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
+}
+
+pub(crate) fn sync_all_drum_lane_step_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+) -> bool {
+    let mut dirty = false;
+    for track in 0..app.tracks.len() {
+        dirty |= sync_drum_lane_step_binding_fields(rt, state, app, track, None);
+    }
+    dirty
 }
 
 fn drum_rack_pad_bank_value(bank_start: i32, selected_bank_start: i32) -> Rc<RefCell<Value>> {
@@ -23912,10 +23961,14 @@ mod tests {
     }
 
     #[test]
-    fn drum_rack_sound_values_use_pad_labels_and_compact_glyphs() {
+    fn drum_rack_sound_values_project_hits_into_slot_lanes() {
         let app = test_app_with_drum_rack_panel(0);
         app.state.pattern.chord_data[0].add_note_with_duration(3, 0.0, 1.0);
         app.state.pattern.patterns[0].set_step_active(3, true);
+        assert_eq!(
+            app.state.set_drum_lane_step_duration(0, 3, 0, 4.0),
+            Some(4.0)
+        );
 
         assert!(matches!(
             build_track_drum_racks_value(&app),
@@ -23937,6 +23990,7 @@ mod tests {
             panic!("drum sound option should be a map");
         };
         assert_eq!(value_map_number(sound, "transpose"), Some(0.0));
+        assert_eq!(value_map_string(sound, "name").as_deref(), Some("DS FM"));
         assert_eq!(
             value_map_string(sound, "label").as_deref(),
             Some("C4 · DS FM"),
@@ -23948,32 +24002,31 @@ mod tests {
             "vertical labels should use only the first three letters of the sound name"
         );
 
-        let glyphs = build_all_track_drum_step_glyphs_value(&app.state, &app);
-        let Value::List(tracks) = glyphs else {
-            panic!("compact drum glyphs should be grouped by track");
-        };
-        let Value::List(steps) = &*tracks[0].borrow() else {
-            panic!("compact drum glyphs should be a step list");
-        };
-        let Value::List(step_glyphs) = &*steps[3].borrow() else {
-            panic!("an active drum hit should publish glyphs");
-        };
-        let Value::Map(glyph) = &*step_glyphs[0].borrow() else {
-            panic!("a drum glyph should be a map");
-        };
-        assert_eq!(value_map_number(glyph, "pad-note"), Some(0.0));
-        assert_eq!(value_map_number(glyph, "sides"), Some(3.0));
+        assert!(drum_lane_step_active(&app.state, 0, 0, 3));
+        assert!(!drum_lane_step_active(&app.state, 0, 1, 3));
+        assert!(!drum_lane_step_active(&app.state, 0, 0, 2));
+        assert!(drum_lane_step_duration_covered(&app.state, 0, 0, 3));
+        assert!(drum_lane_step_duration_covered(&app.state, 0, 0, 6));
+        assert!(!drum_lane_step_duration_covered(&app.state, 0, 0, 7));
 
-        let next_glyph_value = drum_rack_hit_glyph_value(1);
-        let next_glyph_ref = next_glyph_value.borrow();
-        let Value::Map(next_glyph) = &*next_glyph_ref else {
-            panic!("a drum glyph should be a map");
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+        sync_drum_lane_step_binding_fields(&mut runtime, &app.state, &app, 0, None);
+        let Some(Value::Map(fields)) = runtime.global_value("SEQ") else {
+            panic!("SEQ should remain a reactive map");
         };
-        assert_ne!(
-            value_map_number(glyph, "sides"),
-            value_map_number(next_glyph, "sides"),
-            "neighboring pads should receive distinct shape identities"
-        );
+        assert!(matches!(
+            fields
+                .get(&drum_lane_step_selected_field(0, 0, 3))
+                .map(|value| value.borrow().clone()),
+            Some(Value::Bool(false))
+        ));
+        assert!(matches!(
+            fields
+                .get(&drum_lane_step_duration_field(0, 0, 3))
+                .map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        ));
     }
 
     #[test]
@@ -24459,11 +24512,20 @@ mod tests {
         test_list(values.iter().cloned().map(Value::String).collect())
     }
 
-    fn test_drum_sound(transpose: f64, label: &str, short_label: &str) -> Value {
+    fn test_drum_sound(
+        transpose: f64,
+        name: &str,
+        label: &str,
+        short_label: &str,
+    ) -> Value {
         let mut sound = HashMap::new();
         sound.insert(
             "transpose".to_string(),
             Rc::new(RefCell::new(Value::Number(transpose))),
+        );
+        sound.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name.to_string()))),
         );
         sound.insert(
             "label".to_string(),
@@ -24474,14 +24536,6 @@ mod tests {
             Rc::new(RefCell::new(Value::String(short_label.to_string()))),
         );
         Value::Map(sound)
-    }
-
-    fn test_drum_glyph(pad_note: i32) -> Value {
-        drum_rack_hit_glyph_value(pad_note).borrow().clone()
-    }
-
-    fn test_empty_drum_step_glyphs(step_count: usize) -> Value {
-        test_list((0..step_count).map(|_| test_list(vec![])).collect())
     }
 
     fn test_repeated_number_list(value: f64, len: usize) -> Value {
@@ -24846,10 +24900,6 @@ mod tests {
                 ),
                 ("track-drum-racks", test_bool_list(&[false])),
                 ("track-drum-sounds", test_list(vec![test_list(vec![])])),
-                (
-                    "track-drum-step-glyphs",
-                    test_list(vec![test_empty_drum_step_glyphs(16)]),
-                ),
                 ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
@@ -25265,15 +25315,6 @@ mod tests {
             "track-drum-racks",
             test_repeated_bool_list(false, track_count),
         );
-        rt.set_reactive(
-            "SEQ",
-            "track-drum-step-glyphs",
-            test_list(
-                (0..track_count)
-                    .map(|_| test_empty_drum_step_glyphs(step_count))
-                    .collect(),
-            ),
-        );
         rt.set_reactive("SEQ", "track-pans", test_list(repeated_param_lists(0.0)));
         rt.set_reactive("SEQ", "track-syncs", test_list(repeated_param_lists(0.0)));
         rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
@@ -25680,15 +25721,6 @@ mod tests {
             "SEQ",
             "track-drum-racks",
             test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-drum-step-glyphs",
-            test_list(
-                (0..track_count)
-                    .map(|_| test_empty_drum_step_glyphs(step_count))
-                    .collect(),
-            ),
         );
         rt.set_reactive("SEQ", "track-pans", test_list(track_pans));
         rt.set_reactive("SEQ", "track-syncs", test_list(track_syncs));
@@ -28455,8 +28487,6 @@ mod tests {
     #[test]
     fn metal_seq_drum_rack_sound_controls_use_named_pads_and_only_write_pad_notes() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let mut step_glyphs = (0..16).map(|_| test_list(vec![])).collect::<Vec<_>>();
-        step_glyphs[0] = test_list(vec![test_drum_glyph(0), test_drum_glyph(1)]);
         editor.runtime_mut().set_reactive(
             "SEQ",
             "track-instrument-types",
@@ -28469,15 +28499,31 @@ mod tests {
             "SEQ",
             "track-drum-sounds",
             test_list(vec![test_list(vec![
-                test_drum_sound(0.0, "C4 · Kick", "Kic"),
-                test_drum_sound(12.0, "C5 · Snare", "Sna"),
+                test_drum_sound(0.0, "Kick", "C4 · Kick", "Kic"),
+                test_drum_sound(12.0, "Snare", "C5 · Snare", "Sna"),
             ])]),
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-drum-step-glyphs",
-            test_list(vec![test_list(step_glyphs)]),
-        );
+        for pad_note in [0, 12] {
+            for step in 0..16 {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    &drum_lane_step_active_field(0, pad_note, step),
+                    Value::Bool((pad_note == 0 && step == 0) || (pad_note == 12 && step == 4)),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    &drum_lane_step_selected_field(0, pad_note, step),
+                    Value::Bool(false),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    &drum_lane_step_duration_field(0, pad_note, step),
+                    Value::Bool(
+                        (pad_note == 0 && step == 0) || (pad_note == 12 && step == 4),
+                    ),
+                );
+            }
+        }
 
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         {
@@ -28516,15 +28562,55 @@ mod tests {
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let compact_layout = editor.widget_layout().expect("compact drum-rack layout");
-        let glyph = find_layout_node_by_debug_name(&compact_layout, "seqv-drum-step-glyph")
-            .expect("compact drum steps should render a glyph inside the step shell");
-        assert_finite_nonzero_rect(glyph, "compact drum glyph");
-        assert_eq!(layout_prop_number(glyph, "count"), Some(2.0));
-        assert_eq!(layout_prop_number(glyph, "sides-0"), Some(3.0));
-        assert_eq!(layout_prop_number(glyph, "sides-1"), Some(4.0));
+        let mut lanes = Vec::new();
+        collect_layout_nodes_by_debug_name(&compact_layout, "seqv-drum-slot-lane", &mut lanes);
+        assert_eq!(lanes.len(), 2, "each occupied pad should render one lane");
+        for (index, lane) in lanes.iter().enumerate() {
+            assert_finite_nonzero_rect(lane, &format!("drum lane {index}"));
+        }
         assert!(
-            find_layout_node_by_text(&compact_layout, "C4 · Kick").is_none(),
-            "compact drum hits should not render sound-name text"
+            lanes[1].rect.row > lanes[0].rect.row + lanes[0].rect.height,
+            "drum lanes should be separated by a visible vertical gap: {:?}",
+            lanes.iter().map(|lane| lane.rect).collect::<Vec<_>>()
+        );
+        let kick_step = find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-0-0")
+            .expect("the Kick lane should expose its own first step");
+        assert_finite_nonzero_rect(kick_step, "Kick lane first step");
+        for handler in ["on-mouse-down", "on-drag", "on-mouse-up", "on-double-click"] {
+            assert!(
+                kick_step.props.contains_key(handler),
+                "drum lane steps should expose the normal step {handler} interaction"
+            );
+        }
+        let kick_shell = kick_step
+            .children
+            .first()
+            .expect("Kick lane first step shell");
+        assert!(
+            matches!(kick_shell.props.get("selected"), Some(Value::ReactiveRef { .. })),
+            "lane selection must be a reactive per-pad binding"
+        );
+        assert!(
+            matches!(kick_shell.props.get("duration"), Some(Value::ReactiveRef { .. })),
+            "lane duration visualization must use a reactive per-pad binding"
+        );
+        let snare_step =
+            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-12-4")
+                .expect("the Snare lane should expose its own fifth step");
+        assert_finite_nonzero_rect(snare_step, "Snare lane fifth step");
+        let kick_label = find_layout_node_by_stable_key(
+            &compact_layout,
+            "seqv-drum-lane-label-0-0",
+        )
+        .expect("the Kick lane should have a slot label on its right");
+        assert_finite_nonzero_rect(kick_label, "Kick lane label");
+        assert_eq!(
+            kick_label.props.get("text"),
+            Some(&Value::String("Kick".to_string()))
+        );
+        assert!(
+            kick_label.rect.col >= kick_step.rect.col + kick_step.rect.width,
+            "the slot label should be placed to the right of the steps"
         );
         editor
             .runtime_mut()
@@ -28611,6 +28697,260 @@ mod tests {
             ["0:transpose:12", "0:transpose:12"],
             "the step inspector must write the selected pad note, never a label index"
         );
+    }
+
+    #[test]
+    fn metal_seq_drum_lane_click_and_drag_match_normal_track_gestures() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["rack"]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-drum-racks", test_bool_list(&[true]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-drum-sounds",
+            test_list(vec![test_list(vec![test_drum_sound(
+                12.0,
+                "Snare",
+                "C5 · Snare",
+                "Sna",
+            )])]),
+        );
+        for step in 0..16 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &drum_lane_step_active_field(0, 12, step),
+                Value::Bool(step == 0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &drum_lane_step_selected_field(0, 12, step),
+                Value::Bool(false),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &drum_lane_step_duration_field(0, 12, step),
+                Value::Bool(step == 0),
+            );
+        }
+
+        let active = Arc::new(Mutex::new(HashSet::from([0usize])));
+        let selected = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let toggles = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let ranges = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        let moves = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        let durations = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        editor
+            .runtime_mut()
+            .register_native("now-ms", |_args, _ctx| Ok(Value::Number(1_000.0)));
+        {
+            let active = Arc::clone(&active);
+            editor.runtime_mut().register_native(
+                "seq-drum-lane-step-active?",
+                move |args, _ctx| {
+                    let step = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected drum step, got {other:?}"),
+                    };
+                    Ok(Value::Bool(active.lock().unwrap().contains(&step)))
+                },
+            );
+        }
+        {
+            let selected = Arc::clone(&selected);
+            editor.runtime_mut().register_native(
+                "seq-drum-lane-step-selected?",
+                move |args, _ctx| {
+                    let step = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected drum step, got {other:?}"),
+                    };
+                    Ok(Value::Bool(selected.lock().unwrap().contains(&step)))
+                },
+            );
+        }
+        {
+            let selected = Arc::clone(&selected);
+            editor.runtime_mut().register_native(
+                "seq-drum-lane-has-selection?",
+                move |_args, _ctx| Ok(Value::Bool(!selected.lock().unwrap().is_empty())),
+            );
+        }
+        {
+            let active = Arc::clone(&active);
+            let toggles = Arc::clone(&toggles);
+            editor.runtime_mut().register_native(
+                "seq-toggle-drum-lane-step",
+                move |args, _ctx| {
+                    let step = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected drum step, got {other:?}"),
+                    };
+                    toggles.lock().unwrap().push(step);
+                    let mut active = active.lock().unwrap();
+                    let enabled = if active.insert(step) {
+                        true
+                    } else {
+                        active.remove(&step);
+                        false
+                    };
+                    Ok(Value::Bool(enabled))
+                },
+            );
+        }
+        {
+            let selected = Arc::clone(&selected);
+            let ranges = Arc::clone(&ranges);
+            editor.runtime_mut().register_native(
+                "seq-select-drum-lane-step-range",
+                move |args, _ctx| {
+                    let start = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected range start, got {other:?}"),
+                    };
+                    let end = match args.get(3) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected range end, got {other:?}"),
+                    };
+                    ranges.lock().unwrap().push((start, end));
+                    let mut selected = selected.lock().unwrap();
+                    selected.clear();
+                    selected.extend(start.min(end)..=start.max(end));
+                    Ok(Value::Nil)
+                },
+            );
+        }
+        editor.runtime_mut().register_native(
+            "seq-select-drum-lane-step",
+            |_args, _ctx| Ok(Value::Nil),
+        );
+        {
+            let moves = Arc::clone(&moves);
+            editor.runtime_mut().register_native(
+                "seq-move-drum-lane-step-drag",
+                move |args, _ctx| {
+                    let start = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected move start, got {other:?}"),
+                    };
+                    let target = match args.get(3) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected move target, got {other:?}"),
+                    };
+                    moves.lock().unwrap().push((start, target));
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        {
+            let durations = Arc::clone(&durations);
+            editor.runtime_mut().register_native(
+                "seq-set-drum-lane-step-duration",
+                move |args, _ctx| {
+                    let step = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected duration source, got {other:?}"),
+                    };
+                    let duration = match args.get(3) {
+                        Some(Value::Number(duration)) => *duration as usize,
+                        other => panic!("expected duration, got {other:?}"),
+                    };
+                    durations.lock().unwrap().push((step, duration));
+                    Ok(Value::Number(duration as f64))
+                },
+            );
+        }
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 80);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("drum lane gesture layout");
+        let callback = |step: usize, name: &str| {
+            find_layout_node_by_stable_key(
+                &layout,
+                &format!("seqv-drum-lane-step-0-12-{step}"),
+            )
+            .unwrap_or_else(|| panic!("drum lane step {step}"))
+            .props
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| panic!("drum lane step {step} {name}"))
+        };
+        let plain_event = map_value([]);
+        let duration_edge_event = map_value([("sx", Value::Number(0.75))]);
+
+        editor
+            .runtime_mut()
+            .invoke(
+                callback(0, "on-mouse-down"),
+                vec![duration_edge_event.clone()],
+            )
+            .expect("press active drum hit duration edge");
+        editor
+            .runtime_mut()
+            .invoke(callback(3, "on-drag"), vec![duration_edge_event.clone()])
+            .expect("drag drum hit duration edge");
+        editor
+            .runtime_mut()
+            .invoke(callback(3, "on-mouse-up"), vec![duration_edge_event])
+            .expect("release drum hit duration edge");
+        assert_eq!(durations.lock().unwrap().as_slice(), [(0, 1), (0, 4)]);
+        assert!(moves.lock().unwrap().is_empty());
+
+        editor
+            .runtime_mut()
+            .invoke(callback(0, "on-mouse-down"), vec![plain_event.clone()])
+            .expect("press active drum hit");
+        editor
+            .runtime_mut()
+            .invoke(callback(0, "on-mouse-up"), vec![plain_event.clone()])
+            .expect("release active drum hit");
+        assert_eq!(ranges.lock().unwrap().as_slice(), [(0, 0)]);
+        assert!(
+            toggles.lock().unwrap().is_empty(),
+            "clicking an active hit should select it, not toggle it"
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(callback(0, "on-mouse-down"), vec![plain_event.clone()])
+            .expect("press active drum hit for move");
+        editor
+            .runtime_mut()
+            .invoke(callback(3, "on-drag"), vec![plain_event.clone()])
+            .expect("drag active drum hit");
+        editor
+            .runtime_mut()
+            .invoke(callback(3, "on-mouse-up"), vec![plain_event.clone()])
+            .expect("release moved drum hit");
+        assert_eq!(moves.lock().unwrap().as_slice(), [(0, 3)]);
+
+        active.lock().unwrap().clear();
+        selected.lock().unwrap().clear();
+        editor
+            .runtime_mut()
+            .invoke(callback(1, "on-mouse-down"), vec![plain_event.clone()])
+            .expect("paint first empty drum hit");
+        editor
+            .runtime_mut()
+            .invoke(callback(2, "on-drag"), vec![plain_event.clone()])
+            .expect("paint second empty drum hit");
+        editor
+            .runtime_mut()
+            .invoke(callback(2, "on-mouse-up"), vec![plain_event])
+            .expect("release painted drum hits");
+        assert_eq!(toggles.lock().unwrap().as_slice(), [1, 2]);
     }
 
     #[test]
