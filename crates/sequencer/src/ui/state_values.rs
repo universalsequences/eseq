@@ -24695,6 +24695,8 @@ mod tests {
                 ("transport-playhead", Value::Number(0.0)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
+                ("record-quantize", Value::String("1/16".to_string())),
+                ("metronome", Value::Bool(false)),
                 ("queued-scene", Value::Number(-1.0)),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
@@ -30313,6 +30315,72 @@ mod tests {
             }
             other => panic!("expected switch-pattern host command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn metal_seq_transport_record_quantize_and_metronome_controls_are_visible_and_route() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        for debug_name in ["transport-record-quantize", "transport-metronome-toggle"] {
+            let control = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{debug_name} control"));
+            assert_finite_nonzero_rect(control, debug_name);
+            assert!(
+                control.rect.col >= layout.rect.col
+                    && control.rect.row >= layout.rect.row
+                    && control.rect.col + control.rect.width <= layout.rect.col + layout.rect.width
+                    && control.rect.row + control.rect.height <= layout.rect.row + layout.rect.height,
+                "{debug_name} should remain inside transport: control={:?} panel={:?}",
+                control.rect,
+                layout.rect
+            );
+        }
+        assert_eq!(
+            editor.runtime_mut().eval_str("SEQ.record-quantize").unwrap(),
+            Some(Value::String("1/16".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("SEQ.metronome").unwrap(),
+            Some(Value::Bool(false))
+        );
+
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seq-set-record-quantize "1/4")"#)
+            .expect("choose record quantization");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "set-record-quantize" && payload == &Value::String("1/4".to_string())
+        ));
+
+        let metronome = find_layout_node_by_debug_name(&layout, "transport-metronome-toggle")
+            .expect("metronome toggle");
+        let callback = metronome
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("metronome callback");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("toggle metronome");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }] if name == "toggle-metronome"
+        ));
     }
 
     #[test]

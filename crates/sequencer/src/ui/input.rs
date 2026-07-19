@@ -8,7 +8,7 @@ use eseqlisp::widget_render::number_picker::{
 pub(crate) struct HeldKeyboardNote {
     key: char,
     transpose: f32,
-    step_at_press: usize,
+    positions: Vec<(usize, sequencer::sequencer::RecordPosition)>,
     press_time: Instant,
     tracks: Vec<usize>,
 }
@@ -1320,6 +1320,35 @@ impl RecordingKeyOutcome {
     }
 }
 
+/// Convert a captured local position to its recorded step and per-note delay.
+/// Coarser grids are expressed in beats and then converted through the
+/// track's timebase, which keeps recording quantization independent from the
+/// global transport resolution.
+fn quantized_record_position(
+    step: usize,
+    phase: f32,
+    num_steps: usize,
+    timebase: sequencer::sequencer::Timebase,
+    quantize: sequencer::record_quantize::RecordQuantize,
+) -> (usize, f32) {
+    let num_steps = num_steps.max(1);
+    let phase = phase.clamp(0.0, 1.0);
+    match quantize {
+        sequencer::record_quantize::RecordQuantize::Off => (step % num_steps, phase),
+        sequencer::record_quantize::RecordQuantize::Sixteenth => {
+            ((step + usize::from(phase >= 0.5)) % num_steps, 0.0)
+        }
+        _ => {
+            let grid_beats = quantize
+                .grid_beats()
+                .expect("non-off record quantization must define a grid");
+            let grid_steps = (grid_beats / timebase.step_beats(num_steps)).max(1.0e-9);
+            let snapped = ((step as f64 + phase as f64) / grid_steps).round() * grid_steps;
+            (snapped.round().rem_euclid(num_steps as f64) as usize, 0.0)
+        }
+    }
+}
+
 /// Intercept keyboard events for live recording.
 pub(crate) fn handle_recording_key(
     key: &crossterm::event::KeyEvent,
@@ -1328,7 +1357,6 @@ pub(crate) fn handle_recording_key(
     recording: &Arc<AtomicBool>,
     keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
-    current_track: &Arc<AtomicUsize>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     ui_epoch: &Arc<AtomicUsize>,
 ) -> RecordingKeyOutcome {
@@ -1365,11 +1393,25 @@ pub(crate) fn handle_recording_key(
             let octave = keyboard_octave.load(Ordering::Relaxed);
             let transpose = (note + octave) as f32;
             let mut pressed_tracks = Vec::new();
+            let press_time = Instant::now();
+            let mut positions = Vec::new();
 
             // Send note-on to audio thread for all armed tracks
             for (track, a) in armed.iter().enumerate() {
                 if *a {
                     pressed_tracks.push(track);
+                    let position = state.record_position_at_instant(track, press_time).unwrap_or_else(|| {
+                        sequencer::sequencer::RecordPosition {
+                            step: state.transport.track_playheads[track].load(Ordering::Relaxed)
+                                as usize,
+                            phase: f32::from_bits(
+                                state.transport.track_playhead_phases[track]
+                                    .load(Ordering::Relaxed),
+                            )
+                            .clamp(0.0, 1.0),
+                        }
+                    });
+                    positions.push((track, position));
                     let _ = keyboard_tx.send(KeyboardTrigger {
                         track,
                         transpose,
@@ -1379,14 +1421,11 @@ pub(crate) fn handle_recording_key(
                 }
             }
 
-            // Record the step at press time
-            let ct = current_track.load(Ordering::Relaxed);
-            let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed) as usize;
             held.push(HeldKeyboardNote {
                 key: c,
                 transpose,
-                step_at_press: playhead,
-                press_time: Instant::now(),
+                positions,
+                press_time,
                 tracks: pressed_tracks,
             });
             RecordingKeyOutcome::Consumed
@@ -1411,31 +1450,41 @@ pub(crate) fn handle_recording_key(
                 }
 
                 if recording.load(Ordering::Relaxed) && state.is_playing() {
-                    let armed = record_armed.lock().unwrap();
                     let bpm = state.transport.bpm.load(Ordering::Relaxed) as f64;
                     let secs_per_step = 60.0 / bpm / 4.0;
                     let hold_secs = note.press_time.elapsed().as_secs_f64();
                     let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
                     let mut recorded = false;
 
-                    for (track, a) in armed.iter().enumerate() {
-                        if !*a {
-                            continue;
+                    let quantize = sequencer::record_quantize::RecordQuantize::from_atomic(
+                        state.transport.record_quantize.load(Ordering::Relaxed) as u8,
+                    );
+                    for (track, position) in &note.positions {
+                        let num_steps = state.pattern.track_params[*track].get_num_steps();
+                        let (local_step, delay) = quantized_record_position(
+                            position.step,
+                            position.phase,
+                            num_steps,
+                            state.pattern.track_params[*track].get_timebase(),
+                            quantize,
+                        );
+                        if !state.pattern.patterns[*track].is_active(local_step) {
+                            state.pattern.patterns[*track].toggle_step(local_step);
                         }
-                        let num_steps = state.pattern.track_params[track].get_num_steps();
-                        let local_step = note.step_at_press % num_steps;
-                        if !state.pattern.patterns[track].is_active(local_step) {
-                            state.pattern.patterns[track].toggle_step(local_step);
-                        }
-                        state.pattern.chord_data[track].add_note(local_step, note.transpose);
-                        let first_note = state.pattern.chord_data[track].get(local_step, 0);
-                        state.pattern.step_data[track].set(
+                        state.pattern.chord_data[*track].add_note_with_timing(
+                            local_step,
+                            note.transpose,
+                            duration_steps,
+                            delay,
+                        );
+                        let first_note = state.pattern.chord_data[*track].get(local_step, 0);
+                        state.pattern.step_data[*track].set(
                             local_step,
                             StepParam::Transpose,
                             first_note,
                         );
-                        state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
-                        state.pattern.step_data[track].set(
+                        state.pattern.step_data[*track].set(local_step, StepParam::Velocity, 1.0);
+                        state.pattern.step_data[*track].set(
                             local_step,
                             StepParam::Duration,
                             duration_steps,
@@ -1462,7 +1511,7 @@ mod live_keyboard_tests {
         PROCESS_LANE_MODE_OFFSET, SoftStepParamEdit, build_selection_value,
         current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
-        held_note_for_key, note_from_key,
+        held_note_for_key, note_from_key, quantized_record_position,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1473,7 +1522,8 @@ mod live_keyboard_tests {
     use eseqlisp::vm::Value;
     use eseqlisp::widget_render::WidgetKeyEvent;
     use eseqlisp::{Editor, EditorConfig, Runtime};
-    use sequencer::sequencer::{SequencerState, StepParam, StepSnapshot};
+    use sequencer::record_quantize::RecordQuantize;
+    use sequencer::sequencer::{RecordPosition, SequencerState, StepParam, StepSnapshot, Timebase};
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::rc::Rc;
@@ -1486,7 +1536,9 @@ mod live_keyboard_tests {
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
             key: 'a',
             transpose: 0.0,
-            step_at_press: 0,
+            positions: vec![
+                (0, RecordPosition { step: 0, phase: 0.0 }),
+            ],
             press_time: Instant::now(),
             tracks: vec![0],
         }]));
@@ -1499,6 +1551,38 @@ mod live_keyboard_tests {
     fn live_note_map_uses_lowercase_keys() {
         assert_eq!(note_from_key('a'), Some(0));
         assert_eq!(note_from_key('A'), None);
+    }
+
+    #[test]
+    fn record_quantize_off_preserves_phase_as_per_note_delay() {
+        assert_eq!(
+            quantized_record_position(3, 0.37, 16, Timebase::Sixteenth, RecordQuantize::Off),
+            (3, 0.37)
+        );
+    }
+
+    #[test]
+    fn sixteenth_record_quantize_rounds_to_nearest_step() {
+        assert_eq!(
+            quantized_record_position(3, 0.49, 16, Timebase::Sixteenth, RecordQuantize::Sixteenth),
+            (3, 0.0)
+        );
+        assert_eq!(
+            quantized_record_position(3, 0.50, 16, Timebase::Sixteenth, RecordQuantize::Sixteenth),
+            (4, 0.0)
+        );
+    }
+
+    #[test]
+    fn coarse_record_quantize_snaps_and_wraps_the_pattern() {
+        assert_eq!(
+            quantized_record_position(5, 0.7, 16, Timebase::Sixteenth, RecordQuantize::Quarter),
+            (4, 0.0)
+        );
+        assert_eq!(
+            quantized_record_position(15, 0.9, 16, Timebase::Sixteenth, RecordQuantize::Quarter),
+            (0, 0.0)
+        );
     }
 
     #[test]

@@ -31,6 +31,6 @@ pub use state::{
     InstrumentSlotResetSummary, PatternId, PatternSnapshot, PublishedSequencer, RackMacro,
     RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotParam,
     RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, SequencerState, StepSlotPlocks,
-    StepSnapshot, TrackOutputEvent, TrackPatternCellView, TrackPatternData, RACK_MACRO_COUNT,
+    StepSnapshot, TrackOutputEvent, TrackPatternCellView, TrackPatternData, RecordPosition, RACK_MACRO_COUNT,
     RACK_SLOT_PARAM_COUNT,
 };

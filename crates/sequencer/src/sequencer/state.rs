@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::effects::{
@@ -19,7 +19,7 @@ use crate::plock_variants::{
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, CustomInstrumentRunMode, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
+    sync_beats, ChordData, ChordSnapshot, CustomInstrumentRunMode, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
     InstrumentType, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_STEPS,
     MAX_TRACKS, ModConnection, NUM_PARAMS, RackRouting, StepData, StepParam, SwingPLockData,
     SwingResolution, SwingResolutionPLockData, TRACK_PATTERN_WORDS, Timebase, TimebasePLockData,
@@ -3076,11 +3076,93 @@ pub struct TransportState {
     pub trigger_flash: Vec<AtomicU32>,
     pub num_tracks: AtomicU32,
     pub track_playheads: Vec<AtomicU32>,
+    /// Per-track phase within the active step, normalized to 0.0..=1.0.
+    pub track_playhead_phases: Vec<AtomicU32>,
     /// Per-track sampler playhead as normalized 0.0–1.0 (f32 bits).
     pub sampler_playheads: Vec<AtomicU32>,
     pub active_voice_counts: Vec<AtomicU32>,
     pub playhead_phase: AtomicU32,
+    /// The live-keyboard record quantization mode (`RecordQuantize as u8`).
+    pub record_quantize: AtomicU32,
+    /// Audio output latency compensation used when timestamping keyboard note-ons.
+    pub record_latency_seconds: AtomicU32,
+    /// Monotonic audio-clock anchor published by the audio callback.
+    pub record_clock: RecordClockAnchor,
+    pub metronome_enabled: AtomicBool,
     pub record_quantize_thresh: AtomicU32,
+}
+
+/// Lock-free snapshot of the render clock for wall-clock interpolation on the
+/// UI thread. The sequence counter makes the two payload values atomic as a
+/// pair without placing a mutex on the realtime callback.
+pub struct RecordClockAnchor {
+    sequence: AtomicU64,
+    beats_bits: AtomicU64,
+    timestamp_nanos: AtomicU64,
+}
+
+impl RecordClockAnchor {
+    pub fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            beats_bits: AtomicU64::new(0.0_f64.to_bits()),
+            timestamp_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Publish an anchor from the audio callback. The odd/even sequence is a
+    /// standard seqlock protocol; readers retry rather than observing a mixed
+    /// beat/timestamp pair.
+    pub fn publish(&self, beats: f64, timestamp: Instant) {
+        self.sequence.fetch_add(1, Ordering::Release);
+        self.beats_bits
+            .store(beats.max(0.0).to_bits(), Ordering::Relaxed);
+        self.timestamp_nanos
+            .store(record_clock_nanos(timestamp), Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn sample(&self, timestamp: Instant) -> Option<(f64, Duration)> {
+        for _ in 0..8 {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let beats = f64::from_bits(self.beats_bits.load(Ordering::Relaxed));
+            let anchor_nanos = self.timestamp_nanos.load(Ordering::Relaxed);
+            let after = self.sequence.load(Ordering::Acquire);
+            if before == after {
+                if !beats.is_finite() || anchor_nanos == 0 {
+                    return None;
+                }
+                let now_nanos = record_clock_nanos(timestamp);
+                return Some((beats, Duration::from_nanos(now_nanos.saturating_sub(anchor_nanos))));
+            }
+        }
+        None
+    }
+}
+
+impl Default for RecordClockAnchor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static RECORD_CLOCK_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+fn record_clock_nanos(timestamp: Instant) -> u64 {
+    timestamp
+        .saturating_duration_since(*RECORD_CLOCK_ORIGIN.get_or_init(Instant::now))
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RecordPosition {
+    pub step: usize,
+    pub phase: f32,
 }
 
 pub struct RuntimeBindingState {
@@ -3265,6 +3347,8 @@ impl SequencerState {
     }
 
     pub fn new(num_tracks: usize, initial_chains: Vec<Vec<EffectSlotState>>) -> Self {
+        // Initialize the shared monotonic origin off the audio thread.
+        let _ = RECORD_CLOCK_ORIGIN.get_or_init(Instant::now);
         let patterns: Vec<TrackPattern> = (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
         let neural_reset_patterns: Vec<TrackPattern> =
             (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
@@ -3365,11 +3449,20 @@ impl SequencerState {
                 trigger_flash,
                 num_tracks: AtomicU32::new(num_tracks as u32),
                 track_playheads: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                track_playhead_phases: (0..MAX_TRACKS)
+                    .map(|_| AtomicU32::new(0.0_f32.to_bits()))
+                    .collect(),
                 sampler_playheads: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
                 active_voice_counts: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 playhead_phase: AtomicU32::new(0.0_f32.to_bits()),
+                record_quantize: AtomicU32::new(
+                    crate::record_quantize::RecordQuantize::DEFAULT as u32,
+                ),
+                record_latency_seconds: AtomicU32::new(0.0_f32.to_bits()),
+                record_clock: RecordClockAnchor::new(),
+                metronome_enabled: AtomicBool::new(false),
                 record_quantize_thresh: AtomicU32::new(0.5_f32.to_bits()),
             },
             runtime: RuntimeBindingState {
@@ -6802,6 +6895,68 @@ impl SequencerState {
     pub fn track_step(&self, track: usize) -> usize {
         self.transport.track_playheads[track].load(Ordering::Relaxed) as usize
     }
+
+    /// Resolve a track-local step and phase from the transport beat clock.
+    /// This mirrors the scheduler's timebase-override and sync-boundary rules
+    /// so live recording does not accidentally use the global 16th-note phase.
+    pub fn record_position_at_beat(&self, track: usize, beats: f64) -> Option<RecordPosition> {
+        if track >= self.active_track_count() || !beats.is_finite() {
+            return None;
+        }
+        let params = &self.pattern.track_params[track];
+        let num_steps = params.get_num_steps().clamp(1, MAX_STEPS);
+        let default_timebase = params.get_timebase();
+        let mut boundaries = [0.0_f64; MAX_STEPS + 1];
+        let mut step_ends = [0.0_f64; MAX_STEPS];
+        let mut accumulated = 0.0_f64;
+        for step in 0..num_steps {
+            let timebase = self.pattern.timebase_plocks[track]
+                .get(step)
+                .unwrap_or(default_timebase);
+            let sync = sync_beats(self.pattern.step_data[track].get(step, StepParam::Sync));
+            if sync > f64::EPSILON {
+                accumulated = (accumulated / sync).ceil() * sync;
+            }
+            boundaries[step] = accumulated;
+            let step_beats = timebase.step_beats(num_steps).max(f64::EPSILON);
+            step_ends[step] = accumulated + step_beats;
+            accumulated += step_beats;
+        }
+        boundaries[num_steps] = accumulated;
+        let initial_sync = sync_beats(self.pattern.step_data[track].get(0, StepParam::Sync));
+        let cycle_beats = if initial_sync > f64::EPSILON {
+            (accumulated / initial_sync).ceil() * initial_sync
+        } else {
+            accumulated
+        }
+        .max(f64::EPSILON);
+        let position = beats.max(0.0) % cycle_beats;
+        let idx = boundaries[..=num_steps].partition_point(|&boundary| boundary <= position);
+        let step = idx.saturating_sub(1).min(num_steps - 1);
+        (position < step_ends[step]).then(|| RecordPosition {
+            step,
+            phase: ((position - boundaries[step]) / (step_ends[step] - boundaries[step]))
+                .clamp(0.0, 1.0) as f32,
+        })
+    }
+
+    /// Interpolate the audio clock at a keyboard press and compensate the
+    /// configured render-ahead latency before resolving a track-local phase.
+    pub fn record_position_at_instant(
+        &self,
+        track: usize,
+        timestamp: Instant,
+    ) -> Option<RecordPosition> {
+        let (anchor_beats, elapsed) = self.transport.record_clock.sample(timestamp)?;
+        let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
+        let latency_seconds =
+            f32::from_bits(self.transport.record_latency_seconds.load(Ordering::Relaxed))
+                .max(0.0) as f64;
+        let beats = anchor_beats + elapsed.as_secs_f64() * bpm / 60.0
+            - latency_seconds * bpm / 60.0;
+        self.record_position_at_beat(track, beats)
+    }
+
     pub fn is_playing(&self) -> bool {
         self.transport.playing.load(Ordering::Relaxed)
     }
@@ -6837,6 +6992,9 @@ impl SequencerState {
             .store(0.0_f32.to_bits(), Ordering::Relaxed);
         for playhead in &self.transport.track_playheads {
             playhead.store(0, Ordering::Relaxed);
+        }
+        for phase in &self.transport.track_playhead_phases {
+            phase.store(0.0_f32.to_bits(), Ordering::Relaxed);
         }
         for playhead in &self.transport.sampler_playheads {
             playhead.store(0.0_f32.to_bits(), Ordering::Relaxed);
@@ -8529,6 +8687,19 @@ mod tests {
     use crate::plock_variants::{PlockVariantEntry, PlockVariantRegistryEntry};
     use crate::process::{ParamTarget, ProcessInstanceId, TrackProcessSlot};
     use crate::sequencer::ModDestination;
+
+    #[test]
+    fn record_position_uses_the_track_timebase_not_global_sixteenths() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.pattern.track_params[0].set_timebase(Timebase::Eighth);
+        assert_eq!(
+            state.record_position_at_beat(0, 0.75),
+            Some(RecordPosition {
+                step: 1,
+                phase: 0.5,
+            })
+        );
+    }
 
     #[test]
     fn active_notes_merge_scheduled_expirations_with_live_note_state() {

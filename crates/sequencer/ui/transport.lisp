@@ -469,8 +469,13 @@
 
 (def scene-launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
 
+(def record-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
+
 (def seq-set-scene-launch-quantize (value)
   (host-command "set-scene-launch-quantize" value))
+
+(def seq-set-record-quantize (value)
+  (host-command "set-record-quantize" value))
 
 (def seq-switch-pattern (idx)
   (host-command "switch-pattern"
@@ -549,31 +554,31 @@
 
 (effect-buffer "*transport*"
   (h-stack :gap 0.5 :padding 0.5 :align :center
-
+    
     (subtree :key "transport-samples-sidebar-button"
       (samples-sidebar-icon
         :on-click |x y r| (seq-toggle-samples-sidebar)
         :style transport-icon-style
         :active (if samples-sidebar-visible 1 0)))
-
+    
     (subtree :key "transport-mixer-panel-button"
       (mix-panel-icon
         :on-click |x y r| (seq-toggle-mixer-panel)
         :style transport-icon-style
         :active (if mixer-panel-visible 1 0)))
-
+    
     (subtree :key "transport-fx-panel-button"
       (fx-panel-icon
         :on-click |x y r| (seq-toggle-fx-panel)
         :style transport-icon-style
         :active (if lower-panel-visible 1 0)))
-
+    
     (subtree :key "transport-save-button"
       (save-icon
         :on-click |x y r| (sbrowser-open-project-save)
         :style transport-icon-style
         :active (if (sbrowser-project-save-mode?) 1 0)))
-
+    
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
@@ -602,9 +607,9 @@
                 :color (if SEQ.master-recording :white :gray)
                 :hover-color :white
                 :bg :transparent))))))
-
+    
     ;; Single continuous LED panel
-    (box :background "transport-led-bg" :height 1.4 :width 49
+    (box :background "transport-led-bg" :height 1.4 :width 56
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
@@ -629,28 +634,51 @@
                 :value (or SEQ.scene-launch-quantize "off")
                 :options scene-launch-quantize-options
                 :on-change seq-set-scene-launch-quantize
-                :width 7.2 :height 1.15 :font-size 9))))
+                :width 5.2 :height 1.15 :font-size 9))
+            (box :width 1.0)
+            (subtree :key "transport-record-quantize"
+              (dropdown
+                :bg-color '(rgba 0.1 0.1 0.1 0.3)
+                :border-color '(rgba 0.4 0.4 0.4 1)
+                :badge-color :transparent
+                :key "transport-record-quantize-dropdown"
+                :debug-name "transport-record-quantize"
+                :value (or SEQ.record-quantize "1/16")
+                :options record-quantize-options
+                :on-change seq-set-record-quantize
+                :width 5.2 :height 1.15 :font-size 9))
+            (subtree :key "transport-metronome-toggle"
+              (box :debug-name "transport-metronome-toggle"
+                :width 3.4 :height 1.1
+                :background "pattern-pill-bg"
+                :on-click |x y r| (host-command "toggle-metronome")
+                (v-stack :align :center
+                  (label "CLK"
+                    :font-size 9
+                    :color (if SEQ.metronome :white :gray)
+                    :hover-color :white
+                    :bg :transparent))))))
         (v-stack :gap 0.08 :padding 0.05
           (label "L"
             :font-size 5 :width 0.9
             :color '(rgba 0.63 0.88 0.41 1)
             :bg :transparent)
-
+          
           (label "R"
             :font-size 5 :width 0.9
             :color '(rgba 0.63 0.88 0.41 1)
             :bg :transparent)          )
-
-
+        
+        
         (v-stack :gap 0.08 :padding 0.05
           (h-stack :gap 0.25
-
+            
             (v-stack
               (box :height 0.2)
               (subtree :key "master-meter-l"
                 (transport-master-meter :level (bind-seq "master-peak-l")))))
           (h-stack :gap 0.25 :align :center
-
+            
             (v-stack (box :height 0.1)
               (subtree :key "master-meter-r"
                 (transport-master-meter :level (bind-seq "master-peak-r"))))))
@@ -666,7 +694,7 @@
               :font-size 12 :width 4.5 :height 1
               :color :gray
               :bg :transparent)))))
-
+    
     ;; Pattern pills in their own subtree: current-pattern/num-patterns changes
     ;; (every scene switch) rerun just this bar, not the whole transport.
     (subtree :key "transport-pattern-pills"
@@ -715,16 +743,16 @@
             (v-stack :align :center
               (label "+"
                 :font-size 12
-
+                
                 :color :white
                 :bg :transparent)))
-
+          
           (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
             :style (if (> SEQ.num-patterns 1) pattern-control-style nil)
             :on-click |x y r| (if (> SEQ.num-patterns 1) (seq-delete-pattern) nil)
             (v-stack :align :center
               (label "-"
                 :font-size 12
-
+                
                 :color (if (> SEQ.num-patterns 1) :white :dark-gray)
                 :bg :transparent))))))))

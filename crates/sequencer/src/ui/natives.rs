@@ -743,6 +743,8 @@ pub(crate) fn init_runtime(
                 ("playing", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
+                ("record-quantize", Value::String("1/16".to_string())),
+                ("metronome", Value::Bool(false)),
                 ("queued-scene", Value::Number(-1.0)),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),
