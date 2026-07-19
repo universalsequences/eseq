@@ -4,6 +4,11 @@
 
 Proposed implementation specification.
 
+Related: `docs/racks-spec.md` (Amendment A: `FxChainHost`, rack-slot chains,
+rack macro banks), `docs/MACRO_MAPPING_SPEC.md`, `docs/instrument-swap-spec.md`.
+See "Cross-Feature Alignment" below for the required ordering against the
+in-flight racks and macros work.
+
 This document defines the complete architecture and staged delivery plan for
 sequencer undo/redo. Each slice is intended to be independently shippable and
 complete for its declared command set. During the staged rollout, unsupported
@@ -100,6 +105,65 @@ The following gaps must be addressed rather than worked around:
 9. Instrument/effect project references are name-based. Exact redo cannot
    depend on the named file remaining unchanged on disk.
 
+## Cross-Feature Alignment
+
+Two feature tracks are landing alongside this system and share seams with it.
+The following alignment rules are binding on both specs.
+
+### Racks Amendment A (`docs/racks-spec.md`)
+
+1. **`FxChainHost` (racks A4) precedes Slice 6.** Slice 6's
+   `EffectChainPatch` machinery must be designed against the generalized
+   `FxChainHost` seam, not against today's duplicated track/bus chain code.
+   Chain add/move/delete/param-push exist once, parameterized by host; the
+   undo restore path is one implementation over `FxChainHost`, and
+   `EffectChainOwner` gains a `RackSlot` arm from day one (see Slice 6).
+2. **Lease retirement and history retention share one mechanism.** Racks A3
+   locks lease lifetime to the audio thread's applied-batch-serial watermark:
+   a loaded-artifact lease is held until the batch that removed its node is
+   confirmed applied. H13's history-retained compiled resources are the same
+   lifetime problem — a reference-counted handle whose release is gated on
+   the watermark. Do not build a second retirement scheme; the resource-handle
+   layer introduced for Slice 5/6 wraps the same lease accounting.
+3. **Rack macro banks are already implemented and rack-scoped (racks A11).**
+   Definitions, mappings, values, and p-lock rows serialize inside
+   `ProjectRackTrackPattern` and rack presets. Consequences for this spec:
+   rack macro state is captured by rack-track snapshots (`RackTrackSnapshot`
+   inside `InstrumentPatternState`, and Slice 7A rack-structure patches) —
+   it is never part of the project-global macro history in Slice 7E. Rack
+   macro identity is stable by construction (`:macro_1`–`:macro_8` per rack),
+   so no new id scheme is needed. A11's transactional mapping repair on
+   slot/effect deletion must run inside the same edit transaction so the
+   before-state captures mappings prior to repair.
+4. **Rack macro p-lock rows are a live lock domain.** They serialize today,
+   so `StepCellSnapshot` (Slice 1) must include them from the start, and the
+   deferred `(track, slot, fx_slot)` slot-FX p-lock keys (racks A9, a stated
+   priority follow-up) must be admissible in the same snapshot shape without
+   another Slice 1 revision.
+5. **Track → rack conversion (racks A7) is a Slice 5-family operation.** A7
+   states "Undo restores the flat track"; that operation must ship with (or
+   behind) the Slice 5 instrument-binding machinery — the flat track's
+   instrument + FX state is exactly a `TrackInstrumentState` before-snapshot
+   plus an `EffectChainState` before-snapshot. Until then it is a barrier.
+
+### Macro mapping (`docs/MACRO_MAPPING_SPEC.md`)
+
+1. **Project macro mappings currently store a dense `track: usize`.** History
+   must not; `MacroMappingSnapshot` records `TrackId`. Either the mapping
+   store migrates to `TrackId` with the Slice 0 track-identity work, or the
+   snapshot layer translates at capture/restore — migrating the store is
+   preferred since the macro spec already re-resolves `ParamTarget` against
+   live descriptors on load.
+2. **P-locked macro values are declared intent (macro spec §9.2).** When
+   project- or rack-macro values become p-lock targets, they become a step
+   lock domain; the Slice 1 snapshot shape and `without_audio_plocks`
+   enumeration must be extended then, not silently miss it. Rack macro p-lock
+   rows already exist (point 4 above).
+3. **Macro live values remain performance state** for both scopes: project
+   `MacroSetValue`/`MacroRelease` and rack macro live pushes are `Ignore`.
+   Configuration (create/delete/rename/map/unmap/range/curve) is authoring:
+   project-global in Slice 7E, rack-scoped via rack snapshots (point 3 above).
+
 ## Core Invariants
 
 The implementation must preserve all of these invariants.
@@ -186,7 +250,10 @@ redirect the undo to another pattern.
 History entries may retain reference-counted compiled instrument/effect
 resources. Evicting an entry releases its history reference; resources still
 referenced by the live project, another entry, or the engine cache remain
-alive.
+alive. Final release of a resource whose node was removed from the live graph
+is additionally gated on the audio thread's applied-batch-serial watermark —
+the same acknowledged-retirement mechanism racks Amendment A locks for effect
+leases (see Cross-Feature Alignment).
 
 ### H14. History is bounded
 
@@ -565,8 +632,10 @@ saved source changes on disk after the original operation.
 | Track instrument replacement and type conversion | Record | 5 |
 | Audio/MIDI/bus effect structure | Record | 6 |
 | Tracks, racks, scenes, buses, groups, processes, macros, routes | Record | 7 |
-| Macro live value/release gestures | Ignore by default | Performance state |
-| Macro configuration | Barrier, then Record | 7 |
+| Macro live value/release gestures (project and rack scope) | Ignore by default | Performance state |
+| Macro configuration (project-global) | Barrier, then Record | 7 |
+| Rack macro bank config (rename/map/unmap/range) | Barrier, then Record | 7A (rack snapshots) |
+| Rack macro p-lock set/clear | Barrier, then Record | 1 (step cells) + 4 |
 | Recording into steps | Barrier, then one entry per take | 7 |
 | Instrument/effect source editor text | Existing editor history | Separate subsystem |
 
@@ -670,10 +739,16 @@ Extend or replace `StepSnapshot` with a lossless `StepCellSnapshot` containing:
 - Instrument tensor p-lock rows.
 - Rack strip p-locks.
 - Rack-instrument scalar and tensor p-lock rows.
+- Rack macro p-lock rows (racks-spec A11 — these serialize today).
 
-`without_audio_plocks` must clear every MIDI-FX, audio-effect, instrument, and
-rack device lock, including tensor rows. Clipboard cross-track sanitation must
-not accidentally retain a newly added lock domain.
+The snapshot shape must also admit the planned `(track, slot, fx_slot)`
+slot-FX p-lock keys (racks-spec A9) without a structural revision — model the
+lock domains as an enumerable set rather than a fixed field list where that
+is cheap to do.
+
+`without_audio_plocks` must clear every MIDI-FX, audio-effect, instrument,
+rack device, and rack macro lock, including tensor rows. Clipboard cross-track
+sanitation must not accidentally retain a newly added lock domain.
 
 The underlying step clear/copy/move primitives must be corrected to cover the
 same complete set of domains before this slice ships. History must not preserve
@@ -932,6 +1007,7 @@ pub enum DeviceId {
     MidiEffect(MidiFxInstanceId),
     RackSlot(RackSlotId),
     RackInstrument(RackSlotId),
+    RackMacro(TrackId, u8), // :macro_1..:macro_8 — stable by construction
 }
 ```
 
@@ -951,6 +1027,9 @@ simultaneously restoring the matching descriptor.
   strip p-locks.
 - Rack-slot instrument defaults, scalar/tensor p-locks, and key locks where
   supported.
+- Rack macro p-lock set/clear (rack macros are stable p-lock targets per
+  racks-spec A11; bank configuration itself is Slice 7A rack-snapshot
+  territory, not this slice).
 - Instrument preset load/save-to-live operations that change authoring values.
   Loading one preset is one history entry; saving a preset file is a filesystem
   action and is not sequencer history.
@@ -1022,7 +1101,11 @@ state, stored patterns, compiled resources, and live graph topology.
 - Instrument run-mode change when it is part of source replacement.
 
 Rack-slot source replacement may use the same machinery once its graph path is
-adapted; until then it remains a barrier.
+adapted; until then it remains a barrier. Likewise "Group to Instrument Rack"
+(racks-spec A7) and Sound-preset load (A8) are this slice's machinery — the
+flat track's before-state is a `TrackInstrumentState` plus an
+`EffectChainState` — but they additionally move the track FX chain, so they
+remain barriers until both this slice and Slice 6A are complete.
 
 ### Snapshot shape
 
@@ -1104,7 +1187,9 @@ The snapshot must restore exactly:
 - Loaded-preset and dirty state.
 - Instrument-scoped p-lock/key-lock variant registry entries.
 - Instrument process bindings that replacement dropped.
-- Instrument macro mappings that replacement removed.
+- Instrument macro mappings that replacement removed. (For rack tracks the
+  rack macro bank travels inside `RackTrackSnapshot`; `macro_mappings` here
+  covers only project-global mappings targeting this track.)
 - Scene neural instrument overrides.
 - Sampler id/path/rate state for type conversion.
 - Track display name, instrument type, engine binding, and run mode.
@@ -1149,6 +1234,16 @@ cargo run --bin instrument_probe -- core/drift --frames 4096 --min-peak 0.01 --m
 Support reversible audio-effect, MIDI-effect, and bus-effect topology changes
 without storing runtime node ids as history identity.
 
+### Prerequisite: `FxChainHost`
+
+The racks Amendment A Phase R1 refactor (`FxChainHost` + `ChainSuccessor`,
+unified lease storage) must land before this slice. All chain patch
+application — prepare, connect, delete, param push, lease accounting — is
+written once over `FxChainHost` and works identically for track, bus, and
+rack-slot chains. If Slice 6 arrives first for scheduling reasons, it must
+still introduce the host seam rather than a third (or fourth) copy of the
+chain machinery.
+
 ### Identity model
 
 Promote the instance ids assigned in Slice 4 (`EffectInstanceId`,
@@ -1186,6 +1281,18 @@ format version change.
 - Restore per-scene bus effect values, gate state references, sidechains, and
   custom resource metadata.
 
+#### Slice 6D: Rack-slot effects
+
+- Insert, delete, replace, and reorder effects in a rack slot's chain
+  (racks-spec A5/A6).
+- Same patch machinery via `EffectChainOwner::RackSlot`; the only structural
+  difference is the `ChainSuccessor::MonoPair` wiring, which lives below the
+  patch layer.
+- Rack macro mappings that target slot-FX params are repaired or dropped
+  transactionally on chain edits (racks-spec A11). The chain patch must
+  capture the rack macro mapping table before repair so undo restores dropped
+  mappings, not just the chain.
+
 Each sub-slice remains a barrier until it is individually complete.
 
 ### Patch shape
@@ -1200,6 +1307,7 @@ pub struct EffectChainPatch {
 pub enum EffectChainOwner {
     Track(TrackId),
     Bus(BusId),
+    RackSlot(RackSlotId),
 }
 
 pub struct EffectChainState {
@@ -1291,6 +1399,11 @@ Requirements:
   sidechains, selections, scene cells, pattern pools, and runtime binding
   definitions.
 - Restore graph structure from logical track/rack state.
+- Rack macro bank configuration (names, mappings, ranges/curves, persisted
+  values) is part of the rack snapshot — it serializes inside
+  `ProjectRackTrackPattern` (racks-spec A11) and is restored here, not in
+  Slice 7E. Slot deletion's transactional mapping repair must be captured in
+  the same entry as the deletion it accompanies.
 
 ### Slice 7B: Scenes and Track Patterns
 
@@ -1341,6 +1454,17 @@ Operations:
 Macro ids and mapping ids must remain stable through undo/redo. Live
 `MacroSetValue` and `MacroRelease` remain performance actions unless a separate
 automation-recording mode explicitly groups them into an authoring take.
+
+This sub-slice covers **project-global** macros only; rack macro banks are
+rack state and restore through Slice 7A / rack snapshots. Two alignment
+requirements from `docs/MACRO_MAPPING_SPEC.md`:
+
+- Project macro mappings persist a dense `track: usize` today.
+  `MacroMappingSnapshot` records `TrackId`; prefer migrating the mapping
+  store itself to `TrackId` during the Slice 0 identity work.
+- `MacroId` is a persisted monotonic `u32` that is never reused — redo of a
+  macro delete/create must reinstate the original id, mirroring the
+  `insert_with_id` requirement for `PatternId`.
 
 ### Slice 7F: Recording and generated edits
 

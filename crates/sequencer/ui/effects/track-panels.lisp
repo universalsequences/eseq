@@ -314,6 +314,9 @@
         (seqv-param-keyword mode)
         (seqv-step-param-value mode value)))))
 
+(def fx-step-set-sound (label)
+  (fx-step-set-param 3 (seqv-drum-sound-transpose-for-label SEQ.current-track label)))
+
 (def fx-step-param-min (mode)
   (if (= mode 3) -48
     (if (= mode 1) 0
@@ -339,6 +342,19 @@
       :on-change (lambda (v) (fx-step-set-param mode v))
       :width width
       :height 1.15)))
+
+(def fx-step-sound-picker ()
+  (v-stack :align :center :gap 0.24
+    (label "Sound" :font-size 8 :color :dim :bg :transparent)
+    (if (> (seqv-drum-sound-count SEQ.current-track) 0)
+      (dropdown
+        :key "fx-step-param-sound"
+        :value (seqv-drum-sound-label-for-transpose SEQ.current-track (fx-step-param-value 3))
+        :options (seqv-drum-sound-labels SEQ.current-track)
+        :on-change (lambda (label) (fx-step-set-sound label))
+        :width 8.8 :height 1.15 :font-size 8.2)
+      (box :key "fx-step-param-sound-empty" :width 8.8 :height 1.15
+        (label "No drum pads" :font-size 8 :color :dim :bg :transparent)))))
 
 (def fx-step-track-badge ()
   (let ((track SEQ.current-track)
@@ -370,7 +386,9 @@
           ;(label "step" :font-size 10 :color :white :bg :transparent)
           (label (fx-step-selection-title) :font-size 8 :color :dim :bg :transparent))
         (h-stack :gap 0.55 :align :center
-          (fx-step-param-picker 3 "transpose" 4.2)
+          (if (seqv-track-drum-rack? SEQ.current-track)
+            (fx-step-sound-picker)
+            (fx-step-param-picker 3 "transpose" 4.2))
           (fx-step-param-picker 0 "velocity" 4.2)
           (fx-step-param-picker 1 "duration" 4.2))))))
 

@@ -793,6 +793,12 @@ pub(crate) fn init_runtime(
                 ("sampler-playhead", Value::Number(0.0)),
                 ("track-ids", build_track_ids(&app)),
                 ("track-instrument-types", build_track_instrument_types(&app)),
+                ("track-drum-racks", build_track_drum_racks_value(&app)),
+                ("track-drum-sounds", build_all_track_drum_sounds_value(&app)),
+                (
+                    "track-drum-step-glyphs",
+                    build_all_track_drum_step_glyphs_value(&state, &app),
+                ),
                 (
                     "track-mod-output-available",
                     build_track_mod_output_available(&app),

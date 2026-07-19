@@ -1198,6 +1198,63 @@
     (nth lists track)
     '()))
 
+;; A drum rack's sequencer pitch is its pad note.  The host publishes the
+;; occupied pads as {transpose, label} pairs so every sequencer surface can
+;; present the same names that appear on the drum-pad grid.
+(def seqv-track-drum-rack? (track)
+  (seqv-list-ref SEQ.track-drum-racks track false))
+
+(def seqv-track-drum-sounds (track)
+  (seqv-list-ref SEQ.track-drum-sounds track '()))
+
+(def seqv-drum-sound-mode? (track mode)
+  (and (= mode 3) (seqv-track-drum-rack? track)))
+
+(def seqv-drum-sound-count (track)
+  (len (seqv-track-drum-sounds track)))
+
+(def seqv-drum-sound-labels (track)
+  (map (lambda (sound) (get sound :label)) (seqv-track-drum-sounds track)))
+
+(def seqv-drum-sound-short-labels (track)
+  (map (lambda (sound) (get sound :short-label)) (seqv-track-drum-sounds track)))
+
+(def seqv-drum-sound-indices-for-transpose (track transpose)
+  (let ((sounds (seqv-track-drum-sounds track)))
+    (filter
+      (lambda (idx)
+        (= (round (get (nth sounds idx) :transpose)) (round transpose)))
+      (range 0 (len sounds)))))
+
+(def seqv-drum-sound-index-for-transpose (track transpose)
+  (let ((indices (seqv-drum-sound-indices-for-transpose track transpose)))
+    (if (> (len indices) 0) (nth indices 0) 0)))
+
+(def seqv-drum-sound-label-for-transpose (track transpose)
+  (let ((sounds (seqv-track-drum-sounds track))
+        (indices (seqv-drum-sound-indices-for-transpose track transpose)))
+    (if (> (len indices) 0)
+      (get (nth sounds (nth indices 0)) :label)
+      (str "Unassigned " (round transpose)))))
+
+(def seqv-drum-sound-transpose-at-index (track index)
+  (let ((sounds (seqv-track-drum-sounds track)))
+    (if (> (len sounds) 0)
+      (get (nth sounds (max 0 (min (round index) (- (len sounds) 1)))) :transpose)
+      0)))
+
+(def seqv-drum-sound-transpose-for-label (track label)
+  (let ((sounds (seqv-track-drum-sounds track))
+        (matches
+          (filter (lambda (sound) (= (get sound :label) label))
+            (seqv-track-drum-sounds track))))
+    (if (> (len matches) 0)
+      (get (nth matches 0) :transpose)
+      (if (> (len sounds) 0) (get (nth sounds 0) :transpose) 0))))
+
+(def seqv-track-drum-step-glyphs (track step)
+  (seqv-track-step-value SEQ.track-drum-step-glyphs track step '()))
+
 (def seqv-process-lane-mode-offset 7)
 
 (def seqv-process-lane-mode? (mode)
