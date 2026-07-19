@@ -176,14 +176,7 @@ fn sc_filter_coefs(filter_type: usize, freq: f32, q: f32, sample_rate: f32) -> [
                 1.0 - alpha,
             )
         }
-        2 => (
-            alpha,
-            0.0,
-            -alpha,
-            1.0 + alpha,
-            -2.0 * cos_w0,
-            1.0 - alpha,
-        ),
+        2 => (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha),
         3 => (
             1.0,
             -2.0 * cos_w0,
@@ -474,11 +467,7 @@ pub fn compressor_vtable() -> NodeVTable {
 mod tests {
     use super::*;
 
-    fn run_block(
-        state: &mut [f32],
-        input: &[Vec<f32>; 3],
-        nframes: usize,
-    ) -> (Vec<f32>, Vec<f32>) {
+    fn run_block(state: &mut [f32], input: &[Vec<f32>; 3], nframes: usize) -> (Vec<f32>, Vec<f32>) {
         let mut in0 = input[0].clone();
         let mut in1 = input[1].clone();
         let mut in2 = input[2].clone();
@@ -522,7 +511,10 @@ mod tests {
         assert_eq!(static_gain_db(-10.0, -20.0, 4.0, 0.0, true), 0.0);
         let gr = static_gain_db(-25.0, -20.0, 2.0, 0.0, true);
         assert!((gr + 5.0).abs() < 1.0e-4, "{gr}");
-        assert_eq!(static_gain_db(-90.0, -20.0, 10.0, 0.0, true), EXPAND_FLOOR_DB);
+        assert_eq!(
+            static_gain_db(-90.0, -20.0, 10.0, 0.0, true),
+            EXPAND_FLOOR_DB
+        );
     }
 
     #[test]
@@ -548,7 +540,11 @@ mod tests {
             "expected heavy reduction, got {}",
             out0[n - 1]
         );
-        assert!(state[STATE_METER_GR_DB] < -6.0, "{}", state[STATE_METER_GR_DB]);
+        assert!(
+            state[STATE_METER_GR_DB] < -6.0,
+            "{}",
+            state[STATE_METER_GR_DB]
+        );
         assert!(state[STATE_RING_WRITE] as usize >= n / METER_STRIDE);
         let entry = (state[STATE_RING_WRITE] as usize - 1) % METER_RING_LEN;
         assert!(state[STATE_METER_RING + entry * 2] > LEVEL_FLOOR_DB);

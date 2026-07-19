@@ -1,6 +1,6 @@
 use arrayvec::ArrayVec;
-use cpal::Stream;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::Stream;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,19 +25,19 @@ use crate::sampler::{
     SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE, SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE,
 };
 use crate::scheduled_event::{
-    ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
-    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
-    ScheduledInstrumentTensorParam, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
-    resolved_chord_transpose,
+    resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
+    ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+    ScheduledInstrumentParams, ScheduledInstrumentTensorParam, ScheduledInstrumentTensorParams,
+    ScheduledSamplerParams,
 };
 use crate::sequencer::{
-    BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, MAX_INSTRUMENT_ENGINES,
-    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS, RackRouting, RackSlotParam, RackSlotSnapshot,
-    RackTrackSnapshot, SequencerSnapshot, SequencerState, StepParam, SwingResolution,
-    rack_slot_pool_index, sync_beats,
+    rack_slot_pool_index, sync_beats, BusId, CustomInstrumentRunMode, InstrumentType,
+    KeyboardTrigger, RackRouting, RackSlotParam, RackSlotSnapshot, RackTrackSnapshot,
+    SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES,
+    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::tui::BusGateRuntimeState;
-use crate::voice::{MAX_VOICES, VoicePool};
+use crate::voice::{VoicePool, MAX_VOICES};
 
 pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
@@ -2708,8 +2708,7 @@ fn for_each_custom_route_lid(
                 == engine_id as u32
         {
             (
-                state.runtime.rack_engine_route_lids[route_idx][voice_idx]
-                    .load(Ordering::Relaxed),
+                state.runtime.rack_engine_route_lids[route_idx][voice_idx].load(Ordering::Relaxed),
                 state.runtime.rack_engine_route_lids_r[route_idx][voice_idx]
                     .load(Ordering::Relaxed),
                 std::array::from_fn(|input| {
@@ -2760,8 +2759,7 @@ fn for_each_custom_voice_route_update(
         }
         for stale_route in MAX_TRACKS..crate::sequencer::MAX_SAMPLER_POOLS {
             if stale_route != route_idx
-                && state.runtime.rack_engine_route_engine_ids[stale_route]
-                    .load(Ordering::Relaxed)
+                && state.runtime.rack_engine_route_engine_ids[stale_route].load(Ordering::Relaxed)
                     == engine_id as u32
             {
                 set_route(stale_route, 0.0);
@@ -6760,7 +6758,13 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
 
     data.master_recorder.capture(output);
 
-    if transport_playing && data.state.transport.metronome_enabled.load(Ordering::Relaxed) {
+    if transport_playing
+        && data
+            .state
+            .transport
+            .metronome_enabled
+            .load(Ordering::Relaxed)
+    {
         let bpm = data.state.transport.bpm.load(Ordering::Relaxed) as f64;
         mix_metronome(
             &mut data.metronome,
@@ -7105,28 +7109,28 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     use super::{
-        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
-        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
-        FALLBACK_SAMPLE_RATE, FreePatchTransportRouteState, FreePatchTransportRouteTarget,
-        GateOffEvent, GateOffTarget, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
         apply_rack_macros_at_step, bus_gate_target_at, clear_active_keyboard_note_by_lid,
-        collect_rack_choke_group_voice_releases, free_patch_transport_route_cache_is_fresh,
-        free_patch_transport_route_target, for_each_custom_voice_route_update,
-        instrument_sound_fingerprint,
-        key_locked_live_instrument_params, mute_group_winner_for_block_events,
-        mix_metronome, MetronomeState,
-        rack_slot_matches_routing, rack_slot_playback_transpose, resolve_live_instrument_defaults,
+        collect_rack_choke_group_voice_releases, for_each_custom_voice_route_update,
+        free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
+        instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
+        mute_group_winner_for_block_events, rack_slot_matches_routing,
+        rack_slot_playback_transpose, resolve_live_instrument_defaults,
         resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
         resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
         select_output_channels, select_output_config, store_active_keyboard_note,
         swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
+        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
+        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
+        FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
+        MetronomeState, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
+        FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
-    use crate::analysis::{OnsetTableShared, pack_ptr};
+    use crate::analysis::{pack_ptr, OnsetTableShared};
     use crate::effects::{
         EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
         ParamScaling, TensorParamDescriptor,
@@ -7136,14 +7140,15 @@ mod tests {
         ScheduledInstrumentParams, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
     };
     use crate::sequencer::{
-        CustomInstrumentRunMode, InstrumentType, RackMacroCurve, RackMacroMapping, RackMacroTarget,
-        RackRouting, RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot,
-        SequencerState, SwingResolution, TrackSoundState, default_rack_macros,
+        default_rack_macros, CustomInstrumentRunMode, InstrumentType, RackMacroCurve,
+        RackMacroMapping, RackMacroTarget, RackRouting, RackSlotParam, RackSlotParamPlocks,
+        RackSlotSnapshot, RackTrackSnapshot, SequencerState, SwingResolution, TrackSoundState,
     };
     use crate::voice::VoicePool;
 
-    fn active_keyboard_notes_fixture()
-    -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS] {
+    fn active_keyboard_notes_fixture(
+    ) -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
+    {
         [[None; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
     }
 
@@ -8223,18 +8228,13 @@ mod tests {
         let state = SequencerState::new(2, Vec::new());
         let engine_id = 4;
         let voice_idx = 3;
-        let rack_route = crate::sequencer::rack_slot_pool_index(0, 0)
-            .expect("rack route identity");
-        state.runtime.engine_route_lids[engine_id][voice_idx][1]
-            .store(201, Ordering::Relaxed);
-        state.runtime.engine_route_lids_r[engine_id][voice_idx][1]
-            .store(202, Ordering::Relaxed);
+        let rack_route = crate::sequencer::rack_slot_pool_index(0, 0).expect("rack route identity");
+        state.runtime.engine_route_lids[engine_id][voice_idx][1].store(201, Ordering::Relaxed);
+        state.runtime.engine_route_lids_r[engine_id][voice_idx][1].store(202, Ordering::Relaxed);
         state.runtime.rack_engine_route_engine_ids[rack_route]
             .store(engine_id as u32, Ordering::Relaxed);
-        state.runtime.rack_engine_route_lids[rack_route][voice_idx]
-            .store(101, Ordering::Relaxed);
-        state.runtime.rack_engine_route_lids_r[rack_route][voice_idx]
-            .store(102, Ordering::Relaxed);
+        state.runtime.rack_engine_route_lids[rack_route][voice_idx].store(101, Ordering::Relaxed);
+        state.runtime.rack_engine_route_lids_r[rack_route][voice_idx].store(102, Ordering::Relaxed);
 
         let mut updates = Vec::new();
         for_each_custom_voice_route_update(

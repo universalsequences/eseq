@@ -36,7 +36,10 @@ const DIFF_BUF_LEN: usize = 1024;
 const HF_BUF_LEN: usize = 1024;
 
 // Scalar layout within a tank's state slice.
-const SC_AP_Z: usize = 0; // LOOPS × AP_MAX × K_MAX stretched-allpass states
+// Allpass states are stored phase-major and loop-interleaved —
+// [phase][ap][loop] — so processing one sample walks a single contiguous
+// run of `m × LOOPS` floats instead of striding K_MAX apart per stage.
+const SC_AP_Z: usize = 0; // K_MAX × AP_MAX × LOOPS stretched-allpass states
 const SC_DAMP: usize = SC_AP_Z + SPRING_LOOPS * SPRING_AP_MAX * SPRING_K_MAX;
 const SC_SHELF: usize = SC_DAMP + SPRING_LOOPS; // per-loop shelf crossover LP
 const SC_HP_LP: usize = SC_SHELF + SPRING_LOOPS;
@@ -375,31 +378,39 @@ pub fn spring_tank_process(input: f32, c: &SpringCoeffs, st: &mut [f32]) -> f32 
 
     // Parallel dispersive loops. The stretched allpasses (z^-K) are realized
     // as K interleaved state slots per allpass, addressed by a shared phase.
+    // The three loops' chains advance in lockstep: each chain is a serial
+    // dependency (y[j] feeds stage j+1), but the loops are independent, so
+    // interleaving them lets the CPU overlap three chains instead of waiting
+    // out one at a time — this is where the tank spends nearly all its time.
     let phase = st[SC_AP_PHASE] as usize % c.k;
-    let mut acc = 0.0f32;
     let lw = wpos % LOOP_BUF_LEN;
+    let mut v = [0.0f32; SPRING_LOOPS];
     for k in 0..SPRING_LOOPS {
         let base = BUF_LOOP0 + k * LOOP_BUF_LEN;
         let r = (lw + LOOP_BUF_LEN - c.loop_delay[k]) % LOOP_BUF_LEN;
-        let mut v = st[base + r];
-        let zs = SC_AP_Z + k * SPRING_AP_MAX * SPRING_K_MAX + phase;
-        for z in st[zs..zs + c.m * SPRING_K_MAX]
-            .iter_mut()
-            .step_by(SPRING_K_MAX)
-        {
-            let y = -c.ap_a * v + *z;
-            *z = v + c.ap_a * y;
-            v = y;
+        v[k] = st[base + r];
+    }
+    let a = c.ap_a;
+    let row = SC_AP_Z + phase * SPRING_AP_MAX * SPRING_LOOPS;
+    for chunk in st[row..row + c.m * SPRING_LOOPS].chunks_exact_mut(SPRING_LOOPS) {
+        for (vk, z) in v.iter_mut().zip(chunk) {
+            let y = -a * *vk + *z;
+            *z = *vk + a * y;
+            *vk = y;
         }
+    }
+    let mut acc = 0.0f32;
+    for k in 0..SPRING_LOOPS {
+        let base = BUF_LOOP0 + k * LOOP_BUF_LEN;
         // Feedback path: damping LP, then shelf split (lows keep t60, the band
         // above f_shelf gets an extra per-pass cut → non-exponential EDC).
-        let damp = st[SC_DAMP + k] + c.damp_coef * (v - st[SC_DAMP + k]);
+        let damp = st[SC_DAMP + k] + c.damp_coef * (v[k] - st[SC_DAMP + k]);
         st[SC_DAMP + k] = damp;
         let low = st[SC_SHELF + k] + c.shelf_coef * (damp - st[SC_SHELF + k]);
         st[SC_SHELF + k] = low;
         let fb = (low + c.g_shelf * (damp - low)) * c.loop_gain[k];
         st[base + lw] = x + fb;
-        acc += c.w_loop[k] * v;
+        acc += c.w_loop[k] * v[k];
     }
     st[SC_AP_PHASE] = ((phase + 1) % c.k) as f32;
 
@@ -540,6 +551,31 @@ mod tests {
                 assert!(diff > 1e-2, "presets {i} and {j} render identically");
             }
         }
+    }
+
+    #[test]
+    fn reduced_rate_stays_equivalent() {
+        // The space echo runs this tank at half the host rate, so the fit
+        // must hold down at ~22-24 kHz just like across full host rates.
+        let p = SpringParams::re201();
+        let a = render_impulse(&p, 48_000.0, 4.0, 0.25);
+        let b = render_impulse(&p, 24_000.0, 4.0, 0.25);
+        // Dominant arrival (the first-arrival threshold is brittle against
+        // the low-level HF-comb precursor, whose exact level shifts with sr).
+        let peak_s = |ir: &[f32], sr: f32| {
+            ir.iter()
+                .enumerate()
+                .max_by(|x, y| x.1.abs().total_cmp(&y.1.abs()))
+                .unwrap()
+                .0 as f32
+                / sr
+        };
+        let ta = peak_s(&a, 48_000.0);
+        let tb = peak_s(&b, 24_000.0);
+        assert!((ta - tb).abs() < 0.005, "dominant arrival {ta} vs {tb}");
+        let ea = edc_db(&a)[(2.0 * 48_000.0) as usize];
+        let eb = edc_db(&b)[(2.0 * 24_000.0) as usize];
+        assert!((ea - eb).abs() < 3.0, "EDC {ea} vs {eb}");
     }
 
     #[test]

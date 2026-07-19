@@ -1,18 +1,18 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::{CString, c_void};
-use std::sync::Arc;
+use std::ffi::{c_void, CString};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use eseqlisp::live_audio::{BandMeterFrame, CompressorMeterFrame};
 use eseqlisp::widget_render::compressor_display::{
-    CompressorMeterRequest, collect_compressor_meter_requests,
+    collect_compressor_meter_requests, CompressorMeterRequest,
 };
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
-use eseqlisp::widget_render::multiband_meter::{BandMeterRequest, collect_band_meter_requests};
+use eseqlisp::widget_render::multiband_meter::{collect_band_meter_requests, BandMeterRequest};
 use eseqlisp::widget_render::roar_shaper::collect_roar_meter_requests;
-use eseqlisp::widget_render::scope::{ScopeRequest, collect_scope_requests};
-use eseqlisp::widget_render::spectrogram::{SpectrogramRequest, collect_spectrogram_requests};
+use eseqlisp::widget_render::scope::{collect_scope_requests, ScopeRequest};
+use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, SpectrogramRequest};
 use sequencer::audio_tap::{self, SpectrogramProcessor};
 use sequencer::audiograph::{self, LiveGraphPtr};
 use sequencer::sequencer::BusId;

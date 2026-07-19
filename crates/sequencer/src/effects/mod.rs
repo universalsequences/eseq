@@ -5354,12 +5354,7 @@ impl EffectDescriptor {
                     0.0,
                     comp::COMPRESSOR_PARAM_LOOKAHEAD,
                 ),
-                options(
-                    "env",
-                    &["lin", "log"],
-                    1.0,
-                    comp::COMPRESSOR_PARAM_ENV_MODE,
-                ),
+                options("env", &["lin", "log"], 1.0, comp::COMPRESSOR_PARAM_ENV_MODE),
                 continuous(
                     "out",
                     -36.0,

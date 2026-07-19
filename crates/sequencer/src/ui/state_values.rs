@@ -2683,8 +2683,7 @@ pub(crate) fn sync_rack_slot_control_value_field(
     };
     let value = if matches!(
         param,
-        sequencer::sequencer::RackSlotParam::Mute
-            | sequencer::sequencer::RackSlotParam::Solo
+        sequencer::sequencer::RackSlotParam::Mute | sequencer::sequencer::RackSlotParam::Solo
     ) {
         Value::Bool(value > 0.5)
     } else {
@@ -8480,10 +8479,7 @@ fn drum_rack_sound_short_label(name: &str) -> String {
     }
 }
 
-pub(crate) fn drum_rack_sound_options(
-    app: &tui::App,
-    track: usize,
-) -> Vec<DrumRackSoundOption> {
+pub(crate) fn drum_rack_sound_options(app: &tui::App, track: usize) -> Vec<DrumRackSoundOption> {
     let rack = app
         .state
         .pattern
@@ -8563,9 +8559,8 @@ pub(crate) fn drum_lane_step_active(
             .round() as i32
             == pad_note;
     }
-    (0..count).any(|voice| {
-        state.pattern.chord_data[track].get(step, voice).round() as i32 == pad_note
-    })
+    (0..count)
+        .any(|voice| state.pattern.chord_data[track].get(step, voice).round() as i32 == pad_note)
 }
 
 pub(crate) fn drum_lane_step_duration_covered(
@@ -8602,12 +8597,13 @@ pub(crate) fn sync_drum_lane_step_binding_fields(
         Some(Value::Map(fields)) => fields.keys().cloned().collect::<HashSet<_>>(),
         _ => HashSet::new(),
     };
-    let steps = only_step.map_or(0..MAX_STEPS, |step| step..step.saturating_add(1).min(MAX_STEPS));
+    let steps = only_step.map_or(0..MAX_STEPS, |step| {
+        step..step.saturating_add(1).min(MAX_STEPS)
+    });
     let mut dirty = false;
     for sound in drum_rack_sound_options(app, track) {
         for step in steps.clone() {
-            let selected_field =
-                drum_lane_step_selected_field(track, sound.pad_note, step);
+            let selected_field = drum_lane_step_selected_field(track, sound.pad_note, step);
             if registered_fields.insert(selected_field.clone()) {
                 dirty |= rt
                     .set_reactive("SEQ", &selected_field, Value::Bool(false))
@@ -8744,7 +8740,9 @@ struct RackUiModMetadata {
     source_param_idx: Option<usize>,
     depth_param_idx: usize,
     source_slot: f32,
+    source_value_field: Option<String>,
     depth_value: f32,
+    depth_value_field: String,
     depth_min: f32,
     depth_max: f32,
     depth_unit: Option<String>,
@@ -8773,10 +8771,14 @@ fn insert_rack_mod_metadata(
                 "source-slot".to_string(),
                 value_cell(Value::Number(meta.source_slot as f64)),
             );
+            if let Some(field) = &meta.source_value_field {
+                insert_string_prop(&mut target, "source-value-field", field);
+            }
             target.insert(
                 "depth".to_string(),
                 value_cell(Value::Number(meta.depth_value as f64)),
             );
+            insert_string_prop(&mut target, "depth-value-field", &meta.depth_value_field);
             target.insert(
                 "depth-min".to_string(),
                 value_cell(Value::Number(meta.depth_min as f64)),
@@ -8987,7 +8989,22 @@ fn build_selected_rack_slot_instrument_value(
                                 .map(|source_desc| source_desc.stored_to_user(source_current))
                         })
                         .unwrap_or(source_current),
+                    source_value_field: target.source_param_idx.map(|source_param_idx| {
+                        let source_desc = &desc.params[source_param_idx];
+                        rack_slot_instrument_param_value_field(
+                            track,
+                            slot_idx,
+                            source_param_idx,
+                            &source_desc.name,
+                        )
+                    }),
                     depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_value_field: rack_slot_instrument_param_value_field(
+                        track,
+                        slot_idx,
+                        target.depth_param_idx,
+                        &depth_desc.name,
+                    ),
                     depth_min,
                     depth_max,
                     depth_unit: target.depth_unit.clone(),
@@ -9345,7 +9362,24 @@ fn build_rack_slot_effect_value(
                                 .map(|source| source.stored_to_user(source_current))
                         })
                         .unwrap_or(source_current),
+                    source_value_field: target.source_param_idx.map(|source_idx| {
+                        let source = &descriptor.params[source_idx];
+                        rack_slot_effect_param_value_field(
+                            track,
+                            rack_slot,
+                            effect_slot,
+                            source_idx,
+                            &source.name,
+                        )
+                    }),
                     depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_value_field: rack_slot_effect_param_value_field(
+                        track,
+                        rack_slot,
+                        effect_slot,
+                        target.depth_param_idx,
+                        &depth_desc.name,
+                    ),
                     depth_min: target.depth_min,
                     depth_max: target.depth_max,
                     depth_unit: target.depth_unit.clone(),
@@ -22077,12 +22111,13 @@ mod tests {
     #[test]
     fn rack_sampler_waveform_selection_tracks_live_start_and_end_values() {
         let app = test_app_with_rack_panel();
-        assert!(app
-            .state
-            .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
-                slot.instrument_slot.defaults[2] = 0.57;
-                slot.instrument_slot.defaults[3] = 0.82;
-            },));
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                    slot.instrument_slot.defaults[2] = 0.57;
+                    slot.instrument_slot.defaults[3] = 0.82;
+                },)
+        );
         let selected = Arc::new(Mutex::new(HashSet::new()));
         let panel = build_instrument_panel_value(&app, 0, &selected);
         let Value::List(racks) = &panel else {
@@ -22124,11 +22159,12 @@ mod tests {
             Ok(Some(Value::Number(0.82_f32 as f64)))
         );
 
-        assert!(app
-            .state
-            .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| slot
-                .instrument_slot
-                .defaults[2] = 0.25,));
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| slot
+                    .instrument_slot
+                    .defaults[2] = 0.25,)
+        );
         sync_rack_slot_instrument_param_value_field(&mut runtime, &app, 0, 0, 2, None);
         assert_eq!(
             runtime.eval_str(&format!("SEQ.{start_field}")),
@@ -22484,14 +22520,31 @@ mod tests {
             }
         }
 
-        let app = test_app_with_rack_panel();
+        let mut app = test_app_with_rack_panel();
         let selected = Arc::new(Mutex::new(HashSet::new()));
-        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
-        let speed_idx = sequencer::effects::EffectDescriptor::builtin_sampler()
+        let sampler_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let speed_idx = sampler_descriptor
             .params
             .iter()
             .position(|param| param.name == "speed")
             .expect("sampler descriptor should expose speed");
+        let speed_param = &sampler_descriptor.params[speed_idx];
+        app.map_rack_macro(
+            0,
+            sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
+            sequencer::sequencer::RackMacroMapping {
+                target: sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
+                    slot: 0,
+                    param: "speed".to_string(),
+                    param_index: speed_idx,
+                },
+                range_min: speed_param.min,
+                range_max: speed_param.max,
+                curve: sequencer::sequencer::RackMacroCurve::Linear,
+            },
+        )
+        .expect("map rack macro to sampler speed");
+        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
         let speed_wrapper_key = format!("sampler-param-{speed_idx}-mod-wrapper");
         let speed_depth_key = format!("sampler-param-{speed_idx}-mod-depth");
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
@@ -22653,6 +22706,55 @@ mod tests {
             source_idx, depth_idx,
             "rack modulation source and depth should be distinct params"
         );
+        let depth_param = &sampler_descriptor.params[depth_idx];
+        let depth_value_field =
+            rack_slot_instrument_param_value_field(0, 0, depth_idx, &depth_param.name);
+        let depth_target_expression = format!(
+            r#"
+            (let ((p (nth
+                       (filter |candidate| (= (get candidate :idx) {speed_idx})
+                         (get
+                           (get (nth SEQ.instrument-panel 0) :selected-instrument)
+                           :synth))
+                       0)))
+              (nth
+                (filter |target| (= (get target :depth-idx) {depth_idx})
+                  (get p :mod-targets))
+                0))
+            "#
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(&format!(
+                "(get {depth_target_expression} :depth-value-field)"
+            )),
+            Ok(Some(Value::String(depth_value_field.clone()))),
+            "rack modulation depth must observe the rack-slot reactive field"
+        );
+
+        let updated_depth = 0.375_f32;
+        let updated_depth_stored =
+            depth_param.clamp(depth_param.user_input_to_stored(updated_depth));
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                    slot.instrument_slot.defaults[depth_idx] = updated_depth_stored;
+                })
+        );
+        sync_rack_slot_instrument_param_value_field(
+            editor.runtime_mut(),
+            &app,
+            0,
+            0,
+            depth_idx,
+            None,
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(&format!(
+                "(reactive-value (instrument-mod-target-depth {depth_target_expression}))"
+            )),
+            Ok(Some(Value::Number(updated_depth as f64))),
+            "rack custom-UI modulation knobs must redraw from the targeted rack-slot sync"
+        );
 
         editor
             .runtime_mut()
@@ -22693,6 +22795,53 @@ mod tests {
                 panic!("expected set-rack-slot-instrument-param-option host command, got {other:?}")
             }
         }
+
+        let custom_wrapper_probe = format!(
+            r#"
+            (do
+              (set! custom-ui-current-kind "instrument")
+              (let ((p (nth
+                         (filter |candidate| (= (get candidate :idx) {speed_idx})
+                           (get
+                             (get (nth SEQ.instrument-panel 0) :selected-instrument)
+                             :synth))
+                         0)))
+                (not
+                  (string-contains?
+                    (str
+                      (custom-ui-param-mod-wrapper p "rack-custom-mod-wrapper"
+                        (dict :editable-depth true)))
+                    "macro-param-owned-wrapper"))))
+            "#
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(&custom_wrapper_probe),
+            Ok(Some(Value::Bool(true))),
+            "rack custom-UI controls must not retain the macro-owned pointer guard in modulation-depth mode"
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                r#"
+                (let ((p (nth
+                           (filter |candidate| (= (get candidate :idx) {speed_idx})
+                             (get
+                               (get (nth SEQ.instrument-panel 0) :selected-instrument)
+                               :synth))
+                           0)))
+                  (param-set-control-value false p 0.5))
+                "#
+            ))
+            .expect("edit rack custom-UI modulation depth");
+        let custom_commands = editor.drain_host_commands();
+        assert!(
+            custom_commands.iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. }
+                    if name == "set-rack-slot-instrument-param"
+            )),
+            "rack custom-UI depth edit should reach rack-slot parameter routing: {custom_commands:?}"
+        );
     }
 
     #[test]
@@ -24512,12 +24661,7 @@ mod tests {
         test_list(values.iter().cloned().map(Value::String).collect())
     }
 
-    fn test_drum_sound(
-        transpose: f64,
-        name: &str,
-        label: &str,
-        short_label: &str,
-    ) -> Value {
+    fn test_drum_sound(transpose: f64, name: &str, label: &str, short_label: &str) -> Value {
         let mut sound = HashMap::new();
         sound.insert(
             "transpose".to_string(),
@@ -28518,9 +28662,7 @@ mod tests {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     &drum_lane_step_duration_field(0, pad_note, step),
-                    Value::Bool(
-                        (pad_note == 0 && step == 0) || (pad_note == 12 && step == 4),
-                    ),
+                    Value::Bool((pad_note == 0 && step == 0) || (pad_note == 12 && step == 4)),
                 );
             }
         }
@@ -28573,8 +28715,9 @@ mod tests {
             "drum lanes should be separated by a visible vertical gap: {:?}",
             lanes.iter().map(|lane| lane.rect).collect::<Vec<_>>()
         );
-        let kick_step = find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-0-0")
-            .expect("the Kick lane should expose its own first step");
+        let kick_step =
+            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-0-0")
+                .expect("the Kick lane should expose its own first step");
         assert_finite_nonzero_rect(kick_step, "Kick lane first step");
         for handler in ["on-mouse-down", "on-drag", "on-mouse-up", "on-double-click"] {
             assert!(
@@ -28587,22 +28730,26 @@ mod tests {
             .first()
             .expect("Kick lane first step shell");
         assert!(
-            matches!(kick_shell.props.get("selected"), Some(Value::ReactiveRef { .. })),
+            matches!(
+                kick_shell.props.get("selected"),
+                Some(Value::ReactiveRef { .. })
+            ),
             "lane selection must be a reactive per-pad binding"
         );
         assert!(
-            matches!(kick_shell.props.get("duration"), Some(Value::ReactiveRef { .. })),
+            matches!(
+                kick_shell.props.get("duration"),
+                Some(Value::ReactiveRef { .. })
+            ),
             "lane duration visualization must use a reactive per-pad binding"
         );
         let snare_step =
             find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-12-4")
                 .expect("the Snare lane should expose its own fifth step");
         assert_finite_nonzero_rect(snare_step, "Snare lane fifth step");
-        let kick_label = find_layout_node_by_stable_key(
-            &compact_layout,
-            "seqv-drum-lane-label-0-0",
-        )
-        .expect("the Kick lane should have a slot label on its right");
+        let kick_label =
+            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-label-0-0")
+                .expect("the Kick lane should have a slot label on its right");
         assert_finite_nonzero_rect(kick_label, "Kick lane label");
         assert_eq!(
             kick_label.props.get("text"),
@@ -28775,17 +28922,18 @@ mod tests {
         }
         {
             let selected = Arc::clone(&selected);
-            editor.runtime_mut().register_native(
-                "seq-drum-lane-has-selection?",
-                move |_args, _ctx| Ok(Value::Bool(!selected.lock().unwrap().is_empty())),
-            );
+            editor
+                .runtime_mut()
+                .register_native("seq-drum-lane-has-selection?", move |_args, _ctx| {
+                    Ok(Value::Bool(!selected.lock().unwrap().is_empty()))
+                });
         }
         {
             let active = Arc::clone(&active);
             let toggles = Arc::clone(&toggles);
-            editor.runtime_mut().register_native(
-                "seq-toggle-drum-lane-step",
-                move |args, _ctx| {
+            editor
+                .runtime_mut()
+                .register_native("seq-toggle-drum-lane-step", move |args, _ctx| {
                     let step = match args.get(2) {
                         Some(Value::Number(step)) => *step as usize,
                         other => panic!("expected drum step, got {other:?}"),
@@ -28799,8 +28947,7 @@ mod tests {
                         false
                     };
                     Ok(Value::Bool(enabled))
-                },
-            );
+                });
         }
         {
             let selected = Arc::clone(&selected);
@@ -28824,10 +28971,9 @@ mod tests {
                 },
             );
         }
-        editor.runtime_mut().register_native(
-            "seq-select-drum-lane-step",
-            |_args, _ctx| Ok(Value::Nil),
-        );
+        editor
+            .runtime_mut()
+            .register_native("seq-select-drum-lane-step", |_args, _ctx| Ok(Value::Nil));
         {
             let moves = Arc::clone(&moves);
             editor.runtime_mut().register_native(
@@ -28877,15 +29023,12 @@ mod tests {
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().expect("drum lane gesture layout");
         let callback = |step: usize, name: &str| {
-            find_layout_node_by_stable_key(
-                &layout,
-                &format!("seqv-drum-lane-step-0-12-{step}"),
-            )
-            .unwrap_or_else(|| panic!("drum lane step {step}"))
-            .props
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| panic!("drum lane step {step} {name}"))
+            find_layout_node_by_stable_key(&layout, &format!("seqv-drum-lane-step-0-12-{step}"))
+                .unwrap_or_else(|| panic!("drum lane step {step}"))
+                .props
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| panic!("drum lane step {step} {name}"))
         };
         let plain_event = map_value([]);
         let duration_edge_event = map_value([("sx", Value::Number(0.75))]);
@@ -31173,14 +31316,18 @@ mod tests {
                 control.rect.col >= layout.rect.col
                     && control.rect.row >= layout.rect.row
                     && control.rect.col + control.rect.width <= layout.rect.col + layout.rect.width
-                    && control.rect.row + control.rect.height <= layout.rect.row + layout.rect.height,
+                    && control.rect.row + control.rect.height
+                        <= layout.rect.row + layout.rect.height,
                 "{debug_name} should remain inside transport: control={:?} panel={:?}",
                 control.rect,
                 layout.rect
             );
         }
         assert_eq!(
-            editor.runtime_mut().eval_str("SEQ.record-quantize").unwrap(),
+            editor
+                .runtime_mut()
+                .eval_str("SEQ.record-quantize")
+                .unwrap(),
             Some(Value::String("1/16".to_string()))
         );
         assert_eq!(
@@ -39233,9 +39380,7 @@ mod tests {
         };
         threshold.insert(
             "value-field".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                "test-comp-param-0".to_string(),
-            ))),
+            Rc::new(RefCell::new(Value::String("test-comp-param-0".to_string()))),
         );
         params
     }
@@ -39300,8 +39445,19 @@ mod tests {
             .expect("probe compressor ui")
             .expect("compressor ui probe value");
         for label in [
-            "Sidechain", "SC Filter", "Ratio", "Attack", "Release", "Auto", "Thresh", "Knee",
-            "Makeup", "Peak", "RMS", "Expand", "Dry/Wet",
+            "Sidechain",
+            "SC Filter",
+            "Ratio",
+            "Attack",
+            "Release",
+            "Auto",
+            "Thresh",
+            "Knee",
+            "Makeup",
+            "Peak",
+            "RMS",
+            "Expand",
+            "Dry/Wet",
         ] {
             assert!(
                 value_contains_string(&ui_probe, label),
@@ -39343,9 +39499,7 @@ mod tests {
             display.props.get("threshold")
         );
         let requests =
-            eseqlisp::widget_render::compressor_display::collect_compressor_meter_requests(
-                &layout,
-            );
+            eseqlisp::widget_render::compressor_display::collect_compressor_meter_requests(&layout);
         assert_eq!(
             requests.len(),
             1,

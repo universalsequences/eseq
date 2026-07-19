@@ -67,8 +67,8 @@ use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
     CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
-    MAX_STEPS, MidiFxPosition, PatternId, RackSlotParam, SYNC_RESOLUTIONS, SequencerState,
-    StepParam, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
+    MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
+    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::tui;
 use std::sync::atomic::AtomicBool;
@@ -2827,9 +2827,8 @@ fn apply_ui_invalidations(
                 StepInvalidation::DurationSpan => {
                     needs_reactive_cycle |=
                         sync_track_duration_span_binding_fields(rt, state, track, step);
-                    needs_reactive_cycle |= sync_drum_lane_duration_span_binding_fields(
-                        rt, state, app, track, step,
-                    );
+                    needs_reactive_cycle |=
+                        sync_drum_lane_duration_span_binding_fields(rt, state, app, track, step);
                 }
                 StepInvalidation::Active
                 | StepInvalidation::Payload
@@ -4137,14 +4136,14 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
-        FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP, Runtime, StepParam, Value,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         resolve_instrument_swap_target_index, restore_instrument_patcher_layout_source,
         should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
         show_instrument_patcher_source_layout_source, track_meter_bindings_visible,
+        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
+        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -5766,13 +5765,12 @@ mod tests {
                 .enumerate()
                 .skip(3)
                 .find_map(|(param_idx, param)| {
-                    let is_haptic_free_continuous = matches!(
-                        param.kind,
-                        sequencer::effects::ParamKind::Continuous { .. }
-                    ) && (param.max - param.min).abs() <= 1.0
-                        && !sequencer::voice_modulator::is_bar_resync_param(
-                            param.node_param_idx,
-                        );
+                    let is_haptic_free_continuous =
+                        matches!(param.kind, sequencer::effects::ParamKind::Continuous { .. })
+                            && (param.max - param.min).abs() <= 1.0
+                            && !sequencer::voice_modulator::is_bar_resync_param(
+                                param.node_param_idx,
+                            );
                     let suffix = format!("-{}", param.name);
                     (is_haptic_free_continuous
                         && find_layout_node_by_stable_key_suffix(initial_fx_layout, &suffix)
@@ -5861,7 +5859,11 @@ mod tests {
                 );
                 let commands = editor.drain_host_commands();
                 let input_done = Instant::now();
-                assert_eq!(commands.len(), 1, "direct rack control commands={commands:?}");
+                assert_eq!(
+                    commands.len(),
+                    1,
+                    "direct rack control commands={commands:?}"
+                );
                 let HostCommand::Custom { name, payload } = &commands[0] else {
                     panic!("direct rack control must emit a custom command: {commands:?}");
                 };
@@ -5933,11 +5935,9 @@ mod tests {
                     );
                 assert_eq!(retained_stats.missing_previous_runs, 0);
                 assert_eq!(retained_stats.invalid_previous_runs, 0);
-                let rendered_wrapper = find_layout_node_by_stable_key_suffix(
-                    fx_layout,
-                    &direct_param_key_suffix,
-                )
-                .expect("rendered direct rack instrument parameter wrapper");
+                let rendered_wrapper =
+                    find_layout_node_by_stable_key_suffix(fx_layout, &direct_param_key_suffix)
+                        .expect("rendered direct rack instrument parameter wrapper");
                 let rendered_control =
                     find_layout_node_by_widget_type(rendered_wrapper, "knob-number")
                         .expect("rendered direct rack instrument knob");

@@ -731,14 +731,14 @@ mod tests {
             parse_capture_source("(capture-project (track :sampler :samples (\"kick.wav\")))")
                 .is_err()
         );
-        assert!(
-            parse_capture_source("(capture-project (track :layer-rack :samples (\"kick.wav\")))")
-                .is_ok()
-        );
-        assert!(
-            parse_capture_source("(capture-project (track :drum-rack :samples (\"kick.wav\")))")
-                .is_ok()
-        );
+        assert!(parse_capture_source(
+            "(capture-project (track :layer-rack :samples (\"kick.wav\")))"
+        )
+        .is_ok());
+        assert!(parse_capture_source(
+            "(capture-project (track :drum-rack :samples (\"kick.wav\")))"
+        )
+        .is_ok());
     }
 
     #[test]

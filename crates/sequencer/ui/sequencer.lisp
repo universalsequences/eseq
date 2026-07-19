@@ -586,27 +586,27 @@
     (sdf/layer
       (sdf/fill
         (sdf/translate 0 0.0
-          (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0))
+          (sdf/rounded-rect (* 1.0 width) (* 1.00 height) 0.0))
         (material
-          :lighting (lighting :edge-min -0.5 :edge-max 0.3
-            :light (vec3 0.1 -1.8 2.5) :shininess 92.0)
+          :lighting (lighting :edge-min -0.3 :edge-max 0.393
+            :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
           :color (if (= duration 1)
             (aqua-color
               (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5)
               (rgba track-r track-g track-b 1))
             (rgba 0 0 0 0))))
-      (sdf/fill (sdf/circle 0.85)
+      (sdf/fill (sdf/circle (if (= selected 1) 0.76 0.75))
         (material
           :lighting (lighting :edge-min -0.3 :edge-max 1.0
             :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
           :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
-      (sdf/fill (sdf/circle 0.73)
+      (sdf/fill (sdf/circle (if (= selected 1) 0.64 0.69))
         (material
           :color (if (= odd 1)
             (rgba 0.15 0.155 0.155 0.6)
             (rgba 0.015 0.016 0.025 0.8))))
       (sdf/fill
-        (sdf/translate 0 0.70
+        (sdf/translate 0 0.82
           (sdf/rounded-rect 0.52 0.10 0.05))
         (material
           :color (if (= active 1)
@@ -626,9 +626,9 @@
               (if (= plock-kind 2) 0.12 0.0)
               0.0)
             :offset (vec2 0 0))))
-      (sdf/fill (sdf/circle 0.66)
+      (sdf/fill (sdf/circle (if (= selected 1) 0.5 0.6))
         (material
-          :lighting (lighting :edge-min -0.15 :edge-max 0.5
+          :lighting (lighting :edge-min -0.25 :edge-max 1.95
             :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
           :color (if (= active 1)
             (aqua-color
@@ -655,7 +655,7 @@
     (seqv-track-header-body i)))
 
 (def seqv-track-volume-control (i)
-  (v-stack (box :height 0.3 )
+  (v-stack (box :height 0.13 )
     (box
       :key (str "seqv-track-volume-control-" i)
       :width 8.2 :height 1.25
@@ -676,7 +676,7 @@
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "seqv-color-badge-" i)
-          :width 0.68 :height 1.5
+          :width 0.68 :height 1.85
           :background "seqv-track-color-badge"
           :track-r (seqv-track-color-r-binding i)
           :track-g (seqv-track-color-g-binding i)

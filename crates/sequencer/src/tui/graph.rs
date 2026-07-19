@@ -4416,22 +4416,22 @@ impl GraphController<'_> {
                     && custom_route_parent_track(idx) == Some(track_idx)
             });
         if !has_sibling_route {
-        if let (Some(track_mod_out_id), Some(mod_output_channel)) = (
-            track_mod_out_id,
-            engine.mod_output_channels.first().copied(),
-        ) {
-            for &synth_id in &engine.synth_ids {
-                unsafe {
-                    crate::audiograph::graph_disconnect(
-                        self.app.graph.lg.0,
-                        synth_id,
-                        mod_output_channel as i32,
-                        track_mod_out_id,
-                        0,
-                    );
+            if let (Some(track_mod_out_id), Some(mod_output_channel)) = (
+                track_mod_out_id,
+                engine.mod_output_channels.first().copied(),
+            ) {
+                for &synth_id in &engine.synth_ids {
+                    unsafe {
+                        crate::audiograph::graph_disconnect(
+                            self.app.graph.lg.0,
+                            synth_id,
+                            mod_output_channel as i32,
+                            track_mod_out_id,
+                            0,
+                        );
+                    }
                 }
             }
-        }
         }
         if route_idx < engine.route_gain_ids.len() {
             for route_pair in &engine.route_gain_ids[route_idx] {
@@ -4460,14 +4460,14 @@ impl GraphController<'_> {
         for voice in 0..MAX_VOICES {
             if route_idx < MAX_TRACKS {
                 self.app.state.runtime.engine_route_lids[engine_id][voice][route_idx]
-                .store(0, Ordering::Release);
+                    .store(0, Ordering::Release);
                 self.app.state.runtime.engine_route_lids_r[engine_id][voice][route_idx]
                     .store(0, Ordering::Release);
             } else {
                 self.app.state.runtime.rack_engine_route_lids[route_idx][voice]
                     .store(0, Ordering::Release);
                 self.app.state.runtime.rack_engine_route_lids_r[route_idx][voice]
-                .store(0, Ordering::Release);
+                    .store(0, Ordering::Release);
             }
             for input in 0..EXT_MOD_INPUT_COUNT {
                 if route_idx < MAX_TRACKS {
@@ -4476,10 +4476,10 @@ impl GraphController<'_> {
                         .store(0, Ordering::Release);
                 } else {
                     self.app.state.runtime.rack_engine_ext_route_lids[route_idx][voice][input]
-                    .store(0, Ordering::Release);
+                        .store(0, Ordering::Release);
+                }
             }
         }
-    }
         if route_idx >= MAX_TRACKS {
             self.app.state.runtime.rack_engine_route_engine_ids[route_idx]
                 .store(u32::MAX, Ordering::Release);
@@ -4518,19 +4518,19 @@ impl GraphController<'_> {
                     && custom_route_parent_track(idx) == Some(track_idx)
             });
         if !has_sibling_route {
-        if let Some(mod_output_channel) = engine.mod_output_channels.first().copied() {
-            for &synth_id in &engine.synth_ids {
-                unsafe {
-                    crate::audiograph::graph_disconnect(
-                        self.app.graph.lg.0,
-                        synth_id,
-                        mod_output_channel as i32,
-                        track_mod_out_id,
-                        0,
-                    );
+            if let Some(mod_output_channel) = engine.mod_output_channels.first().copied() {
+                for &synth_id in &engine.synth_ids {
+                    unsafe {
+                        crate::audiograph::graph_disconnect(
+                            self.app.graph.lg.0,
+                            synth_id,
+                            mod_output_channel as i32,
+                            track_mod_out_id,
+                            0,
+                        );
+                    }
                 }
             }
-        }
         }
 
         let route_ids = engine
@@ -6976,18 +6976,18 @@ impl GraphController<'_> {
             route_ids.push(route_pair);
 
             if !has_sibling_route {
-            if let Some(src_channel) = primary_mod_output_channel {
-                transaction.connect(
-                    synth_ids[v],
-                    src_channel as i32,
-                    track_mod_out_id,
-                    0,
-                    &format!(
-                        "connect_engine_to_track mod output engine {} track {} voice {}",
-                        engine_id, track_idx, v
-                    ),
-                )?;
-            }
+                if let Some(src_channel) = primary_mod_output_channel {
+                    transaction.connect(
+                        synth_ids[v],
+                        src_channel as i32,
+                        track_mod_out_id,
+                        0,
+                        &format!(
+                            "connect_engine_to_track mod output engine {} track {} voice {}",
+                            engine_id, track_idx, v
+                        ),
+                    )?;
+                }
             }
 
             let mut voice_ext_route_ids = [0; EXT_MOD_INPUT_COUNT];
@@ -7059,7 +7059,7 @@ impl GraphController<'_> {
             let [route_l_id, route_r_id] = engine.route_gain_ids[route_idx][voice];
             if route_idx < MAX_TRACKS {
                 self.app.state.runtime.engine_route_lids[engine_id][voice][route_idx]
-                .store(route_l_id as u64, Ordering::Release);
+                    .store(route_l_id as u64, Ordering::Release);
                 self.app.state.runtime.engine_route_lids_r[engine_id][voice][route_idx]
                     .store(route_r_id as u64, Ordering::Release);
             } else {
@@ -7068,7 +7068,7 @@ impl GraphController<'_> {
                 self.app.state.runtime.rack_engine_route_lids[route_idx][voice]
                     .store(route_l_id as u64, Ordering::Release);
                 self.app.state.runtime.rack_engine_route_lids_r[route_idx][voice]
-                .store(route_r_id as u64, Ordering::Release);
+                    .store(route_r_id as u64, Ordering::Release);
             }
             for input in 0..EXT_MOD_INPUT_COUNT {
                 let ext_route_id = engine.ext_route_gain_ids[route_idx][voice][input];
@@ -7078,9 +7078,9 @@ impl GraphController<'_> {
                         .store(ext_route_id as u64, Ordering::Release);
                 } else {
                     self.app.state.runtime.rack_engine_ext_route_lids[route_idx][voice][input]
-                    .store(ext_route_id as u64, Ordering::Release);
+                        .store(ext_route_id as u64, Ordering::Release);
+                }
             }
-        }
         }
         Ok(())
     }
@@ -8426,11 +8426,11 @@ mod tests {
         );
         assert!(app
             .macro_engine
-                .override_value(&MacroParamKey::Effect {
-                    track: 0,
-                    slot: 0,
-                    param: 0,
-                })
+            .override_value(&MacroParamKey::Effect {
+                track: 0,
+                slot: 0,
+                param: 0,
+            })
             .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
         let old_engine = app.graph.engine_node_ids[0]
             .as_ref()
@@ -8513,7 +8513,7 @@ mod tests {
         assert_eq!(app.graph.track_buffer_ids[0], -1);
         assert_eq!(app.state.runtime.voice_counts[0].load(Ordering::Acquire), 0);
         assert!(sampler_ids
-                .iter()
+            .iter()
             .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) }));
         let engine = app.graph.engine_node_ids[0]
             .as_ref()
@@ -9075,7 +9075,7 @@ mod tests {
             .expect("rack slot should accept OTT");
         assert!(app
             .editor
-                .effect_chain_leases
+            .effect_chain_leases
             .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
 
         app.graph_controller()
@@ -9089,7 +9089,7 @@ mod tests {
         assert!(app.graph.track_node_ids[0].rack_slots.is_empty());
         assert!(!app
             .editor
-                .effect_chain_leases
+            .effect_chain_leases
             .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
         graph.process_block();
     }

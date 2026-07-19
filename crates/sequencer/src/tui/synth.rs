@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::prelude::*;
 use std::sync::atomic::Ordering;
 
-use super::command::{AppCommand, apply_command};
+use super::command::{apply_command, AppCommand};
 
 use crate::effects::EffectDescriptor;
 use crate::sequencer::{InstrumentType, RackSlotParam, RackSlotSnapshot};
@@ -1918,12 +1918,9 @@ impl App {
         slot_idx: usize,
         changed_param_idx: usize,
     ) {
-        let Some((active_param_idx, value)) = self.rack_slot_mod_active_value(
-            track,
-            slot_idx,
-            None,
-            changed_param_idx,
-        ) else {
+        let Some((active_param_idx, value)) =
+            self.rack_slot_mod_active_value(track, slot_idx, None, changed_param_idx)
+        else {
             return;
         };
         if self.set_rack_slot_instrument_default_only(track, slot_idx, active_param_idx, value) {
@@ -1938,12 +1935,9 @@ impl App {
         step: usize,
         changed_param_idx: usize,
     ) {
-        let Some((active_param_idx, value)) = self.rack_slot_mod_active_value(
-            track,
-            slot_idx,
-            Some(step),
-            changed_param_idx,
-        ) else {
+        let Some((active_param_idx, value)) =
+            self.rack_slot_mod_active_value(track, slot_idx, Some(step), changed_param_idx)
+        else {
             return;
         };
         self.state.update_live_rack_slot(track, slot_idx, |slot| {

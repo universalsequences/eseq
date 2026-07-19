@@ -8,22 +8,22 @@ use crate::effects::{
 };
 use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
 use crate::neural::{
-    NeuralVisualizationSnapshot, ProjectNeuralNetwork,
-    remap_neural_network_routes_after_track_delete,
+    remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
+    ProjectNeuralNetwork,
 };
 use crate::plock_variants::{
-    PlockVariantAssignment, PlockVariantDomain, PlockVariantKey, PlockVariantRegistry,
     live_track_key_lock_variant_key, live_track_key_lock_variant_keys, live_track_variant_key,
-    live_track_variant_keys,
+    live_track_variant_keys, PlockVariantAssignment, PlockVariantDomain, PlockVariantKey,
+    PlockVariantRegistry,
 };
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    sync_beats, ChordData, ChordSnapshot, CustomInstrumentRunMode, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
-    InstrumentType, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_STEPS,
-    MAX_TRACKS, ModConnection, NUM_PARAMS, RackRouting, StepData, StepParam, SwingPLockData,
-    SwingResolution, SwingResolutionPLockData, TRACK_PATTERN_WORDS, Timebase, TimebasePLockData,
-    TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
+    sync_beats, ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection,
+    RackRouting, StepData, StepParam, SwingPLockData, SwingResolution, SwingResolutionPLockData,
+    Timebase, TimebasePLockData, TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
+    DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
+    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
 use super::{BusId, TrackOutput};
@@ -3137,7 +3137,10 @@ impl RecordClockAnchor {
                     return None;
                 }
                 let now_nanos = record_clock_nanos(timestamp);
-                return Some((beats, Duration::from_nanos(now_nanos.saturating_sub(anchor_nanos))));
+                return Some((
+                    beats,
+                    Duration::from_nanos(now_nanos.saturating_sub(anchor_nanos)),
+                ));
             }
         }
         None
@@ -6949,11 +6952,14 @@ impl SequencerState {
     ) -> Option<RecordPosition> {
         let (anchor_beats, elapsed) = self.transport.record_clock.sample(timestamp)?;
         let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
-        let latency_seconds =
-            f32::from_bits(self.transport.record_latency_seconds.load(Ordering::Relaxed))
-                .max(0.0) as f64;
-        let beats = anchor_beats + elapsed.as_secs_f64() * bpm / 60.0
-            - latency_seconds * bpm / 60.0;
+        let latency_seconds = f32::from_bits(
+            self.transport
+                .record_latency_seconds
+                .load(Ordering::Relaxed),
+        )
+        .max(0.0) as f64;
+        let beats =
+            anchor_beats + elapsed.as_secs_f64() * bpm / 60.0 - latency_seconds * bpm / 60.0;
         self.record_position_at_beat(track, beats)
     }
 
@@ -7740,9 +7746,7 @@ impl SequencerState {
     }
 
     fn drum_lane_notes(&self, track: usize, step: usize) -> Vec<(f32, f32, f32)> {
-        if track >= MAX_TRACKS
-            || step >= MAX_STEPS
-            || !self.pattern.patterns[track].is_active(step)
+        if track >= MAX_TRACKS || step >= MAX_STEPS || !self.pattern.patterns[track].is_active(step)
         {
             return Vec::new();
         }
@@ -7776,12 +7780,7 @@ impl SequencerState {
             .collect()
     }
 
-    fn write_drum_lane_notes(
-        &self,
-        track: usize,
-        step: usize,
-        mut notes: Vec<(f32, f32, f32)>,
-    ) {
+    fn write_drum_lane_notes(&self, track: usize, step: usize, mut notes: Vec<(f32, f32, f32)>) {
         if notes.is_empty() {
             self.clear_step_payload_inner(track, step);
             return;
@@ -7799,9 +7798,7 @@ impl SequencerState {
             .fold(0.0, f32::max);
         if notes.len() > 1 {
             for (note, duration, delay) in &notes {
-                self.pattern.chord_data[track].add_note_with_timing(
-                    step, *note, *duration, *delay,
-                );
+                self.pattern.chord_data[track].add_note_with_timing(step, *note, *duration, *delay);
             }
         }
         self.pattern.step_data[track].set(step, StepParam::Transpose, notes[0].0);
@@ -7814,12 +7811,7 @@ impl SequencerState {
         self.pattern.patterns[track].set_step_active(step, true);
     }
 
-    pub fn drum_lane_step_duration(
-        &self,
-        track: usize,
-        step: usize,
-        pad_note: i32,
-    ) -> Option<f32> {
+    pub fn drum_lane_step_duration(&self, track: usize, step: usize, pad_note: i32) -> Option<f32> {
         self.drum_lane_notes(track, step)
             .into_iter()
             .find(|(note, _, _)| note.round() as i32 == pad_note)
@@ -8552,7 +8544,11 @@ impl SequencerState {
         for (i, &step) in steps.iter().enumerate() {
             let src = if direction > 0 {
                 // Rotate right: slot i gets content from slot i-1 (last wraps to first)
-                if i == 0 { n - 1 } else { i - 1 }
+                if i == 0 {
+                    n - 1
+                } else {
+                    i - 1
+                }
             } else {
                 // Rotate left: slot i gets content from slot i+1 (first wraps to last)
                 (i + 1) % n
@@ -8929,8 +8925,8 @@ fn copy_snapshot_slot_variant_locks(
 mod tests {
     use super::*;
     use crate::effects::{
-        BUILTIN_SLOT_COUNT, EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor,
-        ParamKind, ParamScaling,
+        EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
+        ParamScaling, BUILTIN_SLOT_COUNT,
     };
     use crate::neural::ParamNodeId;
     use crate::plock_variants::{PlockVariantEntry, PlockVariantRegistryEntry};
@@ -9516,11 +9512,10 @@ mod tests {
             );
             assert!(slot.plocks.iter().flatten().all(Option::is_none));
             assert!(slot.key_locks.is_empty());
-            assert!(
-                slot.tensor_params
-                    .iter()
-                    .all(|tensor| tensor.plocks.is_empty())
-            );
+            assert!(slot
+                .tensor_params
+                .iter()
+                .all(|tensor| tensor.plocks.is_empty()));
             assert_eq!(actual.instrument_types[0], InstrumentType::Custom);
             assert_eq!(actual.sample_ids[0], (-1, String::new(), 44_100));
             assert_eq!(
@@ -9534,13 +9529,11 @@ mod tests {
             let variants = &actual.plock_variant_registries[0];
             assert_eq!(variants.entries.len(), 1);
             assert_eq!(variants.entries[0].name.as_deref(), Some("effect identity"));
-            assert!(
-                variants.entries[0]
-                    .key
-                    .entries
-                    .iter()
-                    .all(|entry| entry.domain == PlockVariantDomain::Effect)
-            );
+            assert!(variants.entries[0]
+                .key
+                .entries
+                .iter()
+                .all(|entry| entry.domain == PlockVariantDomain::Effect));
             assert!(actual.key_lock_variant_registries[0].entries.is_empty());
 
             let bindings = &actual.process_chains[0].slots[0].bindings;
@@ -9553,12 +9546,10 @@ mod tests {
                 bindings["survives"],
                 Some(ParamTarget::EffectParam { .. })
             ));
-            assert!(
-                actual.neural_networks[0].neurons[0]
-                    .output_overrides
-                    .instrument
-                    .is_empty()
-            );
+            assert!(actual.neural_networks[0].neurons[0]
+                .output_overrides
+                .instrument
+                .is_empty());
             assert_eq!(
                 actual.neural_networks[0].neurons[0]
                     .output_overrides
@@ -10283,11 +10274,9 @@ mod tests {
         initial.slots[0].effect_descriptors[0] = rack_fx.clone();
         initial.slots[0].effect_slots[0] = EffectSlotSnapshot::new_default(&rack_fx, 701);
         initial.slots[0].custom_effect_names[0] = Some("builtin:OTT".to_string());
-        assert!(
-            initial.slots[0]
-                .param_plocks
-                .set(4, RackSlotParam::Gain, 0.25)
-        );
+        assert!(initial.slots[0]
+            .param_plocks
+            .set(4, RackSlotParam::Gain, 0.25));
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let replacement = RackSlotSnapshot {
@@ -10367,11 +10356,9 @@ mod tests {
         initial.slots[0].mute = true;
         initial.slots[0].solo = false;
         initial.slots[0].max_polyphony = 6;
-        assert!(
-            initial.slots[0]
-                .param_plocks
-                .set(4, RackSlotParam::Gain, 0.25)
-        );
+        assert!(initial.slots[0]
+            .param_plocks
+            .set(4, RackSlotParam::Gain, 0.25));
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let mut replacement = sample_sampler_rack_slot(321, "replacement", 48_000, 88, Some(9));
@@ -10443,12 +10430,8 @@ mod tests {
         state.restore_current_pattern_from_repository().unwrap();
 
         let descriptor = EffectDescriptor::builtin_sampler();
-        assert!(
-            state.sync_rack_slot_instrument_bindings_for_current_pattern(
-                0,
-                &[(descriptor, 999, 1000)]
-            )
-        );
+        assert!(state
+            .sync_rack_slot_instrument_bindings_for_current_pattern(0, &[(descriptor, 999, 1000)]));
 
         let live = state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref()
@@ -12224,12 +12207,10 @@ mod tests {
             &names,
             &instrument_types,
         ));
-        assert!(
-            state
-                .track_pattern_cells(0)
-                .into_iter()
-                .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden)
-        );
+        assert!(state
+            .track_pattern_cells(0)
+            .into_iter()
+            .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden));
 
         assert!(state.set_scene_cell(
             0,
@@ -12356,12 +12337,10 @@ mod tests {
         ));
         assert_eq!(state.scene_track_pattern_id(1, 0), None);
         assert!(!state.is_scene_silenced(0));
-        assert!(
-            state
-                .track_pattern_cells(0)
-                .iter()
-                .all(|cell| cell.pattern_id != second_id)
-        );
+        assert!(state
+            .track_pattern_cells(0)
+            .iter()
+            .all(|cell| cell.pattern_id != second_id));
 
         assert!(state.delete_track_pattern(
             0,
@@ -12806,12 +12785,10 @@ mod tests {
         for step in [1, 3, 5] {
             assert_eq!(live_plocks[step], Some(1.0));
         }
-        assert!(
-            live_plocks
-                .iter()
-                .enumerate()
-                .all(|(step, value)| [1, 3, 5].contains(&step) || value.is_none())
-        );
+        assert!(live_plocks
+            .iter()
+            .enumerate()
+            .all(|(step, value)| [1, 3, 5].contains(&step) || value.is_none()));
     }
 
     #[test]
@@ -13520,13 +13497,13 @@ mod tests {
         );
         assert_eq!(state.pattern.chord_data[track].count(6), 2);
         let notes = (0..2)
-            .map(|voice| {
-                state.pattern.chord_data[track]
-                    .get(6, voice)
-                    .round() as i32
-            })
+            .map(|voice| state.pattern.chord_data[track].get(6, voice).round() as i32)
             .collect::<Vec<_>>();
-        assert_eq!(notes, vec![0, 12], "the destination's other pad must remain");
+        assert_eq!(
+            notes,
+            vec![0, 12],
+            "the destination's other pad must remain"
+        );
         assert!(!state.pattern.patterns[track].is_active(8));
         assert!(state.pattern.patterns[track].is_active(10));
         assert_eq!(

@@ -6,16 +6,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::macro_engine::{
-    Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping, SceneMacroConfig, StealQuantize,
-    normalize_macro_key,
+    normalize_macro_key, Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping,
+    SceneMacroConfig, StealQuantize,
 };
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MAX_STEPS, MidiFxPosition,
-    ModConnection, ModDestination, NUM_PARAMS, PatternSnapshot, RackRouting, RackSlotParamPlocks,
-    RackSlotSnapshot, RackTrackSnapshot, SwingResolution, TRACK_PATTERN_WORDS, Timebase,
-    TrackOutput, TrackParamsSnapshot, TrackSendSnapshot, TrackSoundState,
+    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
+    ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
+    TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 

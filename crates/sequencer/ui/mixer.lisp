@@ -934,9 +934,9 @@
         (box :height 1.55)
         ;; Mix/Main is the graph output and has no external modulation inputs.
         ;; Every other bus has the same four backend inputs used by group buses.
-        (if (= (nth SEQ.bus-names i) "Mix")
-          (box :height 0.8 :width :fill :bg :transparent)
-          )
+        ;(if (= (nth SEQ.bus-names i) "Mix")
+        ;  (box :height 0.8 :width :fill :bg :transparent)
+        ;  )
         (h-stack :gap 0.45 :align :center
           (box :width 3.0 :height 3.6)
           (mixer-v2-bus-meter-control i))
@@ -945,18 +945,19 @@
           (button (mixer-v2-bus-mute-label i)
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if (nth SEQ.bus-mutes i) :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
-        :border-color :transparent
+            :border-color :transparent
             :color (if (nth SEQ.bus-mutes i) :dim :black)
             :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.bus-solos i))
-        :border-color :transparent
+            :border-color :transparent
             :color (if (nth SEQ.bus-solos i) :black :dim)
             :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-solo i))))
           (box :width 2.1 :height 1.0))
         (if (not (= (nth SEQ.bus-names i) "Mix"))
           (mixer-v2-bus-mod-port-row (nth SEQ.bus-ids i))
+          (box :height 0.8)
           )
         
         (button (mixer-v2-bus-label i)

@@ -7,8 +7,8 @@ use crate::macro_engine::MacroParamKey;
 use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
-    CustomInstrumentRunMode, InstrumentType, MAX_STEPS, ModConnection, NUM_PARAMS, StepParam,
-    SwingResolution, Timebase, TrackParamsSnapshot,
+    CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
+    TrackParamsSnapshot, MAX_STEPS, NUM_PARAMS,
 };
 use super::state::{RackTrackSnapshot, SequencerState, TrackPatternData};
 

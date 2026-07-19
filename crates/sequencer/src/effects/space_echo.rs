@@ -16,7 +16,10 @@
 //!
 //! A two-tank dispersive spring reverb (see `crate::effects::spring`: stretched
 //! allpasses inside parallel feedback delays, tuned offline against a real
-//! spring IR) hangs off the echo bus per the RE-201 mode selector.
+//! spring IR) hangs off the echo bus per the RE-201 mode selector. The tanks
+//! dominate the node's CPU cost, so they run at half the host rate behind
+//! anti-alias/anti-image filters (their own band-limit sits far below host
+//! Nyquist) and are skipped entirely while the echo bus is silent.
 
 use crate::audiograph::NodeVTable;
 use crate::effects::spring::{
@@ -37,6 +40,22 @@ const MAX_SPEED: f32 = 1.38;
 const SPLICE_LOOP_S: f32 = 5.4;
 // Splice dip length in seconds-of-tape (4 ms at nominal speed).
 const SPLICE_DIP_S: f32 = 0.004;
+
+// The spring tanks run at half the host rate when the tank's fitted
+// bandwidth allows it: the reduced Nyquist must clear the input lowpass by
+// enough margin that the resampling filters never touch the spring band.
+// The dark RE-201 tank (f_lp ≈ 2.2 kHz) qualifies; the bright King Tubby
+// tank (f_lp ≈ 5 kHz, audible energy to ~10 kHz) runs at full rate.
+fn spring_decim(base: &SpringParams, sr: f32) -> usize {
+    if sr * 0.5 >= 4.8 * base.f_lp {
+        2
+    } else {
+        1
+    }
+}
+// Silence gate: the tanks are skipped entirely once both their feed and
+// their output envelope sit below -80 dBFS (fast attack, ~150 ms release).
+const SPRING_GATE_THRESH: f32 = 1.0e-4;
 
 // ── Parameter slots ──
 const STATE_ENABLED: usize = 0;
@@ -125,9 +144,28 @@ const STATE_SPRING_TREBLE_LP_A: usize = 78;
 const STATE_SPRING_BASS_LP_B: usize = 79;
 const STATE_SPRING_TREBLE_LP_B: usize = 80;
 
+// Half-rate spring resampling + silence gate state.
+// The tanks run at sr / SPRING_DECIM (they're band-limited far below host
+// Nyquist), with 4th-order anti-alias / anti-image lowpasses at the boundary.
+const STATE_SPRING_PHASE: usize = 81; // decimation tick counter
+const STATE_SPRING_AA_Z1: usize = 82; // down-going AA filter (2 biquads)
+const STATE_SPRING_AA_Z2: usize = 83;
+const STATE_SPRING_AA_Z3: usize = 84;
+const STATE_SPRING_AA_Z4: usize = 85;
+const STATE_SPRING_UP_A_Z1: usize = 86; // tank A anti-image filter
+const STATE_SPRING_UP_A_Z2: usize = 87;
+const STATE_SPRING_UP_A_Z3: usize = 88;
+const STATE_SPRING_UP_A_Z4: usize = 89;
+const STATE_SPRING_UP_B_Z1: usize = 90; // tank B anti-image filter
+const STATE_SPRING_UP_B_Z2: usize = 91;
+const STATE_SPRING_UP_B_Z3: usize = 92;
+const STATE_SPRING_UP_B_Z4: usize = 93;
+const STATE_GATE_IN_ENV: usize = 94; // spring feed envelope (fast attack)
+const STATE_GATE_OUT_ENV: usize = 95; // spring output envelope
+
 // Spring tank state: flat blocks owned by `crate::effects::spring` (scalars + delay
 // buffers per tank).
-const STATE_SPRING_A: usize = 81;
+const STATE_SPRING_A: usize = 96;
 const STATE_SPRING_B: usize = STATE_SPRING_A + SPRING_TANK_STATE_LEN;
 
 const STATE_TAPE_OFFSET: usize = STATE_SPRING_B + SPRING_TANK_STATE_LEN;
@@ -520,9 +558,16 @@ unsafe extern "C" fn space_echo_process(
     *s.add(STATE_SMOOTH_TENSION) = smooth_tension;
     let spring_type = (*s.add(STATE_SPRING_TYPE)).round().clamp(0.0, 1.0) as usize;
     let (spring_base, spring_out_gain) = spring_type_params(spring_type);
+    let decim = spring_decim(&spring_base, sr);
     let spring_params = spring_base.with_tension(smooth_tension);
-    let spring_coef_a = SpringCoeffs::new(&spring_params, sr);
-    let spring_coef_b = SpringCoeffs::new(&spring_tank_b_params(&spring_params), sr);
+    let sr_spring = sr / decim as f32;
+    let spring_coef_a = SpringCoeffs::new(&spring_params, sr_spring);
+    let spring_coef_b = SpringCoeffs::new(&spring_tank_b_params(&spring_params), sr_spring);
+    // Anti-alias / anti-image lowpass for the tank rate change, applied as
+    // two biquad passes (4th order) each way, cut just under the reduced
+    // Nyquist. The spring's own band-limit sits well below the cutoff.
+    let resamp_lp = lowpass_coeffs(sr_spring * 0.44, sr);
+    let gate_decay = (-1.0 / (0.15 * sr)).exp();
 
     let mut smooth_intensity = *s.add(STATE_SMOOTH_INTENSITY);
     let mut smooth_echo = *s.add(STATE_SMOOTH_ECHO);
@@ -567,6 +612,21 @@ unsafe extern "C" fn space_echo_process(
     let mut spring_treble_lp_a = *s.add(STATE_SPRING_TREBLE_LP_A);
     let mut spring_bass_lp_b = *s.add(STATE_SPRING_BASS_LP_B);
     let mut spring_treble_lp_b = *s.add(STATE_SPRING_TREBLE_LP_B);
+    let mut spring_phase = *s.add(STATE_SPRING_PHASE);
+    let mut spring_aa_z1 = *s.add(STATE_SPRING_AA_Z1);
+    let mut spring_aa_z2 = *s.add(STATE_SPRING_AA_Z2);
+    let mut spring_aa_z3 = *s.add(STATE_SPRING_AA_Z3);
+    let mut spring_aa_z4 = *s.add(STATE_SPRING_AA_Z4);
+    let mut spring_up_a_z1 = *s.add(STATE_SPRING_UP_A_Z1);
+    let mut spring_up_a_z2 = *s.add(STATE_SPRING_UP_A_Z2);
+    let mut spring_up_a_z3 = *s.add(STATE_SPRING_UP_A_Z3);
+    let mut spring_up_a_z4 = *s.add(STATE_SPRING_UP_A_Z4);
+    let mut spring_up_b_z1 = *s.add(STATE_SPRING_UP_B_Z1);
+    let mut spring_up_b_z2 = *s.add(STATE_SPRING_UP_B_Z2);
+    let mut spring_up_b_z3 = *s.add(STATE_SPRING_UP_B_Z3);
+    let mut spring_up_b_z4 = *s.add(STATE_SPRING_UP_B_Z4);
+    let mut gate_in_env = *s.add(STATE_GATE_IN_ENV);
+    let mut gate_out_env = *s.add(STATE_GATE_OUT_ENV);
 
     let tape = s.add(STATE_TAPE_OFFSET);
     let spring_a_state =
@@ -767,24 +827,61 @@ unsafe extern "C" fn space_echo_process(
         let side = side_bass + smooth_treble * (side_bass - side_treble_lp);
 
         // ── Spring reverb (fed from preamp + echo, per the RE-201 bus) ──
+        // The tanks tick at sr / SPRING_DECIM behind an anti-alias lowpass,
+        // with zero-stuffed upsampling through matching anti-image filters.
+        // When both the feed and the tank output have been below the gate
+        // threshold for the release time, the whole spring path is skipped.
         let (tank_a, tank_b) = if reverb_on {
             let spring_in = (pre + echo) * 0.7;
-            let raw_a =
-                spring_out_gain * spring_tank_process(spring_in, &spring_coef_a, spring_a_state);
-            let raw_b =
-                spring_out_gain * spring_tank_process(spring_in, &spring_coef_b, spring_b_state);
-            // Bass/treble shelves on the tank outputs, so the tone knobs
-            // shape the reverb too (matters most in reverb-only mode, where
-            // the EQ'd echo path is silent).
-            spring_bass_lp_a += bass_coef * (raw_a - spring_bass_lp_a);
-            let a_bass = raw_a + smooth_bass * spring_bass_lp_a;
-            spring_treble_lp_a += treble_coef * (a_bass - spring_treble_lp_a);
-            let a = a_bass + smooth_treble * (a_bass - spring_treble_lp_a);
-            spring_bass_lp_b += bass_coef * (raw_b - spring_bass_lp_b);
-            let b_bass = raw_b + smooth_bass * spring_bass_lp_b;
-            spring_treble_lp_b += treble_coef * (b_bass - spring_treble_lp_b);
-            let b = b_bass + smooth_treble * (b_bass - spring_treble_lp_b);
-            (a, b)
+            gate_in_env = spring_in.abs().max(gate_in_env * gate_decay);
+            if gate_in_env > SPRING_GATE_THRESH || gate_out_env > SPRING_GATE_THRESH {
+                let (raw_a, raw_b) = if decim == 1 {
+                    (
+                        spring_out_gain
+                            * spring_tank_process(spring_in, &spring_coef_a, spring_a_state),
+                        spring_out_gain
+                            * spring_tank_process(spring_in, &spring_coef_b, spring_b_state),
+                    )
+                } else {
+                    let aa =
+                        biquad_sample(spring_in, resamp_lp, &mut spring_aa_z1, &mut spring_aa_z2);
+                    let aa = biquad_sample(aa, resamp_lp, &mut spring_aa_z3, &mut spring_aa_z4);
+                    spring_phase += 1.0;
+                    let (up_a, up_b) = if spring_phase >= decim as f32 {
+                        spring_phase = 0.0;
+                        let ta = spring_out_gain
+                            * spring_tank_process(aa, &spring_coef_a, spring_a_state);
+                        let tb = spring_out_gain
+                            * spring_tank_process(aa, &spring_coef_b, spring_b_state);
+                        (decim as f32 * ta, decim as f32 * tb)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let a =
+                        biquad_sample(up_a, resamp_lp, &mut spring_up_a_z1, &mut spring_up_a_z2);
+                    let a = biquad_sample(a, resamp_lp, &mut spring_up_a_z3, &mut spring_up_a_z4);
+                    let b =
+                        biquad_sample(up_b, resamp_lp, &mut spring_up_b_z1, &mut spring_up_b_z2);
+                    let b = biquad_sample(b, resamp_lp, &mut spring_up_b_z3, &mut spring_up_b_z4);
+                    (a, b)
+                };
+                gate_out_env = (raw_a.abs() + raw_b.abs()).max(gate_out_env * gate_decay);
+                // Bass/treble shelves on the tank outputs, so the tone knobs
+                // shape the reverb too (matters most in reverb-only mode, where
+                // the EQ'd echo path is silent).
+                spring_bass_lp_a += bass_coef * (raw_a - spring_bass_lp_a);
+                let a_bass = raw_a + smooth_bass * spring_bass_lp_a;
+                spring_treble_lp_a += treble_coef * (a_bass - spring_treble_lp_a);
+                let a = a_bass + smooth_treble * (a_bass - spring_treble_lp_a);
+                spring_bass_lp_b += bass_coef * (raw_b - spring_bass_lp_b);
+                let b_bass = raw_b + smooth_bass * spring_bass_lp_b;
+                spring_treble_lp_b += treble_coef * (b_bass - spring_treble_lp_b);
+                let b = b_bass + smooth_treble * (b_bass - spring_treble_lp_b);
+                (a, b)
+            } else {
+                gate_out_env *= gate_decay;
+                (0.0, 0.0)
+            }
         } else {
             (0.0, 0.0)
         };
@@ -843,6 +940,21 @@ unsafe extern "C" fn space_echo_process(
     *s.add(STATE_SPRING_TREBLE_LP_A) = spring_treble_lp_a;
     *s.add(STATE_SPRING_BASS_LP_B) = spring_bass_lp_b;
     *s.add(STATE_SPRING_TREBLE_LP_B) = spring_treble_lp_b;
+    *s.add(STATE_SPRING_PHASE) = spring_phase;
+    *s.add(STATE_SPRING_AA_Z1) = spring_aa_z1;
+    *s.add(STATE_SPRING_AA_Z2) = spring_aa_z2;
+    *s.add(STATE_SPRING_AA_Z3) = spring_aa_z3;
+    *s.add(STATE_SPRING_AA_Z4) = spring_aa_z4;
+    *s.add(STATE_SPRING_UP_A_Z1) = spring_up_a_z1;
+    *s.add(STATE_SPRING_UP_A_Z2) = spring_up_a_z2;
+    *s.add(STATE_SPRING_UP_A_Z3) = spring_up_a_z3;
+    *s.add(STATE_SPRING_UP_A_Z4) = spring_up_a_z4;
+    *s.add(STATE_SPRING_UP_B_Z1) = spring_up_b_z1;
+    *s.add(STATE_SPRING_UP_B_Z2) = spring_up_b_z2;
+    *s.add(STATE_SPRING_UP_B_Z3) = spring_up_b_z3;
+    *s.add(STATE_SPRING_UP_B_Z4) = spring_up_b_z4;
+    *s.add(STATE_GATE_IN_ENV) = gate_in_env;
+    *s.add(STATE_GATE_OUT_ENV) = gate_out_env;
 }
 
 pub fn space_echo_vtable() -> NodeVTable {
@@ -1338,6 +1450,38 @@ mod tests {
     }
 
     #[test]
+    fn spring_gate_silences_dead_tails_and_reopens() {
+        let mut state = clean_state();
+        state[STATE_MODE] = 11.0; // reverb only
+        state[STATE_DRY] = 0.0;
+        state[STATE_SMOOTH_DRY] = 0.0;
+        state[STATE_REVERB_VOL] = 1.0;
+        state[STATE_SMOOTH_REVERB] = 1.0;
+        state[STATE_SPRING_TYPE] = 1.0; // king tubby: short tail, gates in-run
+        let frames = SR as usize * 5;
+        let (out_l, _) = render(&mut state, &impulse(frames), &impulse(frames));
+        let tail = &out_l[frames - SR as usize / 2..];
+        assert!(
+            tail.iter().all(|x| *x == 0.0),
+            "gated tail should be exactly silent"
+        );
+        // The level right before the gate closed must already be inaudible.
+        let last_nz = out_l.iter().rposition(|x| *x != 0.0).unwrap();
+        let cutoff = out_l[last_nz.saturating_sub(2400)..=last_nz]
+            .iter()
+            .fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(cutoff < 3.0e-4, "gate cut an audible tail: peak {cutoff}");
+        // A new impulse reopens the gate with no warm-up gap.
+        let half = SR as usize / 2;
+        let (out2, _) = render(&mut state, &impulse(half), &impulse(half));
+        assert!(
+            rms(&out2) > 2.0e-4,
+            "gate failed to reopen: rms {}",
+            rms(&out2)
+        );
+    }
+
+    #[test]
     fn reverb_is_muted_in_echo_only_modes() {
         let mut state = clean_state();
         state[STATE_MODE] = 0.0; // head 1, no reverb
@@ -1495,6 +1639,74 @@ mod tests {
         for v in out_l.iter().chain(out_r.iter()) {
             assert!(v.is_finite(), "non-finite sample: {v}");
             assert!(v.abs() < 16.0, "runaway sample: {v}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod cpu_bench {
+    use super::*;
+    use std::os::raw::c_void;
+
+    #[test]
+    #[ignore]
+    fn bench_modes() {
+        const SR: i32 = 48_000;
+        const BLOCK: usize = 128;
+        const BLOCKS: usize = 4000; // ~10.7 s of audio
+        for (label, mode, spring_type) in [
+            ("echo only (mode 3, heads 1+2)", 3.0f32, 0.0f32),
+            ("echo+reverb re201 (mode 9)", 9.0, 0.0),
+            ("echo+reverb king_tubby (mode 9)", 9.0, 1.0),
+            ("reverb only (mode 11)", 11.0, 0.0),
+        ] {
+            let mut state = vec![0.0f32; SPACE_ECHO_STATE_SIZE];
+            unsafe {
+                space_echo_init(
+                    state.as_mut_ptr().cast::<c_void>(),
+                    SR,
+                    BLOCK as i32,
+                    std::ptr::null(),
+                );
+            }
+            state[STATE_MODE] = mode;
+            state[STATE_SPRING_TYPE] = spring_type;
+            let mut in_l: Vec<f32> = (0..BLOCK).map(|i| (i as f32 * 0.1).sin() * 0.3).collect();
+            let mut in_r = in_l.clone();
+            let mut m = vec![0.0f32; BLOCK];
+            let mut m2 = vec![0.0f32; BLOCK];
+            let mut m3 = vec![0.0f32; BLOCK];
+            let mut m4 = vec![0.0f32; BLOCK];
+            let inputs = [
+                in_l.as_mut_ptr(),
+                in_r.as_mut_ptr(),
+                m.as_mut_ptr(),
+                m2.as_mut_ptr(),
+                m3.as_mut_ptr(),
+                m4.as_mut_ptr(),
+            ];
+            let mut out_l = vec![0.0f32; BLOCK];
+            let mut out_r = vec![0.0f32; BLOCK];
+            let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+            let t0 = std::time::Instant::now();
+            for _ in 0..BLOCKS {
+                unsafe {
+                    space_echo_process(
+                        inputs.as_ptr(),
+                        outputs.as_ptr(),
+                        BLOCK as i32,
+                        state.as_mut_ptr().cast::<c_void>(),
+                        std::ptr::null_mut(),
+                    );
+                }
+            }
+            let elapsed = t0.elapsed().as_secs_f64();
+            let audio_s = (BLOCK * BLOCKS) as f64 / SR as f64;
+            println!(
+                "{label}: {:.2} ms total, {:.2}% of realtime",
+                elapsed * 1000.0,
+                elapsed / audio_s * 100.0
+            );
         }
     }
 }

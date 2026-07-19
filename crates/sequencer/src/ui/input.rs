@@ -1,7 +1,7 @@
 use super::*;
 use eseqlisp::widget_render::number_picker::{
-    NumberPickerEditOutcome, clear_number_picker_edit_state,
-    handle_number_picker_edit_key_for_widget, number_picker_edit_state,
+    clear_number_picker_edit_state, handle_number_picker_edit_key_for_widget,
+    number_picker_edit_state, NumberPickerEditOutcome,
 };
 
 #[derive(Clone, Debug)]
@@ -1400,8 +1400,9 @@ pub(crate) fn handle_recording_key(
             for (track, a) in armed.iter().enumerate() {
                 if *a {
                     pressed_tracks.push(track);
-                    let position = state.record_position_at_instant(track, press_time).unwrap_or_else(|| {
-                        sequencer::sequencer::RecordPosition {
+                    let position = state
+                        .record_position_at_instant(track, press_time)
+                        .unwrap_or_else(|| sequencer::sequencer::RecordPosition {
                             step: state.transport.track_playheads[track].load(Ordering::Relaxed)
                                 as usize,
                             phase: f32::from_bits(
@@ -1409,8 +1410,7 @@ pub(crate) fn handle_recording_key(
                                     .load(Ordering::Relaxed),
                             )
                             .clamp(0.0, 1.0),
-                        }
-                    });
+                        });
                     positions.push((track, position));
                     let _ = keyboard_tx.send(KeyboardTrigger {
                         track,
@@ -1507,20 +1507,20 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        ExpandedStepProjectionRegistry, ExpandedStepViewport, HeldKeyboardNote,
-        PROCESS_LANE_MODE_OFFSET, SoftStepParamEdit, build_selection_value,
-        current_step_param_number_picker_id, handle_metal_command_shortcut,
+        build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
         held_note_for_key, note_from_key, quantized_record_position,
+        ExpandedStepProjectionRegistry, ExpandedStepViewport, HeldKeyboardNote, SoftStepParamEdit,
+        PROCESS_LANE_MODE_OFFSET,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use eseqlisp::HostCommand;
     use eseqlisp::editor::ViewMode;
     use eseqlisp::mode::BufferMode;
     use eseqlisp::vm::Value;
     use eseqlisp::widget_render::WidgetKeyEvent;
+    use eseqlisp::HostCommand;
     use eseqlisp::{Editor, EditorConfig, Runtime};
     use sequencer::record_quantize::RecordQuantize;
     use sequencer::sequencer::{RecordPosition, SequencerState, StepParam, StepSnapshot, Timebase};
@@ -1536,9 +1536,13 @@ mod live_keyboard_tests {
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
             key: 'a',
             transpose: 0.0,
-            positions: vec![
-                (0, RecordPosition { step: 0, phase: 0.0 }),
-            ],
+            positions: vec![(
+                0,
+                RecordPosition {
+                    step: 0,
+                    phase: 0.0,
+                },
+            )],
             press_time: Instant::now(),
             tracks: vec![0],
         }]));

@@ -36,6 +36,43 @@ If a targeted test runs for more than three minutes without producing progress,
 stop it and investigate the delay. Report the command and the phase that stalled
 if the cause cannot be resolved. Do not respond by running a broader suite.
 
+If a broader run does surface a failing test you did not touch, do not assume
+you broke it and do not start bisecting with stashes. First check whether the
+failing test's subject overlaps your diff at all; if it does not, verify the
+failure pre-exists by running that one test in a temporary `git worktree` of
+HEAD (see "Working tree safety"), then report it as pre-existing and move on.
+
+Known pre-existing failures (July 2026, do not re-investigate; unrelated to
+effects/DSP work):
+
+- `tui::effects::tests::bus_effect_wiring_resolves_graph_nodes_by_bus_id_after_reordering`
+- `tui::graph::tests::rack_rebuild_defers_old_sampler_nodes_until_forced_reap`
+- `tui::graph::tests::replacing_expanded_rack_instrument_preserves_slot_fx_and_defers_old_engine`
+
+## Working tree safety
+
+The author works in this repository concurrently while agents run: editors
+auto-save files mid-task, and uncommitted work is often present. Therefore:
+
+- NEVER run `git stash` (or `git checkout`/`git restore` over files you did not
+  modify). A stash taken from a tree the author is editing will conflict on pop
+  and can strand both your changes and theirs.
+- To compare against a clean HEAD (pre-existing failures, baselines, bisects),
+  use an isolated checkout instead: `git worktree add /tmp/<name> HEAD`, run
+  there, then `git worktree remove /tmp/<name>`.
+- Before any operation that rewrites working-tree files, re-check `git status`
+  — the set of dirty files may have changed since the task started.
+
+## Formatting
+
+Do not run `cargo fmt` on a package or the workspace. The repository's existing
+style does not match stock rustfmt defaults, so a package-wide format produces
+hundreds of lines of import-reordering and rewrapping churn across files you
+did not touch. Note that `cargo fmt -p <package> -- <files>` does NOT limit
+formatting to those files — it still formats the whole package. Match the
+surrounding code's style by hand; if you must use rustfmt, invoke the `rustfmt`
+binary directly on only the files you created or modified.
+
 ## Instrument testing
 
 Use `instrument_probe` when changing DGenLisp instruments, wavetable/tensor loading, or host-side instrument initialization. It exercises the same host compile/load/init path as the app and gives quick signal checks without launching the UI.
