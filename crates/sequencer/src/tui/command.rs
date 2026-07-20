@@ -202,7 +202,7 @@ fn sync_effect_mod_active_plock(
     slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
 }
 
-fn sanitize_pasted_step_snapshot(
+pub(crate) fn sanitize_pasted_step_snapshot(
     snapshot: &StepSnapshot,
     preserve_audio_plocks: bool,
 ) -> StepSnapshot {
@@ -779,6 +779,118 @@ pub enum AppCommand {
     },
 }
 
+/// Exhaustive staged history classification for every command intent.
+///
+/// `Record` is restricted to the lossless step-cell command family in Slice 1.
+/// Unsupported authoring commands remain barriers until their patch family is
+/// implemented. Live macro gestures and transport playback are performance
+/// actions and never affect authoring history.
+pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
+    use super::history::HistoryPolicy;
+
+    match cmd {
+        AppCommand::ToggleStep { .. }
+        | AppCommand::SetStepActive { .. }
+        | AppCommand::SetStepParam { .. }
+        | AppCommand::AdjustStepParam { .. }
+        | AppCommand::ClearStepPayload { .. }
+        | AppCommand::ClearSteps { .. }
+        | AppCommand::RotateSteps { .. }
+        | AppCommand::PasteSteps { .. }
+        | AppCommand::ShiftStepRange { .. } => HistoryPolicy::Record,
+
+        AppCommand::MacroSetValue { .. }
+        | AppCommand::MacroRelease { .. }
+        | AppCommand::ScenePushBegin { .. }
+        | AppCommand::ScenePushSetValue { .. }
+        | AppCommand::ScenePushEnd
+        | AppCommand::TogglePlay => HistoryPolicy::Ignore,
+
+        AppCommand::DuplicateTrackPattern { .. }
+        | AppCommand::HalveTrackPattern { .. }
+        | AppCommand::SetTimebasePlock { .. }
+        | AppCommand::SetTimebasePlockMulti { .. }
+        | AppCommand::ClearTimebasePlockMulti { .. }
+        | AppCommand::ToggleTrackGate { .. }
+        | AppCommand::ToggleTrackPolyphonic { .. }
+        | AppCommand::AdjustTrackMaxPolyphony { .. }
+        | AppCommand::SetTrackAttack { .. }
+        | AppCommand::AdjustTrackAttack { .. }
+        | AppCommand::SetTrackRelease { .. }
+        | AppCommand::AdjustTrackRelease { .. }
+        | AppCommand::SetTrackSwing { .. }
+        | AppCommand::SetTrackSwingPlock { .. }
+        | AppCommand::SetTrackSwingPlockMulti { .. }
+        | AppCommand::ClearTrackSwingPlockMulti { .. }
+        | AppCommand::AdjustTrackSwing { .. }
+        | AppCommand::SetTrackSwingResolution { .. }
+        | AppCommand::SetTrackSwingResolutionPlock { .. }
+        | AppCommand::SetTrackSwingResolutionPlockMulti { .. }
+        | AppCommand::ClearTrackSwingResolutionPlockMulti { .. }
+        | AppCommand::NextTrackSwingResolution { .. }
+        | AppCommand::PrevTrackSwingResolution { .. }
+        | AppCommand::SetTrackNumSteps { .. }
+        | AppCommand::AdjustTrackNumSteps { .. }
+        | AppCommand::SetTrackVolume { .. }
+        | AppCommand::AdjustTrackVolume { .. }
+        | AppCommand::SetTrackPan { .. }
+        | AppCommand::AdjustTrackPan { .. }
+        | AppCommand::SetTrackSend { .. }
+        | AppCommand::AdjustTrackSend { .. }
+        | AppCommand::SetTrackOutput { .. }
+        | AppCommand::SetTrackSends { .. }
+        | AppCommand::SetMasterVolume { .. }
+        | AppCommand::AdjustMasterVolume { .. }
+        | AppCommand::SetTrackTimebase { .. }
+        | AppCommand::NextTrackTimebase { .. }
+        | AppCommand::PrevTrackTimebase { .. }
+        | AppCommand::SetTrackFtsScale { .. }
+        | AppCommand::SetTrackAccumIdx { .. }
+        | AppCommand::SetTrackAccumLimit { .. }
+        | AppCommand::AdjustTrackAccumLimit { .. }
+        | AppCommand::SetTrackAccumMode { .. }
+        | AppCommand::SetEffectParam { .. }
+        | AppCommand::SetEffectPlock { .. }
+        | AppCommand::SetEffectPlockMulti { .. }
+        | AppCommand::SetInstrumentParam { .. }
+        | AppCommand::SetInstrumentPlock { .. }
+        | AppCommand::SetInstrumentPlockMulti { .. }
+        | AppCommand::SetInstrumentKeyLock { .. }
+        | AppCommand::SetInstrumentKeyLockMulti { .. }
+        | AppCommand::ClearInstrumentKeyLock { .. }
+        | AppCommand::ClearInstrumentKeyLocksForNote { .. }
+        | AppCommand::StampInstrumentKeyLockVariant { .. }
+        | AppCommand::ClearInstrumentKeyLockVariantsForNotes { .. }
+        | AppCommand::SetInstrumentTensorCell { .. }
+        | AppCommand::SetInstrumentTensorPlockCellMulti { .. }
+        | AppCommand::SetInstrumentBaseNoteOffset { .. }
+        | AppCommand::SetRackSlotGain { .. }
+        | AppCommand::SetRackSlotPan { .. }
+        | AppCommand::SetRackSlotMute { .. }
+        | AppCommand::SetRackSlotSolo { .. }
+        | AppCommand::SetRackSlotMaxPolyphony { .. }
+        | AppCommand::SetRackSlotChokeGroup { .. }
+        | AppCommand::SetRackSlotBaseNoteOffset { .. }
+        | AppCommand::SetRackSlotParamPlock { .. }
+        | AppCommand::SetRackSlotParamPlockMulti { .. }
+        | AppCommand::SetRackSlotInstrumentParam { .. }
+        | AppCommand::SetRackSlotInstrumentPlock { .. }
+        | AppCommand::SetRackSlotInstrumentPlockMulti { .. }
+        | AppCommand::MacroCreate { .. }
+        | AppCommand::MacroCreateScene { .. }
+        | AppCommand::MacroSceneConfig { .. }
+        | AppCommand::MacroEnsure { .. }
+        | AppCommand::MacroDelete { .. }
+        | AppCommand::MacroRename { .. }
+        | AppCommand::MacroMapParam { .. }
+        | AppCommand::MacroSetRange { .. }
+        | AppCommand::MacroSetCurve { .. }
+        | AppCommand::MacroUnmap { .. }
+        | AppCommand::SetBpm { .. }
+        | AppCommand::AdjustRecordQuantizeThresh { .. } => HistoryPolicy::Barrier,
+    }
+}
+
 /// Execute `cmd` against `app`, calling
 /// `app.state.publish_scheduler_snapshot()` afterwards when the command
 /// mutated sequencer/transport state.
@@ -801,7 +913,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        apply_command, command_mutates_sequencer_state, sanitize_pasted_step_snapshot, AppCommand,
+        apply_command, command_mutates_sequencer_state, history_policy,
+        sanitize_pasted_step_snapshot, AppCommand,
     };
     use crate::audiograph::LiveGraphPtr;
     use crate::effects::{
@@ -902,6 +1015,31 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn history_policy_records_only_lossless_step_commands_in_slice_one() {
+        use crate::tui::history::HistoryPolicy;
+
+        assert_eq!(
+            history_policy(&AppCommand::ToggleStep { track: 0, step: 3 }),
+            HistoryPolicy::Record
+        );
+        assert_eq!(
+            history_policy(&AppCommand::DuplicateTrackPattern { track: 0 }),
+            HistoryPolicy::Barrier
+        );
+        assert_eq!(
+            history_policy(&AppCommand::MacroSetValue {
+                id: 1,
+                value: 0.5,
+            }),
+            HistoryPolicy::Ignore
+        );
+        assert_eq!(
+            history_policy(&AppCommand::TogglePlay),
+            HistoryPolicy::Ignore
+        );
     }
 
     fn test_app_with_effect_descriptor(desc: EffectDescriptor) -> App {
@@ -1180,19 +1318,31 @@ mod tests {
             timebase: Some(Timebase::Eighth),
             swing: Some(62.0),
             swing_resolution: Some(SwingResolution::Eighth),
+            midi_fx_plocks: vec![StepSlotPlocks {
+                params: vec![Some(0.5)],
+                tensor_params: vec![Some(vec![0.1, 0.2])],
+            }],
             effect_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.1), None, Some(0.9)],
+                tensor_params: vec![Some(vec![0.3, 0.4])],
             }],
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
+                tensor_params: vec![Some(vec![0.5, 0.6])],
             },
             rack_macro_plocks: vec![Some(0.6), None],
             rack_slot_param_plocks: vec![StepSlotPlocks {
                 params: vec![Some(12.0), Some(0.4), None],
+                tensor_params: Vec::new(),
             }],
             rack_slot_instrument_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.3), None, Some(0.7)],
+                tensor_params: vec![Some(vec![0.7, 0.8])],
             }],
+            rack_slot_effect_plocks: vec![vec![StepSlotPlocks {
+                params: vec![Some(0.9)],
+                tensor_params: vec![Some(vec![0.9, 1.0])],
+            }]],
         };
 
         let sanitized = sanitize_pasted_step_snapshot(&snapshot, false);
@@ -1206,6 +1356,11 @@ mod tests {
         assert_eq!(sanitized.timebase, Some(Timebase::Eighth));
         assert_eq!(sanitized.swing, Some(62.0));
         assert_eq!(sanitized.swing_resolution, Some(SwingResolution::Eighth));
+        assert!(sanitized
+            .midi_fx_plocks
+            .iter()
+            .all(|plocks| plocks.params.iter().all(Option::is_none)
+                && plocks.tensor_params.iter().all(Option::is_none)));
         assert!(sanitized
             .effect_plocks
             .iter()
@@ -1225,8 +1380,14 @@ mod tests {
         assert!(sanitized
             .rack_slot_instrument_plocks
             .iter()
-            .flat_map(|plocks| plocks.params.iter())
-            .all(Option::is_none));
+            .all(|plocks| plocks.params.iter().all(Option::is_none)
+                && plocks.tensor_params.iter().all(Option::is_none)));
+        assert!(sanitized
+            .rack_slot_effect_plocks
+            .iter()
+            .flatten()
+            .all(|plocks| plocks.params.iter().all(Option::is_none)
+                && plocks.tensor_params.iter().all(Option::is_none)));
     }
 
     #[test]
@@ -1241,19 +1402,31 @@ mod tests {
             timebase: None,
             swing: None,
             swing_resolution: None,
+            midi_fx_plocks: vec![StepSlotPlocks {
+                params: vec![Some(0.5)],
+                tensor_params: vec![Some(vec![0.1, 0.2])],
+            }],
             effect_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.1), None, Some(0.9)],
+                tensor_params: vec![Some(vec![0.3, 0.4])],
             }],
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
+                tensor_params: vec![Some(vec![0.5, 0.6])],
             },
             rack_macro_plocks: vec![Some(0.6), None],
             rack_slot_param_plocks: vec![StepSlotPlocks {
                 params: vec![Some(12.0), Some(0.4), None],
+                tensor_params: Vec::new(),
             }],
             rack_slot_instrument_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.3), None, Some(0.7)],
+                tensor_params: vec![Some(vec![0.7, 0.8])],
             }],
+            rack_slot_effect_plocks: vec![vec![StepSlotPlocks {
+                params: vec![Some(0.9)],
+                tensor_params: vec![Some(vec![0.9, 1.0])],
+            }]],
         };
 
         let sanitized = sanitize_pasted_step_snapshot(&snapshot, true);

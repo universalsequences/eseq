@@ -1,7 +1,64 @@
 use std::collections::VecDeque;
 
+use crate::plock_variants::PlockVariantRegistry;
+use crate::sequencer::{StepCellSnapshot, StepSlotPlocks, TrackPatternId};
+
 pub const DEFAULT_HISTORY_ENTRY_LIMIT: usize = 256;
 pub const DEFAULT_HISTORY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyMode {
+    UserEdit,
+    Undo,
+    Redo,
+    ProjectLoad,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistoryPolicy {
+    Record,
+    Coalesce(MergeKey),
+    Ignore,
+    Barrier,
+    Reset,
+}
+
+#[derive(Clone, Debug)]
+pub enum EditPatch {
+    StepCells(StepCellsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub struct StepCellsPatch {
+    pub target: TrackPatternId,
+    pub cells: Vec<StepCellDelta>,
+    pub variant_registry_before: PlockVariantRegistry,
+    pub variant_registry_after: PlockVariantRegistry,
+}
+
+#[derive(Clone, Debug)]
+pub struct StepCellDelta {
+    pub step: usize,
+    pub before: StepCellSnapshot,
+    pub after: StepCellSnapshot,
+}
+
+impl StepCellsPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .cells
+                .iter()
+                .map(|cell| {
+                    std::mem::size_of::<StepCellDelta>()
+                        + step_snapshot_heap_bytes(&cell.before)
+                        + step_snapshot_heap_bytes(&cell.after)
+                })
+                .sum::<usize>()
+            + registry_heap_bytes(&self.variant_registry_before)
+            + registry_heap_bytes(&self.variant_registry_after)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MergeKey(String);
@@ -290,6 +347,162 @@ impl<P> UndoManager<P> {
 
 pub fn bit_exact_f32_eq(left: f32, right: f32) -> bool {
     left.to_bits() == right.to_bits()
+}
+
+fn bit_exact_f32_slice_eq(left: &[f32], right: &[f32]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| bit_exact_f32_eq(*left, *right))
+}
+
+fn optional_f32_eq(left: Option<f32>, right: Option<f32>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => bit_exact_f32_eq(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn slot_plocks_eq(left: &StepSlotPlocks, right: &StepSlotPlocks) -> bool {
+    left.params.len() == right.params.len()
+        && left
+            .params
+            .iter()
+            .zip(&right.params)
+            .all(|(left, right)| optional_f32_eq(*left, *right))
+        && left.tensor_params.len() == right.tensor_params.len()
+        && left
+            .tensor_params
+            .iter()
+            .zip(&right.tensor_params)
+            .all(|(left, right)| match (left, right) {
+                (Some(left), Some(right)) => bit_exact_f32_slice_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            })
+}
+
+fn slot_plock_slice_eq(left: &[StepSlotPlocks], right: &[StepSlotPlocks]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| slot_plocks_eq(left, right))
+}
+
+pub fn step_snapshot_bit_exact_eq(
+    left: &StepCellSnapshot,
+    right: &StepCellSnapshot,
+) -> bool {
+    left.active == right.active
+        && left.neural_reset == right.neural_reset
+        && bit_exact_f32_slice_eq(&left.params, &right.params)
+        && bit_exact_f32_slice_eq(&left.chord, &right.chord)
+        && bit_exact_f32_slice_eq(&left.chord_durations, &right.chord_durations)
+        && bit_exact_f32_slice_eq(&left.chord_delays, &right.chord_delays)
+        && left.timebase == right.timebase
+        && optional_f32_eq(left.swing, right.swing)
+        && left.swing_resolution == right.swing_resolution
+        && slot_plock_slice_eq(&left.midi_fx_plocks, &right.midi_fx_plocks)
+        && slot_plock_slice_eq(&left.effect_plocks, &right.effect_plocks)
+        && slot_plocks_eq(&left.instrument_plocks, &right.instrument_plocks)
+        && left.rack_macro_plocks.len() == right.rack_macro_plocks.len()
+        && left
+            .rack_macro_plocks
+            .iter()
+            .zip(&right.rack_macro_plocks)
+            .all(|(left, right)| optional_f32_eq(*left, *right))
+        && slot_plock_slice_eq(
+            &left.rack_slot_param_plocks,
+            &right.rack_slot_param_plocks,
+        )
+        && slot_plock_slice_eq(
+            &left.rack_slot_instrument_plocks,
+            &right.rack_slot_instrument_plocks,
+        )
+        && left.rack_slot_effect_plocks.len() == right.rack_slot_effect_plocks.len()
+        && left
+            .rack_slot_effect_plocks
+            .iter()
+            .zip(&right.rack_slot_effect_plocks)
+            .all(|(left, right)| slot_plock_slice_eq(left, right))
+}
+
+pub fn registry_bit_exact_eq(
+    left: &PlockVariantRegistry,
+    right: &PlockVariantRegistry,
+) -> bool {
+    left.previous_step_keys == right.previous_step_keys
+        && left.entries.len() == right.entries.len()
+        && left.entries.iter().zip(&right.entries).all(|(left, right)| {
+            left.key == right.key
+                && left.label == right.label
+                && left.name == right.name
+                && left.color_index == right.color_index
+                && bit_exact_f32_slice_eq(&left.color, &right.color)
+        })
+}
+
+fn slot_plocks_heap_bytes(plocks: &StepSlotPlocks) -> usize {
+    plocks.params.capacity() * std::mem::size_of::<Option<f32>>()
+        + plocks.tensor_params.capacity() * std::mem::size_of::<Option<Vec<f32>>>()
+        + plocks
+            .tensor_params
+            .iter()
+            .flatten()
+            .map(|values| values.capacity() * std::mem::size_of::<f32>())
+            .sum::<usize>()
+}
+
+fn step_snapshot_heap_bytes(snapshot: &StepCellSnapshot) -> usize {
+    let slot_slice_bytes = |slots: &Vec<StepSlotPlocks>| {
+        slots.capacity() * std::mem::size_of::<StepSlotPlocks>()
+            + slots.iter().map(slot_plocks_heap_bytes).sum::<usize>()
+    };
+    snapshot.chord.capacity() * std::mem::size_of::<f32>()
+        + snapshot.chord_durations.capacity() * std::mem::size_of::<f32>()
+        + snapshot.chord_delays.capacity() * std::mem::size_of::<f32>()
+        + slot_slice_bytes(&snapshot.midi_fx_plocks)
+        + slot_slice_bytes(&snapshot.effect_plocks)
+        + slot_plocks_heap_bytes(&snapshot.instrument_plocks)
+        + snapshot.rack_macro_plocks.capacity() * std::mem::size_of::<Option<f32>>()
+        + slot_slice_bytes(&snapshot.rack_slot_param_plocks)
+        + slot_slice_bytes(&snapshot.rack_slot_instrument_plocks)
+        + snapshot.rack_slot_effect_plocks.capacity()
+            * std::mem::size_of::<Vec<StepSlotPlocks>>()
+        + snapshot
+            .rack_slot_effect_plocks
+            .iter()
+            .map(|slots| slot_slice_bytes(slots))
+            .sum::<usize>()
+}
+
+fn registry_heap_bytes(registry: &PlockVariantRegistry) -> usize {
+    registry.entries.capacity()
+        * std::mem::size_of::<crate::plock_variants::PlockVariantRegistryEntry>()
+        + registry
+            .entries
+            .iter()
+            .map(|entry| {
+                entry.key.entries.capacity()
+                    * std::mem::size_of::<crate::plock_variants::PlockVariantEntry>()
+                    + entry.label.capacity()
+                    + entry.name.as_ref().map(String::capacity).unwrap_or(0)
+            })
+            .sum::<usize>()
+        + registry.previous_step_keys.capacity()
+            * std::mem::size_of::<Option<crate::plock_variants::PlockVariantKey>>()
+        + registry
+            .previous_step_keys
+            .iter()
+            .flatten()
+            .map(|key| {
+                key.entries.capacity()
+                    * std::mem::size_of::<crate::plock_variants::PlockVariantEntry>()
+            })
+            .sum::<usize>()
 }
 
 #[cfg(test)]

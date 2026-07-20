@@ -34,6 +34,7 @@ use crate::track_color::TrackColor;
 mod browser;
 mod cirklon;
 pub mod command;
+pub mod edit;
 pub mod history;
 mod draw;
 mod effect_params;
@@ -862,6 +863,7 @@ pub struct UiState {
 pub struct App {
     pub state: Arc<SequencerState>,
     pub track_registry: crate::sequencer::TrackRegistry,
+    pub history: history::UndoManager<history::EditPatch>,
     pub macro_engine: crate::macro_engine::MacroEngine,
     scene_macro_runtime: HashMap<crate::macro_engine::MacroId, SceneMacroRuntime>,
     pub tracks: Vec<String>,
@@ -1496,6 +1498,7 @@ impl App {
         let mut app = Self {
             state,
             track_registry: crate::sequencer::TrackRegistry::default(),
+            history: history::UndoManager::default(),
             macro_engine: crate::macro_engine::MacroEngine::default(),
             scene_macro_runtime: HashMap::new(),
             tracks: Vec::new(),

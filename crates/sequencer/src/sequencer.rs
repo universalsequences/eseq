@@ -31,7 +31,7 @@ pub use state::{
     EffectInstanceId, InstrumentSlotResetSummary, MidiFxInstanceId, PatternId, PatternSnapshot,
     PublishedSequencer, RackMacro, RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget,
     RackSlotId, RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot,
-    RecordPosition, SequencerState, StepSlotPlocks, StepSnapshot, TrackId, TrackOutputEvent,
-    TrackPatternCellView, TrackPatternData, TrackPatternId, TrackRegistry, TrackRegistryError,
-    RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
+    RecordPosition, SequencerState, StepCellSnapshot, StepSlotPlocks, StepSnapshot, TrackId,
+    TrackOutputEvent, TrackPatternCellView, TrackPatternData, TrackPatternId, TrackRegistry,
+    TrackRegistryError, RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
 };

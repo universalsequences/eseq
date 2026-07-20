@@ -261,9 +261,17 @@ mod track_registry_tests {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StepSlotPlocks {
     pub params: Vec<Option<f32>>,
+    pub tensor_params: Vec<Option<Vec<f32>>>,
+}
+
+impl StepSlotPlocks {
+    fn clear(&mut self) {
+        self.params.fill(None);
+        self.tensor_params.fill(None);
+    }
 }
 
 pub const RACK_SLOT_PARAM_COUNT: usize = 6;
@@ -684,7 +692,7 @@ impl BusGateSequence {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StepSnapshot {
     pub active: bool,
     pub neural_reset: bool,
@@ -695,36 +703,138 @@ pub struct StepSnapshot {
     pub timebase: Option<Timebase>,
     pub swing: Option<f32>,
     pub swing_resolution: Option<SwingResolution>,
+    pub midi_fx_plocks: Vec<StepSlotPlocks>,
     pub effect_plocks: Vec<StepSlotPlocks>,
     pub instrument_plocks: StepSlotPlocks,
     pub rack_macro_plocks: Vec<Option<f32>>,
     pub rack_slot_param_plocks: Vec<StepSlotPlocks>,
     pub rack_slot_instrument_plocks: Vec<StepSlotPlocks>,
+    pub rack_slot_effect_plocks: Vec<Vec<StepSlotPlocks>>,
 }
+
+pub type StepCellSnapshot = StepSnapshot;
 
 impl StepSnapshot {
     pub fn without_audio_plocks(&self) -> Self {
         let mut snapshot = self.clone();
+        for plocks in &mut snapshot.midi_fx_plocks {
+            plocks.clear();
+        }
         for plocks in &mut snapshot.effect_plocks {
-            for value in &mut plocks.params {
-                *value = None;
-            }
+            plocks.clear();
         }
-        for value in &mut snapshot.instrument_plocks.params {
-            *value = None;
-        }
+        snapshot.instrument_plocks.clear();
         snapshot.rack_macro_plocks.fill(None);
         for plocks in &mut snapshot.rack_slot_param_plocks {
-            for value in &mut plocks.params {
-                *value = None;
-            }
+            plocks.clear();
         }
         for plocks in &mut snapshot.rack_slot_instrument_plocks {
-            for value in &mut plocks.params {
-                *value = None;
+            plocks.clear();
+        }
+        for slot in &mut snapshot.rack_slot_effect_plocks {
+            for plocks in slot {
+                plocks.clear();
             }
         }
         snapshot
+    }
+}
+
+fn capture_live_slot_step_plocks(slot: &EffectSlotState, step: usize) -> StepSlotPlocks {
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    let params = (0..num_params)
+        .map(|param_idx| slot.plocks.get(step, param_idx))
+        .collect();
+    let tensor_params = (0..slot.tensor_params.num_params())
+        .map(|tensor_idx| slot.tensor_params.plock_values(step, tensor_idx))
+        .collect();
+    StepSlotPlocks {
+        params,
+        tensor_params,
+    }
+}
+
+fn capture_snapshot_slot_step_plocks(
+    slot: &EffectSlotSnapshot,
+    step: usize,
+) -> StepSlotPlocks {
+    let params = (0..slot.num_params as usize)
+        .map(|param_idx| {
+            slot.plocks
+                .get(step)
+                .and_then(|row| row.get(param_idx))
+                .copied()
+                .flatten()
+        })
+        .collect();
+    let tensor_params = (0..slot.tensor_params.len())
+        .map(|tensor_idx| slot.tensor_plock_values(step, tensor_idx).map(<[f32]>::to_vec))
+        .collect();
+    StepSlotPlocks {
+        params,
+        tensor_params,
+    }
+}
+
+fn restore_live_slot_step_plocks(
+    slot: &EffectSlotState,
+    step: usize,
+    saved: Option<&StepSlotPlocks>,
+) {
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    for param_idx in 0..num_params {
+        match saved
+            .and_then(|plocks| plocks.params.get(param_idx))
+            .copied()
+            .flatten()
+        {
+            Some(value) => slot.set_plock(step, param_idx, value),
+            None => slot.plocks.clear_param(step, param_idx),
+        }
+    }
+    for tensor_idx in 0..slot.tensor_params.num_params() {
+        let values = saved
+            .and_then(|plocks| plocks.tensor_params.get(tensor_idx))
+            .cloned()
+            .flatten();
+        if values.as_deref().is_none_or(|values| {
+            !slot.tensor_params.set_plock(step, tensor_idx, values)
+        }) {
+            slot.tensor_params.clear_plock(step, tensor_idx);
+        }
+    }
+}
+
+fn restore_snapshot_slot_step_plocks(
+    slot: &mut EffectSlotSnapshot,
+    step: usize,
+    saved: Option<&StepSlotPlocks>,
+) {
+    for param_idx in 0..slot.num_params as usize {
+        match saved
+            .and_then(|plocks| plocks.params.get(param_idx))
+            .copied()
+            .flatten()
+        {
+            Some(value) => {
+                slot.set_plock(step, param_idx, value);
+            }
+            None => {
+                slot.clear_plock(step, param_idx);
+            }
+        }
+    }
+    for tensor_idx in 0..slot.tensor_params.len() {
+        let values = saved
+            .and_then(|plocks| plocks.tensor_params.get(tensor_idx))
+            .cloned()
+            .flatten();
+        let restored = values
+            .map(|values| slot.set_tensor_plock(step, tensor_idx, values))
+            .unwrap_or(false);
+        if !restored {
+            slot.clear_tensor_plock(step, tensor_idx);
+        }
     }
 }
 
@@ -1105,6 +1215,173 @@ fn instrument_slot_has_locks(slot: &EffectSlotSnapshot) -> bool {
 }
 
 impl TrackPatternData {
+    fn capture_step_snapshot(&self, step: usize) -> Option<StepSnapshot> {
+        if step >= MAX_STEPS {
+            return None;
+        }
+        let word = step / 64;
+        let bit = step % 64;
+        let params = *self.step_data.get(step)?;
+        let rack = self.rack_track.as_ref();
+
+        Some(StepSnapshot {
+            active: (self.track_bits[word] >> bit) & 1 == 1,
+            neural_reset: (self.neural_reset_bits[word] >> bit) & 1 == 1,
+            params,
+            chord: self.chord_snapshot.steps.get(step)?.clone(),
+            chord_durations: self.chord_snapshot.durations.get(step)?.clone(),
+            chord_delays: self.chord_snapshot.delays.get(step)?.clone(),
+            timebase: self.timebase_plock_snapshot[step].map(Timebase::from_index),
+            swing: self.swing_plock_snapshot[step].map(f32::from_bits),
+            swing_resolution: self.swing_resolution_plock_snapshot[step]
+                .map(SwingResolution::from_index),
+            midi_fx_plocks: self
+                .midi_fx_slots
+                .iter()
+                .map(|slot| capture_snapshot_slot_step_plocks(slot, step))
+                .collect(),
+            effect_plocks: self
+                .effect_slots
+                .iter()
+                .map(|slot| capture_snapshot_slot_step_plocks(slot, step))
+                .collect(),
+            instrument_plocks: capture_snapshot_slot_step_plocks(
+                &self.instrument_slot,
+                step,
+            ),
+            rack_macro_plocks: rack
+                .map(|rack| {
+                    rack.macros
+                        .iter()
+                        .map(|rack_macro| rack_macro.plocks[step])
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rack_slot_param_plocks: rack
+                .map(|rack| {
+                    rack.slots
+                        .iter()
+                        .map(|slot| StepSlotPlocks {
+                            params: RackSlotParam::ALL
+                                .iter()
+                                .map(|param| slot.param_plocks.get(step, *param))
+                                .collect(),
+                            tensor_params: Vec::new(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rack_slot_instrument_plocks: rack
+                .map(|rack| {
+                    rack.slots
+                        .iter()
+                        .map(|slot| {
+                            capture_snapshot_slot_step_plocks(&slot.instrument_slot, step)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rack_slot_effect_plocks: rack
+                .map(|rack| {
+                    rack.slots
+                        .iter()
+                        .map(|slot| {
+                            slot.effect_slots
+                                .iter()
+                                .map(|effect| {
+                                    capture_snapshot_slot_step_plocks(effect, step)
+                                })
+                                .collect()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
+    fn restore_step_snapshot(&mut self, step: usize, snapshot: &StepSnapshot) -> bool {
+        if step >= MAX_STEPS
+            || step >= self.step_data.len()
+            || step >= self.chord_snapshot.steps.len()
+            || step >= self.chord_snapshot.durations.len()
+            || step >= self.chord_snapshot.delays.len()
+        {
+            return false;
+        }
+        let word = step / 64;
+        let mask = 1u64 << (step % 64);
+        if snapshot.active {
+            self.track_bits[word] |= mask;
+        } else {
+            self.track_bits[word] &= !mask;
+        }
+        if snapshot.neural_reset {
+            self.neural_reset_bits[word] |= mask;
+        } else {
+            self.neural_reset_bits[word] &= !mask;
+        }
+        self.step_data[step] = snapshot.params;
+
+        self.chord_snapshot.steps[step] = snapshot.chord.clone();
+        self.chord_snapshot.durations[step] = snapshot.chord_durations.clone();
+        self.chord_snapshot.delays[step] = snapshot.chord_delays.clone();
+        self.timebase_plock_snapshot[step] = snapshot.timebase.map(|value| value as u32);
+        self.swing_plock_snapshot[step] = snapshot.swing.map(f32::to_bits);
+        self.swing_resolution_plock_snapshot[step] =
+            snapshot.swing_resolution.map(|value| value as u32);
+
+        for (slot_idx, slot) in self.midi_fx_slots.iter_mut().enumerate() {
+            restore_snapshot_slot_step_plocks(slot, step, snapshot.midi_fx_plocks.get(slot_idx));
+        }
+        for (slot_idx, slot) in self.effect_slots.iter_mut().enumerate() {
+            restore_snapshot_slot_step_plocks(slot, step, snapshot.effect_plocks.get(slot_idx));
+        }
+        restore_snapshot_slot_step_plocks(
+            &mut self.instrument_slot,
+            step,
+            Some(&snapshot.instrument_plocks),
+        );
+
+        if let Some(rack) = self.rack_track.as_mut() {
+            for (macro_idx, rack_macro) in rack.macros.iter_mut().enumerate() {
+                rack_macro.plocks[step] = snapshot
+                    .rack_macro_plocks
+                    .get(macro_idx)
+                    .copied()
+                    .flatten();
+            }
+            for (slot_idx, slot) in rack.slots.iter_mut().enumerate() {
+                let saved_params = snapshot.rack_slot_param_plocks.get(slot_idx);
+                for param in RackSlotParam::ALL {
+                    match saved_params
+                        .and_then(|plocks| plocks.params.get(param.index()))
+                        .copied()
+                        .flatten()
+                    {
+                        Some(value) => slot.param_plocks.set(step, param, value),
+                        None => slot.param_plocks.clear(step, param),
+                    };
+                }
+                restore_snapshot_slot_step_plocks(
+                    &mut slot.instrument_slot,
+                    step,
+                    snapshot.rack_slot_instrument_plocks.get(slot_idx),
+                );
+                for (effect_idx, effect) in slot.effect_slots.iter_mut().enumerate() {
+                    restore_snapshot_slot_step_plocks(
+                        effect,
+                        step,
+                        snapshot
+                            .rack_slot_effect_plocks
+                            .get(slot_idx)
+                            .and_then(|effects| effects.get(effect_idx)),
+                    );
+                }
+            }
+        }
+        true
+    }
+
     fn reset_instrument_source(
         &mut self,
         descriptor: &EffectDescriptor,
@@ -3865,6 +4142,14 @@ impl SequencerState {
 
     pub fn current_scene_index(&self) -> usize {
         self.current_pattern_index()
+    }
+
+    pub(crate) fn effective_track_pattern_id(&self, track: usize) -> Option<PatternId> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .effective_pattern_id(track)
     }
 
     pub fn scene_count(&self) -> usize {
@@ -7956,31 +8241,23 @@ impl SequencerState {
         true
     }
 
-    pub fn toggle_step_and_clear_plocks(&self, track: usize, step: usize) {
+    pub(crate) fn toggle_step_and_clear_plocks_no_publish(&self, track: usize, step: usize) {
         let was_active = self.pattern.patterns[track].is_active(step);
-        self.pattern.patterns[track].toggle_step(step);
         if was_active {
-            for slot in &self.pattern.effect_chains[track] {
-                slot.plocks.clear_step(step);
+            let params: [f32; NUM_PARAMS] = std::array::from_fn(|param_idx| {
+                self.pattern.step_data[track].get(step, StepParam::ALL[param_idx])
+            });
+            self.clear_step_payload_inner(track, step);
+            for param in StepParam::ALL {
+                self.pattern.step_data[track].set(step, param, params[param.index()]);
             }
-            self.pattern.timebase_plocks[track].clear(step);
-            self.pattern.swing_plocks[track].clear(step);
-            self.pattern.swing_resolution_plocks[track].clear(step);
-            self.pattern.neural_reset_patterns[track].clear_step(step);
-            for param_idx in 0..MAX_SLOT_PARAMS {
-                self.pattern.instrument_slots[track]
-                    .plocks
-                    .clear_param(step, param_idx);
-            }
-            self.clear_rack_macro_plocks_for_step(track, step);
-            if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
-                for slot in &mut rack.slots {
-                    slot.param_plocks.clear_step(step);
-                    slot.instrument_slot.clear_step_plocks(step);
-                }
-            }
-            self.pattern.chord_data[track].clear_step(step);
+        } else {
+            self.pattern.patterns[track].set_step_active(step, true);
         }
+    }
+
+    pub fn toggle_step_and_clear_plocks(&self, track: usize, step: usize) {
+        self.toggle_step_and_clear_plocks_no_publish(track, step);
         self.publish_scheduler_snapshot();
     }
 
@@ -8235,23 +8512,22 @@ impl SequencerState {
             chord_delays.push(self.pattern.chord_data[track].get_delay(step, note_idx));
         }
 
-        let mut effect_plocks = Vec::with_capacity(self.pattern.effect_chains[track].len());
-        for slot in &self.pattern.effect_chains[track] {
-            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-            let mut params = Vec::with_capacity(num_params);
-            for param_idx in 0..num_params {
-                params.push(slot.plocks.get(step, param_idx));
-            }
-            effect_plocks.push(StepSlotPlocks { params });
-        }
-
-        let instrument_slot = &self.pattern.instrument_slots[track];
-        let instrument_param_count = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
-        let mut instrument_plocks = Vec::with_capacity(instrument_param_count);
-        for param_idx in 0..instrument_param_count {
-            instrument_plocks.push(instrument_slot.plocks.get(step, param_idx));
-        }
-        let (rack_macro_plocks, rack_slot_param_plocks, rack_slot_instrument_plocks) = self
+        let midi_fx_plocks = self.pattern.midi_fx_slots[track]
+            .iter()
+            .map(|slot| capture_live_slot_step_plocks(slot, step))
+            .collect();
+        let effect_plocks = self.pattern.effect_chains[track]
+            .iter()
+            .map(|slot| capture_live_slot_step_plocks(slot, step))
+            .collect();
+        let instrument_plocks =
+            capture_live_slot_step_plocks(&self.pattern.instrument_slots[track], step);
+        let (
+            rack_macro_plocks,
+            rack_slot_param_plocks,
+            rack_slot_instrument_plocks,
+            rack_slot_effect_plocks,
+        ) = self
             .pattern
             .rack_tracks
             .lock()
@@ -8272,28 +8548,28 @@ impl SequencerState {
                             .iter()
                             .map(|param| slot.param_plocks.get(step, *param))
                             .collect();
-                        StepSlotPlocks { params }
+                        StepSlotPlocks {
+                            params,
+                            tensor_params: Vec::new(),
+                        }
                     })
                     .collect();
                 let instrument_params = rack
                     .slots
                     .iter()
+                    .map(|slot| capture_snapshot_slot_step_plocks(&slot.instrument_slot, step))
+                    .collect();
+                let effect_params = rack
+                    .slots
+                    .iter()
                     .map(|slot| {
-                        let num_params = slot.instrument_slot.num_params as usize;
-                        let params = (0..num_params)
-                            .map(|param_idx| {
-                                slot.instrument_slot
-                                    .plocks
-                                    .get(step)
-                                    .and_then(|step_plocks| step_plocks.get(param_idx))
-                                    .copied()
-                                    .flatten()
-                            })
-                            .collect();
-                        StepSlotPlocks { params }
+                        slot.effect_slots
+                            .iter()
+                            .map(|effect| capture_snapshot_slot_step_plocks(effect, step))
+                            .collect()
                     })
                     .collect();
-                (macro_plocks, slot_params, instrument_params)
+                (macro_plocks, slot_params, instrument_params, effect_params)
             })
             .unwrap_or_default();
 
@@ -8307,17 +8583,178 @@ impl SequencerState {
             timebase: self.pattern.timebase_plocks[track].get(step),
             swing: self.pattern.swing_plocks[track].get(step),
             swing_resolution: self.pattern.swing_resolution_plocks[track].get(step),
+            midi_fx_plocks,
             effect_plocks,
-            instrument_plocks: StepSlotPlocks {
-                params: instrument_plocks,
-            },
+            instrument_plocks,
             rack_macro_plocks,
             rack_slot_param_plocks,
             rack_slot_instrument_plocks,
+            rack_slot_effect_plocks,
         }
     }
 
-    fn clear_step_payload_inner(&self, track: usize, step: usize) {
+    /// Capture step cells from one stable Track Pattern target.
+    ///
+    /// The live lanes are authoritative only when `pattern_id` is currently
+    /// effective. Inactive targets are read directly from their pattern pool.
+    pub(crate) fn capture_pattern_step_cells(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        steps: &[usize],
+    ) -> Result<(Vec<StepSnapshot>, PlockVariantRegistry), String> {
+        if steps.iter().any(|step| *step >= MAX_STEPS) {
+            return Err("step target is out of range".to_string());
+        }
+        let is_effective = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+            if !is_effective {
+                let data = scenes
+                    .track_pools
+                    .get(track)
+                    .and_then(|pool| pool.get(pattern_id))
+                    .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+                let cells = steps
+                    .iter()
+                    .map(|step| {
+                        data.capture_step_snapshot(*step)
+                            .ok_or_else(|| "stored step target is out of range".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok((cells, data.plock_variant_registry.clone()));
+            }
+            is_effective
+        };
+
+        if is_effective {
+            if track >= self.pattern.patterns.len() {
+                return Err("live track target no longer exists".to_string());
+            }
+            let cells = steps
+                .iter()
+                .map(|step| self.capture_step_snapshot(track, *step))
+                .collect();
+            let registry = self
+                .pattern
+                .plock_variant_registries
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .ok_or_else(|| "live p-lock variant registry is missing".to_string())?;
+            Ok((cells, registry))
+        } else {
+            unreachable!("inactive Track Pattern capture returned while holding repository")
+        }
+    }
+
+    /// Restore a stable Track Pattern step batch without publishing.
+    ///
+    /// The pool is always updated. The live mirror is updated only if the
+    /// same pattern remains effective, so scene changes cannot redirect replay.
+    pub(crate) fn restore_pattern_step_cells_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        cells: &[(usize, StepSnapshot)],
+        variant_registry: &PlockVariantRegistry,
+    ) -> Result<bool, String> {
+        if cells.iter().any(|(step, _)| *step >= MAX_STEPS) {
+            return Err("step target is out of range".to_string());
+        }
+        let initially_effective = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            if scenes
+                .track_pools
+                .get(track)
+                .and_then(|pool| pool.get(pattern_id))
+                .is_none()
+            {
+                return Err("Track Pattern target no longer exists".to_string());
+            }
+            scenes.effective_pattern_id(track) == Some(pattern_id)
+        };
+        if initially_effective {
+            self.validate_live_step_cell_target(track)?;
+        }
+        let is_effective = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+            if is_effective && !initially_effective {
+                return Err("Track Pattern became active during step replay".to_string());
+            }
+            let data = scenes
+                .track_pools
+                .get_mut(track)
+                .and_then(|pool| pool.get_mut(pattern_id))
+                .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+            for (step, snapshot) in cells {
+                if !data.restore_step_snapshot(*step, snapshot) {
+                    return Err("stored step target is out of range".to_string());
+                }
+            }
+            data.plock_variant_registry = variant_registry.clone();
+            is_effective
+        };
+
+        if is_effective {
+            if track >= self.pattern.patterns.len() {
+                return Err("live track target no longer exists".to_string());
+            }
+            for (step, snapshot) in cells {
+                self.restore_step_snapshot_inner(track, *step, snapshot);
+            }
+            let mut registries = self.pattern.plock_variant_registries.lock().unwrap();
+            let registry = registries
+                .get_mut(track)
+                .ok_or_else(|| "live p-lock variant registry is missing".to_string())?;
+            *registry = variant_registry.clone();
+        }
+        Ok(is_effective)
+    }
+
+    fn validate_live_step_cell_target(&self, track: usize) -> Result<(), String> {
+        let lanes = [
+            (self.pattern.patterns.len(), "step active bits"),
+            (
+                self.pattern.neural_reset_patterns.len(),
+                "neural-reset bits",
+            ),
+            (self.pattern.step_data.len(), "step parameter data"),
+            (self.pattern.chord_data.len(), "chord data"),
+            (self.pattern.timebase_plocks.len(), "timebase p-locks"),
+            (self.pattern.swing_plocks.len(), "swing p-locks"),
+            (
+                self.pattern.swing_resolution_plocks.len(),
+                "swing-resolution p-locks",
+            ),
+            (self.pattern.midi_fx_slots.len(), "MIDI-FX slots"),
+            (self.pattern.effect_chains.len(), "audio-effect slots"),
+            (self.pattern.instrument_slots.len(), "instrument slots"),
+        ];
+        if let Some((len, name)) = lanes.into_iter().find(|(len, _)| track >= *len) {
+            return Err(format!(
+                "live track {track} is missing from {name} (length {len})"
+            ));
+        }
+        if track >= self.pattern.rack_tracks.lock().unwrap().len() {
+            return Err("live rack-track lane is missing".to_string());
+        }
+        if track
+            >= self
+                .pattern
+                .plock_variant_registries
+                .lock()
+                .unwrap()
+                .len()
+        {
+            return Err("live p-lock variant registry is missing".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_step_payload_inner(&self, track: usize, step: usize) {
         for param in StepParam::ALL {
             self.pattern.step_data[track].set(step, param, param.default_value());
         }
@@ -8330,20 +8767,39 @@ impl SequencerState {
         self.pattern.swing_plocks[track].clear(step);
         self.pattern.swing_resolution_plocks[track].clear(step);
 
-        for slot in &self.pattern.effect_chains[track] {
+        for slot in &self.pattern.midi_fx_slots[track] {
             slot.plocks.clear_step(step);
+            for tensor_idx in 0..slot.tensor_params.num_params() {
+                slot.tensor_params.clear_plock(step, tensor_idx);
+            }
         }
 
-        for param_idx in 0..MAX_SLOT_PARAMS {
-            self.pattern.instrument_slots[track]
-                .plocks
-                .clear_param(step, param_idx);
+        for slot in &self.pattern.effect_chains[track] {
+            slot.plocks.clear_step(step);
+            for tensor_idx in 0..slot.tensor_params.num_params() {
+                slot.tensor_params.clear_plock(step, tensor_idx);
+            }
+        }
+
+        let instrument_slot = &self.pattern.instrument_slots[track];
+        instrument_slot.plocks.clear_step(step);
+        for tensor_idx in 0..instrument_slot.tensor_params.num_params() {
+            instrument_slot.tensor_params.clear_plock(step, tensor_idx);
         }
         self.clear_rack_macro_plocks_for_step(track, step);
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             for slot in &mut rack.slots {
                 slot.param_plocks.clear_step(step);
                 slot.instrument_slot.clear_step_plocks(step);
+                for tensor_idx in 0..slot.instrument_slot.tensor_params.len() {
+                    slot.instrument_slot.clear_tensor_plock(step, tensor_idx);
+                }
+                for effect in &mut slot.effect_slots {
+                    effect.clear_step_plocks(step);
+                    for tensor_idx in 0..effect.tensor_params.len() {
+                        effect.clear_tensor_plock(step, tensor_idx);
+                    }
+                }
             }
         }
     }
@@ -8615,7 +9071,13 @@ impl SequencerState {
         changed
     }
 
-    fn set_step_param_inner(&self, track: usize, step: usize, param: StepParam, value: f32) {
+    pub(crate) fn set_step_param_inner(
+        &self,
+        track: usize,
+        step: usize,
+        param: StepParam,
+        value: f32,
+    ) {
         let previous = self.pattern.step_data[track].get(step, param);
         self.pattern.step_data[track].set(step, param, value);
 
@@ -8658,7 +9120,12 @@ impl SequencerState {
         self.set_step_param(track, step, param, current + delta);
     }
 
-    fn restore_step_snapshot_inner(&self, track: usize, step: usize, snapshot: &StepSnapshot) {
+    pub(crate) fn restore_step_snapshot_inner(
+        &self,
+        track: usize,
+        step: usize,
+        snapshot: &StepSnapshot,
+    ) {
         for param in StepParam::ALL {
             self.pattern.step_data[track].set(step, param, snapshot.params[param.index()]);
         }
@@ -8689,37 +9156,27 @@ impl SequencerState {
             None => self.pattern.swing_resolution_plocks[track].clear(step),
         }
 
+        for (slot_idx, slot) in self.pattern.midi_fx_slots[track].iter().enumerate() {
+            restore_live_slot_step_plocks(slot, step, snapshot.midi_fx_plocks.get(slot_idx));
+        }
         for (slot_idx, slot) in self.pattern.effect_chains[track].iter().enumerate() {
-            let saved = snapshot.effect_plocks.get(slot_idx);
-            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-            for param_idx in 0..num_params {
-                let val = saved
-                    .and_then(|plocks| plocks.params.get(param_idx))
-                    .copied()
-                    .flatten();
-                match val {
-                    Some(val) => slot.set_plock(step, param_idx, val),
-                    None => slot.plocks.clear_param(step, param_idx),
-                }
-            }
+            restore_live_slot_step_plocks(slot, step, snapshot.effect_plocks.get(slot_idx));
         }
 
-        let instrument_slot = &self.pattern.instrument_slots[track];
-        let instrument_param_count = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
-        for param_idx in 0..instrument_param_count {
-            match snapshot
-                .instrument_plocks
-                .params
-                .get(param_idx)
-                .copied()
-                .flatten()
-            {
-                Some(val) => instrument_slot.set_plock(step, param_idx, val),
-                None => instrument_slot.plocks.clear_param(step, param_idx),
-            }
-        }
+        restore_live_slot_step_plocks(
+            &self.pattern.instrument_slots[track],
+            step,
+            Some(&snapshot.instrument_plocks),
+        );
 
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            for (macro_idx, rack_macro) in rack.macros.iter_mut().enumerate() {
+                rack_macro.plocks[step] = snapshot
+                    .rack_macro_plocks
+                    .get(macro_idx)
+                    .copied()
+                    .flatten();
+            }
             for (slot_idx, slot) in rack.slots.iter_mut().enumerate() {
                 let saved_params = snapshot.rack_slot_param_plocks.get(slot_idx);
                 for param in RackSlotParam::ALL {
@@ -8737,31 +9194,22 @@ impl SequencerState {
                     }
                 }
 
-                let saved = snapshot.rack_slot_instrument_plocks.get(slot_idx);
-                let num_params = slot.instrument_slot.num_params as usize;
-                for param_idx in 0..num_params {
-                    let value = saved
-                        .and_then(|plocks| plocks.params.get(param_idx))
-                        .copied()
-                        .flatten();
-                    match value {
-                        Some(value) => {
-                            slot.instrument_slot.set_plock(step, param_idx, value);
-                        }
-                        None => {
-                            slot.instrument_slot.clear_plock(step, param_idx);
-                        }
-                    }
+                restore_snapshot_slot_step_plocks(
+                    &mut slot.instrument_slot,
+                    step,
+                    snapshot.rack_slot_instrument_plocks.get(slot_idx),
+                );
+                for (effect_idx, effect) in slot.effect_slots.iter_mut().enumerate() {
+                    restore_snapshot_slot_step_plocks(
+                        effect,
+                        step,
+                        snapshot
+                            .rack_slot_effect_plocks
+                            .get(slot_idx)
+                            .and_then(|effects| effects.get(effect_idx)),
+                    );
                 }
             }
-        }
-        for (macro_idx, value) in snapshot.rack_macro_plocks.iter().copied().enumerate() {
-            let Some(id) = RackMacroId::from_index(macro_idx) else {
-                continue;
-            };
-            self.update_rack_macro_in_current_pattern(track, id, |rack_macro| {
-                rack_macro.plocks[step] = value;
-            });
         }
     }
 
@@ -8771,8 +9219,13 @@ impl SequencerState {
     }
 
     /// Cyclically rotate `steps` (sorted) left (direction < 0) or right (direction > 0).
-    pub fn rotate_steps(&self, track: usize, steps: &[usize], direction: isize) {
-        if steps.len() < 2 {
+    pub(crate) fn rotate_steps_no_publish(
+        &self,
+        track: usize,
+        steps: &[usize],
+        direction: isize,
+    ) {
+        if steps.len() < 2 || direction == 0 {
             return;
         }
         let snapshots: Vec<_> = steps
@@ -8794,10 +9247,20 @@ impl SequencerState {
             };
             self.restore_step_snapshot_inner(track, step, &snapshots[src]);
         }
+    }
+
+    pub fn rotate_steps(&self, track: usize, steps: &[usize], direction: isize) {
+        self.rotate_steps_no_publish(track, steps, direction);
         self.publish_scheduler_snapshot();
     }
 
-    pub fn move_step_range(&self, track: usize, lo: usize, hi: usize, new_lo: usize) {
+    pub(crate) fn move_step_range_no_publish(
+        &self,
+        track: usize,
+        lo: usize,
+        hi: usize,
+        new_lo: usize,
+    ) {
         if lo > hi || hi >= MAX_STEPS {
             return;
         }
@@ -8821,6 +9284,10 @@ impl SequencerState {
         for (offset, step) in (new_lo..=new_hi).enumerate() {
             self.restore_step_snapshot_inner(track, step, &snapshots[offset]);
         }
+    }
+
+    pub fn move_step_range(&self, track: usize, lo: usize, hi: usize, new_lo: usize) {
+        self.move_step_range_no_publish(track, lo, hi, new_lo);
         self.publish_scheduler_snapshot();
     }
 
@@ -9165,7 +9632,7 @@ mod tests {
     use super::*;
     use crate::effects::{
         EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
-        ParamScaling, BUILTIN_SLOT_COUNT,
+        ParamScaling, TensorParamDescriptor, BUILTIN_SLOT_COUNT,
     };
     use crate::neural::ParamNodeId;
     use crate::plock_variants::{PlockVariantEntry, PlockVariantRegistryEntry};
@@ -9945,6 +10412,121 @@ mod tests {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
         }
+    }
+
+    fn step_tensor_descriptor() -> EffectDescriptor {
+        EffectDescriptor {
+            name: "step tensor fixture".to_string(),
+            params: vec![ParamDescriptor {
+                name: "amount".to_string(),
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 0,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: vec![TensorParamDescriptor {
+                name: "matrix".to_string(),
+                shape: vec![2],
+                cell_offset: 1,
+                default: vec![0.0, 0.0],
+                min: 0.0,
+                max: 1.0,
+            }],
+        }
+    }
+
+    #[test]
+    fn step_snapshot_clear_and_restore_cover_every_live_lock_domain() {
+        let descriptor = step_tensor_descriptor();
+        let state = SequencerState::new(
+            1,
+            vec![vec![EffectSlotState::new(&descriptor, 10)]],
+        );
+        let step = 7;
+        state.pattern.midi_fx_slots[0][0].apply_descriptor(&descriptor, 20);
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 30);
+        state.pattern.midi_fx_slots[0][0].set_plock(step, 0, 0.11);
+        state.pattern.midi_fx_slots[0][0]
+            .tensor_params
+            .set_plock(step, 0, &[0.12, 0.13]);
+        state.pattern.effect_chains[0][0].set_plock(step, 0, 0.21);
+        state.pattern.effect_chains[0][0]
+            .tensor_params
+            .set_plock(step, 0, &[0.22, 0.23]);
+        state.pattern.instrument_slots[0].set_plock(step, 0, 0.31);
+        state.pattern.instrument_slots[0]
+            .tensor_params
+            .set_plock(step, 0, &[0.32, 0.33]);
+
+        let mut rack = sample_rack_track_snapshot();
+        rack.macros[0].plocks[step] = Some(0.41);
+        rack.slots[0]
+            .param_plocks
+            .set(step, RackSlotParam::Gain, 0.42);
+        rack.slots[0].instrument_slot = EffectSlotSnapshot::new_default(&descriptor, 40);
+        rack.slots[0].instrument_slot.set_plock(step, 0, 0.43);
+        rack.slots[0]
+            .instrument_slot
+            .set_tensor_plock(step, 0, vec![0.44, 0.45]);
+        rack.slots[0].effect_slots[0] = EffectSlotSnapshot::new_default(&descriptor, 50);
+        rack.slots[0].effect_slots[0].set_plock(step, 0, 0.46);
+        rack.slots[0].effect_slots[0]
+            .set_tensor_plock(step, 0, vec![0.47, 0.48]);
+        state.set_rack_track_for_all_pattern_snapshots(0, rack);
+
+        let captured = state.capture_step_snapshot(0, step);
+        assert_eq!(captured.midi_fx_plocks[0].params[0], Some(0.11));
+        assert_eq!(captured.midi_fx_plocks[0].tensor_params[0], Some(vec![0.12, 0.13]));
+        assert_eq!(captured.effect_plocks[0].tensor_params[0], Some(vec![0.22, 0.23]));
+        assert_eq!(captured.instrument_plocks.tensor_params[0], Some(vec![0.32, 0.33]));
+        assert_eq!(captured.rack_macro_plocks[0], Some(0.41));
+        assert_eq!(captured.rack_slot_instrument_plocks[0].tensor_params[0], Some(vec![0.44, 0.45]));
+        assert_eq!(captured.rack_slot_effect_plocks[0][0].tensor_params[0], Some(vec![0.47, 0.48]));
+
+        state.clear_step_payload(0, step);
+        let cleared = state.capture_step_snapshot(0, step);
+        assert!(cleared.midi_fx_plocks[0].params.iter().all(Option::is_none));
+        assert!(cleared.midi_fx_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(cleared.effect_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(cleared.instrument_plocks.tensor_params.iter().all(Option::is_none));
+        assert!(cleared.rack_macro_plocks.iter().all(Option::is_none));
+        assert!(cleared.rack_slot_instrument_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(cleared.rack_slot_effect_plocks[0][0].tensor_params.iter().all(Option::is_none));
+
+        state.restore_step_snapshot(0, step, &captured);
+        let restored = state.capture_step_snapshot(0, step);
+        assert_eq!(restored.midi_fx_plocks[0].tensor_params[0], Some(vec![0.12, 0.13]));
+        assert_eq!(restored.effect_plocks[0].tensor_params[0], Some(vec![0.22, 0.23]));
+        assert_eq!(restored.instrument_plocks.tensor_params[0], Some(vec![0.32, 0.33]));
+        assert_eq!(restored.rack_macro_plocks[0], Some(0.41));
+        assert_eq!(restored.rack_slot_instrument_plocks[0].tensor_params[0], Some(vec![0.44, 0.45]));
+        assert_eq!(restored.rack_slot_effect_plocks[0][0].tensor_params[0], Some(vec![0.47, 0.48]));
+
+        state.pattern.patterns[0].set_step_active(step, true);
+        state.pattern.step_data[0].set(step, StepParam::Velocity, 0.73);
+        let velocity_bits = state.pattern.step_data[0]
+            .get(step, StepParam::Velocity)
+            .to_bits();
+        state.toggle_step_and_clear_plocks_no_publish(0, step);
+        let toggled_off = state.capture_step_snapshot(0, step);
+        assert!(!toggled_off.active);
+        assert_eq!(toggled_off.params[StepParam::Velocity.index()].to_bits(), velocity_bits);
+        assert!(toggled_off.midi_fx_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(toggled_off.effect_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(toggled_off.instrument_plocks.tensor_params.iter().all(Option::is_none));
+        assert!(toggled_off.rack_slot_effect_plocks[0][0]
+            .tensor_params
+            .iter()
+            .all(Option::is_none));
     }
 
     #[test]
@@ -12275,6 +12857,79 @@ mod tests {
         let mut snapshot = PatternSnapshot::new_default(track_count, &[]);
         snapshot.track_bits[track][step / 64] |= 1u64 << (step % 64);
         snapshot
+    }
+
+    #[test]
+    fn stable_step_cell_restore_updates_inactive_pool_without_redirecting_to_current_scene() {
+        let state = make_state_with_tracks(1);
+        let first = PatternSnapshot::new_default(1, &[]);
+        let second = snapshot_with_active_step(1, 0, 7);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let first_id = state.scene_track_pattern_id(0, 0).unwrap();
+
+        let (before_cells, before_registry) = state
+            .capture_pattern_step_cells(0, first_id, &[3])
+            .expect("capture active target");
+        state.pattern.patterns[0].set_step_active(3, true);
+        let (after_cells, after_registry) = state
+            .capture_pattern_step_cells(0, first_id, &[3])
+            .expect("capture edited target");
+        state
+            .restore_pattern_step_cells_no_publish(
+                0,
+                first_id,
+                &[(3, after_cells[0].clone())],
+                &after_registry,
+            )
+            .expect("synchronize edited target");
+
+        state
+            .launch_scene(
+                1,
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+            )
+            .expect("launch second scene");
+        assert!(state.pattern.patterns[0].is_active(7));
+        assert!(!state.pattern.patterns[0].is_active(3));
+
+        let touched_live = state
+            .restore_pattern_step_cells_no_publish(
+                0,
+                first_id,
+                &[(3, before_cells[0].clone())],
+                &before_registry,
+            )
+            .expect("restore inactive target");
+        assert!(!touched_live);
+        assert!(state.pattern.patterns[0].is_active(7));
+
+        state
+            .launch_scene(
+                0,
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+            )
+            .expect("return to first scene");
+        assert!(!state.pattern.patterns[0].is_active(3));
+        assert!(!state.pattern.patterns[0].is_active(7));
+
+        assert!(state
+            .restore_pattern_step_cells_no_publish(
+                0,
+                first_id,
+                &[(3, after_cells[0].clone())],
+                &after_registry,
+            )
+            .expect("redo active target"));
+        assert!(state.pattern.patterns[0].is_active(3));
     }
 
     #[test]
