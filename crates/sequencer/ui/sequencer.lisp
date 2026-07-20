@@ -286,10 +286,24 @@
                 (if (> (len SEQ.process-lanes) 0) seqv-process-lane-mode-offset -1)
                 -1))))))))
 
+(def seqv-selected-drum-sound (track)
+  (let ((selected
+          (filter
+            (lambda (sound)
+              (> (reactive-value (seqv-drum-slot-selected-binding sound)) 0.5))
+            (seqv-track-drum-sounds track))))
+    (if (> (len selected) 0) (nth selected 0) nil)))
+
 (def seqv-select-all-current-track-steps ()
-  (do
-    (set! selected-bus -1)
-    (select-all-steps)))
+  (let ((track SEQ.current-track))
+    (do
+      (set! selected-bus -1)
+      (if (seqv-track-drum-rack? track)
+        (let ((sound (seqv-selected-drum-sound track)))
+          (if sound
+            (seq-select-all-drum-rack-steps (get sound :transpose))
+            nil))
+        (select-all-steps)))))
 
 (def seqv-collapse-all-tracks ()
   (do
@@ -829,8 +843,9 @@
       (drum-step-select-drag-over track pad-note step evt)
       nil)))
 
-(def seqv-drum-step-pointer-down (track pad-note step evt)
+(def seqv-drum-step-pointer-down (track slot-idx pad-note step evt)
   (do
+    (seqv-select-drum-slot-index track slot-idx)
     (set! selected-bus -1)
     (seq-set-track track)
     (set! seqv-drag-track track)
@@ -859,8 +874,9 @@
     (set! seqv-drum-drag-pad nil)
     (set! seqv-duration-drag-source nil)))
 
-(def seqv-drum-step-double-click (track pad-note step evt)
+(def seqv-drum-step-double-click (track slot-idx pad-note step evt)
   (do
+    (seqv-select-drum-slot-index track slot-idx)
     (seq-set-track track)
     (drum-step-double-click track pad-note step evt)))
 
@@ -921,7 +937,7 @@
         :variant-r variant-r :variant-g variant-g :variant-b variant-b
         :background "seqv-step-shell"))))
 
-(def seqv-drum-lane-step-cell (track pad-note step visible)
+(def seqv-drum-lane-step-cell (track slot-idx pad-note step visible)
   (let ((track-r (bind-seq-nth "track-color-r-effective" track))
       (track-g (bind-seq-nth "track-color-g-effective" track))
       (track-b (bind-seq-nth "track-color-b-effective" track))
@@ -935,7 +951,7 @@
       :debug-name "seqv-drum-lane-step"
       :on-mouse-down (lambda (evt)
         (if visible
-          (seqv-drum-step-pointer-down track pad-note step evt)
+          (seqv-drum-step-pointer-down track slot-idx pad-note step evt)
           nil))
       :on-drag (lambda (evt)
         (if visible
@@ -947,7 +963,7 @@
           nil))
       :on-double-click (lambda (evt)
         (if visible
-          (seqv-drum-step-double-click track pad-note step evt)
+          (seqv-drum-step-double-click track slot-idx pad-note step evt)
           nil))
       :active (if (and (= drum-step-cursor-track track)
                     (= drum-step-cursor-pad pad-note))
@@ -1584,9 +1600,22 @@
           :slot (get sound :slot-idx)
           :value (max 0.0 (min seqv-drum-slot-gain-max (+ sx 1.0))))))))
 
+;; bind-seq is a float binding: Bool publishes arrive as 1.0/0.0 and `not`
+;; doesn't negate numbers, so compare against 0.5 to get a real boolean.
 (def seqv-drum-slot-flag (sound field-key)
   (let ((field (get sound field-key)))
-    (if field (reactive-value (bind-seq field)) false)))
+    (if field (> (reactive-value (bind-seq field)) 0.5) false)))
+
+(def seqv-drum-slot-selected-binding (sound)
+  (bind-seq (get sound :selected-field)))
+
+(def seqv-select-drum-slot-index (track-idx slot-idx)
+  (do
+    (seqv-select-track-for-edit track-idx)
+    (host-command "select-rack-slot" (dict :track track-idx :slot slot-idx))))
+
+(def seqv-select-drum-slot (track-idx sound)
+  (seqv-select-drum-slot-index track-idx (get sound :slot-idx)))
 
 (def seqv-drum-slot-toggle (label-text track-idx sound param command active)
   (button label-text
@@ -1597,8 +1626,25 @@
     ;:border-color :transparent
     :background-color (if active (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
     :color (if active :black :dim)
-    :on-click |x y r| (host-command command
-      (dict :track track-idx :slot (get sound :slot-idx) :value (not active)))))
+    :on-click |x y r| (do
+      (seqv-select-drum-slot track-idx sound)
+      (host-command command
+        (dict :track track-idx :slot (get sound :slot-idx) :value (not active))))))
+
+;; A drum pad's note is its identity in the sequencer, just as a regular
+;; track's number is its identity. Its enabled state means the pad is audible,
+;; so the visual state intentionally inverts the underlying mute flag.
+(def seqv-drum-slot-mute-button (track-idx sound muted)
+  (button (get sound :pad-label)
+    :key (str "seqv-drum-slot-mute-" track-idx "-" (get sound :slot-idx))
+    :width 1.9 :height 1.2
+    :padding 0 :font-size 10
+    :background-color (seqv-mute-bg muted)
+    :color (if muted :gray :black)
+    :on-click |x y r| (do
+      (seqv-select-drum-slot track-idx sound)
+      (host-command "set-rack-slot-mute"
+        (dict :track track-idx :slot (get sound :slot-idx) :value (not muted))))))
 
 (def seqv-drum-slot-volume-control (track-idx sound)
   (let ((gain-field (get sound :gain-field))
@@ -1606,15 +1652,19 @@
       (gain (if gain-field (reactive-value (bind-seq gain-field)) 1.0)))
     (box
       :key (str "seqv-drum-slot-volume-" track-idx "-" (get sound :slot-idx))
-      :width 5.4 :height 1.1
+      :width 8.2 :height 1.1
       :background "seqv-track-volume-meter"
       :level (if peak-field (bind-seq peak-field) 0)
       :volume (* 0.5 gain)
       :track-r (seqv-track-color-r-binding track-idx)
       :track-g (seqv-track-color-g-binding track-idx)
       :track-b (seqv-track-color-b-binding track-idx)
-      :on-click (lambda (event) (seqv-drum-slot-set-gain-from-event track-idx sound event))
-      :on-drag (lambda (event) (seqv-drum-slot-set-gain-from-event track-idx sound event)))))
+      :on-click (lambda (event) (do
+        (seqv-select-drum-slot track-idx sound)
+        (seqv-drum-slot-set-gain-from-event track-idx sound event)))
+      :on-drag (lambda (event) (do
+        (seqv-select-drum-slot track-idx sound)
+        (seqv-drum-slot-set-gain-from-event track-idx sound event))))))
 
 (def seqv-drum-track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))
@@ -1627,26 +1677,38 @@
             (let ((pad-note (get sound :transpose))
                 (muted (seqv-drum-slot-flag sound :mute-field))
                 (soloed (seqv-drum-slot-flag sound :solo-field)))
-              (h-stack
-                :gap 0.45
-                :align :baseline
+              (box
                 :key (str "seqv-drum-lane-" track-idx "-" pad-note)
                 :debug-name "seqv-drum-slot-lane"
-                ;; per-slot gutter mirrors the track-header order: M, S, name, volume
-                (box :width 3.25)
-                (seqv-drum-slot-toggle "M" track-idx sound "mute" "set-rack-slot-mute" muted)
-                (seqv-drum-slot-toggle "S" track-idx sound "solo" "set-rack-slot-solo" soloed)
-                (label
-                  (seqv-drum-slot-name-display (get sound :name))
-                  :key (str "seqv-drum-lane-label-" track-idx "-" pad-note)
-                  :debug-name "seqv-drum-slot-label"
-                  :width 8.6
-                  ;:height 1.55
-                  :bg :transparent
-                  :font-size 10
-                  :h-align :left
-                  :color (if muted :dark-gray :dim))
-                (seqv-drum-slot-volume-control track-idx sound)
+                :selected (seqv-drum-slot-selected-binding sound)
+                :background-color :transparent
+                :selected-background-color (rgba 0.12 0.17 0.20 0.55)
+                :border-width 1
+                :border-color :transparent
+                :selected-border-color (rgba 0.30 0.74 0.88 0.62)
+                :on-click |x y r| (seqv-select-drum-slot track-idx sound)
+                (h-stack
+                  :padding 0.5
+                  :gap 0.45
+                  :align :top
+                ;; Per-slot gutter mirrors the track-header order: note/mute, solo,
+                ;; name, volume. The note control is bright while its pad is audible.
+                (box :width 2.65)
+                (h-stack :align :baseline :gap 0.45
+                  (seqv-drum-slot-mute-button track-idx sound muted)
+                  (seqv-drum-slot-toggle "S" track-idx sound "solo" "set-rack-slot-solo" soloed)
+                  (label
+                    (seqv-drum-slot-name-display (get sound :name))
+                    :key (str "seqv-drum-lane-label-" track-idx "-" pad-note)
+                    :debug-name "seqv-drum-slot-label"
+                    :width 8.6
+                    ;:height 1.55
+                    :bg :transparent
+                    :font-size 10
+                    :h-align :left
+                    :color (if muted :dark-gray :dim))
+                  (seqv-drum-slot-volume-control track-idx sound)
+                  (box :width 0.3))
                 (v-stack :gap -0.04
                   (each (range 0 rows) |row|
                     (v-stack :gap -0.16
@@ -1655,13 +1717,14 @@
                           (let ((step (+ (* row sequencer-row-width) col)))
                             (seqv-drum-lane-step-cell
                               track-idx
+                              (get sound :slot-idx)
                               pad-note
                               step
                               (< step num-steps)))))
                       (seqv-playhead-row
                         track-idx
                         (nth SEQ.track-ids track-idx)
-                        row)))))))))))
+                        row))))))))))))
   )
 
 (effect-buffer "*sequencer*"

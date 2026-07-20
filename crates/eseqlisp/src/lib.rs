@@ -2545,6 +2545,50 @@ mod tests {
     }
 
     #[test]
+    fn active_subtree_size_change_can_grow_root_beyond_viewport() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive("APP", vec![("height", Value::Number(1.0))], false);
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (v-stack :width :fill
+                    (subtree :key "row"
+                      (box :key "target" :width :fill :height APP.height))
+                    (box :key "tail" :width :fill :height 1)
+                    (box :key "filler" :width :fill :height 1 :flex 1)))
+                "#,
+            )
+            .expect("install active subtree effect");
+        assert_eq!(
+            runtime.current_layout.as_ref().map(|layout| layout.rect.height),
+            Some(10.0),
+            "the initial flex layout should fill the viewport"
+        );
+
+        runtime.set_reactive("APP", "height", Value::Number(12.0));
+        runtime.run_reactive_cycle();
+
+        let trace = runtime
+            .last_ui_invalidation_trace()
+            .expect("invalidation trace");
+        assert_eq!(trace.relayout_mode.as_deref(), Some("subtree-relayout"));
+        assert_eq!(trace.relayout_failure_reason, None);
+        let layout = runtime
+            .current_layout
+            .as_ref()
+            .expect("updated current layout");
+        assert_eq!(layout.rect.height, 14.0);
+        assert_eq!(layout.children[0].rect.height, 12.0);
+        assert!(
+            layout.children[1].rect.row
+                >= layout.children[0].rect.row + layout.children[0].rect.height,
+            "the tail must start after the over-viewport subtree; layout={layout:#?}"
+        );
+    }
+
+    #[test]
     fn whole_tree_reuse_geometry_change_bumps_layout_revision() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);

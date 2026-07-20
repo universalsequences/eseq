@@ -1127,6 +1127,30 @@ impl App {
         }
     }
 
+    /// Select a physical rack slot while preserving each rack routing mode's
+    /// selection identity. Broadcast racks select by slot index; drum racks
+    /// select by the slot's pad note so sparse pad assignments stay correct.
+    pub fn select_rack_slot(
+        &mut self,
+        track: usize,
+        rack: &RackTrackSnapshot,
+        slot_idx: usize,
+    ) -> bool {
+        let Some(slot) = rack.slots.get(slot_idx) else {
+            return false;
+        };
+        match rack.routing {
+            RackRouting::Broadcast => self.set_rack_selected_slot(track, slot_idx),
+            RackRouting::ByPitch => {
+                let Some(pad_note) = slot.pad_note else {
+                    return false;
+                };
+                self.set_rack_selected_pad_note(track, pad_note);
+            }
+        }
+        true
+    }
+
     pub fn rack_selected_pad_note(&self, track: usize) -> i32 {
         let raw = self.rack_selected_slots.get(track).copied().unwrap_or(0) as i32;
         raw.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE)

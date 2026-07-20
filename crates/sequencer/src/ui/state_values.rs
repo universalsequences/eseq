@@ -2279,6 +2279,10 @@ pub(crate) fn rack_slot_value_field(
     format!("track-{track}-rack-slot-{slot_idx}-{}", param.name())
 }
 
+pub(crate) fn rack_slot_selected_field(track: usize, slot_idx: usize) -> String {
+    format!("track-{track}-rack-slot-{slot_idx}-selected")
+}
+
 pub(crate) fn rack_slot_instrument_param_value_field(
     track: usize,
     slot_idx: usize,
@@ -3618,6 +3622,7 @@ fn sync_all_track_sequencer_state_inner(
         "track-drum-sounds",
         build_all_track_drum_sounds_value(app),
     );
+    sync_all_rack_slot_selection_binding_fields(rt, app);
     sync_all_drum_lane_step_binding_fields(rt, state, app);
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_transposes = started.expect("profile timer").elapsed();
@@ -3976,6 +3981,7 @@ pub(crate) fn sync_track_name_state(
         "track-drum-sounds",
         build_all_track_drum_sounds_value(app),
     );
+    sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
         "track-mod-output-available",
@@ -4404,6 +4410,7 @@ pub(crate) fn sync_track_mixer_state(
         "track-drum-sounds",
         build_all_track_drum_sounds_value(app),
     );
+    sync_all_rack_slot_selection_binding_fields(rt, app);
     sync_all_drum_lane_step_binding_fields(rt, state, app);
     rt.set_reactive(
         "SEQ",
@@ -8521,6 +8528,7 @@ pub(crate) struct DrumRackSoundOption {
     pub(crate) pad_note: i32,
     slot_idx: usize,
     name: String,
+    pad_label: String,
     label: String,
     short_label: String,
 }
@@ -8564,12 +8572,14 @@ pub(crate) fn drum_rack_sound_options(app: &tui::App, track: usize) -> Vec<DrumR
         .filter_map(|(slot_idx, slot)| {
             let pad_note = slot.pad_note?;
             let name = instrument_display_name(&rack_slot_raw_name(app, slot_idx, slot));
+            let pad_label = drum_rack_pad_label(pad_note);
             Some(DrumRackSoundOption {
                 pad_note,
                 slot_idx,
-                label: format!("{} · {name}", drum_rack_pad_label(pad_note)),
+                label: format!("{pad_label} · {name}"),
                 short_label: drum_rack_sound_short_label(&name),
                 name,
+                pad_label,
             })
         })
         .collect::<Vec<_>>();
@@ -8619,7 +8629,13 @@ fn drum_rack_sound_value(track: usize, option: DrumRackSoundOption) -> Rc<RefCel
         "peak-field",
         rack_slot_peak_field(track, option.slot_idx),
     );
+    insert_string_prop(
+        &mut value,
+        "selected-field",
+        rack_slot_selected_field(track, option.slot_idx),
+    );
     insert_string_prop(&mut value, "name", option.name);
+    insert_string_prop(&mut value, "pad-label", option.pad_label);
     insert_string_prop(&mut value, "label", option.label);
     insert_string_prop(&mut value, "short-label", option.short_label);
     Rc::new(RefCell::new(Value::Map(value)))
@@ -8637,6 +8653,33 @@ pub(crate) fn build_all_track_drum_sounds_value(app: &tui::App) -> Value {
             })
             .collect(),
     )
+}
+
+/// Publishes the rack's global slot selection for drum-lane widgets without
+/// rebuilding the sequencer tree. The selected identity for a drum rack is a
+/// pad note, so resolve it through the rack snapshot before lighting a slot.
+pub(crate) fn sync_all_rack_slot_selection_binding_fields(
+    rt: &mut Runtime,
+    app: &tui::App,
+) -> bool {
+    let racks = app.state.pattern.rack_tracks.lock().unwrap();
+    let mut dirty = false;
+    for (track, rack) in racks.iter().enumerate() {
+        let Some(rack) = rack.as_ref() else {
+            continue;
+        };
+        let selected_slot = app.selected_rack_slot_index_for_rack(track, rack);
+        for slot_idx in 0..rack.slots.len() {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &rack_slot_selected_field(track, slot_idx),
+                    Value::Bool(Some(slot_idx) == selected_slot),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
 }
 
 pub(crate) fn drum_lane_step_active(
@@ -24209,8 +24252,37 @@ mod tests {
     }
 
     #[test]
+    fn drum_rack_slot_selection_uses_pad_note_identity() {
+        let mut app = test_app_with_drum_rack_panel(0);
+        let mut rack = app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(0)
+            .cloned()
+            .flatten()
+            .expect("drum rack fixture");
+        let mut second_slot = rack.slots[0].clone();
+        second_slot.pad_note = Some(12);
+        rack.slots.push(second_slot);
+        app.state
+            .set_rack_track_for_all_pattern_snapshots(0, rack.clone());
+
+        assert!(app.select_rack_slot(0, &rack, 1));
+        assert_eq!(app.rack_selected_pad_note(0), 12);
+        assert_eq!(
+            app.selected_rack_slot_index_for_rack(0, &rack),
+            Some(1),
+            "selecting slot 1 must resolve the C5 pad, not slot index 1 as a pad note"
+        );
+    }
+
+    #[test]
     fn drum_rack_sound_values_project_hits_into_slot_lanes() {
-        let app = test_app_with_drum_rack_panel(0);
+        let mut app = test_app_with_drum_rack_panel(0);
+        app.set_rack_selected_pad_note(0, 0);
         app.state.pattern.chord_data[0].add_note_with_duration(3, 0.0, 1.0);
         app.state.pattern.patterns[0].set_step_active(3, true);
         assert_eq!(
@@ -24239,6 +24311,11 @@ mod tests {
         };
         assert_eq!(value_map_number(sound, "transpose"), Some(0.0));
         assert_eq!(value_map_string(sound, "name").as_deref(), Some("DS FM"));
+        assert_eq!(value_map_string(sound, "pad-label").as_deref(), Some("C4"));
+        assert_eq!(
+            value_map_string(sound, "selected-field").as_deref(),
+            Some("track-0-rack-slot-0-selected")
+        );
         assert_eq!(
             value_map_string(sound, "label").as_deref(),
             Some("C4 · DS FM"),
@@ -24260,6 +24337,7 @@ mod tests {
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", vec![], false);
         sync_drum_lane_step_binding_fields(&mut runtime, &app.state, &app, 0, None);
+        sync_all_rack_slot_selection_binding_fields(&mut runtime, &app);
         let Some(Value::Map(fields)) = runtime.global_value("SEQ") else {
             panic!("SEQ should remain a reactive map");
         };
@@ -24272,6 +24350,12 @@ mod tests {
         assert!(matches!(
             fields
                 .get(&drum_lane_step_duration_field(0, 0, 3))
+                .map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        ));
+        assert!(matches!(
+            fields
+                .get(&rack_slot_selected_field(0, 0))
                 .map(|value| value.borrow().clone()),
             Some(Value::Bool(true))
         ));
@@ -24795,8 +24879,20 @@ mod tests {
             )))),
         );
         sound.insert(
+            "selected-field".to_string(),
+            Rc::new(RefCell::new(Value::String(rack_slot_selected_field(
+                0, slot_idx,
+            )))),
+        );
+        sound.insert(
             "name".to_string(),
             Rc::new(RefCell::new(Value::String(name.to_string()))),
+        );
+        sound.insert(
+            "pad-label".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                label.split(" · ").next().unwrap_or(label).to_string(),
+            ))),
         );
         sound.insert(
             "label".to_string(),
@@ -28774,6 +28870,16 @@ mod tests {
                 test_drum_sound(1, 12.0, "Snare", "C5 · Snare", "Sna"),
             ])]),
         );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &rack_slot_selected_field(0, 0),
+            Value::Bool(true),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &rack_slot_selected_field(0, 1),
+            Value::Bool(false),
+        );
         for pad_note in [0, 12] {
             for step in 0..16 {
                 editor.runtime_mut().set_reactive(
@@ -28838,6 +28944,33 @@ mod tests {
             assert_finite_nonzero_rect(lane, &format!("drum lane {index}"));
         }
         assert!(
+            matches!(
+                lanes[0].props.get("selected"),
+                Some(Value::ReactiveRef { field, .. }) if field == &rack_slot_selected_field(0, 0)
+            ),
+            "the selected rack slot should light its sequencer lane through a reactive binding"
+        );
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(
+                lanes[0]
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("drum lane slot-selection click"),
+                vec![Value::Nil],
+            )
+            .expect("select drum lane slot");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "select-rack-slot"
+                    && matches!(payload, Value::Map(values)
+                        if matches!(values.get("track").map(|value| value.borrow().clone()), Some(Value::Number(track)) if track == 0.0)
+                        && matches!(values.get("slot").map(|value| value.borrow().clone()), Some(Value::Number(slot)) if slot == 0.0))
+        ));
+        assert!(
             lanes[1].rect.row > lanes[0].rect.row + lanes[0].rect.height,
             "drum lanes should be separated by a visible vertical gap: {:?}",
             lanes.iter().map(|lane| lane.rect).collect::<Vec<_>>()
@@ -28889,6 +29022,25 @@ mod tests {
         let kick_mute = find_layout_node_by_stable_key(&compact_layout, "seqv-drum-slot-mute-0-0")
             .expect("the Kick lane should expose a per-slot mute toggle");
         assert_finite_nonzero_rect(kick_mute, "Kick lane mute toggle");
+        assert_eq!(
+            kick_mute.props.get("text"),
+            Some(&Value::String("C4".to_string())),
+            "the drum-lane mute control should identify its pad by note"
+        );
+        assert!(
+            matches!(
+                kick_mute.props.get("background-color"),
+                Some(Value::List(items))
+                    if items.len() == 5
+                        && matches!(&*items[0].borrow(), Value::Symbol(name) if name == "rgba")
+                        && matches!(&*items[1].borrow(), Value::Number(value) if (*value - 0.95).abs() < 0.001)
+                        && matches!(&*items[2].borrow(), Value::Number(value) if (*value - 0.48).abs() < 0.001)
+                        && matches!(&*items[3].borrow(), Value::Number(value) if (*value - 0.18).abs() < 0.001)
+                        && matches!(&*items[4].borrow(), Value::Number(value) if (*value - 1.0).abs() < 0.001)
+            ),
+            "an unmuted drum pad should use the enabled mute-control treatment; got {:?}",
+            kick_mute.props.get("background-color")
+        );
         assert!(
             kick_mute.rect.col < kick_label.rect.col,
             "the per-slot mute toggle should sit before the slot name"
@@ -28985,6 +29137,56 @@ mod tests {
             calls.lock().unwrap().as_slice(),
             ["0:transpose:12", "0:transpose:12"],
             "the step inspector must write the selected pad note, never a label index"
+        );
+    }
+
+    #[test]
+    fn metal_seq_drum_rack_cmd_a_targets_the_globally_selected_slot() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-drum-racks", test_bool_list(&[true]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-drum-sounds",
+            test_list(vec![test_list(vec![
+                test_drum_sound(0, 0.0, "Kick", "C4 · Kick", "Kic"),
+                test_drum_sound(1, 12.0, "Snare", "C5 · Snare", "Sna"),
+            ])]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &rack_slot_selected_field(0, 0),
+            Value::Bool(false),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &rack_slot_selected_field(0, 1),
+            Value::Bool(true),
+        );
+        let selected_pad_notes = Arc::new(Mutex::new(Vec::new()));
+        {
+            let selected_pad_notes = Arc::clone(&selected_pad_notes);
+            editor.runtime_mut().register_native(
+                "seq-select-all-drum-rack-steps",
+                move |args, _ctx| {
+                    let Some(Value::Number(pad_note)) = args.first() else {
+                        panic!("expected selected pad note, got {args:?}");
+                    };
+                    selected_pad_notes.lock().unwrap().push(*pad_note as i32);
+                    Ok(Value::Number(16.0))
+                },
+            );
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-select-all-current-track-steps)")
+            .expect("Cmd+A drum-rack selection route");
+        assert_eq!(
+            selected_pad_notes.lock().unwrap().as_slice(),
+            [12],
+            "Cmd+A should begin with the globally selected C5 drum slot"
         );
     }
 
@@ -34931,6 +35133,102 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_tall_track_partial_relayout_keeps_following_drop_zone_below_track() {
+        let viewport_width = 180;
+        let viewport_height = 20;
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 1, MAX_STEPS);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(viewport_width, viewport_height);
+
+        let initial = eseqlisp::frame::build_render_frame(
+            &mut editor,
+            viewport_width as usize,
+            viewport_height as usize,
+        );
+        let initial_layout = initial
+            .widget_layout
+            .as_ref()
+            .expect("initial tall-track layout");
+        let initial_row = find_layout_node_by_stable_key(initial_layout, "sequencer-track-0")
+            .expect("initial tall track");
+        let initial_row_height = initial_row.rect.height;
+        assert!(
+            initial_row_height > viewport_height as f32,
+            "fixture track must be taller than the viewport: {:?}",
+            initial_row.rect
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-set-track-expanded 0 true)")
+            .expect("expand tall track");
+        editor.refresh_runtime_side_effects();
+        let expanded = eseqlisp::frame::build_render_frame(
+            &mut editor,
+            viewport_width as usize,
+            viewport_height as usize,
+        );
+        let expanded_layout = expanded
+            .widget_layout
+            .as_ref()
+            .expect("expanded tall-track layout");
+        let expanded_row = find_layout_node_by_stable_key(expanded_layout, "sequencer-track-0")
+            .expect("expanded track");
+        assert!(
+            expanded_row.rect.height < initial_row_height,
+            "the expanded one-page editor must be shorter than the 256-step compact grid"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-set-track-expanded 0 false)")
+            .expect("collapse tall track");
+        editor.refresh_runtime_side_effects();
+        let collapsed = eseqlisp::frame::build_render_frame(
+            &mut editor,
+            viewport_width as usize,
+            viewport_height as usize,
+        );
+        let collapsed_layout = collapsed
+            .widget_layout
+            .as_ref()
+            .expect("collapsed tall-track layout");
+        let collapsed_row = find_layout_node_by_stable_key(collapsed_layout, "sequencer-track-0")
+            .expect("collapsed tall track");
+        let drop_zone =
+            find_layout_node_by_stable_key(collapsed_layout, "sequencer-new-track-drop-zone")
+                .expect("new-track drop zone");
+
+        assert!(
+            (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
+            "targeted relayout must restore the full tall-track height; initial={:?} collapsed={:?}",
+            initial_row.rect,
+            collapsed_row.rect
+        );
+        assert!(
+            drop_zone.rect.row >= collapsed_row.rect.row + collapsed_row.rect.height,
+            "the following sibling must start after the tall track; row={:?} drop_zone={:?}",
+            collapsed_row.rect,
+            drop_zone.rect
+        );
+        assert!(
+            collapsed_layout.rect.height >= drop_zone.rect.row + drop_zone.rect.height,
+            "the root must contain the tall track and its following sibling; root={:?} drop_zone={:?}",
+            collapsed_layout.rect,
+            drop_zone.rect
+        );
+    }
+
+    #[test]
     #[ignore = "performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_plain_tab_expand_current_track_perf_10_tracks() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -34964,7 +35262,9 @@ mod tests {
         }
 
         let track_count = 10;
-        let step_count = 16;
+        let step_count = MAX_STEPS;
+        let viewport_width = 180;
+        let viewport_height = 20;
         let warmup_iterations = 3;
         let measured_iterations = 10;
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -34978,8 +35278,24 @@ mod tests {
             .expect("sequencer buffer should exist")
             .id;
         editor.set_active_buffer(sequencer_id);
-        editor.set_layout_viewport(180, 44);
-        let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        editor.set_layout_viewport(viewport_width, viewport_height);
+        let initial_frame = eseqlisp::frame::build_render_frame(
+            &mut editor,
+            viewport_width as usize,
+            viewport_height as usize,
+        );
+        let initial_layout = initial_frame
+            .widget_layout
+            .as_ref()
+            .expect("initial large-pattern sequencer layout");
+        let initial_track =
+            find_layout_node_by_stable_key(initial_layout, "sequencer-track-0")
+                .expect("initial current track");
+        assert!(
+            initial_track.rect.height > viewport_height as f32,
+            "benchmark must exercise a track taller than its viewport; track={:?} viewport_height={viewport_height}",
+            initial_track.rect
+        );
 
         let state = Arc::new(SequencerState::new(track_count, vec![]));
         let current_track = Arc::new(AtomicUsize::new(0));
@@ -35015,7 +35331,11 @@ mod tests {
             let side_effects_ms = side_effects_start.elapsed().as_secs_f64() * 1000.0;
 
             let frame_start = std::time::Instant::now();
-            let frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+            let frame = eseqlisp::frame::build_render_frame(
+                &mut editor,
+                viewport_width as usize,
+                viewport_height as usize,
+            );
             let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
             let layout = frame
                 .widget_layout
@@ -35041,7 +35361,7 @@ mod tests {
         }
 
         println!(
-            "plain Tab current-track expand perf: {track_count} tracks, {step_count} steps, {} measured iterations after {} warmups",
+            "plain Tab current-track expand perf: {track_count} tracks, {step_count} steps, viewport {viewport_width}x{viewport_height}, {} measured iterations after {} warmups",
             measured_iterations, warmup_iterations
         );
         summarize(

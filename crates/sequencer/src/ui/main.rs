@@ -1484,7 +1484,8 @@ fn refresh_instrument_panel_reactive(
     let selected_step = selected_plock_step(selected_steps);
     let display_step = displayed_plock_step(&app.state, track, selected_step);
     let rt = editor.runtime_mut();
-    let mut dirty = rt
+    let mut dirty = sync_all_rack_slot_selection_binding_fields(rt, app);
+    dirty |= rt
         .set_reactive(
             "SEQ",
             "instrument-panel",
@@ -9747,14 +9748,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(track), Some(slot_idx)) =
                                 (map_usize(map, "track"), map_usize(map, "slot"))
                             {
-                                app.set_rack_selected_slot(track, slot_idx);
-                                refresh_instrument_panel_reactive(
-                                    &mut editor,
-                                    &app,
-                                    track,
-                                    &selected_steps,
-                                    &ui_epoch,
-                                );
+                                let rack = {
+                                    app.state
+                                        .pattern
+                                        .rack_tracks
+                                        .lock()
+                                        .unwrap()
+                                        .get(track)
+                                        .cloned()
+                                        .flatten()
+                                };
+                                let selected = rack.is_some_and(|rack| {
+                                    app.select_rack_slot(track, &rack, slot_idx)
+                                });
+                                if selected {
+                                    refresh_instrument_panel_reactive(
+                                        &mut editor,
+                                        &app,
+                                        track,
+                                        &selected_steps,
+                                        &ui_epoch,
+                                    );
+                                }
                             }
                         }
                     }
@@ -9870,6 +9885,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     false,
                                     &ui_epoch,
                                 );
+                                // The rack panel's pad/slot dicts carry mute as a
+                                // plain value, so rebuild them or the panel shows
+                                // stale M/S state.
+                                sync_rack_slot_instrument_authoring_display(
+                                    &mut editor,
+                                    &app,
+                                    &state,
+                                    track,
+                                    &selected_steps,
+                                );
                             }
                         }
                     }
@@ -9899,6 +9924,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &selected_steps,
                                     false,
                                     &ui_epoch,
+                                );
+                                sync_rack_slot_instrument_authoring_display(
+                                    &mut editor,
+                                    &app,
+                                    &state,
+                                    track,
+                                    &selected_steps,
                                 );
                             }
                         }

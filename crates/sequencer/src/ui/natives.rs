@@ -35,6 +35,40 @@ fn clear_drum_lane_selection(
     }
 }
 
+fn full_drum_lane_selection(
+    track: usize,
+    pad_notes: impl IntoIterator<Item = i32>,
+    num_steps: usize,
+) -> HashSet<DrumLaneStepSelection> {
+    pad_notes
+        .into_iter()
+        .flat_map(|pad_note| {
+            (0..num_steps).map(move |step| DrumLaneStepSelection {
+                track,
+                pad_note,
+                step,
+            })
+        })
+        .collect()
+}
+
+/// Cmd+A in a drum rack progresses from its selected pad to every occupied
+/// pad. Any partial or unrelated selection starts over at the selected pad.
+fn drum_rack_select_all_target(
+    selected: &HashSet<DrumLaneStepSelection>,
+    track: usize,
+    selected_pad_note: i32,
+    pad_notes: &[i32],
+    num_steps: usize,
+) -> HashSet<DrumLaneStepSelection> {
+    let selected_lane = full_drum_lane_selection(track, [selected_pad_note], num_steps);
+    if selected == &selected_lane {
+        full_drum_lane_selection(track, pad_notes.iter().copied(), num_steps)
+    } else {
+        selected_lane
+    }
+}
+
 fn value_number_field(value: &Value, field: &str) -> Option<usize> {
     let Value::Map(map) = value else {
         return None;
@@ -3299,6 +3333,77 @@ pub(crate) fn init_runtime(
         Ok(Value::Number((hi - lo + 1) as f64))
     });
 
+    // seq-select-all-drum-rack-steps — Cmd+A selects the globally selected
+    // drum pad first, then expands to every occupied pad on the next press.
+    let st = state.clone();
+    let ct = current_track.clone();
+    let drum_sel = selected_drum_lane_steps.clone();
+    let normal_sel = selected_steps.clone();
+    let ui_inv = ui_invalidations.clone();
+    let bindings = runtime.reactive_binding_store();
+    runtime.register_native("seq-select-all-drum-rack-steps", move |args, _ctx| {
+        let Some(Value::Number(selected_pad_note)) = args.first() else {
+            return Err("seq-select-all-drum-rack-steps: expected pad note".into());
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let selected_pad_note = selected_pad_note.round() as i32;
+        let num_steps = st.pattern.track_params[track].get_num_steps().min(MAX_STEPS);
+        let pad_notes = st
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .filter(|rack| rack.routing == sequencer::sequencer::RackRouting::ByPitch)
+            .map(|rack| {
+                let mut pad_notes = rack
+                    .slots
+                    .iter()
+                    .filter_map(|slot| slot.pad_note)
+                    .collect::<Vec<_>>();
+                pad_notes.sort_unstable();
+                pad_notes.dedup();
+                pad_notes
+            })
+            .unwrap_or_default();
+        if num_steps == 0 || !pad_notes.contains(&selected_pad_note) {
+            return Ok(Value::Number(0.0));
+        }
+
+        let mut selected = drum_sel.lock().unwrap();
+        let next = drum_rack_select_all_target(
+            &selected,
+            track,
+            selected_pad_note,
+            &pad_notes,
+            num_steps,
+        );
+        for selection in selected.difference(&next) {
+            write_drum_lane_selection(&bindings, *selection, false);
+        }
+        for selection in next.difference(&selected) {
+            write_drum_lane_selection(&bindings, *selection, true);
+        }
+        *selected = next;
+        let count = selected.len();
+        drop(selected);
+
+        // The selected-cell values are binding-backed, but still notify the
+        // normal selection invalidation path so retained sequencer layouts
+        // redraw immediately just as they do after a drag selection.
+        ui_inv.push(UiInvalidation::StepSelection {
+            track,
+            changed_steps: (0..num_steps).collect(),
+        });
+
+        let mut normal = normal_sel.lock().unwrap();
+        if !normal.is_empty() {
+            normal.clear();
+        }
+        Ok(Value::Number(count as f64))
+    });
+
     let drum_sel = selected_drum_lane_steps.clone();
     let bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-clear-drum-lane-selection", move |_args, _ctx| {
@@ -5749,6 +5854,41 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drum_rack_select_all_progresses_from_selected_lane_to_all_lanes() {
+        let selected = HashSet::new();
+        let selected_pad = 12;
+        let pad_notes = [0, 12, 19];
+
+        let selected_lane =
+            drum_rack_select_all_target(&selected, 0, selected_pad, &pad_notes, 4);
+        assert_eq!(selected_lane.len(), 4);
+        assert!(selected_lane.iter().all(|selection| selection.pad_note == 12));
+
+        let all_lanes =
+            drum_rack_select_all_target(&selected_lane, 0, selected_pad, &pad_notes, 4);
+        assert_eq!(all_lanes.len(), 12);
+        for pad_note in pad_notes {
+            assert_eq!(
+                all_lanes
+                    .iter()
+                    .filter(|selection| selection.pad_note == pad_note)
+                    .count(),
+                4,
+                "second Cmd+A should select every step on pad {pad_note}"
+            );
+        }
+
+        let partial = HashSet::from([DrumLaneStepSelection {
+            track: 0,
+            pad_note: 19,
+            step: 0,
+        }]);
+        let reset_to_selected_lane =
+            drum_rack_select_all_target(&partial, 0, selected_pad, &pad_notes, 4);
+        assert_eq!(reset_to_selected_lane, selected_lane);
+    }
 
     fn map_bool(value: &Value, key: &str) -> bool {
         let Value::Map(map) = value else {
