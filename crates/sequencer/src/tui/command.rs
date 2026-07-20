@@ -11,6 +11,7 @@
 //! publish.
 
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crate::macro_engine::{MacroCurve, MacroId};
 use crate::plock_variants::{PlockVariantDomain, PlockVariantKey};
@@ -224,6 +225,7 @@ pub(crate) fn sanitize_pasted_step_snapshot(
 ///   - Transport                 (always publish)
 ///   - Pure UI                   (no publish)
 #[allow(dead_code)]
+#[derive(Clone)]
 pub enum AppCommand {
     // ── Pattern / step mutations ──────────────────────────────────────────────
     /// Toggle a step on/off and clear its plocks if it was active.
@@ -291,6 +293,14 @@ pub enum AppCommand {
         lo: usize,
         hi: usize,
         new_lo: usize,
+    },
+
+    /// Toggle one piano-roll note while preserving the compact single-note
+    /// representation in `StepParam::Transpose`.
+    TogglePianoNote {
+        track: usize,
+        step: usize,
+        semitone: i32,
     },
 
     /// Double track pattern length by duplicating existing steps.
@@ -797,7 +807,8 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::ClearSteps { .. }
         | AppCommand::RotateSteps { .. }
         | AppCommand::PasteSteps { .. }
-        | AppCommand::ShiftStepRange { .. } => HistoryPolicy::Record,
+        | AppCommand::ShiftStepRange { .. }
+        | AppCommand::TogglePianoNote { .. } => HistoryPolicy::Record,
 
         AppCommand::MacroSetValue { .. }
         | AppCommand::MacroRelease { .. }
@@ -899,12 +910,9 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
 /// performed inside this function alongside the state mutation.
 #[allow(dead_code)]
 pub fn apply_command(app: &mut App, cmd: AppCommand) {
-    let needs_publish = command_mutates_sequencer_state(&cmd);
-
-    execute_command(app, cmd);
-
-    if needs_publish {
-        app.state.publish_scheduler_snapshot();
+    if let Err(error) = super::edit::try_apply_command(app, cmd) {
+        app.editor.status_message = Some((format!("Command failed: {error:?}"), Instant::now()));
+        eprintln!("command failed: {error:?}");
     }
 }
 
@@ -2330,7 +2338,7 @@ mod tests {
 /// `execute_command`. Publishing a full scheduler snapshot for each drag tick
 /// makes the app loop perform broad pattern/UI sync work even though event
 /// scheduling cannot observe those fields.
-fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
+pub(crate) fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
     !matches!(
         cmd,
         AppCommand::SetTrackVolume { .. }
@@ -2355,7 +2363,7 @@ fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
     )
 }
 
-fn execute_command(app: &mut App, cmd: AppCommand) {
+pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
     match cmd {
         // ── Pattern / step mutations ──────────────────────────────────────
         AppCommand::ToggleStep { track, step } => {
@@ -2438,12 +2446,16 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.move_step_range(track, lo, hi, new_lo);
         }
 
+        AppCommand::TogglePianoNote { .. } => {
+            unreachable!("piano-note edits execute through the recorded edit boundary")
+        }
+
         AppCommand::DuplicateTrackPattern { track } => {
-            app.state.duplicate_track_pattern(track);
+            app.state.duplicate_track_pattern_no_publish(track);
         }
 
         AppCommand::HalveTrackPattern { track } => {
-            app.state.halve_track_pattern(track);
+            app.state.halve_track_pattern_no_publish(track);
         }
 
         AppCommand::SetTimebasePlock {
@@ -3090,7 +3102,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
 
         // ── Transport ─────────────────────────────────────────────────────
         AppCommand::TogglePlay => {
-            app.state.toggle_play();
+            app.state.toggle_play_no_publish();
         }
 
         AppCommand::SetBpm { bpm } => {

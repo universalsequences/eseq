@@ -1468,6 +1468,12 @@ requirements from `docs/MACRO_MAPPING_SPEC.md`:
 
 ### Slice 7F: Recording and generated edits
 
+Until this slice ships, a successfully recorded trigger/take is an explicit
+history barrier: it is not undoable, and it clears earlier sequencer history so
+undo can never cross untracked recorded notes. The UI should report this
+limitation when existing history is cleared. Recording must not be presented as
+undoable before take-level transaction capture is implemented.
+
 Operations:
 
 - One completed recording take becomes one composite history entry.

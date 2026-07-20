@@ -1,5 +1,10 @@
+use crate::macro_engine::{Macro, MacroMapping};
+use crate::effects::EffectSlotSnapshot;
 use crate::plock_variants::PlockVariantRegistry;
-use crate::sequencer::{StepCellSnapshot, TrackId, TrackPatternId, MAX_STEPS};
+use crate::sequencer::{
+    StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
+};
+use std::time::Instant;
 
 use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
@@ -16,6 +21,7 @@ pub enum EditError {
     StepOutOfRange { step: usize },
     InvalidStepRange,
     MissingTrackPattern,
+    InvalidTarget(String),
     ReplayFailed(String),
 }
 
@@ -23,11 +29,617 @@ pub enum EditError {
 pub enum EditOutcome {
     NoOp,
     Applied(HistoryMove),
+    AppliedUnrecorded,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MutationEffects {
     pub publish_scheduler: bool,
+}
+
+#[derive(Clone)]
+enum BarrierWitness {
+    Bytes(Vec<u8>),
+    Steps {
+        num_steps: usize,
+        cells: Vec<StepCellSnapshot>,
+    },
+    Macros {
+        next_id: u32,
+        definitions: Vec<Macro>,
+    },
+}
+
+impl BarrierWitness {
+    fn bit_exact_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Bytes(left), Self::Bytes(right)) => left == right,
+            (
+                Self::Steps {
+                    num_steps: left_num_steps,
+                    cells: left,
+                },
+                Self::Steps {
+                    num_steps: right_num_steps,
+                    cells: right,
+                },
+            ) => {
+                left_num_steps == right_num_steps
+                    && left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| step_snapshot_bit_exact_eq(left, right))
+            }
+            (
+                Self::Macros {
+                    next_id: left_next_id,
+                    definitions: left,
+                },
+                Self::Macros {
+                    next_id: right_next_id,
+                    definitions: right,
+                },
+            ) => {
+                left_next_id == right_next_id
+                    && left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| macro_bit_exact_eq(left, right))
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct WitnessBytes(Vec<u8>);
+
+impl WitnessBytes {
+    fn u64(&mut self, value: u64) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn usize(&mut self, value: usize) {
+        self.u64(value as u64);
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn bool(&mut self, value: bool) {
+        self.0.push(u8::from(value));
+    }
+
+    fn f32(&mut self, value: f32) {
+        self.u32(value.to_bits());
+    }
+
+    fn optional_f32(&mut self, value: Option<f32>) {
+        self.bool(value.is_some());
+        if let Some(value) = value {
+            self.f32(value);
+        }
+    }
+
+    fn f32_slice(&mut self, values: &[f32]) {
+        self.usize(values.len());
+        for value in values {
+            self.f32(*value);
+        }
+    }
+}
+
+fn macro_mapping_bit_exact_eq(left: &MacroMapping, right: &MacroMapping) -> bool {
+    left.scope == right.scope
+        && left.target == right.target
+        && left.range_min.to_bits() == right.range_min.to_bits()
+        && left.range_max.to_bits() == right.range_max.to_bits()
+        && left.curve == right.curve
+        && left.suspended == right.suspended
+}
+
+fn macro_bit_exact_eq(left: &Macro, right: &Macro) -> bool {
+    left.id == right.id
+        && left.key == right.key
+        && left.name == right.name
+        && left.value.to_bits() == right.value.to_bits()
+        && left.kind == right.kind
+        && left.mappings.len() == right.mappings.len()
+        && left
+            .mappings
+            .iter()
+            .zip(&right.mappings)
+            .all(|(left, right)| macro_mapping_bit_exact_eq(left, right))
+}
+
+fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
+    let mut bytes = WitnessBytes::default();
+    bytes.bool(snapshot.gate);
+    bytes.f32(snapshot.attack_ms);
+    bytes.f32(snapshot.release_ms);
+    bytes.f32(snapshot.swing);
+    bytes.u32(snapshot.swing_resolution as u32);
+    bytes.usize(snapshot.num_steps);
+    bytes.f32(snapshot.volume);
+    bytes.f32(snapshot.pan);
+    bytes.bool(snapshot.mute);
+    bytes.bool(snapshot.solo);
+    bytes.f32(snapshot.send);
+    match snapshot.output {
+        crate::sequencer::TrackOutput::Mix => bytes.u32(0),
+        crate::sequencer::TrackOutput::Bus(id) => {
+            bytes.u32(1);
+            bytes.u64(id.0);
+        }
+        crate::sequencer::TrackOutput::None => bytes.u32(2),
+    }
+    bytes.usize(snapshot.sends.len());
+    for send in &snapshot.sends {
+        bytes.u64(send.destination.0);
+        bytes.f32(send.amount);
+    }
+    bytes.bool(snapshot.polyphonic);
+    bytes.usize(snapshot.max_polyphony);
+    bytes.u32(snapshot.timebase as u32);
+    bytes.usize(snapshot.accumulator_idx);
+    bytes.f32(snapshot.accum_limit);
+    bytes.u32(snapshot.accum_mode);
+    bytes.usize(snapshot.fts_scale);
+    bytes.0
+}
+
+fn encode_optional_f32_rows(bytes: &mut WitnessBytes, rows: &[Vec<Option<f32>>]) {
+    bytes.usize(rows.len());
+    for row in rows {
+        bytes.usize(row.len());
+        for value in row {
+            bytes.optional_f32(*value);
+        }
+    }
+}
+
+fn encode_effect_slot_values(bytes: &mut WitnessBytes, snapshot: &EffectSlotSnapshot) {
+    bytes.usize(snapshot.num_params as usize);
+    bytes.f32_slice(&snapshot.defaults);
+    encode_optional_f32_rows(bytes, &snapshot.plocks);
+    bytes.usize(snapshot.key_locks.len());
+    for (note, values) in &snapshot.key_locks {
+        bytes.0.push(*note);
+        bytes.usize(values.len());
+        for value in values {
+            bytes.optional_f32(*value);
+        }
+    }
+    bytes.usize(snapshot.tensor_params.len());
+    for tensor in &snapshot.tensor_params {
+        bytes.usize(tensor.name.len());
+        bytes.0.extend_from_slice(tensor.name.as_bytes());
+        bytes.usize(tensor.shape.len());
+        for dimension in &tensor.shape {
+            bytes.usize(*dimension);
+        }
+        bytes.usize(tensor.cell_offset);
+        bytes.f32_slice(&tensor.default);
+        bytes.usize(tensor.plocks.len());
+        for values in &tensor.plocks {
+            bytes.bool(values.is_some());
+            if let Some(values) = values {
+                bytes.f32_slice(values);
+            }
+        }
+    }
+}
+
+fn capture_step_witness(
+    app: &App,
+    track: usize,
+    steps: Vec<usize>,
+    include_num_steps: bool,
+) -> Result<BarrierWitness, EditError> {
+    let pattern_id = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let (cells, _) = app
+        .state
+        .capture_pattern_step_cells(track, pattern_id, &steps)
+        .map_err(EditError::InvalidTarget)?;
+    let num_steps = if include_num_steps {
+        app.state
+            .live_track_params_snapshot(track)
+            .ok_or(EditError::TrackOutOfRange { track })?
+            .num_steps
+    } else {
+        0
+    };
+    Ok(BarrierWitness::Steps { num_steps, cells })
+}
+
+fn capture_track_params_witness(app: &App, track: usize) -> Result<BarrierWitness, EditError> {
+    app.state
+        .live_track_params_snapshot(track)
+        .map(|snapshot| BarrierWitness::Bytes(encode_track_params(&snapshot)))
+        .ok_or(EditError::TrackOutOfRange { track })
+}
+
+fn capture_effect_slot_witness(
+    slot: Option<&crate::effects::EffectSlotState>,
+    description: &str,
+) -> Result<BarrierWitness, EditError> {
+    let slot = slot.ok_or_else(|| EditError::InvalidTarget(description.to_string()))?;
+    let mut bytes = WitnessBytes::default();
+    encode_effect_slot_values(&mut bytes, &EffectSlotSnapshot::capture(slot));
+    Ok(BarrierWitness::Bytes(bytes.0))
+}
+
+fn capture_instrument_slot_witness(app: &App, track: usize) -> Result<BarrierWitness, EditError> {
+    let slot = app
+        .state
+        .pattern
+        .instrument_slots
+        .get(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let dirty = app
+        .state
+        .pattern
+        .track_sound_state
+        .lock()
+        .unwrap()
+        .get(track)
+        .map(|state| state.dirty)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let mut bytes = WitnessBytes::default();
+    encode_effect_slot_values(&mut bytes, &EffectSlotSnapshot::capture(slot));
+    bytes.bool(dirty);
+    Ok(BarrierWitness::Bytes(bytes.0))
+}
+
+fn capture_rack_slot_witness(
+    app: &App,
+    track: usize,
+    slot_idx: usize,
+) -> Result<BarrierWitness, EditError> {
+    let rack = app
+        .state
+        .live_rack_track_snapshot(track)
+        .ok_or_else(|| EditError::InvalidTarget("rack track does not exist".to_string()))?;
+    let slot = rack
+        .slots
+        .get(slot_idx)
+        .ok_or_else(|| EditError::InvalidTarget("rack slot does not exist".to_string()))?;
+    let mut bytes = WitnessBytes::default();
+    bytes.f32(slot.instrument_base_note_offset);
+    bytes.f32(slot.gain);
+    bytes.f32(slot.pan);
+    bytes.bool(slot.mute);
+    bytes.bool(slot.solo);
+    bytes.usize(slot.max_polyphony);
+    bytes.bool(slot.choke_group.is_some());
+    if let Some(group) = slot.choke_group {
+        bytes.0.push(group);
+    }
+    encode_optional_f32_rows(&mut bytes, &slot.param_plocks.rows);
+    encode_effect_slot_values(&mut bytes, &slot.instrument_slot);
+    bytes.bool(slot.track_sound_state.dirty);
+    Ok(BarrierWitness::Bytes(bytes.0))
+}
+
+fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), EditError> {
+    let invalid = |message: &str| EditError::InvalidTarget(message.to_string());
+    match cmd {
+        AppCommand::SetEffectParam {
+            track,
+            slot_idx,
+            param_idx,
+            ..
+        }
+        | AppCommand::SetEffectPlock {
+            track,
+            slot_idx,
+            param_idx,
+            ..
+        }
+        | AppCommand::SetEffectPlockMulti {
+            track,
+            slot_idx,
+            param_idx,
+            ..
+        } => {
+            let slot = app
+                .state
+                .pattern
+                .effect_chains
+                .get(*track)
+                .and_then(|chain| chain.get(*slot_idx))
+                .ok_or_else(|| invalid("effect slot does not exist"))?;
+            if *param_idx >= slot.num_params.load(std::sync::atomic::Ordering::Relaxed) as usize {
+                return Err(invalid("effect parameter does not exist"));
+            }
+        }
+        AppCommand::SetInstrumentParam {
+            track, param_idx, ..
+        }
+        | AppCommand::SetInstrumentPlock {
+            track, param_idx, ..
+        }
+        | AppCommand::SetInstrumentPlockMulti {
+            track, param_idx, ..
+        }
+        | AppCommand::SetInstrumentKeyLock {
+            track, param_idx, ..
+        }
+        | AppCommand::SetInstrumentKeyLockMulti {
+            track, param_idx, ..
+        }
+        | AppCommand::ClearInstrumentKeyLock {
+            track, param_idx, ..
+        } => {
+            let slot = app
+                .state
+                .pattern
+                .instrument_slots
+                .get(*track)
+                .ok_or(EditError::TrackOutOfRange { track: *track })?;
+            if *param_idx >= slot.num_params.load(std::sync::atomic::Ordering::Relaxed) as usize {
+                return Err(invalid("instrument parameter does not exist"));
+            }
+        }
+        AppCommand::SetInstrumentTensorCell {
+            track,
+            tensor_idx,
+            cell_idx,
+            ..
+        }
+        | AppCommand::SetInstrumentTensorPlockCellMulti {
+            track,
+            tensor_idx,
+            cell_idx,
+            ..
+        } => {
+            let slot = app
+                .state
+                .pattern
+                .instrument_slots
+                .get(*track)
+                .ok_or(EditError::TrackOutOfRange { track: *track })?;
+            if *tensor_idx >= slot.tensor_params.num_params()
+                || *cell_idx >= slot.tensor_params.tensor_len(*tensor_idx)
+            {
+                return Err(invalid("instrument tensor cell does not exist"));
+            }
+        }
+        AppCommand::SetRackSlotInstrumentParam {
+            track,
+            slot_idx,
+            param_idx,
+            ..
+        }
+        | AppCommand::SetRackSlotInstrumentPlock {
+            track,
+            slot_idx,
+            param_idx,
+            ..
+        }
+        | AppCommand::SetRackSlotInstrumentPlockMulti {
+            track,
+            slot_idx,
+            param_idx,
+            ..
+        } => {
+            let rack = app
+                .state
+                .live_rack_track_snapshot(*track)
+                .ok_or_else(|| invalid("rack track does not exist"))?;
+            let slot = rack
+                .slots
+                .get(*slot_idx)
+                .ok_or_else(|| invalid("rack slot does not exist"))?;
+            if *param_idx >= slot.instrument_slot.num_params as usize {
+                return Err(invalid("rack instrument parameter does not exist"));
+            }
+        }
+        AppCommand::SetRackSlotGain { track, slot_idx, .. }
+        | AppCommand::SetRackSlotPan { track, slot_idx, .. }
+        | AppCommand::SetRackSlotMute { track, slot_idx, .. }
+        | AppCommand::SetRackSlotSolo { track, slot_idx, .. }
+        | AppCommand::SetRackSlotMaxPolyphony { track, slot_idx, .. }
+        | AppCommand::SetRackSlotChokeGroup { track, slot_idx, .. }
+        | AppCommand::SetRackSlotBaseNoteOffset { track, slot_idx, .. }
+        | AppCommand::SetRackSlotParamPlock { track, slot_idx, .. }
+        | AppCommand::SetRackSlotParamPlockMulti { track, slot_idx, .. } => {
+            let rack = app
+                .state
+                .live_rack_track_snapshot(*track)
+                .ok_or_else(|| invalid("rack track does not exist"))?;
+            if rack.slots.get(*slot_idx).is_none() {
+                return Err(invalid("rack slot does not exist"));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness, EditError> {
+    validate_device_command_target(app, cmd)?;
+    match cmd {
+        AppCommand::DuplicateTrackPattern { track }
+        | AppCommand::HalveTrackPattern { track } => {
+            capture_step_witness(app, *track, (0..MAX_STEPS).collect(), true)
+        }
+        AppCommand::SetTimebasePlock { track, step, .. }
+        | AppCommand::SetTrackSwingPlock { track, step, .. }
+        | AppCommand::SetTrackSwingResolutionPlock { track, step, .. }
+        | AppCommand::SetEffectPlock { track, step, .. }
+        | AppCommand::SetInstrumentPlock { track, step, .. }
+        | AppCommand::SetRackSlotParamPlock { track, step, .. }
+        | AppCommand::SetRackSlotInstrumentPlock { track, step, .. } => {
+            capture_step_witness(app, *track, vec![*step], false)
+        }
+        AppCommand::SetTimebasePlockMulti { track, steps, .. }
+        | AppCommand::ClearTimebasePlockMulti { track, steps }
+        | AppCommand::SetTrackSwingPlockMulti { track, steps, .. }
+        | AppCommand::ClearTrackSwingPlockMulti { track, steps }
+        | AppCommand::SetTrackSwingResolutionPlockMulti { track, steps, .. }
+        | AppCommand::ClearTrackSwingResolutionPlockMulti { track, steps }
+        | AppCommand::SetEffectPlockMulti { track, steps, .. }
+        | AppCommand::SetInstrumentPlockMulti { track, steps, .. }
+        | AppCommand::SetInstrumentTensorPlockCellMulti { track, steps, .. }
+        | AppCommand::SetRackSlotParamPlockMulti { track, steps, .. }
+        | AppCommand::SetRackSlotInstrumentPlockMulti { track, steps, .. } => {
+            capture_step_witness(app, *track, normalized_steps(steps), false)
+        }
+
+        AppCommand::ToggleTrackGate { track }
+        | AppCommand::ToggleTrackPolyphonic { track }
+        | AppCommand::AdjustTrackMaxPolyphony { track, .. }
+        | AppCommand::SetTrackAttack { track, .. }
+        | AppCommand::AdjustTrackAttack { track, .. }
+        | AppCommand::SetTrackRelease { track, .. }
+        | AppCommand::AdjustTrackRelease { track, .. }
+        | AppCommand::SetTrackSwing { track, .. }
+        | AppCommand::AdjustTrackSwing { track, .. }
+        | AppCommand::SetTrackSwingResolution { track, .. }
+        | AppCommand::NextTrackSwingResolution { track }
+        | AppCommand::PrevTrackSwingResolution { track }
+        | AppCommand::SetTrackNumSteps { track, .. }
+        | AppCommand::AdjustTrackNumSteps { track, .. }
+        | AppCommand::SetTrackVolume { track, .. }
+        | AppCommand::AdjustTrackVolume { track, .. }
+        | AppCommand::SetTrackPan { track, .. }
+        | AppCommand::AdjustTrackPan { track, .. }
+        | AppCommand::SetTrackSend { track, .. }
+        | AppCommand::AdjustTrackSend { track, .. }
+        | AppCommand::SetTrackOutput { track, .. }
+        | AppCommand::SetTrackSends { track, .. }
+        | AppCommand::SetTrackTimebase { track, .. }
+        | AppCommand::NextTrackTimebase { track }
+        | AppCommand::PrevTrackTimebase { track }
+        | AppCommand::SetTrackFtsScale { track, .. }
+        | AppCommand::SetTrackAccumIdx { track, .. }
+        | AppCommand::SetTrackAccumLimit { track, .. }
+        | AppCommand::AdjustTrackAccumLimit { track, .. }
+        | AppCommand::SetTrackAccumMode { track, .. } => {
+            capture_track_params_witness(app, *track)
+        }
+
+        AppCommand::SetEffectParam {
+            track, slot_idx, ..
+        } => capture_effect_slot_witness(
+            app.state
+                .pattern
+                .effect_chains
+                .get(*track)
+                .and_then(|chain| chain.get(*slot_idx)),
+            "effect slot does not exist",
+        ),
+        AppCommand::SetInstrumentParam { track, .. }
+        | AppCommand::SetInstrumentKeyLock { track, .. }
+        | AppCommand::SetInstrumentKeyLockMulti { track, .. }
+        | AppCommand::ClearInstrumentKeyLock { track, .. }
+        | AppCommand::ClearInstrumentKeyLocksForNote { track, .. }
+        | AppCommand::StampInstrumentKeyLockVariant { track, .. }
+        | AppCommand::ClearInstrumentKeyLockVariantsForNotes { track, .. }
+        | AppCommand::SetInstrumentTensorCell { track, .. } => {
+            capture_instrument_slot_witness(app, *track)
+        }
+        AppCommand::SetInstrumentBaseNoteOffset { track, .. } => {
+            let value = app
+                .state
+                .pattern
+                .instrument_base_note_offsets
+                .get(*track)
+                .ok_or(EditError::TrackOutOfRange { track: *track })?
+                .load(std::sync::atomic::Ordering::Relaxed);
+            Ok(BarrierWitness::Bytes(value.to_le_bytes().to_vec()))
+        }
+
+        AppCommand::SetRackSlotGain { track, slot_idx, .. }
+        | AppCommand::SetRackSlotPan { track, slot_idx, .. }
+        | AppCommand::SetRackSlotMute { track, slot_idx, .. }
+        | AppCommand::SetRackSlotSolo { track, slot_idx, .. }
+        | AppCommand::SetRackSlotMaxPolyphony { track, slot_idx, .. }
+        | AppCommand::SetRackSlotChokeGroup { track, slot_idx, .. }
+        | AppCommand::SetRackSlotBaseNoteOffset { track, slot_idx, .. }
+        | AppCommand::SetRackSlotInstrumentParam { track, slot_idx, .. } => {
+            capture_rack_slot_witness(app, *track, *slot_idx)
+        }
+
+        AppCommand::MacroCreate { .. }
+        | AppCommand::MacroCreateScene { .. }
+        | AppCommand::MacroSceneConfig { .. }
+        | AppCommand::MacroEnsure { .. }
+        | AppCommand::MacroDelete { .. }
+        | AppCommand::MacroRename { .. }
+        | AppCommand::MacroMapParam { .. }
+        | AppCommand::MacroSetRange { .. }
+        | AppCommand::MacroSetCurve { .. }
+        | AppCommand::MacroUnmap { .. } => Ok(BarrierWitness::Macros {
+            next_id: app.macro_engine.next_id(),
+            definitions: app.macro_engine.macros().to_vec(),
+        }),
+
+        AppCommand::SetMasterVolume { .. } | AppCommand::AdjustMasterVolume { .. } => Ok(
+            BarrierWitness::Bytes(
+                app.state
+                    .transport
+                    .master_volume
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .to_le_bytes()
+                    .to_vec(),
+            ),
+        ),
+        AppCommand::SetBpm { .. } => Ok(BarrierWitness::Bytes(
+            app.state
+                .transport
+                .bpm
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .to_le_bytes()
+                .to_vec(),
+        )),
+        AppCommand::AdjustRecordQuantizeThresh { .. } => Ok(BarrierWitness::Bytes(
+            app.state
+                .transport
+                .record_quantize_thresh
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .to_le_bytes()
+                .to_vec(),
+        )),
+
+        AppCommand::ToggleStep { .. }
+        | AppCommand::SetStepActive { .. }
+        | AppCommand::SetStepParam { .. }
+        | AppCommand::AdjustStepParam { .. }
+        | AppCommand::ClearStepPayload { .. }
+        | AppCommand::ClearSteps { .. }
+        | AppCommand::RotateSteps { .. }
+        | AppCommand::PasteSteps { .. }
+        | AppCommand::ShiftStepRange { .. }
+        | AppCommand::TogglePianoNote { .. }
+        | AppCommand::MacroSetValue { .. }
+        | AppCommand::MacroRelease { .. }
+        | AppCommand::ScenePushBegin { .. }
+        | AppCommand::ScenePushSetValue { .. }
+        | AppCommand::ScenePushEnd
+        | AppCommand::TogglePlay => Err(EditError::UnsupportedCommand),
+    }
+}
+
+pub fn commit_history_barrier(app: &mut App) {
+    let cleared_entries = app.history.undo_len() + app.history.redo_len();
+    app.history.barrier();
+    if cleared_entries > 0 {
+        app.editor.status_message = Some((
+            format!(
+                "Undo history cleared by an edit not yet supported ({cleared_entries} entr{})",
+                if cleared_entries == 1 { "y" } else { "ies" }
+            ),
+            Instant::now(),
+        ));
+    }
 }
 
 enum ResolvedStepCommand<'a> {
@@ -58,6 +670,7 @@ enum ResolvedStepCommand<'a> {
         new_lo: usize,
         affected: Vec<usize>,
     },
+    TogglePianoNote { step: usize, semitone: i32 },
 }
 
 impl ResolvedStepCommand<'_> {
@@ -66,7 +679,8 @@ impl ResolvedStepCommand<'_> {
             Self::Toggle { step }
             | Self::SetActive { step, .. }
             | Self::SetParam { step, .. }
-            | Self::AdjustParam { step, .. } => std::slice::from_ref(step),
+            | Self::AdjustParam { step, .. }
+            | Self::TogglePianoNote { step, .. } => std::slice::from_ref(step),
             Self::Clear { steps } | Self::Rotate { steps, .. } => steps,
             Self::Paste { affected, .. } | Self::Shift { affected, .. } => affected,
         }
@@ -83,6 +697,7 @@ impl ResolvedStepCommand<'_> {
             Self::Rotate { .. } => "Rotate steps",
             Self::Paste { .. } => "Paste steps",
             Self::Shift { .. } => "Move steps",
+            Self::TogglePianoNote { .. } => "Toggle piano note",
         }
     }
 }
@@ -188,6 +803,17 @@ fn resolve_step_command(cmd: &AppCommand) -> Result<(usize, ResolvedStepCommand<
                 },
             )
         }
+        AppCommand::TogglePianoNote {
+            track,
+            step,
+            semitone,
+        } => (
+            *track,
+            ResolvedStepCommand::TogglePianoNote {
+                step: *step,
+                semitone: *semitone,
+            },
+        ),
         _ => return Err(EditError::UnsupportedCommand),
     };
     if let Some(step) = resolved.1.affected_steps().iter().find(|step| **step >= MAX_STEPS) {
@@ -248,6 +874,47 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
             app.state
                 .move_step_range_no_publish(track, *lo, *hi, *new_lo);
         }
+        ResolvedStepCommand::TogglePianoNote { step, semitone } => {
+            let pattern = &app.state.pattern;
+            let is_active = pattern.patterns[track].is_active(*step);
+            let chord_count = pattern.chord_data[track].count(*step);
+            if !is_active {
+                pattern.patterns[track].set_step_active(*step, true);
+                app.state.set_step_param_inner(
+                    track,
+                    *step,
+                    crate::sequencer::StepParam::Transpose,
+                    *semitone as f32,
+                );
+            } else if chord_count == 0 {
+                let current = pattern.step_data[track]
+                    .get(*step, crate::sequencer::StepParam::Transpose)
+                    .round() as i32;
+                if *semitone == current {
+                    pattern.patterns[track].set_step_active(*step, false);
+                } else {
+                    pattern.chord_data[track].add_note(*step, current as f32);
+                    pattern.chord_data[track].add_note(*step, *semitone as f32);
+                }
+            } else {
+                let added = pattern.chord_data[track].toggle_note(*step, *semitone as f32);
+                if !added {
+                    match pattern.chord_data[track].count(*step) {
+                        0 => pattern.patterns[track].set_step_active(*step, false),
+                        1 => {
+                            let remaining = pattern.chord_data[track].get(*step, 0);
+                            pattern.step_data[track].set(
+                                *step,
+                                crate::sequencer::StepParam::Transpose,
+                                remaining,
+                            );
+                            pattern.chord_data[track].clear_step(*step);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -259,6 +926,25 @@ pub fn apply_recorded_step_command(
         return Err(EditError::UnsupportedCommand);
     }
     let (track, resolved) = resolve_step_command(cmd)?;
+    let affected = resolved.affected_steps().to_vec();
+    let label = resolved.label();
+    apply_recorded_step_mutation(app, track, &affected, label, |app| {
+        execute_step_command_no_publish(app, track, &resolved);
+        Ok(())
+    })
+}
+
+pub fn apply_recorded_step_mutation(
+    app: &mut App,
+    track: usize,
+    steps: &[usize],
+    label: &'static str,
+    mutate: impl FnOnce(&mut App) -> Result<(), EditError>,
+) -> Result<EditOutcome, EditError> {
+    let affected = normalized_steps(steps);
+    if affected.is_empty() {
+        return Ok(EditOutcome::NoOp);
+    }
     let track_id = app
         .track_registry
         .id_at(track)
@@ -271,19 +957,32 @@ pub fn apply_recorded_step_command(
         track: track_id,
         pattern: pattern_id,
     };
-    let affected = resolved.affected_steps();
-    if affected.is_empty() {
-        return Ok(EditOutcome::NoOp);
-    }
     let (before, registry_before) = app
         .state
-        .capture_pattern_step_cells(track, pattern_id, affected)
+        .capture_pattern_step_cells(track, pattern_id, &affected)
         .map_err(EditError::ReplayFailed)?;
 
-    execute_step_command_no_publish(app, track, &resolved);
+    if let Err(error) = mutate(app) {
+        let rollback = affected
+            .iter()
+            .copied()
+            .zip(before.iter().cloned())
+            .collect::<Vec<_>>();
+        return match app.state.restore_pattern_step_cells_no_publish(
+            track,
+            pattern_id,
+            &rollback,
+            &registry_before,
+        ) {
+            Ok(_) => Err(error),
+            Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                "{error:?}; rollback also failed: {rollback_error}"
+            ))),
+        };
+    }
     let (after, _) = match app
         .state
-        .capture_pattern_step_cells(track, pattern_id, affected)
+        .capture_pattern_step_cells(track, pattern_id, &affected)
     {
         Ok(after) => after,
         Err(error) => {
@@ -324,7 +1023,7 @@ pub fn apply_recorded_step_command(
     app.state.reconcile_plock_variant_registry_for_track(track);
     let (_, registry_after) = match app
         .state
-        .capture_pattern_step_cells(track, pattern_id, affected)
+        .capture_pattern_step_cells(track, pattern_id, &affected)
     {
         Ok(after) => after,
         Err(error) => {
@@ -362,12 +1061,51 @@ pub fn apply_recorded_step_command(
     }
     let retained_bytes = patch.retained_bytes();
     let history_move = app.history.commit(
-        resolved.label(),
+        label,
         None,
         EditPatch::StepCells(patch),
         retained_bytes,
     );
     Ok(EditOutcome::Applied(history_move))
+}
+
+pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, EditError> {
+    match history_policy(&cmd) {
+        HistoryPolicy::Record => apply_recorded_step_command(app, &cmd),
+        HistoryPolicy::Ignore => {
+            let publish = super::command::command_mutates_sequencer_state(&cmd);
+            super::command::execute_command(app, cmd);
+            if publish {
+                app.state.publish_scheduler_snapshot();
+            }
+            Ok(EditOutcome::AppliedUnrecorded)
+        }
+        HistoryPolicy::Barrier => {
+            let before = capture_barrier_witness(app, &cmd)?;
+            let publish = super::command::command_mutates_sequencer_state(&cmd);
+            super::command::execute_command(app, cmd.clone());
+            let after = match capture_barrier_witness(app, &cmd) {
+                Ok(after) => after,
+                Err(error) => {
+                    if publish {
+                        app.state.publish_scheduler_snapshot();
+                    }
+                    commit_history_barrier(app);
+                    return Err(error);
+                }
+            };
+            if before.bit_exact_eq(&after) {
+                return Ok(EditOutcome::NoOp);
+            }
+            if publish {
+                app.state.publish_scheduler_snapshot();
+            }
+            commit_history_barrier(app);
+            Ok(EditOutcome::AppliedUnrecorded)
+        }
+        HistoryPolicy::Coalesce(_) => Err(EditError::UnsupportedCommand),
+        HistoryPolicy::Reset => Err(EditError::UnsupportedCommand),
+    }
 }
 
 fn replay_step_patch(
@@ -702,5 +1440,145 @@ mod tests {
         assert_eq!(outcome, EditOutcome::NoOp);
         assert!(app.state.pattern.patterns[0].is_active(2));
         assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 1));
+    }
+
+    #[test]
+    fn command_boundary_preserves_history_for_no_op_failure_and_performance_actions() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetStepActive {
+                    track: 0,
+                    step: 2,
+                    active: true,
+                },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert_eq!(app.history.undo_len(), 1);
+
+        let version = app.state.scheduler_snapshot_version();
+        assert_eq!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetTrackAttack { track: 0, ms: 0.0 },
+            ),
+            Ok(EditOutcome::NoOp)
+        );
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(app.state.scheduler_snapshot_version(), version);
+
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetEffectParam {
+                    track: 0,
+                    slot_idx: usize::MAX,
+                    param_idx: 0,
+                    value: 0.5,
+                },
+            ),
+            Err(EditError::InvalidTarget(_))
+        ));
+        assert_eq!(app.history.undo_len(), 1);
+
+        let version = app.state.scheduler_snapshot_version();
+        assert_eq!(
+            try_apply_command(&mut app, AppCommand::TogglePlay),
+            Ok(EditOutcome::AppliedUnrecorded)
+        );
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(app.state.scheduler_snapshot_version(), version + 1);
+
+        let version = app.state.scheduler_snapshot_version();
+        assert_eq!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetTrackAttack {
+                    track: 0,
+                    ms: 12.0,
+                },
+            ),
+            Ok(EditOutcome::AppliedUnrecorded)
+        );
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 0));
+        assert_eq!(app.state.scheduler_snapshot_version(), version + 1);
+        assert!(app
+            .editor
+            .status_message
+            .as_ref()
+            .is_some_and(|(message, _)| message.starts_with("Undo history cleared")));
+    }
+
+    #[test]
+    fn piano_note_toggle_is_one_lossless_history_entry() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let step = 5;
+
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::TogglePianoNote {
+                    track: 0,
+                    step,
+                    semitone: 4,
+                },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert!(app.state.pattern.patterns[0].is_active(step));
+        assert_eq!(
+            app.state.pattern.step_data[0]
+                .get(step, crate::sequencer::StepParam::Transpose),
+            4.0
+        );
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::TogglePianoNote {
+                    track: 0,
+                    step,
+                    semitone: 7,
+                },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert_eq!(app.state.pattern.chord_data[0].count(step), 2);
+        assert_eq!(app.history.undo_len(), 2);
+
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::TogglePianoNote {
+                    track: 0,
+                    step,
+                    semitone: 4,
+                },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert_eq!(app.state.pattern.chord_data[0].count(step), 0);
+        assert_eq!(
+            app.state.pattern.step_data[0]
+                .get(step, crate::sequencer::StepParam::Transpose),
+            7.0
+        );
+        assert_eq!(app.history.undo_len(), 3);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.chord_data[0].count(step), 2);
+        assert_eq!(app.state.pattern.chord_data[0].get(step, 0), 4.0);
+        assert_eq!(app.state.pattern.chord_data[0].get(step, 1), 7.0);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.chord_data[0].count(step), 0);
     }
 }

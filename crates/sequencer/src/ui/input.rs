@@ -80,6 +80,43 @@ fn active_buffer_accepts_global_ui_shortcuts(editor: &Editor) -> bool {
     matches!(editor.active_buffer().view_mode, ViewMode::UiOnly)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SequencerHistoryShortcut {
+    Undo,
+    Redo,
+}
+
+pub(crate) fn sequencer_history_shortcut(
+    editor: &Editor,
+    key: &crossterm::event::KeyEvent,
+) -> Option<SequencerHistoryShortcut> {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    if !matches!(key.kind, KeyEventKind::Press)
+        || !matches!(key.code, KeyCode::Char('z' | 'Z'))
+        || editor.minibuffer_prompt().is_some()
+        || editor.prompt_text().is_some()
+        || !active_buffer_accepts_global_ui_shortcuts(editor)
+        || focused_widget_captures_text_input(editor)
+    {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    let primary = KeyModifiers::SUPER;
+    #[cfg(not(target_os = "macos"))]
+    let primary = KeyModifiers::CONTROL;
+
+    if !key.modifiers.contains(primary) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+        SequencerHistoryShortcut::Redo
+    } else {
+        SequencerHistoryShortcut::Undo
+    })
+}
+
 fn global_sequencer_navigation_available(editor: &Editor) -> bool {
     editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
@@ -1510,8 +1547,8 @@ mod live_keyboard_tests {
         build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
         held_note_for_key, note_from_key, quantized_record_position,
-        ExpandedStepProjectionRegistry, ExpandedStepViewport, HeldKeyboardNote, SoftStepParamEdit,
-        PROCESS_LANE_MODE_OFFSET,
+        sequencer_history_shortcut, ExpandedStepProjectionRegistry, ExpandedStepViewport,
+        HeldKeyboardNote, SequencerHistoryShortcut, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1530,6 +1567,41 @@ mod live_keyboard_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+
+    #[test]
+    fn global_sequencer_history_shortcuts_only_capture_ui_buffers() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let primary = if cfg!(target_os = "macos") {
+            KeyModifiers::SUPER
+        } else {
+            KeyModifiers::CONTROL
+        };
+
+        assert_eq!(
+            sequencer_history_shortcut(
+                &editor,
+                &KeyEvent::new(KeyCode::Char('z'), primary),
+            ),
+            None,
+            "editable source buffers retain their own undo shortcut",
+        );
+
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        assert_eq!(
+            sequencer_history_shortcut(
+                &editor,
+                &KeyEvent::new(KeyCode::Char('z'), primary),
+            ),
+            Some(SequencerHistoryShortcut::Undo),
+        );
+        assert_eq!(
+            sequencer_history_shortcut(
+                &editor,
+                &KeyEvent::new(KeyCode::Char('Z'), primary | KeyModifiers::SHIFT),
+            ),
+            Some(SequencerHistoryShortcut::Redo),
+        );
+    }
 
     #[test]
     fn held_note_lookup_is_case_insensitive_for_release_matching() {

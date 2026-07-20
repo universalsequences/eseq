@@ -52,6 +52,7 @@ mod synth;
 pub use browser::BrowserNode;
 #[allow(unused_imports)]
 pub use command::{apply_command, AppCommand};
+pub use edit::try_apply_command;
 pub use draw::draw;
 
 const BAR_HEIGHT: usize = 8;

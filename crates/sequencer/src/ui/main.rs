@@ -1297,6 +1297,96 @@ fn map_usize(
     })
 }
 
+fn apply_toggle_step_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("step toggle payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "step toggle track was invalid".to_string())?;
+    let step =
+        map_usize(map, "step").ok_or_else(|| "step toggle index was invalid".to_string())?;
+    tui::try_apply_command(app, tui::AppCommand::ToggleStep { track, step })
+        .map(|outcome| (outcome, track, step))
+        .map_err(|error| format!("could not toggle step: {error:?}"))
+}
+
+fn apply_selected_steps_delete(
+    app: &mut tui::App,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> Result<(tui::edit::EditOutcome, Vec<usize>), String> {
+    let mut steps = selected_steps
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    steps.sort_unstable();
+    let outcome = tui::try_apply_command(
+        app,
+        tui::AppCommand::ClearSteps {
+            track,
+            steps: steps.clone(),
+        },
+    )
+    .map_err(|error| format!("could not delete selected steps: {error:?}"))?;
+    if matches!(outcome, tui::edit::EditOutcome::Applied(_)) {
+        selected_steps.lock().unwrap().clear();
+    }
+    Ok((outcome, steps))
+}
+
+fn apply_piano_roll_history_host_command(
+    app: &mut tui::App,
+    selection: &Arc<Mutex<HashSet<u64>>>,
+    move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, String, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("piano-roll edit payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "piano-roll edit track was invalid".to_string())?;
+    if track >= app.state.active_track_count() {
+        return Err(format!("piano-roll edit track {track} was out of range"));
+    }
+    let action = map
+        .get("action")
+        .map(|value| value.borrow().clone())
+        .ok_or_else(|| "piano-roll edit action was missing".to_string())?;
+    let plan = piano_roll_history_plan(&app.state, track, &action)?
+        .ok_or_else(|| "piano-roll action is not recordable at this boundary".to_string())?;
+    let mut status = None;
+    let outcome = tui::edit::apply_recorded_step_mutation(
+        app,
+        track,
+        &plan.steps,
+        plan.label,
+        |app| {
+            status = Some(
+                apply_piano_roll_action(
+                    &app.state,
+                    track,
+                    selection,
+                    move_state,
+                    &action,
+                )
+                .map_err(tui::edit::EditError::ReplayFailed)?,
+            );
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("could not apply piano-roll edit: {error:?}"))?;
+    Ok((
+        outcome,
+        status.unwrap_or_else(|| "piano-roll edit made no change".to_string()),
+        track,
+    ))
+}
+
 fn map_u32(map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<u32> {
     map_number(map, key).and_then(|value| {
         (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64).then_some(value as u32)
@@ -4137,18 +4227,215 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
-        escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
-        patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
-        resolve_instrument_swap_target_index, restore_instrument_patcher_layout_source,
-        should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
-        show_instrument_patcher_source_layout_source, track_meter_bindings_visible,
-        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
-        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
+        apply_piano_roll_history_host_command, apply_selected_steps_delete,
+        apply_toggle_step_host_command, build_custom_instrument_ui_source_with_overlay,
+        effect_patcher_buffer_source, escape_lisp_string, instrument_patcher_buffer_source,
+        key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
+        reconciled_track_index,
+        resolve_instrument_swap_target_index,
+        restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
+        show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
+        track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        FxDeleteChain, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
+        NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
     use std::path::Path;
+
+    fn history_test_app() -> (
+        std::sync::Arc<sequencer::sequencer::SequencerState>,
+        sequencer::tui::App,
+    ) {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = sequencer::tui::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::tui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        (state, app)
+    }
+
+    fn history_value_map(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+        Value::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        key.to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(value)),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn metal_step_toggle_host_command_creates_replayable_history() {
+        let (state, mut app) = history_test_app();
+        let payload = Value::Map(
+            [
+                ("track", Value::Number(0.0)),
+                ("step", Value::Number(6.0)),
+            ]
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key.to_string(),
+                    std::rc::Rc::new(std::cell::RefCell::new(value)),
+                )
+            })
+            .collect(),
+        );
+
+        let (outcome, track, step) =
+            apply_toggle_step_host_command(&mut app, &payload).expect("toggle through host seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!((track, step), (0, 6));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(6));
+    }
+
+    #[test]
+    fn metal_selected_step_delete_is_one_replayable_history_entry() {
+        let (state, mut app) = history_test_app();
+        for step in [2, 5] {
+            state.pattern.patterns[0].set_step_active(step, true);
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Velocity,
+                step as f32 / 10.0,
+            );
+        }
+        let selected = std::sync::Arc::new(std::sync::Mutex::new(
+            [2_usize, 5].into_iter().collect::<std::collections::HashSet<_>>(),
+        ));
+
+        let (outcome, steps) =
+            apply_selected_steps_delete(&mut app, 0, &selected).expect("delete selected steps");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(steps, vec![2, 5]);
+        assert!(selected.lock().unwrap().is_empty());
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.step_data[0].get(
+            5,
+            sequencer::sequencer::StepParam::Velocity,
+        ), 0.5);
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+    }
+
+    #[test]
+    fn metal_piano_roll_create_and_delete_are_individually_replayable() {
+        let (state, mut app) = history_test_app();
+        let selection = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        ));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let create_action = history_value_map([
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(2.0)),
+            ("end", Value::Number(3.0)),
+            ("lane", Value::Number(48.0)),
+        ]);
+        let create_payload = history_value_map([
+            ("track", Value::Number(0.0)),
+            ("action", create_action),
+        ]);
+
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &create_payload,
+        )
+        .expect("create piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert_eq!(app.history.undo_len(), 1);
+
+        let delete_action = history_value_map([
+            ("type", Value::Keyword("delete-items".to_string())),
+            (
+                "ids",
+                Value::List(vec![std::rc::Rc::new(std::cell::RefCell::new(
+                    Value::Number(super::piano_roll_item_id(2, 0) as f64),
+                ))]),
+            ),
+        ]);
+        let delete_payload = history_value_map([
+            ("track", Value::Number(0.0)),
+            ("action", delete_action),
+        ]);
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &delete_payload,
+        )
+        .expect("delete piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert_eq!(app.history.undo_len(), 2);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+    }
 
     #[test]
     fn active_delete_target_buffer_switch_preserves_target_claimed_in_new_buffer() {
@@ -7075,6 +7362,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    if let Some(shortcut) = sequencer_history_shortcut(&editor, &raw_key) {
+                        let replay = match shortcut {
+                            SequencerHistoryShortcut::Undo => tui::edit::undo(&mut app),
+                            SequencerHistoryShortcut::Redo => tui::edit::redo(&mut app),
+                        };
+                        let message = match replay {
+                            tui::history::HistoryReplay::Applied(result) => {
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::AllTracks,
+                                ));
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                match shortcut {
+                                    SequencerHistoryShortcut::Undo => {
+                                        format!("Undid {}", result.label)
+                                    }
+                                    SequencerHistoryShortcut::Redo => {
+                                        format!("Redid {}", result.label)
+                                    }
+                                }
+                            }
+                            tui::history::HistoryReplay::Unavailable => match shortcut {
+                                SequencerHistoryShortcut::Undo => "Nothing to undo".to_string(),
+                                SequencerHistoryShortcut::Redo => "Nothing to redo".to_string(),
+                            },
+                            tui::history::HistoryReplay::Failed(error) => match shortcut {
+                                SequencerHistoryShortcut::Undo => {
+                                    format!("Could not undo: {error:?}")
+                                }
+                                SequencerHistoryShortcut::Redo => {
+                                    format!("Could not redo: {error:?}")
+                                }
+                            },
+                        };
+                        editor.show_transient_message(message);
+                        editor.mark_needs_redraw();
+                        ui_loop_stats.note_event(event_started.elapsed());
+                        continue;
+                    }
                     if handle_metal_command_shortcut_with_ui_epoch(
                         &mut editor,
                         &raw_key,
@@ -7170,6 +7496,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let intercepted = recording_key_outcome.consumed();
                     if recording_key_outcome.recorded() {
+                        let cleared_history = app.history.undo_len() + app.history.redo_len();
+                        tui::edit::commit_history_barrier(&mut app);
+                        if cleared_history > 0 {
+                            editor.show_transient_message(
+                                "Undo history cleared: recorded takes are not undoable yet",
+                            );
+                        }
                         let ct = current_track.load(Ordering::Relaxed);
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
@@ -7322,6 +7655,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     MacroHostCommandOutcome::NotMacro => {}
                 }
                 match name.as_str() {
+                    "history-barrier" => {
+                        let reason = match payload {
+                            Value::String(reason) => reason,
+                            _ => "edit not yet supported by undo".to_string(),
+                        };
+                        let cleared = app.history.undo_len() + app.history.redo_len();
+                        tui::edit::commit_history_barrier(&mut app);
+                        if cleared > 0 {
+                            editor.show_transient_message(format!(
+                                "Undo history cleared: {reason}"
+                            ));
+                        }
+                    }
+                    "piano-roll-history-action" => {
+                        match apply_piano_roll_history_host_command(
+                            &mut app,
+                            &piano_roll_selection,
+                            &piano_roll_move_state,
+                            &payload,
+                        ) {
+                            Ok((outcome, status, track)) => {
+                                if matches!(outcome, tui::edit::EditOutcome::Applied(_)) {
+                                    *auto_follow_override_until.lock().unwrap() =
+                                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                    ui_invalidations.push(UiInvalidation::PianoRoll {
+                                        track,
+                                        change: PianoRollInvalidation::Items,
+                                    });
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                                editor.show_transient_message(status);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "delete-selected-steps" => {
+                        let track = match &payload {
+                            Value::Map(map) => map_usize(map, "track"),
+                            _ => None,
+                        };
+                        let Some(track) = track else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "Selected-step delete target was invalid".to_string(),
+                            ));
+                            continue;
+                        };
+                        match apply_selected_steps_delete(
+                            &mut app,
+                            track,
+                            &selected_steps,
+                        ) {
+                            Ok((tui::edit::EditOutcome::Applied(_), steps)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_invalidations.push(UiInvalidation::StepSelection {
+                                    track,
+                                    changed_steps: steps,
+                                });
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(_) => {}
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "toggle-step" => {
+                        match apply_toggle_step_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(_), track, step)) => {
+                                let mut selection = selected_steps.lock().unwrap();
+                                if !selection.is_empty() {
+                                    selection.clear();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                                drop(selection);
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                for change in [
+                                    StepInvalidation::Active,
+                                    StepInvalidation::Payload,
+                                    StepInvalidation::PlockPresence,
+                                ] {
+                                    ui_invalidations.push(UiInvalidation::Step {
+                                        track,
+                                        step,
+                                        change,
+                                    });
+                                }
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(_) => {}
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
                     "set-scene-launch-quantize" => {
                         let Value::String(label) = payload else {
                             editor.handle_host_event(HostEvent::Error(

@@ -408,6 +408,45 @@ pub(crate) fn piano_roll_action_mutates_pattern(action: &Value) -> bool {
     )
 }
 
+pub(crate) struct PianoRollHistoryPlan {
+    pub(crate) label: &'static str,
+    pub(crate) steps: Vec<usize>,
+}
+
+pub(crate) fn piano_roll_history_plan(
+    state: &Arc<SequencerState>,
+    track: usize,
+    action: &Value,
+) -> Result<Option<PianoRollHistoryPlan>, String> {
+    let map = cloned_map(action)?;
+    let Some(action_type) = value_as_keyword_or_string(map.get("type")) else {
+        return Err("piano roll action missing :type".to_string());
+    };
+    let (label, mut steps) = match action_type.as_str() {
+        "finish-create-item" => {
+            let num_steps = state.pattern.track_params[track]
+                .get_num_steps()
+                .min(MAX_STEPS)
+                .max(1);
+            let start = value_as_number(map.get("start")).unwrap_or(0.0);
+            let (step, _) = piano_roll_time_to_step_delay(start, num_steps);
+            ("Create piano-roll note", vec![step])
+        }
+        "delete-items" => (
+            "Delete piano-roll notes",
+            parse_piano_roll_ids(map.get("ids"))
+                .into_iter()
+                .filter_map(piano_roll_item_parts)
+                .map(|(step, _)| step)
+                .collect(),
+        ),
+        _ => return Ok(None),
+    };
+    steps.sort_unstable();
+    steps.dedup();
+    Ok(Some(PianoRollHistoryPlan { label, steps }))
+}
+
 fn copy_piano_roll_items(
     state: &Arc<SequencerState>,
     track: usize,

@@ -13,12 +13,36 @@ use super::browser::BrowserNode;
 use super::cirklon::track_list_row_layout;
 use super::command::{apply_command, AppCommand};
 use super::draw::rect_contains;
+use super::edit::{redo, undo};
+use super::history::HistoryReplay;
 use super::{
     App, BrowserState, CompileTarget, EffectPaneEntry, EffectTab, InputMode, ParamMouseDrag,
     ParamMouseDragTarget, PendingEditor, Region, SidebarMode, SidebarTab, BAR_HEIGHT, COL_WIDTH,
 };
 
 // ── App impl: input handling ──
+
+fn primary_undo_modifier(modifiers: KeyModifiers) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        modifiers.contains(KeyModifiers::SUPER)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        modifiers.contains(KeyModifiers::CONTROL)
+    }
+}
+
+fn sequencer_history_shortcut(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    text_input_active: bool,
+) -> Option<bool> {
+    (!text_input_active
+        && matches!(code, KeyCode::Char('z' | 'Z'))
+        && primary_undo_modifier(modifiers))
+    .then(|| modifiers.contains(KeyModifiers::SHIFT))
+}
 
 impl App {
     pub fn handle_input(&mut self) -> std::io::Result<()> {
@@ -190,8 +214,17 @@ impl App {
     }
 
     fn handle_normal(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        if self.sidebar_text_input_active()
-            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        let text_input_active = self.sidebar_text_input_active();
+        if text_input_active
+            && matches!(code, KeyCode::Char('z' | 'Z'))
+            && primary_undo_modifier(modifiers)
+        {
+            return;
+        }
+        if text_input_active
+            && !modifiers.intersects(
+                KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+            )
         {
             match code {
                 KeyCode::Char(_)
@@ -210,6 +243,22 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        if let Some(is_redo) = sequencer_history_shortcut(code, modifiers, text_input_active) {
+            let replay = if is_redo { redo(self) } else { undo(self) };
+            let message = match replay {
+                HistoryReplay::Applied(result) if is_redo => format!("Redid {}", result.label),
+                HistoryReplay::Applied(result) => format!("Undid {}", result.label),
+                HistoryReplay::Unavailable if is_redo => "Nothing to redo".to_string(),
+                HistoryReplay::Unavailable => "Nothing to undo".to_string(),
+                HistoryReplay::Failed(error) if is_redo => {
+                    format!("Could not redo: {error:?}")
+                }
+                HistoryReplay::Failed(error) => format!("Could not undo: {error:?}"),
+            };
+            self.editor.status_message = Some((message, Instant::now()));
+            return;
         }
 
         // Global keys first
@@ -841,6 +890,7 @@ impl App {
                                 &self.tracks,
                                 &self.graph.track_instrument_types,
                             );
+                            super::edit::commit_history_barrier(self);
                             self.graph_controller().sync_current_pattern_mod_routes();
                             // Show the page containing the new pattern
                             self.ui.pattern_page = new_idx / 10;
@@ -855,6 +905,7 @@ impl App {
                                 &self.tracks,
                                 &self.graph.track_instrument_types,
                             ) {
+                                super::edit::commit_history_barrier(self);
                                 self.handle_scene_deleted(deleted_scene);
                                 self.graph_controller().apply_sample_ids(&sample_ids);
                                 if let Err(error) = self
@@ -1204,93 +1255,16 @@ impl App {
     }
 
     fn handle_piano_note_click(&mut self, semitone: i32) {
-        use crate::sequencer::StepParam;
         let track = self.ui.cursor_track;
         let step = self.ui.cursor_step;
-        let is_active = self.state.pattern.patterns[track].is_active(step);
-        let chord_count = self.state.pattern.chord_data[track].count(step);
-
-        if !is_active {
-            // Activate the step and set this semitone as the Transpose value
-            apply_command(
-                self,
-                AppCommand::SetStepActive {
-                    track,
-                    step,
-                    active: true,
-                },
-            );
-            apply_command(
-                self,
-                AppCommand::SetStepParam {
-                    track,
-                    step,
-                    param: StepParam::Transpose,
-                    value: semitone as f32,
-                },
-            );
-            return;
-        }
-
-        if chord_count == 0 {
-            // Single-note step using Transpose
-            let current = self.state.pattern.step_data[track]
-                .get(step, StepParam::Transpose)
-                .round() as i32;
-            if semitone == current {
-                // Clicking the same note deactivates the step
-                apply_command(
-                    self,
-                    AppCommand::SetStepActive {
-                        track,
-                        step,
-                        active: false,
-                    },
-                );
-            } else {
-                // Add a second note: migrate Transpose into chord_data, then add new note
-                // These chord mutations go directly through state (ChordData has no AppCommand yet)
-                self.state.pattern.chord_data[track].add_note(step, current as f32);
-                self.state.pattern.chord_data[track].add_note(step, semitone as f32);
-                self.state.publish_scheduler_snapshot();
-            }
-        } else {
-            // Step has chord data — toggle the clicked semitone
-            let added = self.state.pattern.chord_data[track].toggle_note(step, semitone as f32);
-            let new_count = self.state.pattern.chord_data[track].count(step);
-            if !added {
-                if new_count == 0 {
-                    // Removed last note: deactivate step
-                    apply_command(
-                        self,
-                        AppCommand::SetStepActive {
-                            track,
-                            step,
-                            active: false,
-                        },
-                    );
-                    return;
-                } else if new_count == 1 {
-                    // One note left: migrate back to Transpose, clear chord
-                    let remaining = self.state.pattern.chord_data[track].get(step, 0);
-                    apply_command(
-                        self,
-                        AppCommand::SetStepParam {
-                            track,
-                            step,
-                            param: StepParam::Transpose,
-                            value: remaining,
-                        },
-                    );
-                    self.state.pattern.chord_data[track].clear_step(step);
-                    self.state.publish_scheduler_snapshot();
-                    return;
-                }
-            }
-            self.state.publish_scheduler_snapshot();
-        }
-
-        self.state.publish_scheduler_snapshot();
+        apply_command(
+            self,
+            AppCommand::TogglePianoNote {
+                track,
+                step,
+                semitone,
+            },
+        );
     }
 
     fn handle_mouse_scroll(&mut self, col: u16, row: u16, delta: isize) {
@@ -1653,7 +1627,6 @@ impl App {
                         }
                         _ => {}
                     }
-                    self.state.publish_scheduler_snapshot();
                 } else if self.ui.effect_tab == EffectTab::Reverb {
                     self.set_reverb_param(self.ui.reverb_param_cursor, val);
                 } else if self.ui.effect_tab == EffectTab::Mod {
@@ -1702,15 +1675,17 @@ impl App {
                         };
                         let param_desc = &desc.params[param_idx];
                         let store_val = param_desc.clamp(param_desc.user_input_to_stored(val));
-                        let slot = &self.state.pattern.instrument_slots[track];
-
                         if self.has_selection() {
-                            for step in self.selected_steps() {
-                                slot.set_plock(step, param_idx, store_val);
-                            }
-                            self.state.publish_scheduler_snapshot();
+                            apply_command(
+                                self,
+                                AppCommand::SetInstrumentPlockMulti {
+                                    track,
+                                    steps: self.selected_steps(),
+                                    param_idx,
+                                    value: store_val,
+                                },
+                            );
                         } else {
-                            // publish is called inside set_instrument_param_or_plock
                             self.set_instrument_param_or_plock(track, param_idx, store_val);
                         }
                     }
@@ -1737,11 +1712,9 @@ impl App {
                     let param_desc = &desc.params[param_idx];
                     let store_val = param_desc.clamp(param_desc.user_input_to_stored(val));
 
-                    let chain = &self.state.pattern.effect_chains[track];
-                    if slot_idx >= chain.len() {
+                    if slot_idx >= self.state.pattern.effect_chains[track].len() {
                         return;
                     }
-                    let slot = &chain[slot_idx];
 
                     if matches!(
                         param_desc.host_control,
@@ -1751,16 +1724,37 @@ impl App {
                         self.apply_effect_sidechain_selection(
                             track, slot_idx, param_idx, selection,
                         );
-                        slot.defaults.set(param_idx, selection as f32);
+                        apply_command(
+                            self,
+                            AppCommand::SetEffectParam {
+                                track,
+                                slot_idx,
+                                param_idx,
+                                value: selection as f32,
+                            },
+                        );
                     } else if self.has_selection() {
-                        for step in self.selected_steps() {
-                            slot.set_plock(step, param_idx, store_val);
-                        }
+                        apply_command(
+                            self,
+                            AppCommand::SetEffectPlockMulti {
+                                track,
+                                steps: self.selected_steps(),
+                                slot_idx,
+                                param_idx,
+                                value: store_val,
+                            },
+                        );
                     } else {
-                        slot.defaults.set(param_idx, store_val);
-                        self.send_slot_param(track, slot_idx, param_idx, store_val);
+                        apply_command(
+                            self,
+                            AppCommand::SetEffectParam {
+                                track,
+                                slot_idx,
+                                param_idx,
+                                value: store_val,
+                            },
+                        );
                     }
-                    self.state.publish_scheduler_snapshot();
                 }
             }
         }
@@ -1838,6 +1832,7 @@ impl App {
                     &self.tracks,
                     &self.graph.track_instrument_types,
                 ) {
+                    super::edit::commit_history_barrier(self);
                     self.graph_controller().apply_sample_ids(&sample_ids);
                     self.graph_controller().sync_current_pattern_mod_routes();
                     self.push_all_restored_defaults();
@@ -1857,6 +1852,7 @@ impl App {
                         &self.tracks,
                         &self.graph.track_instrument_types,
                     );
+                    super::edit::commit_history_barrier(self);
                     self.graph_controller().sync_current_pattern_mod_routes();
                 } else if let Ok(n) = self.ui.value_buffer.parse::<usize>() {
                     if n >= 1 {
@@ -2308,12 +2304,14 @@ impl App {
         let hold_secs = press_time.elapsed().as_secs_f64();
         let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0);
 
+        let mut changed = false;
         for (track, armed) in self.graph.record_armed.iter().enumerate() {
             if !*armed {
                 continue;
             }
             let num_steps = self.state.pattern.track_params[track].get_num_steps();
             let local_step = step_at_press % num_steps;
+            let before = self.state.capture_step_snapshot(track, local_step);
             // Enable step trigger
             if !self.state.pattern.patterns[track].is_active(local_step) {
                 self.state.pattern.patterns[track].toggle_step(local_step);
@@ -2330,9 +2328,14 @@ impl App {
                 StepParam::Duration,
                 duration_steps as f32,
             );
+            let after = self.state.capture_step_snapshot(track, local_step);
+            changed |= !super::history::step_snapshot_bit_exact_eq(&before, &after);
         }
 
-        self.state.publish_scheduler_snapshot();
+        if changed {
+            self.state.publish_scheduler_snapshot();
+            super::edit::commit_history_barrier(self);
+        }
     }
 
     pub(super) fn release_held_notes_for_tracks(&mut self, tracks: &[usize]) {
@@ -2357,5 +2360,47 @@ impl App {
             }
         }
         self.ui.held_notes = retained;
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn primary_modifier() -> KeyModifiers {
+        #[cfg(target_os = "macos")]
+        {
+            KeyModifiers::SUPER
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            KeyModifiers::CONTROL
+        }
+    }
+
+    #[test]
+    fn sequencer_history_shortcuts_prioritize_redo_and_respect_text_focus() {
+        let primary = primary_modifier();
+        assert_eq!(
+            sequencer_history_shortcut(KeyCode::Char('z'), primary, false),
+            Some(false)
+        );
+        assert_eq!(
+            sequencer_history_shortcut(
+                KeyCode::Char('Z'),
+                primary | KeyModifiers::SHIFT,
+                false,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            sequencer_history_shortcut(KeyCode::Char('z'), primary, true),
+            None
+        );
+        assert_eq!(
+            sequencer_history_shortcut(KeyCode::Char('z'), KeyModifiers::NONE, false),
+            None
+        );
     }
 }

@@ -1934,11 +1934,7 @@ pub(crate) fn init_runtime(
     // seq-toggle-step — toggle step on current track
     let st = state.clone();
     let ct = current_track.clone();
-    let sel = selected_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let fx_ep = fx_epoch.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-toggle-step", move |args, _ctx| {
+    runtime.register_native("seq-toggle-step", move |args, ctx| {
         let Some(Value::Number(step)) = args.first() else {
             return Err("seq-toggle-step: expected step number".into());
         };
@@ -1947,40 +1943,26 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-toggle-step: step {step} out of range").into());
         }
         let track = ct.load(Ordering::Relaxed);
-        st.toggle_step_and_clear_plocks(track, step);
-        {
-            let mut set = sel.lock().unwrap();
-            if !set.is_empty() {
-                set.clear();
-                fx_ep.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::Active,
+        let next_active = !st.pattern.patterns[track].is_active(step);
+        let mut payload = HashMap::new();
+        payload.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(track as f64))),
+        );
+        payload.insert(
+            "step".to_string(),
+            Rc::new(RefCell::new(Value::Number(step as f64))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "toggle-step".to_string(),
+            payload: Value::Map(payload),
         });
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::Payload,
-        });
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::PlockPresence,
-        });
-        Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
+        Ok(Value::Bool(next_active))
     });
 
     // seq-toggle-track-step — toggle a step on a specific track (no track switch)
     let st = state.clone();
-    let sel = selected_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let fx_ep = fx_epoch.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-toggle-track-step", move |args, _ctx| {
+    runtime.register_native("seq-toggle-track-step", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(step))) = (args.first(), args.get(1))
         else {
             return Err("seq-toggle-track-step: expected (track step)".into());
@@ -1993,31 +1975,21 @@ pub(crate) fn init_runtime(
         if step >= MAX_STEPS {
             return Err(format!("seq-toggle-track-step: step {step} out of range").into());
         }
-        st.toggle_step_and_clear_plocks(track, step);
-        {
-            let mut set = sel.lock().unwrap();
-            if !set.is_empty() {
-                set.clear();
-                fx_ep.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::Active,
+        let next_active = !st.pattern.patterns[track].is_active(step);
+        let mut payload = HashMap::new();
+        payload.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(track as f64))),
+        );
+        payload.insert(
+            "step".to_string(),
+            Rc::new(RefCell::new(Value::Number(step as f64))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "toggle-step".to_string(),
+            payload: Value::Map(payload),
         });
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::Payload,
-        });
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::PlockPresence,
-        });
-        Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
+        Ok(Value::Bool(next_active))
     });
 
     // seq-toggle-drum-lane-step — toggle one occupied pad lane at a track step
@@ -2506,6 +2478,24 @@ pub(crate) fn init_runtime(
             return Err("seq-piano-roll-action: expected action map".into());
         };
         let track = ct.load(Ordering::Relaxed);
+        if piano_roll_history_plan(&st, track, action)?.is_some() {
+            let mut payload = HashMap::new();
+            payload.insert(
+                "track".to_string(),
+                Rc::new(RefCell::new(Value::Number(track as f64))),
+            );
+            payload.insert(
+                "action".to_string(),
+                Rc::new(RefCell::new(action.clone())),
+            );
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "piano-roll-history-action".to_string(),
+                payload: Value::Map(payload),
+            });
+            let status = "piano roll edit queued".to_string();
+            ctx.set_status(status.clone());
+            return Ok(Value::String(status));
+        }
         let status = apply_piano_roll_action_with_clipboard(
             &st,
             track,
@@ -2517,6 +2507,10 @@ pub(crate) fn init_runtime(
         let mutates_pattern = piano_roll_action_mutates_pattern(action);
         if mutates_pattern {
             st.publish_scheduler_snapshot();
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "history-barrier".to_string(),
+                payload: Value::String("piano-roll edit not yet supported by undo".to_string()),
+            });
             *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         }
         ui_inv.push(UiInvalidation::PianoRoll {
@@ -3634,7 +3628,7 @@ pub(crate) fn init_runtime(
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
     let drum_selection_bindings = runtime.reactive_binding_store();
-    runtime.register_native("seq-delete-selected-steps", move |_args, _ctx| {
+    runtime.register_native("seq-delete-selected-steps", move |_args, ctx| {
         let drum_steps = {
             let mut selected = drum_sel.lock().unwrap();
             if selected.is_empty() {
@@ -3655,6 +3649,10 @@ pub(crate) fn init_runtime(
         };
         if let Some((track, pad_note, steps)) = drum_steps {
             let cleared = st.clear_drum_lane_steps(track, pad_note, &steps);
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "history-barrier".to_string(),
+                payload: Value::String("drum-lane step deletion".to_string()),
+            });
             *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
             ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
                 track,
@@ -3663,23 +3661,19 @@ pub(crate) fn init_runtime(
         }
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
-            let mut set = sel.lock().unwrap();
+            let set = sel.lock().unwrap();
             let mut steps: Vec<usize> = set.iter().copied().collect();
             steps.sort_unstable();
-            set.clear();
             steps
         };
-        for step in &steps {
-            st.clear_step_payload(track, *step);
-        }
-        st.publish_scheduler_snapshot();
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
-            track,
-        }));
-        ui_inv.push(UiInvalidation::StepSelection {
-            track,
-            changed_steps: steps.clone(),
+        let mut payload = HashMap::new();
+        payload.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(track as f64))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "delete-selected-steps".to_string(),
+            payload: Value::Map(payload),
         });
         Ok(Value::Number(steps.len() as f64))
     });

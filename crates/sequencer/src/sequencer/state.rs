@@ -4152,6 +4152,23 @@ impl SequencerState {
             .effective_pattern_id(track)
     }
 
+    pub(crate) fn live_track_params_snapshot(&self, track: usize) -> Option<TrackParamsSnapshot> {
+        self.pattern
+            .track_params
+            .get(track)
+            .map(capture_track_params_snapshot)
+    }
+
+    pub(crate) fn live_rack_track_snapshot(&self, track: usize) -> Option<RackTrackSnapshot> {
+        self.pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .flatten()
+    }
+
     pub fn scene_count(&self) -> usize {
         self.pattern.scenes.lock().unwrap().scene_count()
     }
@@ -7506,11 +7523,21 @@ impl SequencerState {
     }
 
     pub fn toggle_play(&self) -> bool {
+        let playing = self.toggle_play_no_publish();
+        self.publish_scheduler_snapshot();
+        playing
+    }
+
+    pub(crate) fn toggle_play_no_publish(&self) -> bool {
         if self.is_playing() {
-            self.stop_playback();
+            self.transport.playing.store(false, Ordering::Relaxed);
+            self.reset_playheads();
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             false
         } else {
-            self.start_playback();
+            self.reset_playheads();
+            self.transport.playing.store(true, Ordering::Relaxed);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             true
         }
     }
@@ -9291,7 +9318,7 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
     }
 
-    pub fn duplicate_track_pattern(&self, track: usize) -> usize {
+    pub(crate) fn duplicate_track_pattern_no_publish(&self, track: usize) -> usize {
         let num_steps = self.pattern.track_params[track].get_num_steps();
         let new_len = (num_steps * 2).min(MAX_STEPS);
         if new_len == num_steps {
@@ -9351,17 +9378,27 @@ impl SequencerState {
         }
 
         self.pattern.track_params[track].set_num_steps(new_len);
+        new_len
+    }
+
+    pub fn duplicate_track_pattern(&self, track: usize) -> usize {
+        let new_len = self.duplicate_track_pattern_no_publish(track);
         self.publish_scheduler_snapshot();
         new_len
     }
 
-    pub fn halve_track_pattern(&self, track: usize) -> usize {
+    pub(crate) fn halve_track_pattern_no_publish(&self, track: usize) -> usize {
         let num_steps = self.pattern.track_params[track].get_num_steps();
         let new_len = (num_steps / 2).max(1);
         if new_len == num_steps {
             return num_steps;
         }
         self.pattern.track_params[track].set_num_steps(new_len);
+        new_len
+    }
+
+    pub fn halve_track_pattern(&self, track: usize) -> usize {
+        let new_len = self.halve_track_pattern_no_publish(track);
         self.publish_scheduler_snapshot();
         new_len
     }

@@ -1149,6 +1149,7 @@ impl App {
         self.ui.track_selection_anchor = None;
         self.ui.visual_steps.clear();
 
+        self.history.reset();
         self.editor.status_message = Some(("New project".to_string(), Instant::now()));
     }
 
@@ -1432,6 +1433,7 @@ impl App {
     pub(super) fn save_project_named(&mut self, project_name: &str) -> Result<(), String> {
         let project = self.capture_project(project_name)?;
         project::save_project(project_name, &project).map_err(|error| error.to_string())?;
+        self.history.mark_saved();
         Ok(())
     }
 
@@ -2935,6 +2937,8 @@ impl App {
             status
         };
         eprintln!("project-load: finish complete status={status}");
+        self.history.reset();
+        self.history.mark_saved();
         self.editor.status_message = Some((status, Instant::now()));
         self.editor.pending_project_load = None;
         Ok(())
