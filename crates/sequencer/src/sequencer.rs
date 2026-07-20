@@ -28,9 +28,10 @@ pub use snapshot::{
 #[allow(unused_imports)]
 pub use state::{
     default_empty_effect_chain, default_rack_macros, BusGateSequence, BusPatternSnapshot,
-    InstrumentSlotResetSummary, PatternId, PatternSnapshot, PublishedSequencer, RackMacro,
-    RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotParam,
-    RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, RecordPosition, SequencerState,
-    StepSlotPlocks, StepSnapshot, TrackOutputEvent, TrackPatternCellView, TrackPatternData,
+    EffectInstanceId, InstrumentSlotResetSummary, MidiFxInstanceId, PatternId, PatternSnapshot,
+    PublishedSequencer, RackMacro, RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget,
+    RackSlotId, RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot,
+    RecordPosition, SequencerState, StepSlotPlocks, StepSnapshot, TrackId, TrackOutputEvent,
+    TrackPatternCellView, TrackPatternData, TrackPatternId, TrackRegistry, TrackRegistryError,
     RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
 };

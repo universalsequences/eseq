@@ -34,6 +34,7 @@ use crate::track_color::TrackColor;
 mod browser;
 mod cirklon;
 pub mod command;
+pub mod history;
 mod draw;
 mod effect_params;
 mod effects;
