@@ -4172,6 +4172,8 @@ mod tests {
         app.tracks = (0..track_count)
             .map(|idx| format!("Track {}", idx + 1))
             .collect();
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(track_count).unwrap();
         app
     }
 
@@ -4534,6 +4536,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.effect_descriptors = vec![vec![desc]];
 
         app.push_all_delay_bpm();
@@ -4594,6 +4597,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_node_ids = vec![crate::tui::TrackNodeIds {
             sampler_ids: Vec::new(),
             sampler_gatepitch_ids: Vec::new(),
@@ -4668,6 +4672,7 @@ mod tests {
         let graph = TestLiveGraph::new("track-fx-chain-host-lifecycle-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 1);
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         let pan_id = graph.add_gain(1.0, "track_fx_pan");
         let delay_name = CString::new("track_fx_delay").unwrap();
         let delay_id = unsafe {

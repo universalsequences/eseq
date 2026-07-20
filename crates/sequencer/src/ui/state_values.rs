@@ -19781,6 +19781,10 @@ mod tests {
         app.tracks = (0..state.active_track_count())
             .map(|track| format!("Track {}", track + 1))
             .collect();
+        app.track_registry = sequencer::sequencer::TrackRegistry::for_legacy_track_count(
+            state.active_track_count(),
+        )
+        .unwrap();
         app
     }
 
@@ -20725,6 +20729,8 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.instrument_descriptors = vec![desc];
         app
     }
@@ -21983,6 +21989,8 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Instrument Rack".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Rack];
         app.graph.instrument_descriptors =
             vec![sequencer::effects::EffectDescriptor::empty_custom_slot()];
@@ -22057,6 +22065,8 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Drum Rack".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Rack];
         app.graph.instrument_descriptors =
             vec![sequencer::effects::EffectDescriptor::empty_custom_slot()];

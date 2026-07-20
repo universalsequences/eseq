@@ -134,6 +134,10 @@ impl TrackRegistry {
         self.index_by_id.get(&id).copied()
     }
 
+    pub fn can_allocate(&self) -> bool {
+        self.next_id != 0
+    }
+
     pub fn allocate_at(&mut self, index: usize) -> Result<TrackId, TrackRegistryError> {
         if index > self.order.len() {
             return Err(TrackRegistryError::IndexOutOfRange {
@@ -157,6 +161,35 @@ impl TrackRegistry {
         self.order.remove(index);
         self.reindex_from(index);
         Some(index)
+    }
+
+    pub fn replace_at(
+        &mut self,
+        index: usize,
+        replacement: TrackId,
+    ) -> Result<TrackId, TrackRegistryError> {
+        if replacement.0 == 0 {
+            return Err(TrackRegistryError::InvalidId(replacement));
+        }
+        let Some(current) = self.order.get(index).copied() else {
+            return Err(TrackRegistryError::IndexOutOfRange {
+                index,
+                len: self.order.len(),
+            });
+        };
+        if current == replacement {
+            return Ok(current);
+        }
+        if self.index_by_id.contains_key(&replacement) {
+            return Err(TrackRegistryError::DuplicateId(replacement));
+        }
+        self.order[index] = replacement;
+        self.index_by_id.remove(&current);
+        self.index_by_id.insert(replacement, index);
+        if replacement.0 >= self.next_id && self.next_id != 0 {
+            self.next_id = replacement.0.checked_add(1).unwrap_or(0);
+        }
+        Ok(current)
     }
 
     pub fn move_to(&mut self, id: TrackId, target: usize) -> Result<(), TrackRegistryError> {

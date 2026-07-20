@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use sequencer::effects::EffectDescriptor;
 use sequencer::lisp_host;
-use sequencer::project::{ProjectEffectSlot, ProjectFile, ProjectTrack};
+use sequencer::project::{ProjectEffectSlot, ProjectFile, ProjectTrackKind};
 use sequencer::sequencer::MAX_STEPS;
 
 fn usage() {
@@ -245,10 +245,10 @@ fn migrate_project(mut project: ProjectFile) -> Result<ProjectFile, String> {
         .tracks
         .iter()
         .enumerate()
-        .filter_map(|(track_idx, track)| match track {
-            ProjectTrack::Custom {
-                instrument_name, ..
-            } => Some((track_idx, instrument_name.clone())),
+        .filter_map(|(track_idx, track)| match &track.kind {
+            ProjectTrackKind::Custom { instrument_name } => {
+                Some((track_idx, instrument_name.clone()))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();

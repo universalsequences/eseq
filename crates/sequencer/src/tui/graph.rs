@@ -1565,7 +1565,7 @@ impl GraphController<'_> {
                 gatepitch_ids: voices.gatepitch_ids,
                 modulator_ids: voices.modulator_ids,
             },
-        });
+        })?;
         let sample_path = wav_path.to_path_buf();
         let sample_name = self.app.tracks[idx].clone();
         self.app.sampler_paths.push(Some(sample_path.clone()));
@@ -1611,7 +1611,7 @@ impl GraphController<'_> {
                 gatepitch_ids: voices.gatepitch_ids,
                 modulator_ids: voices.modulator_ids,
             },
-        });
+        })?;
         self.app.sampler_paths.push(None);
         self.debug_assert_track_vectors_aligned();
         Ok(idx)
@@ -1633,7 +1633,7 @@ impl GraphController<'_> {
             shell,
             voice_lids: Vec::new(),
             instrument: InstrumentRegistration::Modulator,
-        });
+        })?;
         self.app.sampler_paths.push(None);
         self.debug_assert_track_vectors_aligned();
         Ok(idx)
@@ -1677,7 +1677,7 @@ impl GraphController<'_> {
                 manifest,
                 run_mode,
             },
-        });
+        })?;
         self.app.sampler_paths.push(None);
         if run_mode == CustomInstrumentRunMode::FreePatch {
             self.apply_free_patch_idle_voice(idx)?;
@@ -2451,7 +2451,7 @@ impl GraphController<'_> {
             runtime_macro_values: None,
             runtime_macro_track: 0,
         };
-        self.finish_rack_track_registration(idx, track_name, shell, rack_slot_nodes, rack_track);
+        self.finish_rack_track_registration(idx, track_name, shell, rack_slot_nodes, rack_track)?;
         self.app.sampler_paths.push(None);
         self.debug_assert_track_vectors_aligned();
         Ok(idx)
@@ -3793,6 +3793,7 @@ impl GraphController<'_> {
         }
 
         self.app.tracks.clear();
+        self.app.track_registry = crate::sequencer::TrackRegistry::default();
         self.app.track_colors.clear();
         self.app.track_collapsed.clear();
         self.app.sampler_paths.clear();
@@ -4964,6 +4965,12 @@ impl GraphController<'_> {
         track_idx: usize,
         retire_after: u64,
     ) -> Result<(), String> {
+        let track_id = self
+            .app
+            .track_registry
+            .id_at(track_idx)
+            .ok_or_else(|| format!("Missing stable id for track {}", track_idx + 1))?;
+        self.app.track_registry.remove(track_id);
         self.app.tracks.remove(track_idx);
         if track_idx < self.app.track_colors.len() {
             self.app.track_colors.remove(track_idx);
@@ -5951,6 +5958,9 @@ impl GraphController<'_> {
     }
 
     fn create_track_shell(&mut self, idx: usize, name: &str) -> Result<TrackShell, String> {
+        if !self.app.track_registry.can_allocate() {
+            return Err("Stable track id space is exhausted".to_string());
+        }
         let voice_sum_id = add_gain_node_checked(
             self.app.graph.lg.0,
             1.0,
@@ -6201,7 +6211,11 @@ impl GraphController<'_> {
         shell: TrackShell,
         rack_slots: Vec<RackSlotNodeIds>,
         rack_track: RackTrackSnapshot,
-    ) {
+    ) -> Result<(), String> {
+        self.app
+            .track_registry
+            .allocate()
+            .map_err(|error| format!("Failed to allocate stable track id: {error:?}"))?;
         let rack_signature = rack_topology_signature(&rack_track);
         self.app.state.runtime.voice_counts[idx].store(0, Ordering::Release);
         self.app.state.runtime.sampler_lids[idx].store(0, Ordering::Release);
@@ -6319,6 +6333,7 @@ impl GraphController<'_> {
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.state.publish_scheduler_snapshot();
+        Ok(())
     }
 
     fn build_sampler_voices(
@@ -7334,7 +7349,14 @@ impl GraphController<'_> {
         Ok(())
     }
 
-    fn finish_track_registration(&mut self, registration: TrackRegistration<'_>) {
+    fn finish_track_registration(
+        &mut self,
+        registration: TrackRegistration<'_>,
+    ) -> Result<(), String> {
+        self.app
+            .track_registry
+            .allocate()
+            .map_err(|error| format!("Failed to allocate stable track id: {error:?}"))?;
         let TrackRegistration {
             idx,
             track_name,
@@ -7616,9 +7638,11 @@ impl GraphController<'_> {
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.state.publish_scheduler_snapshot();
+        Ok(())
     }
 
     fn debug_assert_track_vectors_aligned(&self) {
+        debug_assert_eq!(self.app.track_registry.len(), self.app.tracks.len());
         debug_assert_eq!(self.app.graph.track_node_ids.len(), self.app.tracks.len());
         debug_assert_eq!(self.app.graph.track_buffer_ids.len(), self.app.tracks.len());
         debug_assert_eq!(
@@ -8092,6 +8116,9 @@ mod tests {
                     .expect("old engine route should connect");
             }
             app.tracks.push(format!("Track {}", track + 1));
+            app.track_registry
+                .allocate()
+                .expect("allocate fixture track id");
             app.graph.track_node_ids.push(nodes);
             app.graph.track_buffer_ids.push(-1);
             app.graph.track_sample_rates.push(44_100);
@@ -8204,6 +8231,31 @@ mod tests {
             unsafe { crate::audiograph::graph_edit_applied_batch_serial(graph.ptr.0) } >= serial,
             "processing the next block should acknowledge the committed batch"
         );
+    }
+
+    #[test]
+    fn track_registration_and_deletion_keep_stable_registry_aligned() {
+        let graph = TestLiveGraph::new("stable-track-registry-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add first sampler track");
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add second sampler track");
+
+        let first = app.track_registry.id_at(0).expect("first stable id");
+        let second = app.track_registry.id_at(1).expect("second stable id");
+        assert_ne!(first, second);
+        assert_eq!(app.track_registry.index_of(second), Some(1));
+
+        app.graph_controller()
+            .delete_track(0)
+            .expect("delete first track");
+        assert_eq!(app.track_registry.ids(), &[second]);
+        assert_eq!(app.track_registry.index_of(second), Some(0));
+        assert_eq!(app.track_registry.len(), app.tracks.len());
+        graph.process_block();
     }
 
     #[test]
@@ -9329,16 +9381,19 @@ mod tests {
                 tags: vec!["test".to_string()],
                 author: "test".to_string(),
             },
-            track: crate::project::ProjectTrack::Rack {
-                routing: crate::project::ProjectRackRouting::Broadcast,
-                slots: vec![crate::project::ProjectRackTrackSlot {
-                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                    sample_path: Some("assets/ir/lexicon-300-rich-plate.wav".to_string()),
-                    sample_name: Some("plate".to_string()),
-                    instrument_name: None,
-                }],
+            track: crate::project::ProjectTrack {
+                id: crate::sequencer::TrackId(1),
                 color: None,
                 collapsed: false,
+                kind: crate::project::ProjectTrackKind::Rack {
+                    routing: crate::project::ProjectRackRouting::Broadcast,
+                    slots: vec![crate::project::ProjectRackTrackSlot {
+                        instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                        sample_path: Some("assets/ir/lexicon-300-rich-plate.wav".to_string()),
+                        sample_name: Some("plate".to_string()),
+                        instrument_name: None,
+                    }],
+                },
             },
             rack: crate::project::ProjectRackTrackPattern {
                 macros: crate::project::default_project_rack_macros(),
@@ -9516,8 +9571,10 @@ mod tests {
             .expect("converted sampler project should load");
         assert!(matches!(
             restored.tracks.as_slice(),
-            [crate::project::ProjectTrack::Sampler { sample_path: restored_path, .. }]
-                if restored_path == &sample_path.to_string_lossy()
+            [crate::project::ProjectTrack {
+                kind: crate::project::ProjectTrackKind::Sampler { sample_path: restored_path },
+                ..
+            }] if restored_path == &sample_path.to_string_lossy()
         ));
         graph.process_block();
     }
@@ -9616,8 +9673,8 @@ mod tests {
 
         assert!(matches!(
             restored.tracks.as_slice(),
-            [crate::project::ProjectTrack::Custom {
-                instrument_name,
+            [crate::project::ProjectTrack {
+                kind: crate::project::ProjectTrackKind::Custom { instrument_name },
                 ..
             }] if instrument_name == "new"
         ));

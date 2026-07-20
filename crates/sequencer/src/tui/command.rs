@@ -925,6 +925,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.effect_descriptors = vec![vec![desc]];
         app
     }
@@ -950,6 +951,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_instrument_types = vec![InstrumentType::Custom];
         app.graph.instrument_descriptors = vec![desc];
         app
@@ -1036,6 +1038,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Rack".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_instrument_types = vec![InstrumentType::Rack];
         app.graph.instrument_descriptors = vec![EffectDescriptor::empty_custom_slot()];
         app

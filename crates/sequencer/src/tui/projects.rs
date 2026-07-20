@@ -13,7 +13,7 @@ use crate::process::ParamTarget;
 use crate::project::{
     self, chord_snapshot_from_steps_durations_and_delays, project_file_version, ProjectBusChannel,
     ProjectBusPatternSnapshot, ProjectFile, ProjectMacro, ProjectPattern, ProjectReverbState,
-    ProjectScratchState, ProjectTrack,
+    ProjectScratchState, ProjectTrack, ProjectTrackKind,
 };
 use crate::sequencer::{
     BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
@@ -560,7 +560,7 @@ fn migrate_legacy_dgen_param_node_indices(project: &mut ProjectFile) {
     let custom_instrument_tracks: Vec<bool> = project
         .tracks
         .iter()
-        .map(|track| matches!(track, project::ProjectTrack::Custom { .. }))
+        .map(|track| matches!(track.kind, project::ProjectTrackKind::Custom { .. }))
         .collect();
     let track_effect_names = project.custom_effects.clone();
     let bus_effect_names: std::collections::HashMap<u64, Vec<Option<String>>> = project
@@ -1451,8 +1451,14 @@ impl App {
             .patterns
             .get(project.current_pattern)
             .ok_or_else(|| "Current pattern is missing while saving Sound".to_string())?;
-        let (track_payload, rack_payload) = match source_track {
-            ProjectTrack::Rack { .. } => {
+        let ProjectTrack {
+            id,
+            color,
+            collapsed,
+            kind,
+        } = source_track;
+        let (track_payload, rack_payload) = match kind {
+            ProjectTrackKind::Rack { .. } => {
                 let rack = pattern
                     .rack_tracks
                     .get(track)
@@ -1461,11 +1467,7 @@ impl App {
                     .ok_or_else(|| "Rack pattern data is missing".to_string())?;
                 (project.tracks[track].clone(), rack)
             }
-            ProjectTrack::Sampler {
-                sample_path,
-                color,
-                collapsed,
-            } => {
+            ProjectTrackKind::Sampler { sample_path } => {
                 let sample_name = pattern.sample_names.get(track).cloned();
                 let slot_source = crate::project::ProjectRackTrackSlot {
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
@@ -1497,11 +1499,14 @@ impl App {
                     sample_name,
                 };
                 (
-                    ProjectTrack::Rack {
-                        routing: crate::project::ProjectRackRouting::Broadcast,
-                        slots: vec![slot_source],
+                    ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Rack {
+                            routing: crate::project::ProjectRackRouting::Broadcast,
+                            slots: vec![slot_source],
+                        },
                     },
                     crate::project::ProjectRackTrackPattern {
                         routing: crate::project::ProjectRackRouting::Broadcast,
@@ -1510,11 +1515,7 @@ impl App {
                     },
                 )
             }
-            ProjectTrack::Custom {
-                instrument_name,
-                color,
-                collapsed,
-            } => {
+            ProjectTrackKind::Custom { instrument_name } => {
                 let slot_source = crate::project::ProjectRackTrackSlot {
                     instrument_type: crate::project::ProjectInstrumentType::Custom,
                     sample_path: None,
@@ -1549,11 +1550,14 @@ impl App {
                     sample_name: None,
                 };
                 (
-                    ProjectTrack::Rack {
-                        routing: crate::project::ProjectRackRouting::Broadcast,
-                        slots: vec![slot_source],
+                    ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Rack {
+                            routing: crate::project::ProjectRackRouting::Broadcast,
+                            slots: vec![slot_source],
+                        },
                     },
                     crate::project::ProjectRackTrackPattern {
                         routing: crate::project::ProjectRackRouting::Broadcast,
@@ -1562,7 +1566,7 @@ impl App {
                     },
                 )
             }
-            ProjectTrack::Modulator { .. } => {
+            ProjectTrackKind::Modulator => {
                 return Err("Modulator tracks cannot be saved as Sounds".to_string())
             }
         };
@@ -1614,8 +1618,8 @@ impl App {
         sound: crate::project::ProjectSoundPreset,
         fallback_name: &str,
     ) -> Result<(), String> {
-        let source_slots = match &sound.track {
-            ProjectTrack::Rack { slots, .. } => slots.clone(),
+        let source_slots = match &sound.track.kind {
+            ProjectTrackKind::Rack { slots, .. } => slots.clone(),
             _ => return Err("Container preset does not contain a rack".to_string()),
         };
         if source_slots.len() != sound.rack.slots.len() {
@@ -1966,6 +1970,10 @@ impl App {
             .iter()
             .enumerate()
             .map(|(track_idx, name)| {
+                let id = self
+                    .track_registry
+                    .id_at(track_idx)
+                    .ok_or_else(|| format!("Missing stable id for track {}", track_idx + 1))?;
                 let color = self.track_colors.get(track_idx).copied();
                 let collapsed = self
                     .track_collapsed
@@ -2051,11 +2059,14 @@ impl App {
                             }
                         }
                     }
-                    Ok(ProjectTrack::Rack {
-                        routing: crate::project::ProjectRackRouting::from(rack.routing),
-                        slots,
+                    Ok(ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Rack {
+                            routing: crate::project::ProjectRackRouting::from(rack.routing),
+                            slots,
+                        },
                     })
                 } else if self.is_sampler_track(track_idx) {
                     let path = self
@@ -2064,15 +2075,23 @@ impl App {
                     let Some(path) = path else {
                         return Err(format!("Couldn't resolve sample path for '{}'", name));
                     };
-                    Ok(ProjectTrack::Sampler {
-                        sample_path: path.to_string_lossy().to_string(),
+                    Ok(ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Sampler {
+                            sample_path: path.to_string_lossy().to_string(),
+                        },
                     })
                 } else if self.graph.track_instrument_types.get(track_idx)
                     == Some(&InstrumentType::Modulator)
                 {
-                    Ok(ProjectTrack::Modulator { color, collapsed })
+                    Ok(ProjectTrack {
+                        id,
+                        color,
+                        collapsed,
+                        kind: ProjectTrackKind::Modulator,
+                    })
                 } else {
                     let instrument_name = self
                         .graph
@@ -2082,10 +2101,11 @@ impl App {
                         .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
                         .map(|engine| engine.name.clone())
                         .unwrap_or_else(|| name.clone());
-                    Ok(ProjectTrack::Custom {
-                        instrument_name,
+                    Ok(ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Custom { instrument_name },
                     })
                 }
             })
@@ -2253,6 +2273,10 @@ impl App {
                     pending.project.tracks.len()
                 );
                 if track_idx >= pending.project.tracks.len() {
+                    self.track_registry = crate::sequencer::TrackRegistry::from_ids(
+                        pending.project.tracks.iter().map(|track| track.id),
+                    )
+                    .map_err(|error| format!("Invalid project track ids: {error:?}"))?;
                     pending.phase = super::PendingProjectLoadPhase::AddEffect {
                         track_idx: 0,
                         offset: 0,
@@ -2260,8 +2284,8 @@ impl App {
                 } else {
                     let saved_color = pending.project.tracks[track_idx].color();
                     let saved_collapsed = pending.project.tracks[track_idx].collapsed();
-                    match &pending.project.tracks[track_idx] {
-                        ProjectTrack::Sampler { sample_path, .. } => {
+                    match &pending.project.tracks[track_idx].kind {
+                        ProjectTrackKind::Sampler { sample_path } => {
                             eprintln!(
                                 "project-load: add sampler track index={} path={}",
                                 track_idx, sample_path
@@ -2272,20 +2296,18 @@ impl App {
                                     format!("Failed to load sample '{}': {error}", sample_path)
                                 })?;
                         }
-                        ProjectTrack::Custom {
-                            instrument_name, ..
-                        } => {
+                        ProjectTrackKind::Custom { instrument_name } => {
                             eprintln!(
                                 "project-load: add custom track index={} instrument={}",
                                 track_idx, instrument_name
                             );
                             self.add_saved_instrument_track_sync(instrument_name)?;
                         }
-                        ProjectTrack::Modulator { .. } => {
+                        ProjectTrackKind::Modulator => {
                             eprintln!("project-load: add modulator track index={track_idx}");
                             self.graph_controller().add_modulator_track()?;
                         }
-                        ProjectTrack::Rack { routing, slots, .. } => {
+                        ProjectTrackKind::Rack { routing, slots } => {
                             eprintln!(
                                 "project-load: add rack track index={} slots={}",
                                 track_idx,
@@ -3927,10 +3949,13 @@ mod tests {
             },
             buses: Vec::new(),
             groups: Vec::new(),
-            tracks: vec![ProjectTrack::Sampler {
-                sample_path: "samples/kick.wav".to_string(),
+            tracks: vec![ProjectTrack {
+                id: crate::sequencer::TrackId(1),
                 color: None,
                 collapsed: false,
+                kind: ProjectTrackKind::Sampler {
+                    sample_path: "samples/kick.wav".to_string(),
+                },
             }],
             custom_effects: vec![custom_effects],
             scratch: ProjectScratchState::default(),

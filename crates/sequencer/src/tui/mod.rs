@@ -861,6 +861,7 @@ pub struct UiState {
 
 pub struct App {
     pub state: Arc<SequencerState>,
+    pub track_registry: crate::sequencer::TrackRegistry,
     pub macro_engine: crate::macro_engine::MacroEngine,
     scene_macro_runtime: HashMap<crate::macro_engine::MacroId, SceneMacroRuntime>,
     pub tracks: Vec<String>,
@@ -1494,6 +1495,7 @@ impl App {
 
         let mut app = Self {
             state,
+            track_registry: crate::sequencer::TrackRegistry::default(),
             macro_engine: crate::macro_engine::MacroEngine::default(),
             scene_macro_runtime: HashMap::new(),
             tracks: Vec::new(),
