@@ -52,7 +52,7 @@ struct PianoRollMoveItem {
     delay: f32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PianoRollDragKind {
     Move,
     Resize,
@@ -413,10 +413,126 @@ pub(crate) struct PianoRollHistoryPlan {
     pub(crate) steps: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PianoRollGestureCommand {
+    Update(PianoRollDragKind),
+    Finish(PianoRollDragKind),
+}
+
+pub(crate) fn piano_roll_gesture_command(action: &Value) -> Option<PianoRollGestureCommand> {
+    let map = cloned_map(action).ok()?;
+    match value_as_keyword_or_string(map.get("type"))?.as_str() {
+        "move-items-absolute" => Some(PianoRollGestureCommand::Update(PianoRollDragKind::Move)),
+        "resize-item-absolute" => {
+            Some(PianoRollGestureCommand::Update(PianoRollDragKind::Resize))
+        }
+        "finish-move-items" => Some(PianoRollGestureCommand::Finish(PianoRollDragKind::Move)),
+        "finish-resize-items" => {
+            Some(PianoRollGestureCommand::Finish(PianoRollDragKind::Resize))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn piano_roll_gesture_touched_steps(
+    state: &Arc<SequencerState>,
+    track: usize,
+    move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+    action: &Value,
+) -> Result<Vec<usize>, String> {
+    let map = cloned_map(action)?;
+    let action_type = value_as_keyword_or_string(map.get("type"))
+        .ok_or_else(|| "piano roll action missing :type".to_string())?;
+    let mut ids = parse_piano_roll_ids(map.get("ids"));
+    if ids.is_empty() {
+        if let Some(id) = value_as_u64(map.get("id")) {
+            ids.push(id);
+        }
+    }
+    let mut steps = ids
+        .iter()
+        .filter_map(|id| piano_roll_item_parts(*id).map(|(step, _)| step))
+        .collect::<Vec<_>>();
+    if action_type == "resize-item-absolute" {
+        steps.sort_unstable();
+        steps.dedup();
+        return Ok(steps);
+    }
+    if action_type != "move-items-absolute" {
+        return Err(format!("{action_type} is not a piano-roll gesture update"));
+    }
+
+    let anchor_id = value_as_u64(map.get("anchor-id"))
+        .or_else(|| ids.first().copied())
+        .ok_or_else(|| "move-items-absolute missing anchor-id".to_string())?;
+    let start = value_as_number(map.get("start")).unwrap_or(0.0) as f32;
+    let mut sorted_ids = ids;
+    sorted_ids.sort_unstable();
+    let (originals, last_positions, anchor_start) = {
+        let guard = move_state.lock().unwrap();
+        if let Some(existing) = guard
+            .as_ref()
+            .filter(|existing| {
+                existing.kind == PianoRollDragKind::Move && existing.ids == sorted_ids
+            })
+        {
+            (
+                existing.originals.clone(),
+                existing.last_positions.clone(),
+                existing.anchor_start,
+            )
+        } else {
+            let (anchor_step, anchor_voice_idx) = piano_roll_item_parts(anchor_id)
+                .ok_or_else(|| "move anchor was invalid".to_string())?;
+            let anchor_note = piano_roll_step_note_entries(state, track, anchor_step)
+                .get(anchor_voice_idx)
+                .cloned()
+                .ok_or_else(|| "move anchor no longer exists".to_string())?;
+            let originals = sorted_ids
+                .iter()
+                .filter_map(|id| {
+                    let (step, voice_idx) = piano_roll_item_parts(*id)?;
+                    let note = piano_roll_step_note_entries(state, track, step)
+                        .get(voice_idx)
+                        .cloned()?;
+                    Some(PianoRollMoveItem {
+                        id: *id,
+                        step,
+                        transpose: note.transpose,
+                        duration: note.duration,
+                        delay: note.delay,
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                originals.clone(),
+                originals,
+                anchor_step as f32 + anchor_note.delay,
+            )
+        }
+    };
+    steps.extend(originals.iter().map(|item| item.step));
+    steps.extend(last_positions.iter().map(|item| item.step));
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS)
+        .max(1);
+    for item in originals {
+        let time_offset = item.step as f32 + item.delay - anchor_start;
+        let (next_step, _) =
+            piano_roll_time_to_step_delay((start + time_offset) as f64, num_steps);
+        steps.push(next_step);
+    }
+    steps.sort_unstable();
+    steps.dedup();
+    Ok(steps)
+}
+
 pub(crate) fn piano_roll_history_plan(
     state: &Arc<SequencerState>,
     track: usize,
     action: &Value,
+    clipboard: &PianoRollClipboard,
 ) -> Result<Option<PianoRollHistoryPlan>, String> {
     let map = cloned_map(action)?;
     let Some(action_type) = value_as_keyword_or_string(map.get("type")) else {
@@ -440,6 +556,44 @@ pub(crate) fn piano_roll_history_plan(
                 .map(|(step, _)| step)
                 .collect(),
         ),
+        "nudge-selection" => {
+            let num_steps = state.pattern.track_params[track]
+                .get_num_steps()
+                .min(MAX_STEPS)
+                .max(1);
+            let delta_time = value_as_number(map.get("delta-time"))
+                .unwrap_or(0.0)
+                .round() as isize;
+            let source_steps = parse_piano_roll_ids(map.get("ids"))
+                .into_iter()
+                .filter_map(piano_roll_item_parts)
+                .map(|(step, _)| step)
+                .collect::<Vec<_>>();
+            let mut affected_steps = source_steps.clone();
+            affected_steps.extend(source_steps.into_iter().map(|step| {
+                (step as isize + delta_time).clamp(0, (num_steps - 1) as isize) as usize
+            }));
+            ("Nudge piano-roll notes", affected_steps)
+        }
+        "paste-items" => {
+            let num_steps = state.pattern.track_params[track]
+                .get_num_steps()
+                .min(MAX_STEPS)
+                .max(1);
+            let start = value_as_number(map.get("time")).unwrap_or(0.0);
+            let notes = clipboard.lock().unwrap().clone().unwrap_or_default();
+            let affected_steps = notes
+                .into_iter()
+                .map(|note| {
+                    piano_roll_time_to_step_delay(
+                        start + note.start_offset as f64,
+                        num_steps,
+                    )
+                    .0
+                })
+                .collect();
+            ("Paste piano-roll notes", affected_steps)
+        }
         _ => return Ok(None),
     };
     steps.sort_unstable();

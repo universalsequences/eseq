@@ -5,6 +5,7 @@ pub(crate) struct RuntimeInit {
     pub(crate) accumulator_names: Arc<Mutex<Vec<String>>>,
     pub(crate) midi_fx_names: Arc<Mutex<Vec<String>>>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
+    pub(crate) piano_roll_clipboard: PianoRollClipboard,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2471,6 +2472,7 @@ pub(crate) fn init_runtime(
     let piano_sel = piano_roll_selection.clone();
     let piano_move = piano_roll_move_state.clone();
     let piano_clipboard = new_piano_roll_clipboard();
+    let native_piano_clipboard = piano_clipboard.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-piano-roll-action", move |args, ctx| {
@@ -2478,7 +2480,32 @@ pub(crate) fn init_runtime(
             return Err("seq-piano-roll-action: expected action map".into());
         };
         let track = ct.load(Ordering::Relaxed);
-        if piano_roll_history_plan(&st, track, action)?.is_some() {
+        if let Some(command) = piano_roll_gesture_command(action) {
+            let mut payload = HashMap::new();
+            payload.insert(
+                "track".to_string(),
+                Rc::new(RefCell::new(Value::Number(track as f64))),
+            );
+            payload.insert(
+                "action".to_string(),
+                Rc::new(RefCell::new(action.clone())),
+            );
+            let (name, status) = match command {
+                PianoRollGestureCommand::Update(_) => {
+                    ("piano-roll-gesture-update", "piano roll gesture preview")
+                }
+                PianoRollGestureCommand::Finish(_) => {
+                    ("piano-roll-gesture-finish", "piano roll gesture finished")
+                }
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: name.to_string(),
+                payload: Value::Map(payload),
+            });
+            ctx.set_status(status);
+            return Ok(Value::String(status.to_string()));
+        }
+        if piano_roll_history_plan(&st, track, action, &native_piano_clipboard)?.is_some() {
             let mut payload = HashMap::new();
             payload.insert(
                 "track".to_string(),
@@ -2501,7 +2528,7 @@ pub(crate) fn init_runtime(
             track,
             &piano_sel,
             &piano_move,
-            &piano_clipboard,
+            &native_piano_clipboard,
             action,
         )?;
         let mutates_pattern = piano_roll_action_mutates_pattern(action);
@@ -4837,6 +4864,7 @@ pub(crate) fn init_runtime(
         accumulator_names,
         midi_fx_names,
         sample_browser,
+        piano_roll_clipboard: piano_clipboard,
     }
 }
 

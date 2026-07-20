@@ -2100,6 +2100,16 @@ impl TimelineView {
                     ("mode", keyword(":replace")),
                 ]))
             }
+            Some(Value::Keyword(kind)) if kind == "move" => Some(action_map(vec![
+                ("type", keyword(":finish-move-items")),
+                ("ids", gesture.get("ids")?.clone()),
+                ("anchor-id", gesture.get("anchor-id")?.clone()),
+            ])),
+            Some(Value::Keyword(kind)) if kind == "resize-end" => Some(action_map(vec![
+                ("type", keyword(":finish-resize-items")),
+                ("ids", gesture.get("ids")?.clone()),
+                ("id", gesture.get("id")?.clone()),
+            ])),
             _ => None,
         }
     }
@@ -3587,6 +3597,45 @@ mod tests {
             map.get("time").map(|value| value.borrow().clone()),
             Some(Value::Number(4.0))
         );
+    }
+
+    #[test]
+    fn pointer_up_emits_move_and_resize_completion_actions() {
+        let view = TimelineView::from_props(
+            &HashMap::new(),
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let move_gesture = map_value_raw(vec![
+            ("kind", keyword_value("move")),
+            ("ids", list_value_raw(vec![number_value(7.0)])),
+            ("anchor-id", number_value(7.0)),
+        ]);
+        let resize_gesture = map_value_raw(vec![
+            ("kind", keyword_value("resize-end")),
+            ("ids", list_value_raw(vec![number_value(7.0)])),
+            ("id", number_value(7.0)),
+        ]);
+
+        for (gesture, expected) in [
+            (move_gesture, "finish-move-items"),
+            (resize_gesture, "finish-resize-items"),
+        ] {
+            let Value::Map(action) = view
+                .handle_pointer_up(8.0, 2.0, Some(&gesture))
+                .expect("gesture completion action")
+            else {
+                panic!("expected action map");
+            };
+            assert_eq!(
+                action.get("type").map(|value| value.borrow().clone()),
+                Some(Value::Keyword(expected.to_string())),
+            );
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
     StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
 };
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
@@ -35,6 +36,215 @@ pub enum EditOutcome {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MutationEffects {
     pub publish_scheduler: bool,
+}
+
+pub struct StepGestureTransaction {
+    target: TrackPatternId,
+    label: &'static str,
+    before: BTreeMap<usize, StepCellSnapshot>,
+    variant_registry_before: PlockVariantRegistry,
+}
+
+impl StepGestureTransaction {
+    pub fn begin(
+        app: &App,
+        track: usize,
+        steps: &[usize],
+        label: &'static str,
+    ) -> Result<Self, EditError> {
+        let track_id = app
+            .track_registry
+            .id_at(track)
+            .ok_or(EditError::TrackOutOfRange { track })?;
+        let pattern_id = app
+            .state
+            .effective_track_pattern_id(track)
+            .ok_or(EditError::MissingTrackPattern)?;
+        let steps = normalized_steps(steps);
+        if steps.is_empty() {
+            return Err(EditError::InvalidStepRange);
+        }
+        let (cells, variant_registry_before) = app
+            .state
+            .capture_pattern_step_cells(track, pattern_id, &steps)
+            .map_err(EditError::ReplayFailed)?;
+        Ok(Self {
+            target: TrackPatternId {
+                track: track_id,
+                pattern: pattern_id,
+            },
+            label,
+            before: steps.into_iter().zip(cells).collect(),
+            variant_registry_before,
+        })
+    }
+
+    pub fn capture_additional_steps(
+        &mut self,
+        app: &App,
+        steps: &[usize],
+    ) -> Result<(), EditError> {
+        let track = app
+            .track_registry
+            .index_of(self.target.track)
+            .ok_or(EditError::MissingStableTrack {
+                track: self.target.track,
+            })?;
+        if app.state.effective_track_pattern_id(track) != Some(self.target.pattern) {
+            return Err(EditError::MissingTrackPattern);
+        }
+        let missing = normalized_steps(steps)
+            .into_iter()
+            .filter(|step| !self.before.contains_key(step))
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let (cells, _) = app
+            .state
+            .capture_pattern_step_cells(track, self.target.pattern, &missing)
+            .map_err(EditError::ReplayFailed)?;
+        self.before.extend(missing.into_iter().zip(cells));
+        Ok(())
+    }
+
+    pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
+        let track = app
+            .track_registry
+            .index_of(self.target.track)
+            .ok_or(EditError::MissingStableTrack {
+                track: self.target.track,
+            })?;
+        let cells = self.before.into_iter().collect::<Vec<_>>();
+        let publish = app
+            .state
+            .restore_pattern_step_cells_no_publish(
+                track,
+                self.target.pattern,
+                &cells,
+                &self.variant_registry_before,
+            )
+            .map_err(EditError::ReplayFailed)?;
+        if publish {
+            app.state.publish_scheduler_snapshot();
+        }
+        Ok(())
+    }
+
+    pub fn commit(self, app: &mut App) -> Result<EditOutcome, EditError> {
+        let track = app
+            .track_registry
+            .index_of(self.target.track)
+            .ok_or(EditError::MissingStableTrack {
+                track: self.target.track,
+            })?;
+        let steps = self.before.keys().copied().collect::<Vec<_>>();
+        let (after, _) = match app
+            .state
+            .capture_pattern_step_cells(track, self.target.pattern, &steps)
+        {
+            Ok(after) => after,
+            Err(error) => {
+                return match self.rollback(app) {
+                    Ok(()) => Err(EditError::ReplayFailed(error)),
+                    Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                        "{error}; rollback also failed: {rollback_error:?}"
+                    ))),
+                };
+            }
+        };
+        let cells = self
+            .before
+            .into_iter()
+            .zip(after)
+            .filter_map(|((step, before), after)| {
+                (!step_snapshot_bit_exact_eq(&before, &after)).then_some(StepCellDelta {
+                    step,
+                    before,
+                    after,
+                })
+            })
+            .collect::<Vec<_>>();
+        if cells.is_empty() {
+            return Ok(EditOutcome::NoOp);
+        }
+        app.state.reconcile_plock_variant_registry_for_track(track);
+        let (_, variant_registry_after) = match app
+            .state
+            .capture_pattern_step_cells(track, self.target.pattern, &steps)
+        {
+            Ok(after) => after,
+            Err(error) => {
+                let before_cells = cells
+                    .iter()
+                    .map(|cell| (cell.step, cell.before.clone()))
+                    .collect::<Vec<_>>();
+                return match app.state.restore_pattern_step_cells_no_publish(
+                    track,
+                    self.target.pattern,
+                    &before_cells,
+                    &self.variant_registry_before,
+                ) {
+                    Ok(publish) => {
+                        if publish {
+                            app.state.publish_scheduler_snapshot();
+                        }
+                        Err(EditError::ReplayFailed(error))
+                    }
+                    Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                        "{error}; rollback also failed: {rollback_error}"
+                    ))),
+                };
+            }
+        };
+        let patch = StepCellsPatch {
+            target: self.target,
+            cells,
+            variant_registry_before: self.variant_registry_before,
+            variant_registry_after,
+        };
+        let after_cells = patch
+            .cells
+            .iter()
+            .map(|cell| (cell.step, cell.after.clone()))
+            .collect::<Vec<_>>();
+        if let Err(error) = app.state.restore_pattern_step_cells_no_publish(
+            track,
+            patch.target.pattern,
+            &after_cells,
+            &patch.variant_registry_after,
+        ) {
+            let before_cells = patch
+                .cells
+                .iter()
+                .map(|cell| (cell.step, cell.before.clone()))
+                .collect::<Vec<_>>();
+            return match app.state.restore_pattern_step_cells_no_publish(
+                track,
+                patch.target.pattern,
+                &before_cells,
+                &patch.variant_registry_before,
+            ) {
+                Ok(publish) => {
+                    if publish {
+                        app.state.publish_scheduler_snapshot();
+                    }
+                    Err(EditError::ReplayFailed(error))
+                }
+                Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                    "{error}; rollback also failed: {rollback_error}"
+                ))),
+            };
+        }
+        let retained_bytes = patch.retained_bytes();
+        let history_move = app.history.commit(
+            self.label,
+            None,
+            EditPatch::StepCells(patch),
+            retained_bytes,
+        );
+        Ok(EditOutcome::Applied(history_move))
+    }
 }
 
 #[derive(Clone)]
@@ -1580,5 +1790,31 @@ mod tests {
         assert_eq!(app.state.pattern.chord_data[0].get(step, 1), 7.0);
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         assert_eq!(app.state.pattern.chord_data[0].count(step), 0);
+    }
+
+    #[test]
+    fn no_op_step_gesture_preserves_redo() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetStepActive {
+                    track: 0,
+                    step: 4,
+                    active: true,
+                },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 1));
+
+        let gesture = StepGestureTransaction::begin(&app, 0, &[2], "No-op gesture")
+            .expect("begin no-op gesture");
+        assert_eq!(gesture.commit(&mut app), Ok(EditOutcome::NoOp));
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 1));
     }
 }

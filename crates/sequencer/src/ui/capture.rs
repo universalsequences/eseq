@@ -547,6 +547,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         accumulator_names,
         midi_fx_names: _,
         sample_browser: _,
+        piano_roll_clipboard: _,
     } = init_runtime(
         &app,
         Arc::clone(&state),

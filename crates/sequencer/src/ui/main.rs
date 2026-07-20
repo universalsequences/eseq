@@ -1343,6 +1343,7 @@ fn apply_piano_roll_history_host_command(
     app: &mut tui::App,
     selection: &Arc<Mutex<HashSet<u64>>>,
     move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+    clipboard: &PianoRollClipboard,
     payload: &Value,
 ) -> Result<(tui::edit::EditOutcome, String, usize), String> {
     let Value::Map(map) = payload else {
@@ -1357,7 +1358,7 @@ fn apply_piano_roll_history_host_command(
         .get("action")
         .map(|value| value.borrow().clone())
         .ok_or_else(|| "piano-roll edit action was missing".to_string())?;
-    let plan = piano_roll_history_plan(&app.state, track, &action)?
+    let plan = piano_roll_history_plan(&app.state, track, &action, clipboard)?
         .ok_or_else(|| "piano-roll action is not recordable at this boundary".to_string())?;
     let mut status = None;
     let outcome = tui::edit::apply_recorded_step_mutation(
@@ -1367,11 +1368,12 @@ fn apply_piano_roll_history_host_command(
         plan.label,
         |app| {
             status = Some(
-                apply_piano_roll_action(
+                apply_piano_roll_action_with_clipboard(
                     &app.state,
                     track,
                     selection,
                     move_state,
+                    clipboard,
                     &action,
                 )
                 .map_err(tui::edit::EditError::ReplayFailed)?,
@@ -1385,6 +1387,132 @@ fn apply_piano_roll_history_host_command(
         status.unwrap_or_else(|| "piano-roll edit made no change".to_string()),
         track,
     ))
+}
+
+struct ActivePianoRollHistoryGesture {
+    kind: PianoRollDragKind,
+    track: usize,
+    transaction: tui::edit::StepGestureTransaction,
+}
+
+fn piano_roll_host_action(payload: &Value) -> Result<(usize, Value), String> {
+    let Value::Map(map) = payload else {
+        return Err("piano-roll gesture payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "piano-roll gesture track was invalid".to_string())?;
+    let action = map
+        .get("action")
+        .map(|value| value.borrow().clone())
+        .ok_or_else(|| "piano-roll gesture action was missing".to_string())?;
+    Ok((track, action))
+}
+
+fn apply_piano_roll_gesture_update(
+    app: &mut tui::App,
+    selection: &Arc<Mutex<HashSet<u64>>>,
+    move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+    active: &mut Option<ActivePianoRollHistoryGesture>,
+    payload: &Value,
+) -> Result<(String, usize), String> {
+    let (track, action) = piano_roll_host_action(payload)?;
+    if track >= app.state.active_track_count() {
+        return Err(format!("piano-roll gesture track {track} was out of range"));
+    }
+    let Some(PianoRollGestureCommand::Update(kind)) = piano_roll_gesture_command(&action) else {
+        return Err("piano-roll gesture update action was invalid".to_string());
+    };
+    if active
+        .as_ref()
+        .is_some_and(|gesture| gesture.kind != kind || gesture.track != track)
+    {
+        let previous = active.take().expect("active gesture disappeared");
+        previous
+            .transaction
+            .rollback(app)
+            .map_err(|error| format!("could not roll back interrupted gesture: {error:?}"))?;
+        *move_state.lock().unwrap() = None;
+    }
+    let touched = piano_roll_gesture_touched_steps(&app.state, track, move_state, &action)?;
+    if active.is_none() {
+        let label = match kind {
+            PianoRollDragKind::Move => "Move piano-roll notes",
+            PianoRollDragKind::Resize => "Resize piano-roll notes",
+        };
+        *active = Some(ActivePianoRollHistoryGesture {
+            kind,
+            track,
+            transaction: tui::edit::StepGestureTransaction::begin(app, track, &touched, label)
+                .map_err(|error| format!("could not begin piano-roll gesture: {error:?}"))?,
+        });
+    } else if let Err(error) = active
+        .as_mut()
+        .expect("active gesture disappeared")
+        .transaction
+        .capture_additional_steps(app, &touched)
+    {
+        let gesture = active.take().expect("active gesture disappeared");
+        let rollback = gesture.transaction.rollback(app);
+        *move_state.lock().unwrap() = None;
+        return match rollback {
+            Ok(()) => Err(format!("could not extend piano-roll gesture: {error:?}")),
+            Err(rollback_error) => Err(format!(
+                "could not extend piano-roll gesture: {error:?}; rollback failed: {rollback_error:?}"
+            )),
+        };
+    }
+    let status = match apply_piano_roll_action(
+        &app.state,
+        track,
+        selection,
+        move_state,
+        &action,
+    ) {
+        Ok(status) => status,
+        Err(error) => {
+            let gesture = active.take().expect("active gesture disappeared");
+            let rollback = gesture.transaction.rollback(app);
+            *move_state.lock().unwrap() = None;
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "{error}; gesture rollback failed: {rollback_error:?}"
+                )),
+            };
+        }
+    };
+    app.state.publish_scheduler_snapshot();
+    Ok((status, track))
+}
+
+fn finish_piano_roll_gesture(
+    app: &mut tui::App,
+    move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+    active: &mut Option<ActivePianoRollHistoryGesture>,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize), String> {
+    let (track, action) = piano_roll_host_action(payload)?;
+    let Some(PianoRollGestureCommand::Finish(kind)) = piano_roll_gesture_command(&action) else {
+        return Err("piano-roll gesture finish action was invalid".to_string());
+    };
+    let Some(gesture) = active.take() else {
+        *move_state.lock().unwrap() = None;
+        return Ok((tui::edit::EditOutcome::NoOp, track));
+    };
+    if gesture.kind != kind || gesture.track != track {
+        gesture
+            .transaction
+            .rollback(app)
+            .map_err(|error| format!("could not roll back mismatched gesture: {error:?}"))?;
+        *move_state.lock().unwrap() = None;
+        return Err("piano-roll gesture finished with a different edit kind".to_string());
+    }
+    *move_state.lock().unwrap() = None;
+    gesture
+        .transaction
+        .commit(app)
+        .map(|outcome| (outcome, track))
+        .map_err(|error| format!("could not commit piano-roll gesture: {error:?}"))
 }
 
 fn map_u32(map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<u32> {
@@ -4227,9 +4355,10 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_piano_roll_history_host_command, apply_selected_steps_delete,
-        apply_toggle_step_host_command, build_custom_instrument_ui_source_with_overlay,
-        effect_patcher_buffer_source, escape_lisp_string, instrument_patcher_buffer_source,
+        apply_piano_roll_gesture_update, apply_piano_roll_history_host_command,
+        apply_selected_steps_delete, apply_toggle_step_host_command,
+        build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
+        escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
         key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
         reconciled_track_index,
         resolve_instrument_swap_target_index,
@@ -4369,6 +4498,7 @@ mod tests {
             std::collections::HashSet::new(),
         ));
         let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
         let create_action = history_value_map([
             ("type", Value::Keyword("finish-create-item".to_string())),
             ("start", Value::Number(2.0)),
@@ -4384,6 +4514,7 @@ mod tests {
             &mut app,
             &selection,
             &move_state,
+            &clipboard,
             &create_payload,
         )
         .expect("create piano-roll note through history seam");
@@ -4408,6 +4539,7 @@ mod tests {
             &mut app,
             &selection,
             &move_state,
+            &clipboard,
             &delete_payload,
         )
         .expect("delete piano-roll note through history seam");
@@ -4435,6 +4567,288 @@ mod tests {
             sequencer::tui::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
+    }
+
+    fn piano_roll_gesture_payload(action: Value) -> Value {
+        history_value_map([("track", Value::Number(0.0)), ("action", action)])
+    }
+
+    fn piano_roll_id_list(ids: impl IntoIterator<Item = u64>) -> Value {
+        Value::List(
+            ids.into_iter()
+                .map(|id| {
+                    std::rc::Rc::new(std::cell::RefCell::new(Value::Number(id as f64)))
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn metal_piano_roll_move_drag_coalesces_preview_updates_into_one_entry() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let version_before = state.scheduler_snapshot_version();
+
+        for (destination, lane) in [(4.0, 48.0), (6.0, 41.0)] {
+            let action = history_value_map([
+                ("type", Value::Keyword("move-items-absolute".to_string())),
+                ("ids", piano_roll_id_list([id])),
+                ("anchor-id", Value::Number(id as f64)),
+                ("start", Value::Number(destination)),
+                ("lane", Value::Number(lane)),
+            ]);
+            apply_piano_roll_gesture_update(
+                &mut app,
+                &selection,
+                &move_state,
+                &mut active,
+                &piano_roll_gesture_payload(action),
+            )
+            .expect("preview piano-roll move");
+            assert_eq!(app.history.undo_len(), 0);
+        }
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(4));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 7.0);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("anchor-id", Value::Number(id as f64)),
+        ]);
+        let (outcome, _) = finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish piano-roll move");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(6));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 3);
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 7.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_nudge_time_and_note_is_replayable() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let action = history_value_map([
+            ("type", Value::Keyword("nudge-selection".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("delta-time", Value::Number(3.0)),
+            ("delta-lane", Value::Number(-5.0)),
+        ]);
+
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &piano_roll_gesture_payload(action),
+        )
+        .expect("nudge piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.chord_data[0].get(5, 0), 5.0);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.chord_data[0].get(5, 0), 5.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_paste_is_replayable_with_shared_clipboard() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Transpose,
+            4.0,
+        );
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.5,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let copy_action = history_value_map([
+            ("type", Value::Keyword("copy-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+        ]);
+        super::apply_piano_roll_action_with_clipboard(
+            &state,
+            0,
+            &selection,
+            &move_state,
+            &clipboard,
+            &copy_action,
+        )
+        .expect("copy piano-roll note");
+
+        let paste_action = history_value_map([
+            ("type", Value::Keyword("paste-items".to_string())),
+            ("time", Value::Number(6.0)),
+        ]);
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &piano_roll_gesture_payload(paste_action),
+        )
+        .expect("paste piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 4.0);
+        assert_eq!(state.pattern.chord_data[0].get_duration(6, 0), 1.5);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(6));
+
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 4.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_resize_drag_coalesces_preview_updates_into_one_entry() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let version_before = state.scheduler_snapshot_version();
+
+        for time in [4.0, 5.0] {
+            let action = history_value_map([
+                ("type", Value::Keyword("resize-item-absolute".to_string())),
+                ("id", Value::Number(id as f64)),
+                ("ids", piano_roll_id_list([id])),
+                ("edge", Value::Keyword("end".to_string())),
+                ("time", Value::Number(time)),
+            ]);
+            apply_piano_roll_gesture_update(
+                &mut app,
+                &selection,
+                &move_state,
+                &mut active,
+                &piano_roll_gesture_payload(action),
+            )
+            .expect("preview piano-roll resize");
+            assert_eq!(app.history.undo_len(), 0);
+        }
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            3.0,
+        );
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-resize-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("id", Value::Number(id as f64)),
+        ]);
+        let (outcome, _) = finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish piano-roll resize");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            1.0,
+        );
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            3.0,
+        );
     }
 
     #[test]
@@ -5114,6 +5528,7 @@ mod tests {
             accumulator_names,
             midi_fx_names: _,
             sample_browser: _,
+            piano_roll_clipboard: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -5576,6 +5991,7 @@ mod tests {
             accumulator_names,
             midi_fx_names: _,
             sample_browser: _,
+            piano_roll_clipboard: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -6979,6 +7395,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         accumulator_names,
         midi_fx_names: _,
         sample_browser,
+        piano_roll_clipboard,
     } = init_runtime(
         &app,
         state.clone(),
@@ -7024,6 +7441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
     let mut soft_step_param_edit = SoftStepParamEdit::default();
+    let mut piano_roll_history_gesture: Option<ActivePianoRollHistoryGesture> = None;
     let mut lisp_hot_reload_watcher = LispHotReloadWatcher::start(watched_lisp_paths(&editor));
     let mut lisp_hot_reload_source_revision = editor.runtime().lisp_source_revision();
     let mut last_lisp_hot_reload_path_scan = Instant::now();
@@ -7362,6 +7780,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    if raw_key.kind == crossterm::event::KeyEventKind::Press {
+                        if let Some(gesture) = piano_roll_history_gesture.take() {
+                            let track = gesture.track;
+                            let cancel = raw_key.code == crossterm::event::KeyCode::Esc
+                                && raw_key.modifiers == crossterm::event::KeyModifiers::NONE;
+                            let finalized = if cancel {
+                                gesture
+                                    .transaction
+                                    .rollback(&mut app)
+                                    .map(|()| tui::edit::EditOutcome::NoOp)
+                            } else {
+                                gesture.transaction.commit(&mut app)
+                            };
+                            *piano_roll_move_state.lock().unwrap() = None;
+                            ui_invalidations.push(UiInvalidation::PianoRoll {
+                                track,
+                                change: PianoRollInvalidation::Items,
+                            });
+                            match finalized {
+                                Ok(_) => {
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Could not finalize interrupted piano-roll gesture: {error:?}"
+                                    )));
+                                    ui_loop_stats.note_event(event_started.elapsed());
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     if let Some(shortcut) = sequencer_history_shortcut(&editor, &raw_key) {
                         let replay = match shortcut {
                             SequencerHistoryShortcut::Undo => tui::edit::undo(&mut app),
@@ -7655,6 +8105,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     MacroHostCommandOutcome::NotMacro => {}
                 }
                 match name.as_str() {
+                    "piano-roll-gesture-update" => {
+                        match apply_piano_roll_gesture_update(
+                            &mut app,
+                            &piano_roll_selection,
+                            &piano_roll_move_state,
+                            &mut piano_roll_history_gesture,
+                            &payload,
+                        ) {
+                            Ok((status, track)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::PianoRoll {
+                                    track,
+                                    change: PianoRollInvalidation::Items,
+                                });
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(status);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "piano-roll-gesture-finish" => {
+                        match finish_piano_roll_gesture(
+                            &mut app,
+                            &piano_roll_move_state,
+                            &mut piano_roll_history_gesture,
+                            &payload,
+                        ) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                                ui_invalidations.push(UiInvalidation::PianoRoll {
+                                    track,
+                                    change: PianoRollInvalidation::Items,
+                                });
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Piano-roll gesture was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
                     "history-barrier" => {
                         let reason = match payload {
                             Value::String(reason) => reason,
@@ -7673,6 +8169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &mut app,
                             &piano_roll_selection,
                             &piano_roll_move_state,
+                            &piano_roll_clipboard,
                             &payload,
                         ) {
                             Ok((outcome, status, track)) => {
