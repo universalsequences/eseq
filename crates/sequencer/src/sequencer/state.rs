@@ -8725,6 +8725,53 @@ impl SequencerState {
         }
     }
 
+    pub(crate) fn capture_pattern_num_steps(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+    ) -> Result<usize, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .track_params
+                .get(track)
+                .map(TrackParams::get_num_steps)
+                .ok_or_else(|| "live track target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .map(|data| data.track_params.num_steps)
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_num_steps_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        num_steps: usize,
+    ) -> Result<bool, String> {
+        let num_steps = num_steps.clamp(1, MAX_STEPS);
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        data.track_params.num_steps = num_steps;
+        if is_effective {
+            self.pattern
+                .track_params
+                .get(track)
+                .ok_or_else(|| "live track target no longer exists".to_string())?
+                .set_num_steps(num_steps);
+        }
+        Ok(is_effective)
+    }
+
     /// Restore a stable Track Pattern step batch without publishing.
     ///
     /// The pool is always updated. The live mirror is updated only if the
@@ -9389,54 +9436,8 @@ impl SequencerState {
 
         for step in num_steps..new_len {
             let src = step - num_steps;
-            let active = self.pattern.patterns[track].is_active(src);
-            self.pattern.patterns[track].set_step_active(step, active);
-            let neural_reset = self.pattern.neural_reset_patterns[track].is_active(src);
-            self.pattern.neural_reset_patterns[track].set_step_active(step, neural_reset);
-        }
-
-        for step in num_steps..new_len {
-            let src = step - num_steps;
-            for param in StepParam::ALL {
-                let val = self.pattern.step_data[track].get(src, param);
-                self.pattern.step_data[track].set(step, param, val);
-            }
-        }
-
-        for slot in &self.pattern.effect_chains[track] {
-            let np = slot.num_params.load(Ordering::Relaxed) as usize;
-            for step in num_steps..new_len {
-                let src = step - num_steps;
-                for p in 0..np {
-                    match slot.plocks.get(src, p) {
-                        Some(val) => slot.set_plock(step, p, val),
-                        None => slot.plocks.clear_param(step, p),
-                    }
-                }
-            }
-        }
-
-        for step in num_steps..new_len {
-            let src = step - num_steps;
-            self.pattern.chord_data[track].copy_step(src, step);
-        }
-
-        for step in num_steps..new_len {
-            let src = step - num_steps;
-            match self.pattern.timebase_plocks[track].get(src) {
-                Some(tb) => self.pattern.timebase_plocks[track].set(step, tb),
-                None => self.pattern.timebase_plocks[track].clear(step),
-            }
-            match self.pattern.swing_plocks[track].get(src) {
-                Some(swing) => self.pattern.swing_plocks[track].set(step, swing),
-                None => self.pattern.swing_plocks[track].clear(step),
-            }
-            match self.pattern.swing_resolution_plocks[track].get(src) {
-                Some(resolution) => {
-                    self.pattern.swing_resolution_plocks[track].set(step, resolution)
-                }
-                None => self.pattern.swing_resolution_plocks[track].clear(step),
-            }
+            let snapshot = self.capture_step_snapshot(track, src);
+            self.restore_step_snapshot_inner(track, step, &snapshot);
         }
 
         self.pattern.track_params[track].set_num_steps(new_len);

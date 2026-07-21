@@ -10,7 +10,7 @@ use std::time::Instant;
 use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
     step_snapshot_bit_exact_eq, ApplyMode, EditPatch, HistoryMove, HistoryPolicy, HistoryReplay,
-    StepCellDelta, StepCellsPatch,
+    PatternGeometryPatch, StepCellDelta, StepCellsPatch,
 };
 use super::App;
 
@@ -881,6 +881,12 @@ enum ResolvedStepCommand<'a> {
         affected: Vec<usize>,
     },
     TogglePianoNote { step: usize, semitone: i32 },
+    TimebasePlock { steps: Vec<usize>, value: Option<crate::sequencer::Timebase> },
+    SwingPlock { steps: Vec<usize>, value: Option<f32> },
+    SwingResolutionPlock {
+        steps: Vec<usize>,
+        value: Option<crate::sequencer::SwingResolution>,
+    },
 }
 
 impl ResolvedStepCommand<'_> {
@@ -891,7 +897,11 @@ impl ResolvedStepCommand<'_> {
             | Self::SetParam { step, .. }
             | Self::AdjustParam { step, .. }
             | Self::TogglePianoNote { step, .. } => std::slice::from_ref(step),
-            Self::Clear { steps } | Self::Rotate { steps, .. } => steps,
+            Self::Clear { steps }
+            | Self::Rotate { steps, .. }
+            | Self::TimebasePlock { steps, .. }
+            | Self::SwingPlock { steps, .. }
+            | Self::SwingResolutionPlock { steps, .. } => steps,
             Self::Paste { affected, .. } | Self::Shift { affected, .. } => affected,
         }
     }
@@ -908,6 +918,12 @@ impl ResolvedStepCommand<'_> {
             Self::Paste { .. } => "Paste steps",
             Self::Shift { .. } => "Move steps",
             Self::TogglePianoNote { .. } => "Toggle piano note",
+            Self::TimebasePlock { value: Some(_), .. } => "Set timebase p-lock",
+            Self::TimebasePlock { value: None, .. } => "Clear timebase p-lock",
+            Self::SwingPlock { value: Some(_), .. } => "Set swing p-lock",
+            Self::SwingPlock { value: None, .. } => "Clear swing p-lock",
+            Self::SwingResolutionPlock { value: Some(_), .. } => "Set swing-resolution p-lock",
+            Self::SwingResolutionPlock { value: None, .. } => "Clear swing-resolution p-lock",
         }
     }
 }
@@ -1024,6 +1040,69 @@ fn resolve_step_command(cmd: &AppCommand) -> Result<(usize, ResolvedStepCommand<
                 semitone: *semitone,
             },
         ),
+        AppCommand::SetTimebasePlock { track, step, timebase } => (
+            *track,
+            ResolvedStepCommand::TimebasePlock {
+                steps: vec![*step],
+                value: *timebase,
+            },
+        ),
+        AppCommand::SetTimebasePlockMulti { track, steps, timebase } => (
+            *track,
+            ResolvedStepCommand::TimebasePlock {
+                steps: normalized_steps(steps),
+                value: Some(*timebase),
+            },
+        ),
+        AppCommand::ClearTimebasePlockMulti { track, steps } => (
+            *track,
+            ResolvedStepCommand::TimebasePlock {
+                steps: normalized_steps(steps),
+                value: None,
+            },
+        ),
+        AppCommand::SetTrackSwingPlock { track, step, value } => (
+            *track,
+            ResolvedStepCommand::SwingPlock {
+                steps: vec![*step],
+                value: *value,
+            },
+        ),
+        AppCommand::SetTrackSwingPlockMulti { track, steps, value } => (
+            *track,
+            ResolvedStepCommand::SwingPlock {
+                steps: normalized_steps(steps),
+                value: Some(*value),
+            },
+        ),
+        AppCommand::ClearTrackSwingPlockMulti { track, steps } => (
+            *track,
+            ResolvedStepCommand::SwingPlock {
+                steps: normalized_steps(steps),
+                value: None,
+            },
+        ),
+        AppCommand::SetTrackSwingResolutionPlock { track, step, resolution } => (
+            *track,
+            ResolvedStepCommand::SwingResolutionPlock {
+                steps: vec![*step],
+                value: *resolution,
+            },
+        ),
+        AppCommand::SetTrackSwingResolutionPlockMulti { track, steps, resolution } => (
+            *track,
+            ResolvedStepCommand::SwingResolutionPlock {
+                steps: normalized_steps(steps),
+                value: Some(*resolution),
+            },
+        ),
+        AppCommand::ClearTrackSwingResolutionPlockMulti { track, steps } => (
+            *track,
+            ResolvedStepCommand::SwingResolutionPlock {
+                steps: normalized_steps(steps),
+                value: None,
+            },
+        ),
         _ => return Err(EditError::UnsupportedCommand),
     };
     if let Some(step) = resolved.1.affected_steps().iter().find(|step| **step >= MAX_STEPS) {
@@ -1125,6 +1204,30 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
                 }
             }
         }
+        ResolvedStepCommand::TimebasePlock { steps, value } => {
+            for step in steps {
+                match value {
+                    Some(value) => app.state.pattern.timebase_plocks[track].set(*step, *value),
+                    None => app.state.pattern.timebase_plocks[track].clear(*step),
+                }
+            }
+        }
+        ResolvedStepCommand::SwingPlock { steps, value } => {
+            for step in steps {
+                match value {
+                    Some(value) => app.state.pattern.swing_plocks[track].set(*step, *value),
+                    None => app.state.pattern.swing_plocks[track].clear(*step),
+                }
+            }
+        }
+        ResolvedStepCommand::SwingResolutionPlock { steps, value } => {
+            for step in steps {
+                match value {
+                    Some(value) => app.state.pattern.swing_resolution_plocks[track].set(*step, *value),
+                    None => app.state.pattern.swing_resolution_plocks[track].clear(*step),
+                }
+            }
+        }
     }
 }
 
@@ -1142,6 +1245,119 @@ pub fn apply_recorded_step_command(
         execute_step_command_no_publish(app, track, &resolved);
         Ok(())
     })
+}
+
+fn is_pattern_geometry_command(cmd: &AppCommand) -> bool {
+    matches!(
+        cmd,
+        AppCommand::DuplicateTrackPattern { .. }
+            | AppCommand::HalveTrackPattern { .. }
+            | AppCommand::SetTrackNumSteps { .. }
+            | AppCommand::AdjustTrackNumSteps { .. }
+    )
+}
+
+fn pattern_geometry_track(cmd: &AppCommand) -> Option<usize> {
+    match cmd {
+        AppCommand::DuplicateTrackPattern { track }
+        | AppCommand::HalveTrackPattern { track }
+        | AppCommand::SetTrackNumSteps { track, .. }
+        | AppCommand::AdjustTrackNumSteps { track, .. } => Some(*track),
+        _ => None,
+    }
+}
+
+fn pattern_geometry_label(cmd: &AppCommand) -> &'static str {
+    match cmd {
+        AppCommand::DuplicateTrackPattern { .. } => "Duplicate track pattern",
+        AppCommand::HalveTrackPattern { .. } => "Halve track pattern",
+        AppCommand::SetTrackNumSteps { .. } | AppCommand::AdjustTrackNumSteps { .. } => {
+            "Set track pattern length"
+        }
+        _ => "Edit track pattern geometry",
+    }
+}
+
+fn apply_recorded_pattern_geometry_command(
+    app: &mut App,
+    cmd: &AppCommand,
+) -> Result<EditOutcome, EditError> {
+    let track = pattern_geometry_track(cmd).ok_or(EditError::UnsupportedCommand)?;
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern_id = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let target = TrackPatternId {
+        track: track_id,
+        pattern: pattern_id,
+    };
+    let steps = (0..MAX_STEPS).collect::<Vec<_>>();
+    let (before, registry_before) = app
+        .state
+        .capture_pattern_step_cells(track, pattern_id, &steps)
+        .map_err(EditError::ReplayFailed)?;
+    let num_steps_before = app
+        .state
+        .capture_pattern_num_steps(track, pattern_id)
+        .map_err(EditError::ReplayFailed)?;
+
+    super::command::execute_command(app, cmd.clone());
+    app.state.reconcile_plock_variant_registry_for_track(track);
+
+    let (after, registry_after) = app
+        .state
+        .capture_pattern_step_cells(track, pattern_id, &steps)
+        .map_err(EditError::ReplayFailed)?;
+    let num_steps_after = app
+        .state
+        .capture_pattern_num_steps(track, pattern_id)
+        .map_err(EditError::ReplayFailed)?;
+    let cells = steps
+        .into_iter()
+        .zip(before)
+        .zip(after)
+        .filter_map(|((step, before), after)| {
+            (!step_snapshot_bit_exact_eq(&before, &after)).then_some(StepCellDelta {
+                step,
+                before,
+                after,
+            })
+        })
+        .collect::<Vec<_>>();
+    if cells.is_empty() && num_steps_before == num_steps_after {
+        return Ok(EditOutcome::NoOp);
+    }
+    let patch = PatternGeometryPatch {
+        target,
+        num_steps_before,
+        num_steps_after,
+        cells: StepCellsPatch {
+            target,
+            cells,
+            variant_registry_before: registry_before,
+            variant_registry_after: registry_after,
+        },
+    };
+    if let Err(error) = replay_pattern_geometry_patch(app, &patch, ApplyMode::Redo) {
+        return match replay_pattern_geometry_patch(app, &patch, ApplyMode::Undo) {
+            Ok(_) => Err(error),
+            Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                "{error:?}; rollback also failed: {rollback_error:?}"
+            ))),
+        };
+    }
+    let retained_bytes = patch.retained_bytes();
+    let history_move = app.history.commit(
+        pattern_geometry_label(cmd),
+        None,
+        EditPatch::PatternGeometry(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(history_move))
 }
 
 pub fn apply_recorded_step_mutation(
@@ -1281,6 +1497,9 @@ pub fn apply_recorded_step_mutation(
 
 pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, EditError> {
     match history_policy(&cmd) {
+        HistoryPolicy::Record if is_pattern_geometry_command(&cmd) => {
+            apply_recorded_pattern_geometry_command(app, &cmd)
+        }
         HistoryPolicy::Record => apply_recorded_step_command(app, &cmd),
         HistoryPolicy::Ignore => {
             let publish = super::command::command_mutates_sequencer_state(&cmd);
@@ -1362,9 +1581,45 @@ fn replay_step_patch(
     Ok(MutationEffects { publish_scheduler })
 }
 
+fn replay_pattern_geometry_patch(
+    app: &mut App,
+    patch: &PatternGeometryPatch,
+    mode: ApplyMode,
+) -> Result<MutationEffects, EditError> {
+    let track = app
+        .track_registry
+        .index_of(patch.target.track)
+        .ok_or(EditError::MissingStableTrack {
+            track: patch.target.track,
+        })?;
+    let num_steps = match mode {
+        ApplyMode::Undo => patch.num_steps_before,
+        ApplyMode::Redo => patch.num_steps_after,
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "pattern geometry replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
+    let step_effects = replay_step_patch(app, &patch.cells, mode)?;
+    let geometry_publish = app
+        .state
+        .restore_pattern_num_steps_no_publish(track, patch.target.pattern, num_steps)
+        .map_err(EditError::ReplayFailed)?;
+    if geometry_publish && !step_effects.publish_scheduler {
+        app.state.publish_scheduler_snapshot();
+    }
+    Ok(MutationEffects {
+        publish_scheduler: step_effects.publish_scheduler || geometry_publish,
+    })
+}
+
 fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(), EditError> {
     match patch {
         EditPatch::StepCells(patch) => replay_step_patch(app, patch, mode).map(|_| ()),
+        EditPatch::PatternGeometry(patch) => {
+            replay_pattern_geometry_patch(app, patch, mode).map(|_| ())
+        }
     }
 }
 
@@ -1390,7 +1645,8 @@ mod tests {
     use crate::audiograph::LiveGraphPtr;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, InstrumentType, PatternSnapshot, SequencerState, Timebase,
+        default_empty_effect_chain, InstrumentType, PatternSnapshot, SequencerState,
+        SwingResolution, Timebase,
     };
     use crate::tui::AudioBuses;
 
@@ -1790,6 +2046,125 @@ mod tests {
         assert_eq!(app.state.pattern.chord_data[0].get(step, 1), 7.0);
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         assert_eq!(app.state.pattern.chord_data[0].count(step), 0);
+    }
+
+    #[test]
+    fn pattern_geometry_commands_round_trip_length_and_duplicated_cells() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        app.state.pattern.patterns[0].set_step_active(3, true);
+        app.state.pattern.step_data[0].set(
+            3,
+            crate::sequencer::StepParam::Velocity,
+            0.37,
+        );
+        app.state.pattern.timebase_plocks[0].set(3, Timebase::Eighth);
+
+        let duplicate = try_apply_command(
+            &mut app,
+            AppCommand::DuplicateTrackPattern { track: 0 },
+        )
+        .expect("duplicate pattern through history");
+        assert!(matches!(duplicate, EditOutcome::Applied(_)));
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 32);
+        assert!(app.state.pattern.patterns[0].is_active(19));
+        assert_eq!(
+            app.state.pattern.step_data[0].get(19, crate::sequencer::StepParam::Velocity),
+            0.37,
+        );
+        assert_eq!(app.state.pattern.timebase_plocks[0].get(19), Some(Timebase::Eighth));
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 16);
+        assert!(!app.state.pattern.patterns[0].is_active(19));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 32);
+        assert!(app.state.pattern.patterns[0].is_active(19));
+
+        let halve = try_apply_command(&mut app, AppCommand::HalveTrackPattern { track: 0 })
+            .expect("halve pattern through history");
+        assert!(matches!(halve, EditOutcome::Applied(_)));
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 16);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 32);
+        assert!(app.state.pattern.patterns[0].is_active(19));
+    }
+
+    #[test]
+    fn track_level_plock_commands_round_trip_as_step_cell_entries() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let steps = vec![2, 5, 9];
+        for command in [
+            AppCommand::SetTimebasePlockMulti {
+                track: 0,
+                steps: steps.clone(),
+                timebase: Timebase::Eighth,
+            },
+            AppCommand::SetTrackSwingPlockMulti {
+                track: 0,
+                steps: steps.clone(),
+                value: 63.0,
+            },
+            AppCommand::SetTrackSwingResolutionPlockMulti {
+                track: 0,
+                steps: steps.clone(),
+                resolution: SwingResolution::Eighth,
+            },
+        ] {
+            assert_command_round_trip(&mut app, command, &steps);
+        }
+    }
+
+    #[test]
+    fn pattern_geometry_undo_after_scene_switch_targets_original_pattern() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        let mut app = test_app(state);
+
+        try_apply_command(
+            &mut app,
+            AppCommand::DuplicateTrackPattern { track: 0 },
+        )
+        .expect("duplicate first scene track pattern");
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 32);
+
+        app.state
+            .launch_scene(
+                1,
+                1,
+                &[-1],
+                &[44_100],
+                &["Track 1".to_string()],
+                &[InstrumentType::Sampler],
+            )
+            .expect("launch second scene");
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 16);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 16);
+
+        app.state
+            .launch_scene(
+                0,
+                1,
+                &[-1],
+                &[44_100],
+                &["Track 1".to_string()],
+                &[InstrumentType::Sampler],
+            )
+            .expect("return to first scene");
+        assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 16);
     }
 
     #[test]

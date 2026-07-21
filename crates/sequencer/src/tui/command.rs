@@ -808,7 +808,20 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::RotateSteps { .. }
         | AppCommand::PasteSteps { .. }
         | AppCommand::ShiftStepRange { .. }
-        | AppCommand::TogglePianoNote { .. } => HistoryPolicy::Record,
+        | AppCommand::TogglePianoNote { .. }
+        | AppCommand::SetTimebasePlock { .. }
+        | AppCommand::SetTimebasePlockMulti { .. }
+        | AppCommand::ClearTimebasePlockMulti { .. }
+        | AppCommand::SetTrackSwingPlock { .. }
+        | AppCommand::SetTrackSwingPlockMulti { .. }
+        | AppCommand::ClearTrackSwingPlockMulti { .. }
+        | AppCommand::SetTrackSwingResolutionPlock { .. }
+        | AppCommand::SetTrackSwingResolutionPlockMulti { .. }
+        | AppCommand::ClearTrackSwingResolutionPlockMulti { .. } => HistoryPolicy::Record,
+        AppCommand::DuplicateTrackPattern { .. }
+        | AppCommand::HalveTrackPattern { .. }
+        | AppCommand::SetTrackNumSteps { .. }
+        | AppCommand::AdjustTrackNumSteps { .. } => HistoryPolicy::Record,
 
         AppCommand::MacroSetValue { .. }
         | AppCommand::MacroRelease { .. }
@@ -817,12 +830,7 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::ScenePushEnd
         | AppCommand::TogglePlay => HistoryPolicy::Ignore,
 
-        AppCommand::DuplicateTrackPattern { .. }
-        | AppCommand::HalveTrackPattern { .. }
-        | AppCommand::SetTimebasePlock { .. }
-        | AppCommand::SetTimebasePlockMulti { .. }
-        | AppCommand::ClearTimebasePlockMulti { .. }
-        | AppCommand::ToggleTrackGate { .. }
+        AppCommand::ToggleTrackGate { .. }
         | AppCommand::ToggleTrackPolyphonic { .. }
         | AppCommand::AdjustTrackMaxPolyphony { .. }
         | AppCommand::SetTrackAttack { .. }
@@ -830,18 +838,10 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackRelease { .. }
         | AppCommand::AdjustTrackRelease { .. }
         | AppCommand::SetTrackSwing { .. }
-        | AppCommand::SetTrackSwingPlock { .. }
-        | AppCommand::SetTrackSwingPlockMulti { .. }
-        | AppCommand::ClearTrackSwingPlockMulti { .. }
         | AppCommand::AdjustTrackSwing { .. }
         | AppCommand::SetTrackSwingResolution { .. }
-        | AppCommand::SetTrackSwingResolutionPlock { .. }
-        | AppCommand::SetTrackSwingResolutionPlockMulti { .. }
-        | AppCommand::ClearTrackSwingResolutionPlockMulti { .. }
         | AppCommand::NextTrackSwingResolution { .. }
         | AppCommand::PrevTrackSwingResolution { .. }
-        | AppCommand::SetTrackNumSteps { .. }
-        | AppCommand::AdjustTrackNumSteps { .. }
         | AppCommand::SetTrackVolume { .. }
         | AppCommand::AdjustTrackVolume { .. }
         | AppCommand::SetTrackPan { .. }
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn history_policy_records_only_lossless_step_commands_in_slice_one() {
+    fn history_policy_records_completed_step_and_pattern_geometry_slices() {
         use crate::tui::history::HistoryPolicy;
 
         assert_eq!(
@@ -1035,7 +1035,7 @@ mod tests {
         );
         assert_eq!(
             history_policy(&AppCommand::DuplicateTrackPattern { track: 0 }),
-            HistoryPolicy::Barrier
+            HistoryPolicy::Record
         );
         assert_eq!(
             history_policy(&AppCommand::MacroSetValue {

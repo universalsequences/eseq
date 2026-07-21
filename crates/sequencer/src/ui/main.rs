@@ -1488,6 +1488,61 @@ fn apply_move_step_history_host_command(
     Ok((outcome, track, steps, delta, move_selection))
 }
 
+fn apply_slice2_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("Slice 2 edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "Slice 2 edit operation was missing".to_string())?;
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "Slice 2 edit track was invalid".to_string())?;
+    let command = match op.as_str() {
+        "duplicate" => tui::AppCommand::DuplicateTrackPattern { track },
+        "halve" => tui::AppCommand::HalveTrackPattern { track },
+        "set-length" => tui::AppCommand::SetTrackNumSteps {
+            track,
+            n: map_usize(map, "value")
+                .ok_or_else(|| "track pattern length was invalid".to_string())?,
+        },
+        "timebase-plock" => tui::AppCommand::SetTimebasePlockMulti {
+            track,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "timebase p-lock steps were invalid".to_string())?,
+            timebase: Timebase::from_index(
+                map_usize(map, "value")
+                    .ok_or_else(|| "timebase p-lock value was invalid".to_string())?
+                    as u32,
+            ),
+        },
+        "swing-plock" => tui::AppCommand::SetTrackSwingPlockMulti {
+            track,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "swing p-lock steps were invalid".to_string())?,
+            value: map_number(map, "value")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| "swing p-lock value was invalid".to_string())?
+                as f32,
+        },
+        "swing-resolution-plock" => tui::AppCommand::SetTrackSwingResolutionPlockMulti {
+            track,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "swing-resolution p-lock steps were invalid".to_string())?,
+            resolution: SwingResolution::from_index(
+                map_usize(map, "value")
+                    .ok_or_else(|| "swing-resolution p-lock value was invalid".to_string())?
+                    as u32,
+            ),
+        },
+        _ => return Err(format!("unknown Slice 2 edit operation {op}")),
+    };
+    tui::try_apply_command(app, command)
+        .map(|outcome| (outcome, track))
+        .map_err(|error| format!("could not apply Slice 2 edit: {error:?}"))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum DrumLaneHistoryAction {
     Toggle {
@@ -8879,6 +8934,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok((tui::edit::EditOutcome::AppliedUnrecorded, ..)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Step move was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "slice2-history-action" => {
+                        match apply_slice2_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Slice 2 edit was applied without history".to_string(),
                                 ));
                             }
                             Err(error) => editor.handle_host_event(HostEvent::Error(error)),

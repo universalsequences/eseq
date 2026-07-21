@@ -3981,7 +3981,7 @@ pub(crate) fn init_runtime(
     let sel = selected_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-track-param", move |args, _ctx| {
+    runtime.register_native("seq-set-track-param", move |args, ctx| {
         let (Some(Value::Keyword(param_name)), Some(param_value)) = (args.first(), args.get(1))
         else {
             return Err("seq-set-track-param: expected (:param value)".into());
@@ -4018,9 +4018,17 @@ pub(crate) fn init_runtime(
                 if steps.is_empty() {
                     tp.set_swing(v);
                 } else {
-                    for &step in steps.iter() {
-                        st.pattern.swing_plocks[track].set(step, v);
-                    }
+                    let values = steps.iter().map(|step| Rc::new(RefCell::new(Value::Number(*step as f64)))).collect();
+                    let mut payload = HashMap::new();
+                    payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("swing-plock".to_string()))));
+                    payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+                    payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(v as f64))));
+                    payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(values))));
+                    ctx.enqueue_command(HostCommand::Custom {
+                        name: "slice2-history-action".to_string(),
+                        payload: Value::Map(payload),
+                    });
+                    return Ok(Value::Number(v as f64));
                 }
                 (TrackParamInvalidation::Swing, Ok(Value::Number(v as f64)))
             }
@@ -4029,11 +4037,15 @@ pub(crate) fn init_runtime(
                     return Err("seq-set-track-param: :num-steps expects a number".into());
                 };
                 let v = (val as usize).clamp(1, MAX_STEPS);
-                tp.set_num_steps(v);
-                (
-                    TrackParamInvalidation::NumSteps,
-                    Ok(Value::Number(v as f64)),
-                )
+                let mut payload = HashMap::new();
+                payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("set-length".to_string()))));
+                payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+                payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(v as f64))));
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "slice2-history-action".to_string(),
+                    payload: Value::Map(payload),
+                });
+                return Ok(Value::Number(v as f64));
             }
             "send" => {
                 let Some(val) = numeric_value else {
@@ -4431,22 +4443,32 @@ pub(crate) fn init_runtime(
     // seq-double-track-pattern — duplicate current track pattern to double its length
     let st = state.clone();
     let ct = current_track.clone();
-    let ui_ep = ui_epoch.clone();
-    runtime.register_native("seq-double-track-pattern", move |_args, _ctx| {
+    runtime.register_native("seq-double-track-pattern", move |_args, ctx| {
         let track = ct.load(Ordering::Relaxed);
-        let new_len = st.duplicate_track_pattern(track);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let new_len = (st.pattern.track_params[track].get_num_steps() * 2).min(MAX_STEPS);
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("duplicate".to_string()))));
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "slice2-history-action".to_string(),
+            payload: Value::Map(payload),
+        });
         Ok(Value::Number(new_len as f64))
     });
 
     // seq-halve-track-pattern — halve current track pattern length
     let st = state.clone();
     let ct = current_track.clone();
-    let ui_ep = ui_epoch.clone();
-    runtime.register_native("seq-halve-track-pattern", move |_args, _ctx| {
+    runtime.register_native("seq-halve-track-pattern", move |_args, ctx| {
         let track = ct.load(Ordering::Relaxed);
-        let new_len = st.halve_track_pattern(track);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let new_len = (st.pattern.track_params[track].get_num_steps() / 2).max(1);
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("halve".to_string()))));
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "slice2-history-action".to_string(),
+            payload: Value::Map(payload),
+        });
         Ok(Value::Number(new_len as f64))
     });
 
@@ -4510,12 +4532,9 @@ pub(crate) fn init_runtime(
     });
 
     // seq-plock-timebase — set a timebase p-lock on selected steps
-    let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    runtime.register_native("seq-plock-timebase", move |args, _ctx| {
+    runtime.register_native("seq-plock-timebase", move |args, ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
             _ => return Err("seq-plock-timebase: expected string label".into()),
@@ -4527,13 +4546,17 @@ pub(crate) fn init_runtime(
             .map(|i| Timebase::ALL[i])
             .ok_or_else(|| format!("seq-plock-timebase: unknown timebase '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
-        let steps = sel.lock().unwrap();
-        for &step in steps.iter() {
-            st.pattern.timebase_plocks[track].set(step, tb);
-        }
-        st.publish_scheduler_snapshot();
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let steps = sel.lock().unwrap().iter().copied().collect::<Vec<_>>();
+        let values = steps.iter().map(|step| Rc::new(RefCell::new(Value::Number(*step as f64)))).collect();
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("timebase-plock".to_string()))));
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(tb as u32 as f64))));
+        payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(values))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "slice2-history-action".to_string(),
+            payload: Value::Map(payload),
+        });
         Ok(Value::String(tb.label().to_string()))
     });
 
@@ -4543,7 +4566,7 @@ pub(crate) fn init_runtime(
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    runtime.register_native("seq-set-swing-resolution", move |args, _ctx| {
+    runtime.register_native("seq-set-swing-resolution", move |args, ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
             _ => return Err("seq-set-swing-resolution: expected string label".into()),
@@ -4559,9 +4582,17 @@ pub(crate) fn init_runtime(
         if steps.is_empty() {
             st.pattern.track_params[track].set_swing_resolution(resolution);
         } else {
-            for &step in steps.iter() {
-                st.pattern.swing_resolution_plocks[track].set(step, resolution);
-            }
+            let values = steps.iter().map(|step| Rc::new(RefCell::new(Value::Number(*step as f64)))).collect();
+            let mut payload = HashMap::new();
+            payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("swing-resolution-plock".to_string()))));
+            payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+            payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(resolution as u32 as f64))));
+            payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(values))));
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "slice2-history-action".to_string(),
+                payload: Value::Map(payload),
+            });
+            return Ok(Value::String(resolution.label().to_string()));
         }
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);

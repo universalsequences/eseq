@@ -26,6 +26,21 @@ pub enum HistoryPolicy {
 #[derive(Clone, Debug)]
 pub enum EditPatch {
     StepCells(StepCellsPatch),
+    PatternGeometry(PatternGeometryPatch),
+}
+
+#[derive(Clone, Debug)]
+pub struct PatternGeometryPatch {
+    pub target: TrackPatternId,
+    pub num_steps_before: usize,
+    pub num_steps_after: usize,
+    pub cells: StepCellsPatch,
+}
+
+impl PatternGeometryPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.cells.retained_bytes()
+    }
 }
 
 #[derive(Clone, Debug)]
