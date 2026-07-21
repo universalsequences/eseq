@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Slice 3.
+Implemented through Slice 4.
 
 - Slice 0 provides stable track identity, bounded linear history, barriers,
   revision tracking, and global undo/redo shortcuts.
@@ -11,6 +11,13 @@ Implemented through Slice 3.
 - Slice 2 covers pattern geometry, track-level p-locks, and variant stamp/clear.
 - Slice 3 covers track, mixer, routing, accumulator, base-note, master-volume,
   and BPM edits with stable Track Pattern targets and gesture coalescing.
+- Slice 4 covers stable track/rack device identities, scalar and tensor
+  defaults, scalar and tensor p-locks, instrument key locks and variants, rack
+  strip/instrument/effect values, instrument preset application, and
+  convolution IR selection with retained prepared data for fileless redo.
+- Bus-effect value edits remain explicit barriers; bus device identity and
+  scene-pattern addressing land with the generalized effect-chain work in
+  Slice 6.
 - Recorded takes remain an explicit history barrier until Slice 7F; arming and
   other performance-only controls remain outside authoring history.
 

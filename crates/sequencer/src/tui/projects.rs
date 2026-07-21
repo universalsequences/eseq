@@ -1150,6 +1150,7 @@ impl App {
         self.ui.visual_steps.clear();
 
         self.history.reset();
+        self.device_registry.clear();
         self.editor.status_message = Some(("New project".to_string(), Instant::now()));
     }
 
@@ -2943,6 +2944,7 @@ impl App {
         };
         eprintln!("project-load: finish complete status={status}");
         self.history.reset();
+        self.device_registry.clear();
         self.history.mark_saved();
         self.editor.status_message = Some((status, Instant::now()));
         self.editor.pending_project_load = None;

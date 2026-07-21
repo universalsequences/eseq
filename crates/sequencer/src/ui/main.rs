@@ -2426,7 +2426,16 @@ fn apply_rack_macro_host_command(
                         .is_some_and(Option::is_some)
                 })
             };
-            if !app.set_rack_macro_plocks(track, id, &steps, value) {
+            let outcome = tui::try_apply_command(
+                app,
+                tui::AppCommand::SetRackMacroPlockMulti {
+                    track,
+                    steps,
+                    macro_idx: id.index(),
+                    value,
+                },
+            );
+            if !outcome.is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp) {
                 return false;
             }
             refresh_rack_macro_plock_reactive(
@@ -10006,17 +10015,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some(param),
                                 Some(value),
                             ) => {
-                                if let Err(error) = app.set_rack_slot_effect_param(
-                                    track,
-                                    rack_slot,
-                                    effect_slot,
-                                    param,
-                                    value,
-                                ) {
-                                    editor.handle_host_event(HostEvent::Status(format!(
-                                        "Error setting rack-slot effect parameter: {error}"
-                                    )));
-                                } else {
+                                let outcome = tui::try_apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotEffectParam {
+                                        track,
+                                        rack_slot_idx: rack_slot,
+                                        effect_slot_idx: effect_slot,
+                                        param_idx: param,
+                                        value,
+                                    },
+                                );
+                                if outcome.is_ok() {
                                     rack_control_snapshot_dirty = true;
                                     if rack_slot_effect_param_needs_panel_rebuild(
                                         &state,
@@ -10048,6 +10057,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             &ui_epoch,
                                         );
                                     }
+                                } else if let Err(error) = outcome {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error setting rack-slot effect parameter: {error:?}"
+                                    )));
                                 }
                             }
                             _ => editor.handle_host_event(HostEvent::Status(
@@ -10071,16 +10084,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ) => {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                if let Err(error) = app.set_rack_slot_effect_plocks(
-                                    track,
-                                    rack_slot,
-                                    effect_slot,
-                                    &steps,
-                                    param,
-                                    value,
-                                ) {
+                                let outcome = tui::try_apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                        track,
+                                        steps,
+                                        rack_slot_idx: rack_slot,
+                                        effect_slot_idx: effect_slot,
+                                        param_idx: param,
+                                        value,
+                                    },
+                                );
+                                if !outcome
+                                    .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp)
+                                {
                                     editor.handle_host_event(HostEvent::Status(format!(
-                                        "Error setting rack-slot effect parameter locks: {error}"
+                                        "Rack-slot effect parameter locks were not changed"
                                     )));
                                 } else {
                                     rack_control_snapshot_dirty = true;
@@ -10141,22 +10160,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let result = if write_plock {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
-                                    app.set_rack_slot_effect_plock_option(
-                                        track,
-                                        rack_slot,
-                                        effect_slot,
-                                        &steps,
-                                        param_idx,
-                                        &label,
+                                    app.rack_slot_effect_option_value(
+                                        track, rack_slot, effect_slot, param_idx, &label,
                                     )
+                                    .and_then(|value| {
+                                        let outcome = tui::try_apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                                track,
+                                                steps,
+                                                rack_slot_idx: rack_slot,
+                                                effect_slot_idx: effect_slot,
+                                                param_idx,
+                                                value,
+                                            },
+                                        );
+                                        outcome
+                                            .map_err(|error| format!("{error:?}"))
+                                            .and_then(|outcome| {
+                                                (outcome != tui::edit::EditOutcome::NoOp)
+                                                    .then_some(())
+                                                    .ok_or_else(|| {
+                                                    "Rack-slot effect parameter locks were not changed"
+                                                        .to_string()
+                                                    })
+                                            })
+                                    })
                                 } else {
-                                    app.set_rack_slot_effect_param_option(
-                                        track,
-                                        rack_slot,
-                                        effect_slot,
-                                        param_idx,
-                                        &label,
+                                    app.rack_slot_effect_option_value(
+                                        track, rack_slot, effect_slot, param_idx, &label,
                                     )
+                                    .and_then(|value| {
+                                        tui::try_apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetRackSlotEffectParam {
+                                                track,
+                                                rack_slot_idx: rack_slot,
+                                                effect_slot_idx: effect_slot,
+                                                param_idx,
+                                                value,
+                                            },
+                                        )
+                                        .map(|_| ())
+                                        .map_err(|error| format!("{error:?}"))
+                                    })
                                 };
                                 match result {
                                     Ok(()) => {
@@ -10457,8 +10504,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .to_string();
                                 let result = if let Some(bus_idx) = bus {
                                     app.set_conv_reverb_ir_bus(bus_idx, slot, path, &reference)
+                                        .map(|()| {
+                                            tui::edit::commit_history_barrier(&mut app);
+                                        })
                                 } else if let Some(track) = track {
-                                    app.set_conv_reverb_ir(track, slot, path, &reference)
+                                    tui::edit::apply_recorded_track_effect_ir_mutation(
+                                        &mut app,
+                                        track,
+                                        slot,
+                                        path,
+                                        &reference,
+                                    )
+                                    .map(|_| ())
+                                    .map_err(|error| format!("{error:?}"))
                                 } else {
                                     Err("need a track or bus".to_string())
                                 };
@@ -11763,7 +11821,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                app.set_rack_slot_gain(track, slot_idx, value);
+                                tui::apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotGain {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
                                 rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
@@ -11788,7 +11853,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                app.set_rack_slot_pan(track, slot_idx, value);
+                                tui::apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotPan {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
                                 rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
@@ -11986,11 +12058,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                for step in steps {
-                                    app.set_rack_slot_param_plock(
-                                        track, slot_idx, step, param, value,
-                                    );
-                                }
+                                tui::apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotParamPlockMulti {
+                                        track,
+                                        slot_idx,
+                                        steps,
+                                        param,
+                                        value,
+                                    },
+                                );
                                 rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
@@ -12215,8 +12292,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         let stored =
                                             desc.clamp(desc.user_input_to_stored(user_val));
-                                        app.set_rack_slot_instrument_param(
-                                            track, slot_idx, param_idx, stored,
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetRackSlotInstrumentParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: stored,
+                                            },
                                         );
                                         rack_control_snapshot_dirty = true;
                                         if param_change_needs_fx_rebuild(&desc) {
@@ -12271,11 +12354,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .copied()
                                             .collect();
-                                        for step in steps {
-                                            app.set_rack_slot_instrument_plock(
-                                                track, slot_idx, step, param_idx, stored,
-                                            );
-                                        }
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                track,
+                                                slot_idx,
+                                                steps,
+                                                param_idx,
+                                                value: stored,
+                                            },
+                                        );
                                         rack_control_snapshot_dirty = true;
                                         if param_change_needs_fx_rebuild(&desc) {
                                             sync_rack_slot_instrument_authoring_display(
@@ -12550,6 +12638,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                             stored,
                                         );
+                                    if wrote_neural_plock {
+                                        tui::edit::commit_history_barrier(&mut app);
+                                    }
                                     if !wrote_neural_plock {
                                         tui::apply_command(
                                             &mut app,
@@ -12881,6 +12972,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         next,
                                     );
                                     if wrote_neural_plock {
+                                        tui::edit::commit_history_barrier(&mut app);
+                                    }
+                                    if wrote_neural_plock {
                                         sync_instrument_param_authoring_display(
                                             &mut editor,
                                             InstrumentParamDisplaySync {
@@ -12990,8 +13084,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         track,
                                         slot_idx,
                                         param_idx,
-                                        clamped,
-                                    );
+                                    clamped,
+                                );
+                                if wrote_neural_plock {
+                                    tui::edit::commit_history_barrier(&mut app);
+                                }
                                 if !wrote_neural_plock {
                                     tui::apply_command(
                                         &mut app,
@@ -13109,18 +13206,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         continue;
                                                     }
                                                 }
-                                            } else if let Some(bus) = app.buses.get_mut(bus_idx) {
-                                                if let Some(slot) =
-                                                    bus.effect_slots.get_mut(slot_idx)
-                                                {
-                                                    for step in selected {
-                                                        if step < slot.plocks.len()
-                                                            && param_idx < slot.plocks[step].len()
-                                                        {
-                                                            slot.plocks[step][param_idx] =
-                                                                Some(next);
-                                                        }
+                                            } else {
+                                                let mut succeeded = true;
+                                                for step in selected {
+                                                    if let Err(error) = app.set_bus_effect_plock(
+                                                        bus_idx,
+                                                        slot_idx,
+                                                        step,
+                                                        param_idx,
+                                                        next,
+                                                    ) {
+                                                        succeeded = false;
+                                                        editor.handle_host_event(
+                                                            HostEvent::Status(format!(
+                                                                "Error toggling bus effect p-lock: {error}"
+                                                            )),
+                                                        );
+                                                        break;
                                                     }
+                                                }
+                                                if succeeded {
                                                     app.publish_bus_gate_runtime();
                                                     *bus_state.lock().unwrap() = app.buses.clone();
                                                 }
@@ -13155,7 +13260,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let next =
                                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                             if selected.is_empty() {
-                                                slot.defaults.set(param_idx, next);
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetMidiFxParam {
+                                                        track,
+                                                        slot_idx,
+                                                        param_idx,
+                                                        value: next,
+                                                    },
+                                                );
                                                 if sync_midi_fx_param_value_field(
                                                     editor.runtime_mut(),
                                                     &state,
@@ -13167,11 +13280,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     editor.mark_needs_redraw();
                                                 }
                                             } else {
-                                                for step in selected {
-                                                    slot.set_plock(step, param_idx, next);
-                                                }
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetMidiFxPlockMulti {
+                                                        track,
+                                                        steps: selected,
+                                                        slot_idx,
+                                                        param_idx,
+                                                        value: next,
+                                                    },
+                                                );
                                             }
-                                            state.publish_scheduler_snapshot();
                                             fx_epoch.fetch_add(1, Ordering::Relaxed);
                                             ui_epoch.fetch_add(1, Ordering::Relaxed);
                                         }
@@ -13223,6 +13342,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                             next,
                                         );
+                                        if wrote_neural_plock {
+                                            tui::edit::commit_history_barrier(&mut app);
+                                        }
                                         if wrote_neural_plock {
                                             sync_effect_param_authoring_display(
                                                 &mut editor,
@@ -13311,8 +13433,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 &selected_neural_neurons,
                                                 track,
                                                 param_idx,
-                                                value,
-                                            );
+                                            value,
+                                        );
+                                        if wrote_neural_plock {
+                                            tui::edit::commit_history_barrier(&mut app);
+                                        }
                                         if !wrote_neural_plock {
                                             tui::apply_command(
                                                 &mut app,
@@ -13373,8 +13498,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             &selected_neural_neurons,
                                             track,
                                             param_idx,
-                                            stored,
-                                        );
+                                        stored,
+                                    );
+                                    if wrote_neural_plock {
+                                        tui::edit::commit_history_barrier(&mut app);
+                                    }
                                     if !wrote_neural_plock {
                                         let steps: Vec<usize> = selected_steps
                                             .lock()
@@ -13520,8 +13648,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 &selected_neural_neurons,
                                                 track,
                                                 param_idx,
-                                                value,
-                                            );
+                                            value,
+                                        );
+                                        if wrote_neural_plock {
+                                            tui::edit::commit_history_barrier(&mut app);
+                                        }
                                         if !wrote_neural_plock {
                                             let steps: Vec<usize> = selected_steps
                                                 .lock()
@@ -13624,22 +13755,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Some(sequencer::effects::HostControl::FxSidechain { .. })
                                     );
                                     if is_host_sidechain {
-                                        app.apply_effect_sidechain_selection(
-                                            track,
-                                            slot_idx,
-                                            param_idx,
-                                            selected_idx,
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetEffectParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
                                         );
-                                        if let Some(slot) = app
-                                            .state
-                                            .pattern
-                                            .effect_chains
-                                            .get(track)
-                                            .and_then(|chain| chain.get(slot_idx))
-                                        {
-                                            slot.defaults.set(param_idx, selected_idx as f32);
-                                        }
-                                        app.state.publish_scheduler_snapshot();
                                     } else {
                                         let value = selected_idx as f32;
                                         let (neural_selection, wrote_neural_plock) =
@@ -13650,8 +13774,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
-                                                value,
-                                            );
+                                            value,
+                                        );
+                                        if wrote_neural_plock {
+                                            tui::edit::commit_history_barrier(&mut app);
+                                        }
                                         if !wrote_neural_plock {
                                             tui::apply_command(
                                                 &mut app,
@@ -15013,22 +15140,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Some(sequencer::effects::HostControl::FxSidechain { .. })
                                     );
                                     if is_host_sidechain {
-                                        app.apply_effect_sidechain_selection(
-                                            track,
-                                            slot_idx,
-                                            param_idx,
-                                            selected_idx,
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetEffectParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
                                         );
-                                        if let Some(slot) = app
-                                            .state
-                                            .pattern
-                                            .effect_chains
-                                            .get(track)
-                                            .and_then(|chain| chain.get(slot_idx))
-                                        {
-                                            slot.defaults.set(param_idx, selected_idx as f32);
-                                        }
-                                        app.state.publish_scheduler_snapshot();
                                     } else {
                                         let value = selected_idx as f32;
                                         let (neural_selection, wrote_neural_plock) =
@@ -15039,8 +15159,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
-                                                value,
-                                            );
+                                            value,
+                                        );
+                                        if wrote_neural_plock {
+                                            tui::edit::commit_history_barrier(&mut app);
+                                        }
                                         if !wrote_neural_plock {
                                             let steps: Vec<usize> = selected_steps
                                                 .lock()
@@ -15112,14 +15235,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .as_ref()
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
-                                if let Some(slot) = state
+                                if let Some(_slot) = state
                                     .pattern
                                     .midi_fx_slots
                                     .get(track)
                                     .and_then(|slots| slots.get(slot_idx))
                                 {
-                                    slot.defaults.set(param_idx, clamped);
-                                    state.publish_scheduler_snapshot();
+                                    tui::apply_command(
+                                        &mut app,
+                                        tui::AppCommand::SetMidiFxParam {
+                                            track,
+                                            slot_idx,
+                                            param_idx,
+                                            value: clamped,
+                                        },
+                                    );
                                     sync_midi_fx_param_value_field(
                                         editor.runtime_mut(),
                                         &state,
@@ -15165,7 +15295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .and_then(|desc| desc.params.get(param_idx).cloned())
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
-                                if let Some(slot) = state
+                                if let Some(_slot) = state
                                     .pattern
                                     .midi_fx_slots
                                     .get(track)
@@ -15173,10 +15303,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
-                                    for step in steps {
-                                        slot.set_plock(step, param_idx, clamped);
-                                    }
-                                    state.publish_scheduler_snapshot();
+                                    tui::apply_command(
+                                        &mut app,
+                                        tui::AppCommand::SetMidiFxPlockMulti {
+                                            track,
+                                            steps,
+                                            slot_idx,
+                                            param_idx,
+                                            value: clamped,
+                                        },
+                                    );
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -15208,14 +15344,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .get(slot_idx)
                                     .and_then(|name| midi_fx_option_index(name, param_idx, &label))
                                 {
-                                    if let Some(slot) = state
+                                    if let Some(_slot) = state
                                         .pattern
                                         .midi_fx_slots
                                         .get(track)
                                         .and_then(|slots| slots.get(slot_idx))
                                     {
-                                        slot.defaults.set(param_idx, selected_idx as f32);
-                                        state.publish_scheduler_snapshot();
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetMidiFxParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -15248,7 +15391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .get(slot_idx)
                                     .and_then(|name| midi_fx_option_index(name, param_idx, &label))
                                 {
-                                    if let Some(slot) = state
+                                    if let Some(_slot) = state
                                         .pattern
                                         .midi_fx_slots
                                         .get(track)
@@ -15260,10 +15403,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .copied()
                                             .collect();
-                                        for step in steps {
-                                            slot.set_plock(step, param_idx, selected_idx as f32);
-                                        }
-                                        state.publish_scheduler_snapshot();
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetMidiFxPlockMulti {
+                                                track,
+                                                steps,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -15330,30 +15479,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "timebase" => {
                                         let idx = (value.round() as usize)
                                             .min(sequencer::sequencer::Timebase::ALL.len() - 1);
-                                        state.pattern.timebase_plocks[track]
-                                            .set(step, sequencer::sequencer::Timebase::ALL[idx]);
-                                        state.publish_scheduler_snapshot();
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetTimebasePlock {
+                                                track,
+                                                step,
+                                                timebase: Some(
+                                                    sequencer::sequencer::Timebase::ALL[idx],
+                                                ),
+                                            },
+                                        );
                                     }
                                     "swing" => {
-                                        state.pattern.swing_plocks[track].set(step, value);
-                                        state.publish_scheduler_snapshot();
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetTrackSwingPlock {
+                                                track,
+                                                step,
+                                                value: Some(value),
+                                            },
+                                        );
                                     }
                                     "swing-resolution" => {
                                         let idx = (value.round() as usize).min(
                                             sequencer::sequencer::SwingResolution::ALL.len() - 1,
                                         );
-                                        state.pattern.swing_resolution_plocks[track].set(
-                                            step,
-                                            sequencer::sequencer::SwingResolution::ALL[idx],
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetTrackSwingResolutionPlock {
+                                                track,
+                                                step,
+                                                resolution: Some(
+                                                    sequencer::sequencer::SwingResolution::ALL[idx],
+                                                ),
+                                            },
                                         );
-                                        state.publish_scheduler_snapshot();
                                     }
                                     "step-param" => {
                                         if let Some(param_idx) = param_idx {
                                             if let Some(param) =
                                                 sequencer::sequencer::StepParam::ALL.get(param_idx)
                                             {
-                                                state.set_step_param(track, step, *param, value);
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetStepParam {
+                                                        track,
+                                                        step,
+                                                        param: *param,
+                                                        value,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -15368,9 +15543,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             {
                                                 let stored =
                                                     desc.clamp(desc.user_input_to_stored(value));
-                                                state.pattern.instrument_slots[track]
-                                                    .set_plock(step, param_idx, stored);
-                                                state.publish_scheduler_snapshot();
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetInstrumentPlock {
+                                                        track,
+                                                        step,
+                                                        param_idx,
+                                                        value: stored,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -15378,7 +15559,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let (Some(slot_idx), Some(param_idx)) =
                                             (slot_idx, param_idx)
                                         {
-                                            if let Some(slot) = state
+                                            if let Some(_slot) = state
                                                 .pattern
                                                 .effect_chains
                                                 .get(track)
@@ -15392,8 +15573,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .and_then(|d| d.params.get(param_idx))
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                slot.set_plock(step, param_idx, clamped);
-                                                state.publish_scheduler_snapshot();
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetEffectPlock {
+                                                        track,
+                                                        step,
+                                                        slot_idx,
+                                                        param_idx,
+                                                        value: clamped,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -15404,10 +15593,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     param_idx,
                                                 )
                                             {
-                                                if app.set_rack_macro_plock(track, id, step, value)
-                                                {
-                                                    state.publish_scheduler_snapshot();
-                                                }
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetRackMacroPlockMulti {
+                                                        track,
+                                                        steps: vec![step],
+                                                        macro_idx: id.index(),
+                                                        value,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -15418,27 +15612,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (rack_slot, slot_idx, param_idx)
                                         {
-                                            if let Err(error) = app.set_rack_slot_effect_plocks(
-                                                track,
-                                                rack_slot,
-                                                effect_slot,
-                                                &[step],
-                                                param_idx,
-                                                value,
-                                            ) {
-                                                editor.handle_host_event(HostEvent::Status(
-                                                    format!(
-                                                    "Error editing rack-slot effect lock: {error}"
-                                                ),
-                                                ));
-                                            }
+                                            tui::apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    rack_slot_idx: rack_slot,
+                                                    effect_slot_idx: effect_slot,
+                                                    param_idx,
+                                                    value,
+                                                },
+                                            );
                                         }
                                     }
                                     "midi-fx" => {
                                         if let (Some(slot_idx), Some(param_idx)) =
                                             (slot_idx, param_idx)
                                         {
-                                            if let Some(slot) = state
+                                            if let Some(_slot) = state
                                                 .pattern
                                                 .midi_fx_slots
                                                 .get(track)
@@ -15456,8 +15647,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     })
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                slot.set_plock(step, param_idx, clamped);
-                                                state.publish_scheduler_snapshot();
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetMidiFxPlockMulti {
+                                                        track,
+                                                        steps: vec![step],
+                                                        slot_idx,
+                                                        param_idx,
+                                                        value: clamped,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -15505,11 +15704,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .position(|item| *item == label)
                                         {
-                                            state.pattern.timebase_plocks[track].set(
-                                                step,
-                                                sequencer::sequencer::Timebase::ALL[idx],
+                                            tui::apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTimebasePlock {
+                                                    track,
+                                                    step,
+                                                    timebase: Some(
+                                                        sequencer::sequencer::Timebase::ALL[idx],
+                                                    ),
+                                                },
                                             );
-                                            state.publish_scheduler_snapshot();
                                         }
                                     }
                                     "swing-resolution" => {
@@ -15518,11 +15722,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .iter()
                                                 .position(|item| *item == label)
                                         {
-                                            state.pattern.swing_resolution_plocks[track].set(
-                                                step,
-                                                sequencer::sequencer::SwingResolution::ALL[idx],
+                                            tui::apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTrackSwingResolutionPlock {
+                                                    track,
+                                                    step,
+                                                    resolution: Some(
+                                                        sequencer::sequencer::SwingResolution::ALL[idx],
+                                                    ),
+                                                },
                                             );
-                                            state.publish_scheduler_snapshot();
                                         }
                                     }
                                     "step-param" => {}
@@ -15549,12 +15758,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     _ => None,
                                                 })
                                             {
-                                                state.pattern.instrument_slots[track].set_plock(
-                                                    step,
-                                                    param_idx,
-                                                    selected_idx as f32,
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetInstrumentPlock {
+                                                        track,
+                                                        step,
+                                                        param_idx,
+                                                        value: selected_idx as f32,
+                                                    },
                                                 );
-                                                state.publish_scheduler_snapshot();
                                             }
                                         }
                                     }
@@ -15584,18 +15796,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     _ => None,
                                                 })
                                             {
-                                                if let Some(slot) = state
+                                                if let Some(_slot) = state
                                                     .pattern
                                                     .effect_chains
                                                     .get(track)
                                                     .and_then(|chain| chain.get(slot_idx))
                                                 {
-                                                    slot.set_plock(
-                                                        step,
-                                                        param_idx,
-                                                        selected_idx as f32,
+                                                    tui::apply_command(
+                                                        &mut app,
+                                                        tui::AppCommand::SetEffectPlock {
+                                                            track,
+                                                            step,
+                                                            slot_idx,
+                                                            param_idx,
+                                                            value: selected_idx as f32,
+                                                        },
                                                     );
-                                                    state.publish_scheduler_snapshot();
                                                 }
                                             }
                                         }
@@ -15607,21 +15823,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (rack_slot, slot_idx, param_idx)
                                         {
-                                            if let Err(error) = app
-                                                .set_rack_slot_effect_plock_option(
-                                                    track,
-                                                    rack_slot,
-                                                    effect_slot,
-                                                    &[step],
-                                                    param_idx,
-                                                    &label,
-                                                )
-                                            {
-                                                editor.handle_host_event(HostEvent::Status(
-                                                    format!(
-                                                    "Error editing rack-slot effect lock: {error}"
+                                            match app.rack_slot_effect_option_value(
+                                                track,
+                                                rack_slot,
+                                                effect_slot,
+                                                param_idx,
+                                                &label,
+                                            ) {
+                                                Ok(value) => {
+                                                    tui::apply_command(
+                                                        &mut app,
+                                                        tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                                            track,
+                                                            steps: vec![step],
+                                                            rack_slot_idx: rack_slot,
+                                                            effect_slot_idx: effect_slot,
+                                                            param_idx,
+                                                            value,
+                                                        },
+                                                    );
+                                                }
+                                                Err(error) => editor.handle_host_event(
+                                                    HostEvent::Status(format!(
+                                                        "Error editing rack-slot effect lock: {error}"
+                                                    )),
                                                 ),
-                                                ));
                                             }
                                         }
                                     }
@@ -15658,18 +15884,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     })
                                                 })
                                             {
-                                                if let Some(slot) = state
+                                                if let Some(_slot) = state
                                                     .pattern
                                                     .midi_fx_slots
                                                     .get(track)
                                                     .and_then(|slots| slots.get(slot_idx))
                                                 {
-                                                    slot.set_plock(
-                                                        step,
-                                                        param_idx,
-                                                        selected_idx as f32,
+                                                    tui::apply_command(
+                                                        &mut app,
+                                                        tui::AppCommand::SetMidiFxPlockMulti {
+                                                            track,
+                                                            steps: vec![step],
+                                                            slot_idx,
+                                                            param_idx,
+                                                            value: selected_idx as f32,
+                                                        },
                                                     );
-                                                    state.publish_scheduler_snapshot();
                                                 }
                                             }
                                         }
@@ -15730,17 +15960,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match target.as_str() {
                                     "timebase" => {
                                         if let Some(step) = step {
-                                            state.pattern.timebase_plocks[track].clear(step);
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTimebasePlock {
+                                                    track,
+                                                    step,
+                                                    timebase: None,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "swing" => {
                                         if let Some(step) = step {
-                                            state.pattern.swing_plocks[track].clear(step);
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTrackSwingPlock {
+                                                    track,
+                                                    step,
+                                                    value: None,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "swing-resolution" => {
                                         if let Some(step) = step {
-                                            state.pattern.swing_resolution_plocks[track].clear(step)
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTrackSwingResolutionPlock {
+                                                    track,
+                                                    step,
+                                                    resolution: None,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "step-param" => {
@@ -15748,33 +16002,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Some(param) =
                                                 sequencer::sequencer::StepParam::ALL.get(param_idx)
                                             {
-                                                state.pattern.step_data[track].set(
-                                                    step,
-                                                    *param,
-                                                    param.default_value(),
-                                                );
+                                                changed = tui::try_apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetStepParam {
+                                                        track,
+                                                        step,
+                                                        param: *param,
+                                                        value: param.default_value(),
+                                                    },
+                                                )
+                                                .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                             }
                                         }
                                     }
                                     "instrument" => {
                                         if let (Some(step), Some(param_idx)) = (step, param_idx) {
-                                            state.pattern.instrument_slots[track]
-                                                .plocks
-                                                .clear_param(step, param_idx);
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::ClearInstrumentPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    param_idx,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "effect" => {
                                         if let (Some(step), Some(slot_idx), Some(param_idx)) =
                                             (step, slot_idx, param_idx)
                                         {
-                                            if let Some(slot) = state
-                                                .pattern
-                                                .effect_chains
-                                                .get(track)
-                                                .and_then(|chain| chain.get(slot_idx))
-                                            {
-                                                slot.plocks.clear_param(step, param_idx);
-                                            }
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::ClearEffectPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    slot_idx,
+                                                    param_idx,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "rack-macro" => {
@@ -15784,11 +16051,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     param_idx,
                                                 )
                                             {
-                                                changed =
-                                                    app.clear_rack_macro_plock(track, id, step);
-                                                if changed {
-                                                    state.publish_scheduler_snapshot();
-                                                }
+                                                changed = tui::try_apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::ClearRackMacroPlockMulti {
+                                                        track,
+                                                        steps: vec![step],
+                                                        macro_idx: id.index(),
+                                                    },
+                                                )
+                                                .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                             }
                                         }
                                     }
@@ -15800,34 +16071,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (step, rack_slot, slot_idx, param_idx)
                                         {
-                                            changed = state.update_rack_slot_in_current_pattern(
-                                                track,
-                                                rack_slot,
-                                                |slot| {
-                                                    if let Some(effect) =
-                                                        slot.effect_slots.get_mut(effect_slot)
-                                                    {
-                                                        effect.clear_plock(step, param_idx);
-                                                    }
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::ClearRackSlotEffectPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    rack_slot_idx: rack_slot,
+                                                    effect_slot_idx: effect_slot,
+                                                    param_idx,
                                                 },
-                                            );
-                                            if changed {
-                                                state.publish_scheduler_snapshot();
-                                            }
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "midi-fx" => {
                                         if let (Some(step), Some(slot_idx), Some(param_idx)) =
                                             (step, slot_idx, param_idx)
                                         {
-                                            if let Some(slot) = state
-                                                .pattern
-                                                .midi_fx_slots
-                                                .get(track)
-                                                .and_then(|slots| slots.get(slot_idx))
-                                            {
-                                                slot.plocks.clear_param(step, param_idx);
-                                            }
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::ClearMidiFxPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    slot_idx,
+                                                    param_idx,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "neural-instrument" => {
@@ -15838,6 +16108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (network_id, neuron_idx, target_track, param_idx)
                                         {
+                                            tui::edit::commit_history_barrier(&mut app);
                                             match sequencer::lisp_host::clear_neural_instrument_plock_by_network_id(
                                                 &state,
                                                 network_id,
@@ -15868,6 +16139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             slot_idx,
                                             param_idx,
                                         ) {
+                                            tui::edit::commit_history_barrier(&mut app);
                                             match sequencer::lisp_host::clear_neural_effect_plock_by_network_id(
                                                 &state,
                                                 network_id,

@@ -10670,39 +10670,49 @@ pub(crate) fn load_instrument_preset_into_track(
         .cloned()
         .ok_or_else(|| "Instrument descriptor unavailable".to_string())?;
 
-    {
-        let slot = &app.state.pattern.instrument_slots[track];
-        for (param_idx, param) in desc.params.iter().enumerate() {
-            let value = preset
-                .params
-                .get(&param.name)
-                .copied()
-                .unwrap_or(param.default);
-            let clamped = param.clamp(value);
-            slot.defaults.set(param_idx, clamped);
-            app.send_instrument_param(track, param_idx, clamped);
-        }
-        sequencer::effects::restore_key_locks_by_param_name(slot, &desc, &preset.key_locks);
-    }
-
-    app.state.pattern.instrument_base_note_offsets[track]
-        .store(preset.base_note_offset.to_bits(), Ordering::Relaxed);
-    app.state.schedule_mod_resync();
-    app.state.publish_scheduler_snapshot();
     let engine_id = app.graph.track_engine_ids.get(track).and_then(|id| *id);
-    if let Some(meta) = app
-        .state
-        .pattern
-        .track_sound_state
-        .lock()
-        .unwrap()
-        .get_mut(track)
-    {
-        meta.engine_id = engine_id;
-        meta.loaded_preset = Some(preset.name.clone());
-        meta.dirty = false;
-    }
-    Ok(())
+    let preset_label = preset.name.clone();
+    sequencer::tui::edit::apply_recorded_instrument_values_mutation(
+        app,
+        track,
+        format!("Load preset '{preset_label}'"),
+        move |app| {
+            let slot = &app.state.pattern.instrument_slots[track];
+            for (param_idx, param) in desc.params.iter().enumerate() {
+                let value = preset
+                    .params
+                    .get(&param.name)
+                    .copied()
+                    .unwrap_or(param.default);
+                let clamped = param.clamp(value);
+                slot.defaults.set(param_idx, clamped);
+                app.send_instrument_param(track, param_idx, clamped);
+            }
+            sequencer::effects::restore_key_locks_by_param_name(
+                slot,
+                &desc,
+                &preset.key_locks,
+            );
+            app.state.pattern.instrument_base_note_offsets[track]
+                .store(preset.base_note_offset.to_bits(), Ordering::Relaxed);
+            app.state.schedule_mod_resync();
+            if let Some(meta) = app
+                .state
+                .pattern
+                .track_sound_state
+                .lock()
+                .unwrap()
+                .get_mut(track)
+            {
+                meta.engine_id = engine_id;
+                meta.loaded_preset = Some(preset.name.clone());
+                meta.dirty = false;
+            }
+            Ok(())
+        },
+    )
+    .map(|_| ())
+    .map_err(|error| format!("{error:?}"))
 }
 
 /// Extract the :path string from a host-command payload dict.

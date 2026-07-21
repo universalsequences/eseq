@@ -1723,9 +1723,6 @@ impl App {
                         Some(crate::effects::HostControl::FxSidechain { .. })
                     ) {
                         let selection = store_val.round().max(0.0) as usize;
-                        self.apply_effect_sidechain_selection(
-                            track, slot_idx, param_idx, selection,
-                        );
                         apply_command(
                             self,
                             AppCommand::SetEffectParam {

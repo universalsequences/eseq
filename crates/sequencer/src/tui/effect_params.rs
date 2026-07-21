@@ -666,7 +666,6 @@ impl App {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
-            self.apply_effect_sidechain_selection(track, slot_idx, param_idx, new_val as usize);
             apply_command(
                 self,
                 AppCommand::SetEffectParam {

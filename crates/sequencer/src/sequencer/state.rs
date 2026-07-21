@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::effects::{
-    EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
+    EffectDescriptor, EffectSlotSnapshot, EffectSlotState, EffectSlotValuesSnapshot, HostControl,
+    MAX_SLOT_PARAMS,
 };
 use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
 use crate::neural::{
@@ -1018,7 +1019,161 @@ pub struct RackSlotSnapshot {
     pub sample_id: Option<(i32, String, u32)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct InstrumentDeviceValuesSnapshot {
+    pub slot: EffectSlotValuesSnapshot,
+    pub base_note_offset_bits: u32,
+    pub sound_state: TrackSoundState,
+    pub key_lock_variant_registry: PlockVariantRegistry,
+}
+
+impl InstrumentDeviceValuesSnapshot {
+    pub fn bit_exact_eq(&self, other: &Self) -> bool {
+        self.slot.bit_exact_eq(&other.slot)
+            && self.base_note_offset_bits == other.base_note_offset_bits
+            && self.sound_state.engine_id == other.sound_state.engine_id
+            && self.sound_state.loaded_preset == other.sound_state.loaded_preset
+            && self.sound_state.dirty == other.sound_state.dirty
+            && self.key_lock_variant_registry == other.key_lock_variant_registry
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.slot.retained_bytes()
+            + self
+                .sound_state
+                .loaded_preset
+                .as_ref()
+                .map_or(0, String::capacity)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RackSlotValuesSnapshot {
+    pub base_note_offset_bits: u32,
+    pub choke_group: Option<u8>,
+    pub gain_bits: u32,
+    pub pan_bits: u32,
+    pub mute: bool,
+    pub solo: bool,
+    pub max_polyphony: usize,
+    pub param_plocks: RackSlotParamPlocks,
+    pub instrument_slot: EffectSlotValuesSnapshot,
+    pub effect_slots: Vec<EffectSlotValuesSnapshot>,
+    pub sound_state: TrackSoundState,
+}
+
+impl RackSlotValuesSnapshot {
+    pub fn bit_exact_eq(&self, other: &Self) -> bool {
+        self.base_note_offset_bits == other.base_note_offset_bits
+            && self.choke_group == other.choke_group
+            && self.gain_bits == other.gain_bits
+            && self.pan_bits == other.pan_bits
+            && self.mute == other.mute
+            && self.solo == other.solo
+            && self.max_polyphony == other.max_polyphony
+            && optional_f32_rows_bit_exact_eq(
+                &self.param_plocks.rows,
+                &other.param_plocks.rows,
+            )
+            && self.instrument_slot.bit_exact_eq(&other.instrument_slot)
+            && self.effect_slots.len() == other.effect_slots.len()
+            && self
+                .effect_slots
+                .iter()
+                .zip(&other.effect_slots)
+                .all(|(left, right)| left.bit_exact_eq(right))
+            && self.sound_state.engine_id == other.sound_state.engine_id
+            && self.sound_state.loaded_preset == other.sound_state.loaded_preset
+            && self.sound_state.dirty == other.sound_state.dirty
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.param_plocks.rows.capacity() * std::mem::size_of::<Vec<Option<f32>>>()
+            + self
+                .param_plocks
+                .rows
+                .iter()
+                .map(|row| row.capacity() * std::mem::size_of::<Option<f32>>())
+                .sum::<usize>()
+            + self.instrument_slot.retained_bytes()
+            + self
+                .effect_slots
+                .iter()
+                .map(EffectSlotValuesSnapshot::retained_bytes)
+                .sum::<usize>()
+            + self
+                .sound_state
+                .loaded_preset
+                .as_ref()
+                .map_or(0, String::capacity)
+    }
+}
+
+fn optional_f32_rows_bit_exact_eq(
+    left: &[Vec<Option<f32>>],
+    right: &[Vec<Option<f32>>],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(left, right)| match (left, right) {
+                    (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+                    (None, None) => true,
+                    _ => false,
+                })
+        })
+}
+
 impl RackSlotSnapshot {
+    pub fn authoring_values(&self) -> RackSlotValuesSnapshot {
+        RackSlotValuesSnapshot {
+            base_note_offset_bits: self.instrument_base_note_offset.to_bits(),
+            choke_group: self.choke_group,
+            gain_bits: self.gain.to_bits(),
+            pan_bits: self.pan.to_bits(),
+            mute: self.mute,
+            solo: self.solo,
+            max_polyphony: self.max_polyphony,
+            param_plocks: self.param_plocks.clone(),
+            instrument_slot: self.instrument_slot.authoring_values(),
+            effect_slots: self
+                .effect_slots
+                .iter()
+                .map(EffectSlotSnapshot::authoring_values)
+                .collect(),
+            sound_state: self.track_sound_state.clone(),
+        }
+    }
+
+    pub fn apply_authoring_values(
+        &mut self,
+        values: &RackSlotValuesSnapshot,
+    ) -> Result<(), String> {
+        let mut instrument_slot = self.instrument_slot.clone();
+        instrument_slot.apply_authoring_values(&values.instrument_slot)?;
+        if self.effect_slots.len() != values.effect_slots.len() {
+            return Err("rack effect chain changed while replaying history".to_string());
+        }
+        let mut effect_slots = self.effect_slots.clone();
+        for (slot, values) in effect_slots.iter_mut().zip(&values.effect_slots) {
+            slot.apply_authoring_values(values)?;
+        }
+        self.instrument_base_note_offset = f32::from_bits(values.base_note_offset_bits);
+        self.choke_group = values.choke_group;
+        self.gain = f32::from_bits(values.gain_bits);
+        self.pan = f32::from_bits(values.pan_bits);
+        self.mute = values.mute;
+        self.solo = values.solo;
+        self.max_polyphony = values.max_polyphony;
+        self.param_plocks = values.param_plocks.clone();
+        self.instrument_slot = instrument_slot;
+        self.effect_slots = effect_slots;
+        self.track_sound_state = values.sound_state.clone();
+        Ok(())
+    }
+
     pub fn empty_effect_slots() -> Vec<EffectSlotSnapshot> {
         (0..crate::lisp_host::MAX_CUSTOM_FX)
             .map(|_| EffectSlotSnapshot::new_empty())
@@ -8850,6 +9005,323 @@ impl SequencerState {
                 .get(track)
                 .ok_or_else(|| "live track target no longer exists".to_string())?
                 .store(value.to_bits(), Ordering::Relaxed);
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn capture_pattern_instrument_device_values(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+    ) -> Result<InstrumentDeviceValuesSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            let slot = self
+                .pattern
+                .instrument_slots
+                .get(track)
+                .ok_or_else(|| "live instrument target no longer exists".to_string())?;
+            let base_note_offset_bits = self
+                .pattern
+                .instrument_base_note_offsets
+                .get(track)
+                .ok_or_else(|| "live instrument base note is missing".to_string())?
+                .load(Ordering::Relaxed);
+            let sound_state = self
+                .pattern
+                .track_sound_state
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .ok_or_else(|| "live instrument sound state is missing".to_string())?;
+            let key_lock_variant_registry = self
+                .pattern
+                .key_lock_variant_registries
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .ok_or_else(|| "live key-lock variant registry is missing".to_string())?;
+            return Ok(InstrumentDeviceValuesSnapshot {
+                slot: EffectSlotSnapshot::capture_authoring_values(slot),
+                base_note_offset_bits,
+                sound_state,
+                key_lock_variant_registry,
+            });
+        }
+        let data = scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        Ok(InstrumentDeviceValuesSnapshot {
+            slot: data.instrument_slot.authoring_values(),
+            base_note_offset_bits: data.instrument_base_note_offset.to_bits(),
+            sound_state: data.track_sound_state.clone(),
+            key_lock_variant_registry: data.key_lock_variant_registry.clone(),
+        })
+    }
+
+    pub(crate) fn restore_pattern_instrument_device_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        values: &InstrumentDeviceValuesSnapshot,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        let mut stored_slot = data.instrument_slot.clone();
+        stored_slot.apply_authoring_values(&values.slot)?;
+        let live_slot = if is_effective {
+            let slot = self
+                .pattern
+                .instrument_slots
+                .get(track)
+                .ok_or_else(|| "live instrument target no longer exists".to_string())?;
+            let mut snapshot = EffectSlotSnapshot::capture(slot);
+            snapshot.apply_authoring_values(&values.slot)?;
+            Some((slot, snapshot))
+        } else {
+            None
+        };
+
+        data.instrument_slot = stored_slot;
+        data.instrument_base_note_offset = f32::from_bits(values.base_note_offset_bits);
+        data.track_sound_state = values.sound_state.clone();
+        data.key_lock_variant_registry = values.key_lock_variant_registry.clone();
+        if let Some((slot, snapshot)) = live_slot {
+            snapshot.restore(slot);
+            self.pattern
+                .instrument_base_note_offsets
+                .get(track)
+                .ok_or_else(|| "live instrument base note is missing".to_string())?
+                .store(values.base_note_offset_bits, Ordering::Relaxed);
+            *self
+                .pattern
+                .track_sound_state
+                .lock()
+                .unwrap()
+                .get_mut(track)
+                .ok_or_else(|| "live instrument sound state is missing".to_string())? =
+                values.sound_state.clone();
+            *self
+                .pattern
+                .key_lock_variant_registries
+                .lock()
+                .unwrap()
+                .get_mut(track)
+                .ok_or_else(|| "live key-lock variant registry is missing".to_string())? =
+                values.key_lock_variant_registry.clone();
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn capture_pattern_effect_device_values(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+    ) -> Result<EffectSlotValuesSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+                .map(EffectSlotSnapshot::capture_authoring_values)
+                .ok_or_else(|| "live effect target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .and_then(|data| data.effect_slots.get(slot_idx))
+            .map(EffectSlotSnapshot::authoring_values)
+            .ok_or_else(|| "Track Pattern effect target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_effect_device_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+        values: &EffectSlotValuesSnapshot,
+    ) -> Result<bool, String> {
+        self.restore_pattern_slot_device_values_no_publish(
+            track,
+            pattern_id,
+            slot_idx,
+            values,
+            false,
+        )
+    }
+
+    pub(crate) fn capture_pattern_midi_fx_device_values(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+    ) -> Result<EffectSlotValuesSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .midi_fx_slots
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx))
+                .map(EffectSlotSnapshot::capture_authoring_values)
+                .ok_or_else(|| "live MIDI-FX target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .and_then(|data| data.midi_fx_slots.get(slot_idx))
+            .map(EffectSlotSnapshot::authoring_values)
+            .ok_or_else(|| "Track Pattern MIDI-FX target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_midi_fx_device_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+        values: &EffectSlotValuesSnapshot,
+    ) -> Result<bool, String> {
+        self.restore_pattern_slot_device_values_no_publish(
+            track,
+            pattern_id,
+            slot_idx,
+            values,
+            true,
+        )
+    }
+
+    fn restore_pattern_slot_device_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+        values: &EffectSlotValuesSnapshot,
+        midi_fx: bool,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        let stored = if midi_fx {
+            data.midi_fx_slots.get_mut(slot_idx)
+        } else {
+            data.effect_slots.get_mut(slot_idx)
+        }
+        .ok_or_else(|| "stored device target no longer exists".to_string())?;
+        let mut stored_next = stored.clone();
+        stored_next.apply_authoring_values(values)?;
+        let live = if is_effective {
+            let slot = if midi_fx {
+                self.pattern
+                    .midi_fx_slots
+                    .get(track)
+                    .and_then(|slots| slots.get(slot_idx))
+            } else {
+                self.pattern
+                    .effect_chains
+                    .get(track)
+                    .and_then(|slots| slots.get(slot_idx))
+            }
+            .ok_or_else(|| "live device target no longer exists".to_string())?;
+            let mut snapshot = EffectSlotSnapshot::capture(slot);
+            snapshot.apply_authoring_values(values)?;
+            Some((slot, snapshot))
+        } else {
+            None
+        };
+        *stored = stored_next;
+        if let Some((slot, snapshot)) = live {
+            snapshot.restore(slot);
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn capture_pattern_rack_slot_values(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+    ) -> Result<RackSlotValuesSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(slot_idx))
+                .map(RackSlotSnapshot::authoring_values)
+                .ok_or_else(|| "live rack slot target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .and_then(|data| data.rack_track.as_ref())
+            .and_then(|rack| rack.slots.get(slot_idx))
+            .map(RackSlotSnapshot::authoring_values)
+            .ok_or_else(|| "Track Pattern rack slot target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_rack_slot_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+        values: &RackSlotValuesSnapshot,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let stored = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .and_then(|data| data.rack_track.as_mut())
+            .and_then(|rack| rack.slots.get_mut(slot_idx))
+            .ok_or_else(|| "Track Pattern rack slot target no longer exists".to_string())?;
+        let mut stored_next = stored.clone();
+        stored_next.apply_authoring_values(values)?;
+        let live_next = if is_effective {
+            let racks = self.pattern.rack_tracks.lock().unwrap();
+            let live = racks
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(slot_idx))
+                .ok_or_else(|| "live rack slot target no longer exists".to_string())?;
+            let mut snapshot = live.clone();
+            snapshot.apply_authoring_values(values)?;
+            Some(snapshot)
+        } else {
+            None
+        };
+        *stored = stored_next;
+        if let Some(snapshot) = live_next {
+            let mut racks = self.pattern.rack_tracks.lock().unwrap();
+            let live = racks
+                .get_mut(track)
+                .and_then(Option::as_mut)
+                .and_then(|rack| rack.slots.get_mut(slot_idx))
+                .ok_or_else(|| "live rack slot target no longer exists".to_string())?;
+            *live = snapshot;
         }
         Ok(is_effective)
     }

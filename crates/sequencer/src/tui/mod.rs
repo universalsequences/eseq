@@ -864,6 +864,7 @@ pub struct UiState {
 pub struct App {
     pub state: Arc<SequencerState>,
     pub track_registry: crate::sequencer::TrackRegistry,
+    pub device_registry: DeviceIdentityRegistry,
     pub history: history::UndoManager<history::EditPatch>,
     pub macro_engine: crate::macro_engine::MacroEngine,
     scene_macro_runtime: HashMap<crate::macro_engine::MacroId, SceneMacroRuntime>,
@@ -888,6 +889,99 @@ pub struct App {
     pub master_recorder: Arc<MasterRecorder>,
     pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
+}
+
+#[derive(Default)]
+pub struct DeviceIdentityRegistry {
+    next_id: u64,
+    audio_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::EffectInstanceId>,
+    audio_effect_locations:
+        HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::TrackId, usize)>,
+    midi_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::MidiFxInstanceId>,
+    midi_effect_locations:
+        HashMap<crate::sequencer::MidiFxInstanceId, (crate::sequencer::TrackId, usize)>,
+    rack_slots: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::RackSlotId>,
+    rack_slot_locations:
+        HashMap<crate::sequencer::RackSlotId, (crate::sequencer::TrackId, usize)>,
+}
+
+impl DeviceIdentityRegistry {
+    fn allocate(&mut self) -> u64 {
+        self.next_id = self.next_id.checked_add(1).expect("device instance id exhausted");
+        self.next_id
+    }
+
+    pub(crate) fn audio_effect(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> crate::sequencer::EffectInstanceId {
+        if let Some(id) = self.audio_effects.get(&(track, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        self.audio_effects.insert((track, slot), id);
+        self.audio_effect_locations.insert(id, (track, slot));
+        id
+    }
+
+    pub(crate) fn audio_effect_location(
+        &self,
+        id: crate::sequencer::EffectInstanceId,
+    ) -> Option<(crate::sequencer::TrackId, usize)> {
+        self.audio_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn midi_effect(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> crate::sequencer::MidiFxInstanceId {
+        if let Some(id) = self.midi_effects.get(&(track, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::MidiFxInstanceId(self.allocate());
+        self.midi_effects.insert((track, slot), id);
+        self.midi_effect_locations.insert(id, (track, slot));
+        id
+    }
+
+    pub(crate) fn midi_effect_location(
+        &self,
+        id: crate::sequencer::MidiFxInstanceId,
+    ) -> Option<(crate::sequencer::TrackId, usize)> {
+        self.midi_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn rack_slot(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> crate::sequencer::RackSlotId {
+        if let Some(id) = self.rack_slots.get(&(track, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::RackSlotId(self.allocate());
+        self.rack_slots.insert((track, slot), id);
+        self.rack_slot_locations.insert(id, (track, slot));
+        id
+    }
+
+    pub(crate) fn rack_slot_location(
+        &self,
+        id: crate::sequencer::RackSlotId,
+    ) -> Option<(crate::sequencer::TrackId, usize)> {
+        self.rack_slot_locations.get(&id).copied()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.audio_effects.clear();
+        self.audio_effect_locations.clear();
+        self.midi_effects.clear();
+        self.midi_effect_locations.clear();
+        self.rack_slots.clear();
+        self.rack_slot_locations.clear();
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1499,6 +1593,7 @@ impl App {
         let mut app = Self {
             state,
             track_registry: crate::sequencer::TrackRegistry::default(),
+            device_registry: DeviceIdentityRegistry::default(),
             history: history::UndoManager::default(),
             macro_engine: crate::macro_engine::MacroEngine::default(),
             scene_macro_runtime: HashMap::new(),

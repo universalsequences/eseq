@@ -3,8 +3,11 @@ use std::time::{Duration, Instant};
 
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, StepCellSnapshot, StepSlotPlocks, TrackParamsSnapshot, TrackPatternId,
+    BusId, EffectInstanceId, InstrumentDeviceValuesSnapshot, MidiFxInstanceId, PatternId,
+    RackSlotId, RackSlotValuesSnapshot, StepCellSnapshot, StepSlotPlocks, TrackId,
+    TrackParamsSnapshot, TrackPatternId,
 };
+use crate::effects::EffectSlotValuesSnapshot;
 
 pub const DEFAULT_HISTORY_ENTRY_LIMIT: usize = 256;
 pub const DEFAULT_HISTORY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
@@ -34,7 +37,60 @@ pub enum EditPatch {
     TrackParams(TrackParamsPatch),
     TrackParamsBatch(TrackParamsBatchPatch),
     BusMixer(BusMixerPatch),
+    DeviceValues(DeviceValuesPatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeviceId {
+    TrackInstrument(TrackId),
+    AudioEffect(EffectInstanceId),
+    MidiEffect(MidiFxInstanceId),
+    RackSlot(RackSlotId),
+    RackInstrument(RackSlotId),
+}
+
+#[derive(Clone, Debug)]
+pub enum DeviceValueSnapshot {
+    Instrument(InstrumentDeviceValuesSnapshot),
+    Slot(EffectSlotValuesSnapshot),
+    RackSlot(RackSlotValuesSnapshot),
+}
+
+impl DeviceValueSnapshot {
+    pub fn bit_exact_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Instrument(left), Self::Instrument(right)) => left.bit_exact_eq(right),
+            (Self::Slot(left), Self::Slot(right)) => left.bit_exact_eq(right),
+            (Self::RackSlot(left), Self::RackSlot(right)) => left.bit_exact_eq(right),
+            _ => false,
+        }
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::Instrument(snapshot) => snapshot.retained_bytes(),
+                Self::Slot(snapshot) => snapshot.retained_bytes(),
+                Self::RackSlot(snapshot) => snapshot.retained_bytes(),
+            }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DeviceValuesPatch {
+    pub target: DeviceId,
+    pub pattern: PatternId,
+    pub before: DeviceValueSnapshot,
+    pub after: DeviceValueSnapshot,
+}
+
+impl DeviceValuesPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.before.retained_bytes()
+            + self.after.retained_bytes()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

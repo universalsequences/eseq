@@ -802,17 +802,15 @@ impl App {
         value: f32,
     ) {
         if self.has_selection() {
-            for step in self.selected_steps() {
-                apply_command(
-                    self,
-                    AppCommand::SetInstrumentPlock {
-                        track,
-                        step,
-                        param_idx,
-                        value,
-                    },
-                );
-            }
+            apply_command(
+                self,
+                AppCommand::SetInstrumentPlockMulti {
+                    track,
+                    steps: self.selected_steps(),
+                    param_idx,
+                    value,
+                },
+            );
         } else {
             apply_command(
                 self,

@@ -1608,20 +1608,88 @@ impl App {
         }
         let slots = crate::effects::conv_reverb::ir_slots_for(node_id)
             .ok_or_else(|| "slot is not a Convolution Reverb".to_string())?;
-        let ir = crate::effects::conv_reverb::prepare_ir(abs_path, self.graph.sample_rate)?;
+        let ir = Arc::new(crate::effects::conv_reverb::prepare_ir(
+            abs_path,
+            self.graph.sample_rate,
+        )?);
+        self.apply_prepared_conv_reverb_ir_to_node(node_id, ir, reference, abs_path)
+    }
+
+    pub(crate) fn apply_prepared_conv_reverb_ir_to_node(
+        &self,
+        node_id: i32,
+        ir: Arc<crate::effects::conv_reverb::StereoIr>,
+        reference: &str,
+        source_path: &std::path::Path,
+    ) -> Result<(), String> {
+        if node_id == 0 {
+            return Err("Convolution Reverb node not live".to_string());
+        }
+        let slots = crate::effects::conv_reverb::ir_slots_for(node_id)
+            .ok_or_else(|| "slot is not a Convolution Reverb".to_string())?;
         unsafe {
-            crate::effects::conv_reverb::apply_ir_to_node(self.graph.lg.0, node_id, &slots, &ir)?;
+            crate::effects::conv_reverb::apply_ir_to_node(
+                self.graph.lg.0,
+                node_id,
+                &slots,
+                ir.as_ref(),
+            )?;
         }
         // Friendly label: the bundled default has a fixed title; user samples
         // resolve their display title from the DB, falling back to the stem.
         let display = if reference == crate::effects::conv_reverb::DEFAULT_IR_REF {
             "Lexicon 300 Rich Plate".to_string()
         } else {
-            crate::sample_db::display_title_for_sample_path(abs_path)
+            crate::sample_db::display_title_for_sample_path(source_path)
                 .unwrap_or_else(|| reference.to_string())
         };
-        crate::effects::conv_reverb::record_ir(node_id, reference, &display);
+        crate::effects::conv_reverb::record_prepared_ir(node_id, reference, &display, ir);
         Ok(())
+    }
+
+    pub(crate) fn restore_prepared_track_effect_ir(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        reference: &str,
+        ir: Arc<crate::effects::conv_reverb::StereoIr>,
+    ) -> Result<(), String> {
+        let node_id = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+            .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+            .ok_or_else(|| "Track effect slot not found".to_string())?;
+        self.apply_prepared_conv_reverb_ir_to_node(
+            node_id,
+            ir,
+            reference,
+            std::path::Path::new(reference),
+        )
+    }
+
+    pub(crate) fn restore_prepared_rack_effect_ir(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        reference: &str,
+        ir: Arc<crate::effects::conv_reverb::StereoIr>,
+    ) -> Result<(), String> {
+        let node_id = self
+            .rack_slot_effect_snapshot(track, rack_slot)?
+            .effect_slots
+            .get(effect_slot)
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Rack effect slot not found".to_string())?;
+        self.apply_prepared_conv_reverb_ir_to_node(
+            node_id,
+            ir,
+            reference,
+            std::path::Path::new(reference),
+        )
     }
 
     /// Load an impulse response into a live Convolution Reverb on a track slot.
@@ -2782,6 +2850,7 @@ impl App {
             stored_value,
         );
         self.sync_bus_effect_mod_active_defaults(bus_idx, slot_idx);
+        super::edit::commit_history_barrier(self);
         Ok(())
     }
 
@@ -2818,6 +2887,7 @@ impl App {
             slot.plocks[step][param_idx] = Some(value.clamp(param.min, param.max));
         }
         self.sync_bus_effect_mod_active_plocks(bus_idx, step, slot_idx);
+        super::edit::commit_history_barrier(self);
         Ok(())
     }
 
@@ -3549,7 +3619,56 @@ impl App {
         Ok(())
     }
 
+    pub fn send_effect_tensor_param(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        tensor_idx: usize,
+        values: &[f32],
+    ) {
+        let Some(slot) = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+        else {
+            return;
+        };
+        let Some(cell_offset) = slot.tensor_params.tensor_cell_offset(tensor_idx) else {
+            return;
+        };
+        let node_id = slot.node_id.load(Ordering::Relaxed) as i32;
+        if node_id == 0 {
+            return;
+        }
+        unsafe {
+            crate::lisp_host::queue_tensor_write(self.graph.lg.0, node_id, cell_offset, values);
+        }
+    }
+
     pub fn set_rack_slot_effect_plocks(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        steps: &[usize],
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        self.set_rack_slot_effect_plocks_no_publish(
+            track,
+            rack_slot,
+            effect_slot,
+            steps,
+            param_idx,
+            value,
+        )?;
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    pub(crate) fn set_rack_slot_effect_plocks_no_publish(
         &mut self,
         track: usize,
         rack_slot: usize,
@@ -3604,11 +3723,10 @@ impl App {
         if !updated {
             return Err("Failed to set rack-slot effect parameter locks".to_string());
         }
-        self.state.publish_scheduler_snapshot();
         Ok(())
     }
 
-    fn rack_slot_effect_option_value(
+    pub fn rack_slot_effect_option_value(
         &self,
         track: usize,
         rack_slot: usize,

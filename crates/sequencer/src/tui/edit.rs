@@ -11,9 +11,9 @@ use std::time::Instant;
 use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
     step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusMixerPatch, BusMixerSnapshot,
-    EditPatch, GestureId, HistoryMove, HistoryPolicy, HistoryReplay, MergeKey,
-    PatternGeometryPatch, StepCellDelta, StepCellsPatch, TrackParamsBatchPatch, TrackParamsPatch,
-    TransportAuthoringSnapshot, TransportParamsPatch,
+    DeviceId, DeviceValueSnapshot, DeviceValuesPatch, EditPatch, GestureId, HistoryMove,
+    HistoryPolicy, HistoryReplay, MergeKey, PatternGeometryPatch, StepCellDelta, StepCellsPatch,
+    TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
 };
 use super::App;
 
@@ -575,6 +575,12 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
             slot_idx,
             param_idx,
             ..
+        }
+        | AppCommand::ClearEffectPlockMulti {
+            track,
+            slot_idx,
+            param_idx,
+            ..
         } => {
             let slot = app
                 .state
@@ -587,6 +593,58 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
                 return Err(invalid("effect parameter does not exist"));
             }
         }
+        AppCommand::SetEffectTensorCell {
+            track, slot_idx, tensor_idx, cell_idx, ..
+        }
+        | AppCommand::SetEffectTensorPlockCellMulti {
+            track, slot_idx, tensor_idx, cell_idx, ..
+        } => {
+            let slot = app.state.pattern.effect_chains.get(*track)
+                .and_then(|chain| chain.get(*slot_idx))
+                .ok_or_else(|| invalid("effect slot does not exist"))?;
+            if *tensor_idx >= slot.tensor_params.num_params()
+                || *cell_idx >= slot.tensor_params.tensor_len(*tensor_idx)
+            {
+                return Err(invalid("effect tensor cell does not exist"));
+            }
+        }
+        AppCommand::ClearEffectTensorPlockMulti { track, slot_idx, tensor_idx, .. } => {
+            let slot = app.state.pattern.effect_chains.get(*track)
+                .and_then(|chain| chain.get(*slot_idx))
+                .ok_or_else(|| invalid("effect slot does not exist"))?;
+            if *tensor_idx >= slot.tensor_params.num_params() {
+                return Err(invalid("effect tensor does not exist"));
+            }
+        }
+        AppCommand::SetMidiFxParam { track, slot_idx, param_idx, .. }
+        | AppCommand::SetMidiFxPlockMulti { track, slot_idx, param_idx, .. }
+        | AppCommand::ClearMidiFxPlockMulti { track, slot_idx, param_idx, .. } => {
+            let slot = app.state.pattern.midi_fx_slots.get(*track)
+                .and_then(|slots| slots.get(*slot_idx))
+                .ok_or_else(|| invalid("MIDI-FX slot does not exist"))?;
+            if *param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
+                return Err(invalid("MIDI-FX parameter does not exist"));
+            }
+        }
+        AppCommand::SetMidiFxTensorCell { track, slot_idx, tensor_idx, cell_idx, .. }
+        | AppCommand::SetMidiFxTensorPlockCellMulti { track, slot_idx, tensor_idx, cell_idx, .. } => {
+            let slot = app.state.pattern.midi_fx_slots.get(*track)
+                .and_then(|slots| slots.get(*slot_idx))
+                .ok_or_else(|| invalid("MIDI-FX slot does not exist"))?;
+            if *tensor_idx >= slot.tensor_params.num_params()
+                || *cell_idx >= slot.tensor_params.tensor_len(*tensor_idx)
+            {
+                return Err(invalid("MIDI-FX tensor cell does not exist"));
+            }
+        }
+        AppCommand::ClearMidiFxTensorPlockMulti { track, slot_idx, tensor_idx, .. } => {
+            let slot = app.state.pattern.midi_fx_slots.get(*track)
+                .and_then(|slots| slots.get(*slot_idx))
+                .ok_or_else(|| invalid("MIDI-FX slot does not exist"))?;
+            if *tensor_idx >= slot.tensor_params.num_params() {
+                return Err(invalid("MIDI-FX tensor does not exist"));
+            }
+        }
         AppCommand::SetInstrumentParam {
             track, param_idx, ..
         }
@@ -594,6 +652,9 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
             track, param_idx, ..
         }
         | AppCommand::SetInstrumentPlockMulti {
+            track, param_idx, ..
+        }
+        | AppCommand::ClearInstrumentPlockMulti {
             track, param_idx, ..
         }
         | AppCommand::SetInstrumentKeyLock {
@@ -637,6 +698,19 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
                 || *cell_idx >= slot.tensor_params.tensor_len(*tensor_idx)
             {
                 return Err(invalid("instrument tensor cell does not exist"));
+            }
+        }
+        AppCommand::ClearInstrumentTensorPlockMulti {
+            track, tensor_idx, ..
+        } => {
+            let slot = app
+                .state
+                .pattern
+                .instrument_slots
+                .get(*track)
+                .ok_or(EditError::TrackOutOfRange { track: *track })?;
+            if *tensor_idx >= slot.tensor_params.num_params() {
+                return Err(invalid("instrument tensor does not exist"));
             }
         }
         AppCommand::SetRackSlotInstrumentParam {
@@ -686,6 +760,32 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
                 return Err(invalid("rack slot does not exist"));
             }
         }
+        AppCommand::SetRackSlotEffectParam {
+            track, rack_slot_idx, effect_slot_idx, param_idx, ..
+        }
+        | AppCommand::SetRackSlotEffectPlockMulti {
+            track, rack_slot_idx, effect_slot_idx, param_idx, ..
+        }
+        | AppCommand::ClearRackSlotEffectPlockMulti {
+            track, rack_slot_idx, effect_slot_idx, param_idx, ..
+        } => {
+            let rack = app.state.live_rack_track_snapshot(*track)
+                .ok_or_else(|| invalid("rack track does not exist"))?;
+            let effect = rack.slots.get(*rack_slot_idx)
+                .and_then(|slot| slot.effect_slots.get(*effect_slot_idx))
+                .ok_or_else(|| invalid("rack effect slot does not exist"))?;
+            if *param_idx >= effect.num_params as usize {
+                return Err(invalid("rack effect parameter does not exist"));
+            }
+        }
+        AppCommand::SetRackMacroPlockMulti { track, macro_idx, .. }
+        | AppCommand::ClearRackMacroPlockMulti { track, macro_idx, .. } => {
+            let rack = app.state.live_rack_track_snapshot(*track)
+                .ok_or_else(|| invalid("rack track does not exist"))?;
+            if *macro_idx >= rack.macros.len() {
+                return Err(invalid("rack macro does not exist"));
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -716,6 +816,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::SetEffectPlockMulti { track, steps, .. }
         | AppCommand::SetInstrumentPlockMulti { track, steps, .. }
         | AppCommand::SetInstrumentTensorPlockCellMulti { track, steps, .. }
+        | AppCommand::ClearInstrumentTensorPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotParamPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotInstrumentPlockMulti { track, steps, .. } => {
             capture_step_witness(app, *track, normalized_steps(steps), false)
@@ -860,6 +961,22 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::SetBusVolume { .. }
         | AppCommand::ToggleBusMute { .. }
         | AppCommand::ToggleBusSolo { .. }
+        | AppCommand::SetMidiFxParam { .. }
+        | AppCommand::SetEffectTensorCell { .. }
+        | AppCommand::SetEffectTensorPlockCellMulti { .. }
+        | AppCommand::ClearEffectTensorPlockMulti { .. }
+        | AppCommand::SetMidiFxTensorCell { .. }
+        | AppCommand::SetMidiFxTensorPlockCellMulti { .. }
+        | AppCommand::ClearMidiFxTensorPlockMulti { .. }
+        | AppCommand::SetRackSlotEffectParam { .. }
+        | AppCommand::SetMidiFxPlockMulti { .. }
+        | AppCommand::ClearMidiFxPlockMulti { .. }
+        | AppCommand::ClearEffectPlockMulti { .. }
+        | AppCommand::ClearInstrumentPlockMulti { .. }
+        | AppCommand::SetRackMacroPlockMulti { .. }
+        | AppCommand::ClearRackMacroPlockMulti { .. }
+        | AppCommand::SetRackSlotEffectPlockMulti { .. }
+        | AppCommand::ClearRackSlotEffectPlockMulti { .. }
         | AppCommand::TogglePlay => Err(EditError::UnsupportedCommand),
     }
 }
@@ -867,6 +984,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
 pub fn commit_history_barrier(app: &mut App) {
     let cleared_entries = app.history.undo_len() + app.history.redo_len();
     app.history.barrier();
+    app.device_registry.clear();
     if cleared_entries > 0 {
         app.editor.status_message = Some((
             format!(
@@ -1281,6 +1399,530 @@ fn is_pattern_geometry_command(cmd: &AppCommand) -> bool {
             | AppCommand::SetTrackNumSteps { .. }
             | AppCommand::AdjustTrackNumSteps { .. }
     )
+}
+
+fn device_plock_command_target(cmd: &AppCommand) -> Option<(usize, Vec<usize>)> {
+    match cmd {
+        AppCommand::SetEffectPlock { track, step, .. }
+        | AppCommand::SetInstrumentPlock { track, step, .. }
+        | AppCommand::SetRackSlotParamPlock { track, step, .. }
+        | AppCommand::SetRackSlotInstrumentPlock { track, step, .. } => {
+            Some((*track, vec![*step]))
+        }
+        AppCommand::SetEffectPlockMulti { track, steps, .. }
+        | AppCommand::ClearEffectPlockMulti { track, steps, .. }
+        | AppCommand::SetEffectTensorPlockCellMulti { track, steps, .. }
+        | AppCommand::ClearEffectTensorPlockMulti { track, steps, .. }
+        | AppCommand::SetMidiFxPlockMulti { track, steps, .. }
+        | AppCommand::ClearMidiFxPlockMulti { track, steps, .. }
+        | AppCommand::SetMidiFxTensorPlockCellMulti { track, steps, .. }
+        | AppCommand::ClearMidiFxTensorPlockMulti { track, steps, .. }
+        | AppCommand::SetInstrumentPlockMulti { track, steps, .. }
+        | AppCommand::ClearInstrumentPlockMulti { track, steps, .. }
+        | AppCommand::SetInstrumentTensorPlockCellMulti { track, steps, .. }
+        | AppCommand::ClearInstrumentTensorPlockMulti { track, steps, .. }
+        | AppCommand::SetRackSlotParamPlockMulti { track, steps, .. }
+        | AppCommand::SetRackSlotInstrumentPlockMulti { track, steps, .. }
+        | AppCommand::SetRackMacroPlockMulti { track, steps, .. }
+        | AppCommand::ClearRackMacroPlockMulti { track, steps, .. }
+        | AppCommand::SetRackSlotEffectPlockMulti { track, steps, .. }
+        | AppCommand::ClearRackSlotEffectPlockMulti { track, steps, .. } => {
+            Some((*track, normalized_steps(steps)))
+        }
+        _ => None,
+    }
+}
+
+fn device_plock_label(cmd: &AppCommand) -> &'static str {
+    match cmd {
+        AppCommand::SetEffectPlock { .. }
+        | AppCommand::SetEffectPlockMulti { .. }
+        | AppCommand::ClearEffectPlockMulti { .. } => {
+            "Set effect p-lock"
+        }
+        AppCommand::SetEffectTensorPlockCellMulti { .. }
+        | AppCommand::ClearEffectTensorPlockMulti { .. } => "Set effect tensor p-lock",
+        AppCommand::SetMidiFxPlockMulti { .. } | AppCommand::ClearMidiFxPlockMulti { .. } => {
+            "Set MIDI-FX p-lock"
+        }
+        AppCommand::SetMidiFxTensorPlockCellMulti { .. }
+        | AppCommand::ClearMidiFxTensorPlockMulti { .. } => "Set MIDI-FX tensor p-lock",
+        AppCommand::SetInstrumentPlock { .. }
+        | AppCommand::SetInstrumentPlockMulti { .. }
+        | AppCommand::ClearInstrumentPlockMulti { .. } => "Set instrument p-lock",
+        AppCommand::SetInstrumentTensorPlockCellMulti { .. }
+        | AppCommand::ClearInstrumentTensorPlockMulti { .. } => "Set instrument tensor p-lock",
+        AppCommand::SetRackSlotParamPlock { .. }
+        | AppCommand::SetRackSlotParamPlockMulti { .. } => "Set rack strip p-lock",
+        AppCommand::SetRackSlotInstrumentPlock { .. }
+        | AppCommand::SetRackSlotInstrumentPlockMulti { .. } => {
+            "Set rack instrument p-lock"
+        }
+        AppCommand::SetRackMacroPlockMulti { .. } => "Set rack macro p-lock",
+        AppCommand::ClearRackMacroPlockMulti { .. } => "Clear rack macro p-lock",
+        AppCommand::SetRackSlotEffectPlockMulti { .. } => "Set rack effect p-lock",
+        AppCommand::ClearRackSlotEffectPlockMulti { .. } => "Clear rack effect p-lock",
+        _ => "Set device p-lock",
+    }
+}
+
+fn apply_recorded_device_plock_command(
+    app: &mut App,
+    cmd: &AppCommand,
+) -> Result<EditOutcome, EditError> {
+    let (track, steps) =
+        device_plock_command_target(cmd).ok_or(EditError::UnsupportedCommand)?;
+    let label = device_plock_label(cmd);
+    apply_recorded_step_mutation(app, track, &steps, label, |app| {
+        super::command::execute_command(app, cmd.clone());
+        Ok(())
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResolvedDeviceTarget {
+    id: DeviceId,
+    track: usize,
+    pattern: crate::sequencer::PatternId,
+    slot_idx: Option<usize>,
+}
+
+fn device_value_command_track(cmd: &AppCommand) -> Option<usize> {
+    match cmd {
+        AppCommand::SetEffectParam { track, .. }
+        | AppCommand::SetEffectTensorCell { track, .. }
+        | AppCommand::SetMidiFxParam { track, .. }
+        | AppCommand::SetMidiFxTensorCell { track, .. }
+        | AppCommand::SetInstrumentParam { track, .. }
+        | AppCommand::SetInstrumentKeyLock { track, .. }
+        | AppCommand::SetInstrumentKeyLockMulti { track, .. }
+        | AppCommand::ClearInstrumentKeyLock { track, .. }
+        | AppCommand::ClearInstrumentKeyLocksForNote { track, .. }
+        | AppCommand::StampInstrumentKeyLockVariant { track, .. }
+        | AppCommand::ClearInstrumentKeyLockVariantsForNotes { track, .. }
+        | AppCommand::SetInstrumentTensorCell { track, .. }
+        | AppCommand::SetRackSlotGain { track, .. }
+        | AppCommand::SetRackSlotPan { track, .. }
+        | AppCommand::SetRackSlotMute { track, .. }
+        | AppCommand::SetRackSlotSolo { track, .. }
+        | AppCommand::SetRackSlotMaxPolyphony { track, .. }
+        | AppCommand::SetRackSlotChokeGroup { track, .. }
+        | AppCommand::SetRackSlotBaseNoteOffset { track, .. }
+        | AppCommand::SetRackSlotInstrumentParam { track, .. }
+        | AppCommand::SetRackSlotEffectParam { track, .. } => Some(*track),
+        _ => None,
+    }
+}
+
+fn resolve_device_value_target(
+    app: &mut App,
+    cmd: &AppCommand,
+) -> Result<ResolvedDeviceTarget, EditError> {
+    let track = device_value_command_track(cmd).ok_or(EditError::UnsupportedCommand)?;
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let (id, slot_idx) = match cmd {
+        AppCommand::SetEffectParam { slot_idx, .. }
+        | AppCommand::SetEffectTensorCell { slot_idx, .. } => (
+            DeviceId::AudioEffect(app.device_registry.audio_effect(track_id, *slot_idx)),
+            Some(*slot_idx),
+        ),
+        AppCommand::SetMidiFxParam { slot_idx, .. }
+        | AppCommand::SetMidiFxTensorCell { slot_idx, .. } => (
+            DeviceId::MidiEffect(app.device_registry.midi_effect(track_id, *slot_idx)),
+            Some(*slot_idx),
+        ),
+        AppCommand::SetRackSlotGain { slot_idx, .. }
+        | AppCommand::SetRackSlotPan { slot_idx, .. }
+        | AppCommand::SetRackSlotMute { slot_idx, .. }
+        | AppCommand::SetRackSlotSolo { slot_idx, .. }
+        | AppCommand::SetRackSlotMaxPolyphony { slot_idx, .. }
+        | AppCommand::SetRackSlotChokeGroup { slot_idx, .. }
+        | AppCommand::SetRackSlotBaseNoteOffset { slot_idx, .. } => (
+            DeviceId::RackSlot(app.device_registry.rack_slot(track_id, *slot_idx)),
+            Some(*slot_idx),
+        ),
+        AppCommand::SetRackSlotInstrumentParam { slot_idx, .. } => (
+            DeviceId::RackInstrument(app.device_registry.rack_slot(track_id, *slot_idx)),
+            Some(*slot_idx),
+        ),
+        AppCommand::SetRackSlotEffectParam { rack_slot_idx, .. } => (
+            DeviceId::RackSlot(app.device_registry.rack_slot(track_id, *rack_slot_idx)),
+            Some(*rack_slot_idx),
+        ),
+        _ => (DeviceId::TrackInstrument(track_id), None),
+    };
+    let target = ResolvedDeviceTarget {
+        id,
+        track,
+        pattern,
+        slot_idx,
+    };
+    capture_device_value_snapshot(app, target)?;
+    Ok(target)
+}
+
+fn device_value_label(cmd: &AppCommand) -> &'static str {
+    match cmd {
+        AppCommand::SetEffectParam { .. } => "Set effect parameter",
+        AppCommand::SetEffectTensorCell { .. } => "Set effect tensor cell",
+        AppCommand::SetMidiFxParam { .. } => "Set MIDI-FX parameter",
+        AppCommand::SetMidiFxTensorCell { .. } => "Set MIDI-FX tensor cell",
+        AppCommand::SetInstrumentParam { .. } => "Set instrument parameter",
+        AppCommand::SetInstrumentTensorCell { .. } => "Set instrument tensor cell",
+        AppCommand::SetInstrumentKeyLock { .. }
+        | AppCommand::SetInstrumentKeyLockMulti { .. } => "Set instrument key lock",
+        AppCommand::ClearInstrumentKeyLock { .. }
+        | AppCommand::ClearInstrumentKeyLocksForNote { .. } => "Clear instrument key lock",
+        AppCommand::StampInstrumentKeyLockVariant { .. } => "Stamp key-lock variant",
+        AppCommand::ClearInstrumentKeyLockVariantsForNotes { .. } => "Clear key-lock variant",
+        AppCommand::SetRackSlotGain { .. } => "Set rack slot gain",
+        AppCommand::SetRackSlotPan { .. } => "Set rack slot pan",
+        AppCommand::SetRackSlotMute { .. } => "Set rack slot mute",
+        AppCommand::SetRackSlotSolo { .. } => "Set rack slot solo",
+        AppCommand::SetRackSlotMaxPolyphony { .. } => "Set rack slot max polyphony",
+        AppCommand::SetRackSlotChokeGroup { .. } => "Set rack slot choke group",
+        AppCommand::SetRackSlotBaseNoteOffset { .. } => "Set rack slot base note",
+        AppCommand::SetRackSlotInstrumentParam { .. } => "Set rack instrument parameter",
+        AppCommand::SetRackSlotEffectParam { .. } => "Set rack effect parameter",
+        _ => "Edit device values",
+    }
+}
+
+fn device_value_merge_suffix(cmd: &AppCommand) -> String {
+    match cmd {
+        AppCommand::SetEffectParam { param_idx, .. }
+        | AppCommand::SetMidiFxParam { param_idx, .. }
+        | AppCommand::SetInstrumentParam { param_idx, .. }
+        | AppCommand::SetRackSlotInstrumentParam { param_idx, .. } => {
+            format!("param:{param_idx}")
+        }
+        AppCommand::SetRackSlotEffectParam {
+            effect_slot_idx,
+            param_idx,
+            ..
+        } => format!("effect:{effect_slot_idx}:param:{param_idx}"),
+        AppCommand::SetInstrumentTensorCell {
+            tensor_idx, cell_idx, ..
+        } => format!("tensor:{tensor_idx}:cell:{cell_idx}"),
+        AppCommand::SetEffectTensorCell {
+            tensor_idx, cell_idx, ..
+        }
+        | AppCommand::SetMidiFxTensorCell {
+            tensor_idx, cell_idx, ..
+        } => format!("tensor:{tensor_idx}:cell:{cell_idx}"),
+        _ => device_value_label(cmd).to_string(),
+    }
+}
+
+fn capture_device_value_snapshot(
+    app: &App,
+    target: ResolvedDeviceTarget,
+) -> Result<DeviceValueSnapshot, EditError> {
+    match target.id {
+        DeviceId::TrackInstrument(_) => app
+            .state
+            .capture_pattern_instrument_device_values(target.track, target.pattern)
+            .map(DeviceValueSnapshot::Instrument)
+            .map_err(EditError::ReplayFailed),
+        DeviceId::AudioEffect(_) => app
+            .state
+            .capture_pattern_effect_device_values(
+                target.track,
+                target.pattern,
+                target.slot_idx.ok_or(EditError::UnsupportedCommand)?,
+            )
+            .map(DeviceValueSnapshot::Slot)
+            .map_err(EditError::ReplayFailed),
+        DeviceId::MidiEffect(_) => app
+            .state
+            .capture_pattern_midi_fx_device_values(
+                target.track,
+                target.pattern,
+                target.slot_idx.ok_or(EditError::UnsupportedCommand)?,
+            )
+            .map(DeviceValueSnapshot::Slot)
+            .map_err(EditError::ReplayFailed),
+        DeviceId::RackSlot(_) | DeviceId::RackInstrument(_) => app
+            .state
+            .capture_pattern_rack_slot_values(
+                target.track,
+                target.pattern,
+                target.slot_idx.ok_or(EditError::UnsupportedCommand)?,
+            )
+            .map(DeviceValueSnapshot::RackSlot)
+            .map_err(EditError::ReplayFailed),
+    }
+}
+
+fn restore_device_value_snapshot(
+    app: &mut App,
+    target: ResolvedDeviceTarget,
+    snapshot: &DeviceValueSnapshot,
+) -> Result<bool, EditError> {
+    match (target.id, snapshot) {
+        (DeviceId::TrackInstrument(_), DeviceValueSnapshot::Instrument(snapshot)) => app
+            .state
+            .restore_pattern_instrument_device_values_no_publish(
+                target.track,
+                target.pattern,
+                snapshot,
+            )
+            .map_err(EditError::ReplayFailed),
+        (DeviceId::AudioEffect(_), DeviceValueSnapshot::Slot(snapshot)) => app
+            .state
+            .restore_pattern_effect_device_values_no_publish(
+                target.track,
+                target.pattern,
+                target.slot_idx.ok_or(EditError::UnsupportedCommand)?,
+                snapshot,
+            )
+            .map_err(EditError::ReplayFailed),
+        (DeviceId::MidiEffect(_), DeviceValueSnapshot::Slot(snapshot)) => app
+            .state
+            .restore_pattern_midi_fx_device_values_no_publish(
+                target.track,
+                target.pattern,
+                target.slot_idx.ok_or(EditError::UnsupportedCommand)?,
+                snapshot,
+            )
+            .map_err(EditError::ReplayFailed),
+        (
+            DeviceId::RackSlot(_) | DeviceId::RackInstrument(_),
+            DeviceValueSnapshot::RackSlot(snapshot),
+        ) => app
+            .state
+            .restore_pattern_rack_slot_values_no_publish(
+                target.track,
+                target.pattern,
+                target.slot_idx.ok_or(EditError::UnsupportedCommand)?,
+                snapshot,
+            )
+            .map_err(EditError::ReplayFailed),
+        _ => Err(EditError::ReplayFailed(
+            "device history snapshot did not match its target".to_string(),
+        )),
+    }
+}
+
+fn device_command_changes_key_locks(cmd: &AppCommand) -> bool {
+    matches!(
+        cmd,
+        AppCommand::SetInstrumentKeyLock { .. }
+            | AppCommand::SetInstrumentKeyLockMulti { .. }
+            | AppCommand::ClearInstrumentKeyLock { .. }
+            | AppCommand::ClearInstrumentKeyLocksForNote { .. }
+            | AppCommand::StampInstrumentKeyLockVariant { .. }
+            | AppCommand::ClearInstrumentKeyLockVariantsForNotes { .. }
+    )
+}
+
+fn apply_recorded_device_value_command(
+    app: &mut App,
+    cmd: &AppCommand,
+    merge_key: Option<MergeKey>,
+) -> Result<EditOutcome, EditError> {
+    let target = resolve_device_value_target(app, cmd)?;
+    let current_before = capture_device_value_snapshot(app, target)?;
+    let merge_key = merge_key.map(|_| {
+        MergeKey::new(format!(
+            "device:{:?}:pattern:{}:{}",
+            target.id,
+            target.pattern.0,
+            device_value_merge_suffix(cmd),
+        ))
+    });
+    if let Some(key) = merge_key.as_ref() {
+        if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(key) {
+            finish_active_gesture(app);
+        }
+    }
+    let entry_before = merge_key
+        .as_ref()
+        .and_then(|key| app.history.active_gesture_patch(key))
+        .and_then(|patch| match patch {
+            EditPatch::DeviceValues(patch)
+                if patch.target == target.id && patch.pattern == target.pattern =>
+            {
+                Some(patch.before.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| current_before.clone());
+
+    super::command::execute_command(app, cmd.clone());
+    if device_command_changes_key_locks(cmd) {
+        app.state
+            .reconcile_key_lock_variant_registry_for_track(target.track);
+    }
+    let after = capture_device_value_snapshot(app, target)?;
+    if current_before.bit_exact_eq(&after) {
+        return Ok(EditOutcome::NoOp);
+    }
+    if let Err(error) = restore_device_value_snapshot(app, target, &after) {
+        let _ = restore_device_value_snapshot(app, target, &current_before);
+        return Err(error);
+    }
+
+    let patch = DeviceValuesPatch {
+        target: target.id,
+        pattern: target.pattern,
+        before: entry_before,
+        after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    if let Some(key) = merge_key {
+        if patch.before.bit_exact_eq(&patch.after)
+            && app.history.discard_active_gesture_entry(&key)
+        {
+            return Ok(EditOutcome::NoOp);
+        }
+        ensure_coalescing_gesture(app, &key);
+        let history_move = app
+            .history
+            .stage_active_gesture(
+                device_value_label(cmd),
+                &key,
+                EditPatch::DeviceValues(patch),
+                retained_bytes,
+            )
+            .ok_or(EditError::UnsupportedCommand)?;
+        return Ok(EditOutcome::Applied(history_move));
+    }
+    finish_active_gesture(app);
+    app.state.publish_scheduler_snapshot();
+    let history_move = app.history.commit(
+        device_value_label(cmd),
+        None,
+        EditPatch::DeviceValues(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(history_move))
+}
+
+pub fn apply_recorded_instrument_values_mutation(
+    app: &mut App,
+    track: usize,
+    label: impl Into<String>,
+    mutate: impl FnOnce(&mut App) -> Result<(), String>,
+) -> Result<EditOutcome, EditError> {
+    let label = label.into();
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let target = ResolvedDeviceTarget {
+        id: DeviceId::TrackInstrument(track_id),
+        track,
+        pattern,
+        slot_idx: None,
+    };
+    let before = capture_device_value_snapshot(app, target)?;
+    finish_active_gesture(app);
+    if let Err(error) = mutate(app) {
+        let _ = restore_device_value_snapshot(app, target, &before);
+        let _ = push_live_device_values(app, target, Some(&before));
+        return Err(EditError::ReplayFailed(error));
+    }
+    app.state.reconcile_key_lock_variant_registry_for_track(track);
+    let after = capture_device_value_snapshot(app, target)?;
+    if before.bit_exact_eq(&after) {
+        return Ok(EditOutcome::NoOp);
+    }
+    if let Err(error) = restore_device_value_snapshot(app, target, &after) {
+        let _ = restore_device_value_snapshot(app, target, &before);
+        let _ = push_live_device_values(app, target, Some(&before));
+        return Err(error);
+    }
+    app.state.publish_scheduler_snapshot();
+    let patch = DeviceValuesPatch {
+        target: target.id,
+        pattern,
+        before,
+        after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    let history_move = app.history.commit(
+        label,
+        None,
+        EditPatch::DeviceValues(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(history_move))
+}
+
+pub fn apply_recorded_track_effect_ir_mutation(
+    app: &mut App,
+    track: usize,
+    slot_idx: usize,
+    source_path: &std::path::Path,
+    reference: &str,
+) -> Result<EditOutcome, EditError> {
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let target = ResolvedDeviceTarget {
+        id: DeviceId::AudioEffect(app.device_registry.audio_effect(track_id, slot_idx)),
+        track,
+        pattern,
+        slot_idx: Some(slot_idx),
+    };
+    let before = capture_device_value_snapshot(app, target)?;
+    let prepared = std::sync::Arc::new(
+        crate::effects::conv_reverb::prepare_ir(source_path, app.graph.sample_rate)
+            .map_err(EditError::InvalidTarget)?,
+    );
+    finish_active_gesture(app);
+    let node_id = app
+        .state
+        .pattern
+        .effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+        .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+        .ok_or_else(|| EditError::InvalidTarget("Track effect slot not found".to_string()))?;
+    app.apply_prepared_conv_reverb_ir_to_node(
+        node_id,
+        prepared,
+        reference,
+        source_path,
+    )
+    .map_err(EditError::InvalidTarget)?;
+    let after = capture_device_value_snapshot(app, target)?;
+    if before.bit_exact_eq(&after) {
+        return Ok(EditOutcome::NoOp);
+    }
+    restore_device_value_snapshot(app, target, &after)?;
+    app.state.publish_scheduler_snapshot();
+    let patch = DeviceValuesPatch {
+        target: target.id,
+        pattern,
+        before,
+        after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    let history_move = app.history.commit(
+        format!("Load effect IR '{reference}'"),
+        None,
+        EditPatch::DeviceValues(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(history_move))
 }
 
 fn track_params_command_track(cmd: &AppCommand) -> Option<usize> {
@@ -2077,6 +2719,7 @@ pub fn apply_recorded_step_mutation(
 }
 
 pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, EditError> {
+    validate_device_command_target(app, &cmd)?;
     let policy = history_policy(&cmd);
     if matches!(policy, HistoryPolicy::Record) {
         finish_active_gesture(app);
@@ -2085,11 +2728,17 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
         HistoryPolicy::Record if is_pattern_geometry_command(&cmd) => {
             apply_recorded_pattern_geometry_command(app, &cmd)
         }
+        HistoryPolicy::Record if device_plock_command_target(&cmd).is_some() => {
+            apply_recorded_device_plock_command(app, &cmd)
+        }
         HistoryPolicy::Record if track_params_command_track(&cmd).is_some() => {
             apply_recorded_track_params_command(app, &cmd, None)
         }
         HistoryPolicy::Record if bus_mixer_command_bus(&cmd).is_some() => {
             apply_recorded_bus_mixer_command(app, &cmd, None)
+        }
+        HistoryPolicy::Record if device_value_command_track(&cmd).is_some() => {
+            apply_recorded_device_value_command(app, &cmd, None)
         }
         HistoryPolicy::Record
             if matches!(
@@ -2138,6 +2787,9 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
         }
         HistoryPolicy::Coalesce(key) if bus_mixer_command_bus(&cmd).is_some() => {
             apply_recorded_bus_mixer_command(app, &cmd, Some(key))
+        }
+        HistoryPolicy::Coalesce(key) if device_value_command_track(&cmd).is_some() => {
+            apply_recorded_device_value_command(app, &cmd, Some(key))
         }
         HistoryPolicy::Coalesce(key)
             if matches!(
@@ -2359,6 +3011,167 @@ fn replay_bus_mixer_patch(
     Ok(())
 }
 
+fn resolve_stored_device_target(
+    app: &App,
+    patch: &DeviceValuesPatch,
+) -> Result<ResolvedDeviceTarget, EditError> {
+    let (track_id, slot_idx) = match patch.target {
+        DeviceId::TrackInstrument(track) => (track, None),
+        DeviceId::AudioEffect(id) => app
+            .device_registry
+            .audio_effect_location(id)
+            .map(|(track, slot)| (track, Some(slot)))
+            .ok_or_else(|| {
+                EditError::ReplayFailed("audio-effect instance no longer exists".to_string())
+            })?,
+        DeviceId::MidiEffect(id) => app
+            .device_registry
+            .midi_effect_location(id)
+            .map(|(track, slot)| (track, Some(slot)))
+            .ok_or_else(|| {
+                EditError::ReplayFailed("MIDI-FX instance no longer exists".to_string())
+            })?,
+        DeviceId::RackSlot(id) | DeviceId::RackInstrument(id) => app
+            .device_registry
+            .rack_slot_location(id)
+            .map(|(track, slot)| (track, Some(slot)))
+            .ok_or_else(|| {
+                EditError::ReplayFailed("rack-slot instance no longer exists".to_string())
+            })?,
+    };
+    let track = app
+        .track_registry
+        .index_of(track_id)
+        .ok_or(EditError::MissingStableTrack { track: track_id })?;
+    Ok(ResolvedDeviceTarget {
+        id: patch.target,
+        track,
+        pattern: patch.pattern,
+        slot_idx,
+    })
+}
+
+fn push_live_device_values(
+    app: &mut App,
+    target: ResolvedDeviceTarget,
+    snapshot: Option<&DeviceValueSnapshot>,
+) -> Result<(), EditError> {
+    match target.id {
+        DeviceId::TrackInstrument(_) => {
+            app.push_instrument_defaults_for_track(target.track);
+            if let Some(slot) = app.state.pattern.instrument_slots.get(target.track) {
+                let tensors = slot.tensor_params.capture();
+                for (tensor_idx, tensor) in tensors.iter().enumerate() {
+                    app.send_instrument_tensor_param(target.track, tensor_idx, &tensor.default);
+                }
+            }
+        }
+        DeviceId::AudioEffect(_) => {
+            let Some(slot_idx) = target.slot_idx else { return Ok(()) };
+            let count = app
+                .state
+                .pattern
+                .effect_chains
+                .get(target.track)
+                .and_then(|chain| chain.get(slot_idx))
+                .map(|slot| slot.num_params.load(Ordering::Relaxed) as usize)
+                .unwrap_or(0);
+            for param_idx in 0..count {
+                app.send_effective_slot_param(target.track, slot_idx, param_idx);
+            }
+            if let Some(DeviceValueSnapshot::Slot(values)) = snapshot {
+                for (tensor_idx, tensor) in values.tensor_params.iter().enumerate() {
+                    app.send_effect_tensor_param(
+                        target.track,
+                        slot_idx,
+                        tensor_idx,
+                        &tensor.default,
+                    );
+                }
+                if let (Some(reference), Some(ir)) = (&values.ir, &values.prepared_ir) {
+                    app.restore_prepared_track_effect_ir(
+                        target.track,
+                        slot_idx,
+                        reference,
+                        ir.clone(),
+                    )
+                    .map_err(EditError::ReplayFailed)?;
+                }
+            }
+        }
+        DeviceId::MidiEffect(_) => {}
+        DeviceId::RackSlot(_) | DeviceId::RackInstrument(_) => {
+            let Some(slot_idx) = target.slot_idx else { return Ok(()) };
+            let values = app
+                .state
+                .capture_pattern_rack_slot_values(target.track, target.pattern, slot_idx)
+                .ok();
+            if let Some(values) = values {
+                app.set_rack_slot_gain(
+                    target.track,
+                    slot_idx,
+                    f32::from_bits(values.gain_bits),
+                );
+                app.set_rack_slot_pan(
+                    target.track,
+                    slot_idx,
+                    f32::from_bits(values.pan_bits),
+                );
+                app.set_rack_slot_mute(target.track, slot_idx, values.mute);
+                app.push_rack_slot_solo_mutes(target.track);
+                app.push_rack_slot_instrument_defaults_for_track(target.track);
+                for (effect_slot, effect) in values.effect_slots.iter().enumerate() {
+                    app.push_rack_slot_effect_defaults(target.track, slot_idx, effect_slot);
+                    if let (Some(reference), Some(ir)) = (&effect.ir, &effect.prepared_ir) {
+                        app.restore_prepared_rack_effect_ir(
+                            target.track,
+                            slot_idx,
+                            effect_slot,
+                            reference,
+                            ir.clone(),
+                        )
+                        .map_err(EditError::ReplayFailed)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn replay_device_values_patch(
+    app: &mut App,
+    patch: &DeviceValuesPatch,
+    mode: ApplyMode,
+    publish: bool,
+) -> Result<MutationEffects, EditError> {
+    let target = resolve_stored_device_target(app, patch)?;
+    let snapshot = match mode {
+        ApplyMode::Undo => &patch.before,
+        ApplyMode::Redo => &patch.after,
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "device-value replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
+    let current = capture_device_value_snapshot(app, target)?;
+    let is_effective = restore_device_value_snapshot(app, target, snapshot)?;
+    if is_effective {
+        if let Err(error) = push_live_device_values(app, target, Some(snapshot)) {
+            let _ = restore_device_value_snapshot(app, target, &current);
+            let _ = push_live_device_values(app, target, Some(&current));
+            return Err(error);
+        }
+        if publish {
+            app.state.publish_scheduler_snapshot();
+        }
+    }
+    Ok(MutationEffects {
+        publish_scheduler: is_effective,
+    })
+}
+
 fn replay_transport_params_patch(
     app: &mut App,
     patch: &TransportParamsPatch,
@@ -2406,6 +3219,9 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             replay_track_params_batch_patch(app, patch, mode, true).map(|_| ())
         }
         EditPatch::BusMixer(patch) => replay_bus_mixer_patch(app, patch, mode),
+        EditPatch::DeviceValues(patch) => {
+            replay_device_values_patch(app, patch, mode, true).map(|_| ())
+        }
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -2425,6 +3241,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
                     != patch.instrument_base_note_offset_after
         }),
         EditPatch::TransportParams(patch) => patch.before.bpm != patch.after.bpm,
+        EditPatch::DeviceValues(_) => true,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
     }
 }
@@ -2487,6 +3304,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_transport_params_patch(app, patch, ApplyMode::Undo, false)?;
         }
         EditPatch::BusMixer(patch) => replay_bus_mixer_patch(app, patch, ApplyMode::Undo)?,
+        EditPatch::DeviceValues(patch) => {
+            replay_device_values_patch(app, patch, ApplyMode::Undo, false)?;
+        }
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
@@ -2609,6 +3429,754 @@ mod tests {
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         assert!(!app.state.pattern.patterns[0].is_active(step));
         assert_eq!(app.state.pattern.timebase_plocks[0].get(step), None);
+    }
+
+    #[test]
+    fn instrument_plock_multi_edit_round_trips_as_one_step_transaction() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 1);
+        let mut app = test_app(state);
+        let steps = [2, 5, 9];
+        let before = steps
+            .iter()
+            .map(|step| app.state.capture_step_snapshot(0, *step))
+            .collect::<Vec<_>>();
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentPlockMulti {
+                track: 0,
+                steps: steps.to_vec(),
+                param_idx: 0,
+                value: 0.73,
+            },
+        )
+        .expect("set instrument p-locks");
+        let after = steps
+            .iter()
+            .map(|step| app.state.capture_step_snapshot(0, *step))
+            .collect::<Vec<_>>();
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        for (step, expected) in steps.iter().zip(&before) {
+            assert!(step_snapshot_bit_exact_eq(
+                &app.state.capture_step_snapshot(0, *step),
+                expected,
+            ));
+        }
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        for (step, expected) in steps.iter().zip(&after) {
+            assert!(step_snapshot_bit_exact_eq(
+                &app.state.capture_step_snapshot(0, *step),
+                expected,
+            ));
+        }
+    }
+
+    #[test]
+    fn instrument_default_drag_and_key_locks_round_trip_bit_exactly() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap();
+
+        for update in 1..=200 {
+            try_apply_command(
+                &mut app,
+                AppCommand::SetInstrumentParam {
+                    track: 0,
+                    param_idx: 0,
+                    value: update as f32 / 400.0,
+                },
+            )
+            .expect("set instrument default");
+        }
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentKeyLockMulti {
+                track: 0,
+                notes: vec![48, 60, 72],
+                param_idx: 0,
+                value: 0.37,
+            },
+        )
+        .expect("set instrument key locks");
+        let after = app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap();
+        assert_eq!(app.history.undo_len(), 2);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap()
+            .bit_exact_eq(&before));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap()
+            .bit_exact_eq(&after));
+    }
+
+    #[test]
+    fn audio_and_midi_effect_defaults_use_stable_device_history() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.effect_chains[0][0].apply_descriptor(&descriptor, 0);
+        state.pattern.midi_fx_slots[0][0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.effect_descriptors = vec![vec![descriptor]];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let effect_before = app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap();
+        let midi_before = app
+            .state
+            .capture_pattern_midi_fx_device_values(0, pattern, 0)
+            .unwrap();
+
+        for update in 1..=200 {
+            try_apply_command(
+                &mut app,
+                AppCommand::SetEffectParam {
+                    track: 0,
+                    slot_idx: 0,
+                    param_idx: 0,
+                    value: update as f32 / 400.0,
+                },
+            )
+            .expect("set audio effect default");
+        }
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+        try_apply_command(
+            &mut app,
+            AppCommand::SetMidiFxParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 0,
+                value: 0.8,
+            },
+        )
+        .expect("set MIDI-FX default");
+        finish_active_gesture(&mut app);
+        let effect_after = app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap();
+        let midi_after = app
+            .state
+            .capture_pattern_midi_fx_device_values(0, pattern, 0)
+            .unwrap();
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_midi_fx_device_values(0, pattern, 0)
+            .unwrap()
+            .bit_exact_eq(&midi_before));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap()
+            .bit_exact_eq(&effect_before));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap()
+            .bit_exact_eq(&effect_after));
+        assert!(app
+            .state
+            .capture_pattern_midi_fx_device_values(0, pattern, 0)
+            .unwrap()
+            .bit_exact_eq(&midi_after));
+    }
+
+    #[test]
+    fn rack_strip_drag_and_solo_round_trip_with_derived_state() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let sampler = crate::effects::EffectDescriptor::builtin_sampler();
+        state.set_rack_track_for_all_pattern_snapshots(
+            0,
+            crate::sequencer::RackTrackSnapshot::new(
+                crate::sequencer::RackRouting::Broadcast,
+                vec![crate::sequencer::RackSlotSnapshot {
+                    instrument_type: InstrumentType::Sampler,
+                    instrument_run_mode:
+                        crate::sequencer::CustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 8,
+                    param_plocks: crate::sequencer::RackSlotParamPlocks::new(),
+                    instrument_slot:
+                        crate::effects::EffectSlotSnapshot::new_default_with_modulator(
+                            &sampler,
+                            0,
+                            0,
+                        ),
+                    effect_slots: crate::sequencer::RackSlotSnapshot::empty_effect_slots(),
+                    effect_descriptors: crate::effects::EffectDescriptor::default_full_chain(),
+                    custom_effect_names: crate::sequencer::RackSlotSnapshot::empty_effect_names(),
+                    track_sound_state: crate::sequencer::TrackSoundState::default(),
+                    sample_id: Some((1, "test.wav".to_string(), 44_100)),
+                }],
+                crate::sequencer::default_rack_macros(),
+            ),
+        );
+        let mut app = test_app(state);
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app
+            .state
+            .capture_pattern_rack_slot_values(0, pattern, 0)
+            .unwrap();
+
+        for update in 1..=200 {
+            try_apply_command(
+                &mut app,
+                AppCommand::SetRackSlotGain {
+                    track: 0,
+                    slot_idx: 0,
+                    value: update as f32 / 400.0,
+                },
+            )
+            .expect("set rack slot gain");
+        }
+        finish_active_gesture(&mut app);
+        try_apply_command(
+            &mut app,
+            AppCommand::SetRackSlotSolo {
+                track: 0,
+                slot_idx: 0,
+                value: true,
+            },
+        )
+        .expect("solo rack slot");
+        let after = app
+            .state
+            .capture_pattern_rack_slot_values(0, pattern, 0)
+            .unwrap();
+        assert_eq!(app.history.undo_len(), 2);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_rack_slot_values(0, pattern, 0)
+            .unwrap()
+            .bit_exact_eq(&before));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_rack_slot_values(0, pattern, 0)
+            .unwrap()
+            .bit_exact_eq(&after));
+    }
+
+    #[test]
+    fn rack_effect_defaults_and_multi_step_plocks_round_trip() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let sampler = crate::effects::EffectDescriptor::builtin_sampler();
+        let effect = tensor_test_descriptor();
+        let mut effect_slots = crate::sequencer::RackSlotSnapshot::empty_effect_slots();
+        effect_slots[0] = crate::effects::EffectSlotSnapshot::new_default_with_modulator(
+            &effect, 0, 0,
+        );
+        let mut effect_descriptors = crate::effects::EffectDescriptor::default_full_chain();
+        effect_descriptors[0] = effect;
+        state.set_rack_track_for_all_pattern_snapshots(
+            0,
+            crate::sequencer::RackTrackSnapshot::new(
+                crate::sequencer::RackRouting::Broadcast,
+                vec![crate::sequencer::RackSlotSnapshot {
+                    instrument_type: InstrumentType::Sampler,
+                    instrument_run_mode: crate::sequencer::CustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 8,
+                    param_plocks: crate::sequencer::RackSlotParamPlocks::new(),
+                    instrument_slot: crate::effects::EffectSlotSnapshot::new_default_with_modulator(
+                        &sampler, 0, 0,
+                    ),
+                    effect_slots,
+                    effect_descriptors,
+                    custom_effect_names: crate::sequencer::RackSlotSnapshot::empty_effect_names(),
+                    track_sound_state: crate::sequencer::TrackSoundState::default(),
+                    sample_id: Some((1, "test.wav".to_string(), 44_100)),
+                }],
+                crate::sequencer::default_rack_macros(),
+            ),
+        );
+        let mut app = test_app(state);
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app.state.capture_pattern_rack_slot_values(0, pattern, 0).unwrap();
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetRackSlotEffectParam {
+                track: 0,
+                rack_slot_idx: 0,
+                effect_slot_idx: 0,
+                param_idx: 0,
+                value: 0.41,
+            },
+        ).unwrap();
+        finish_active_gesture(&mut app);
+        try_apply_command(
+            &mut app,
+            AppCommand::SetRackSlotEffectPlockMulti {
+                track: 0,
+                steps: vec![2, 6],
+                rack_slot_idx: 0,
+                effect_slot_idx: 0,
+                param_idx: 0,
+                value: 0.72,
+            },
+        ).unwrap();
+        let after = app.state.capture_pattern_rack_slot_values(0, pattern, 0).unwrap();
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.state.capture_pattern_rack_slot_values(0, pattern, 0).unwrap().bit_exact_eq(&before));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.state.capture_pattern_rack_slot_values(0, pattern, 0).unwrap().bit_exact_eq(&after));
+    }
+
+    fn tensor_test_descriptor() -> crate::effects::EffectDescriptor {
+        let mut descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        descriptor.tensor_params = vec![crate::effects::TensorParamDescriptor {
+            name: "matrix".to_string(),
+            shape: vec![2, 2],
+            cell_offset: 64,
+            default: vec![0.1, 0.2, 0.3, 0.4],
+            min: 0.0,
+            max: 1.0,
+        }];
+        descriptor
+    }
+
+    #[test]
+    fn scalar_and_tensor_device_locks_set_overwrite_clear_and_round_trip() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = tensor_test_descriptor();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        state.pattern.effect_chains[0][0].apply_descriptor(&descriptor, 0);
+        state.pattern.midi_fx_slots[0][0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor.clone()];
+        app.graph.effect_descriptors = vec![vec![descriptor]];
+        let steps = vec![3, 7];
+        let before = steps
+            .iter()
+            .map(|step| app.state.capture_step_snapshot(0, *step))
+            .collect::<Vec<_>>();
+
+        let commands = [
+            AppCommand::SetInstrumentTensorPlockCellMulti {
+                track: 0,
+                steps: steps.clone(),
+                tensor_idx: 0,
+                cell_idx: 2,
+                value: 0.8,
+            },
+            AppCommand::SetEffectTensorPlockCellMulti {
+                track: 0,
+                steps: steps.clone(),
+                slot_idx: 0,
+                tensor_idx: 0,
+                cell_idx: 1,
+                value: 0.7,
+            },
+            AppCommand::SetMidiFxTensorPlockCellMulti {
+                track: 0,
+                steps: steps.clone(),
+                slot_idx: 0,
+                tensor_idx: 0,
+                cell_idx: 0,
+                value: 0.6,
+            },
+        ];
+        for command in commands {
+            assert!(matches!(
+                try_apply_command(&mut app, command),
+                Ok(EditOutcome::Applied(_))
+            ));
+        }
+        assert_eq!(app.history.undo_len(), 3);
+        let locked = steps
+            .iter()
+            .map(|step| app.state.capture_step_snapshot(0, *step))
+            .collect::<Vec<_>>();
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentTensorPlockCellMulti {
+                track: 0,
+                steps: steps.clone(),
+                tensor_idx: 0,
+                cell_idx: 2,
+                value: 0.9,
+            },
+        )
+        .unwrap();
+        try_apply_command(
+            &mut app,
+            AppCommand::ClearInstrumentTensorPlockMulti {
+                track: 0,
+                steps: steps.clone(),
+                tensor_idx: 0,
+            },
+        )
+        .unwrap();
+        try_apply_command(
+            &mut app,
+            AppCommand::ClearEffectTensorPlockMulti {
+                track: 0,
+                steps: steps.clone(),
+                slot_idx: 0,
+                tensor_idx: 0,
+            },
+        ).unwrap();
+        try_apply_command(
+            &mut app,
+            AppCommand::ClearMidiFxTensorPlockMulti {
+                track: 0,
+                steps: steps.clone(),
+                slot_idx: 0,
+                tensor_idx: 0,
+            },
+        ).unwrap();
+        for _ in 0..4 {
+            assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        }
+        for (step, expected) in steps.iter().zip(&locked) {
+            assert!(step_snapshot_bit_exact_eq(
+                &app.state.capture_step_snapshot(0, *step),
+                expected,
+            ));
+        }
+        for _ in 0..3 {
+            assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        }
+        for (step, expected) in steps.iter().zip(&before) {
+            assert!(step_snapshot_bit_exact_eq(
+                &app.state.capture_step_snapshot(0, *step),
+                expected,
+            ));
+        }
+
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let defaults_before = app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap();
+        let effect_defaults_before = app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap();
+        let midi_defaults_before = app
+            .state
+            .capture_pattern_midi_fx_device_values(0, pattern, 0)
+            .unwrap();
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentTensorCell {
+                track: 0,
+                tensor_idx: 0,
+                cell_idx: 3,
+                value: 0.55,
+            },
+        )
+        .unwrap();
+        finish_active_gesture(&mut app);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap()
+            .bit_exact_eq(&defaults_before));
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetEffectTensorCell {
+                track: 0,
+                slot_idx: 0,
+                tensor_idx: 0,
+                cell_idx: 1,
+                value: 0.51,
+            },
+        ).unwrap();
+        finish_active_gesture(&mut app);
+        try_apply_command(
+            &mut app,
+            AppCommand::SetMidiFxTensorCell {
+                track: 0,
+                slot_idx: 0,
+                tensor_idx: 0,
+                cell_idx: 0,
+                value: 0.61,
+            },
+        ).unwrap();
+        finish_active_gesture(&mut app);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.state.capture_pattern_effect_device_values(0, pattern, 0).unwrap().bit_exact_eq(&effect_defaults_before));
+        assert!(app.state.capture_pattern_midi_fx_device_values(0, pattern, 0).unwrap().bit_exact_eq(&midi_defaults_before));
+    }
+
+    #[test]
+    fn derived_modulation_active_defaults_and_plocks_restore_exactly() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        descriptor.instrument_modulation_targets = vec![
+            crate::effects::InstrumentModulationTarget {
+                base_param_idx: 0,
+                source_param_idx: None,
+                modulator_slot: 1,
+                depth_param_idx: 0,
+                active_param_idx: Some(1),
+                depth_min: -1.0,
+                depth_max: 1.0,
+                depth_unit: None,
+            },
+        ];
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        state.pattern.effect_chains[0][0].apply_descriptor(&descriptor, 0);
+        state.pattern.instrument_slots[0].defaults.set(0, 0.0);
+        state.pattern.instrument_slots[0].defaults.set(1, 0.0);
+        state.pattern.effect_chains[0][0].defaults.set(0, 0.0);
+        state.pattern.effect_chains[0][0].defaults.set(1, 0.0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor.clone()];
+        app.graph.effect_descriptors = vec![vec![descriptor]];
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: 0.5,
+            },
+        )
+        .unwrap();
+        finish_active_gesture(&mut app);
+        assert_eq!(app.state.pattern.instrument_slots[0].defaults.get(1), 1.0);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.instrument_slots[0].defaults.get(1).to_bits(), 0.0f32.to_bits());
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetEffectPlockMulti {
+                track: 0,
+                steps: vec![4],
+                slot_idx: 0,
+                param_idx: 0,
+                value: 0.5,
+            },
+        )
+        .unwrap();
+        assert_eq!(app.state.pattern.effect_chains[0][0].plocks.get(4, 1), Some(1.0));
+        try_apply_command(
+            &mut app,
+            AppCommand::ClearEffectPlockMulti {
+                track: 0,
+                steps: vec![4],
+                slot_idx: 0,
+                param_idx: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(app.state.pattern.effect_chains[0][0].plocks.get(4, 1), None);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.effect_chains[0][0].plocks.get(4, 1), Some(1.0));
+    }
+
+    #[test]
+    fn device_history_keeps_the_original_pattern_after_scene_switch() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1, &[-1], &[44_100], &["Track 1".to_string()], &[InstrumentType::Sampler],
+        ));
+        state.launch_scene(
+            1, 1, &[-1], &[44_100], &["Track 1".to_string()], &[InstrumentType::Sampler],
+        ).unwrap();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1, &[-1], &[44_100], &["Track 1".to_string()], &[InstrumentType::Sampler],
+        ));
+        state.launch_scene(
+            0, 1, &[-1], &[44_100], &["Track 1".to_string()], &[InstrumentType::Sampler],
+        ).unwrap();
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor];
+        let first_pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let first_before = app.state.capture_pattern_instrument_device_values(0, first_pattern).unwrap();
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam { track: 0, param_idx: 0, value: 0.23 },
+        ).unwrap();
+        finish_active_gesture(&mut app);
+        app.state.launch_scene(
+            1, 1, &[-1], &[44_100], &["Track 1".to_string()], &[InstrumentType::Sampler],
+        ).unwrap();
+        let second_pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let second_before = app.state.capture_pattern_instrument_device_values(0, second_pattern).unwrap();
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.state.capture_pattern_instrument_device_values(0, first_pattern).unwrap().bit_exact_eq(&first_before));
+        assert!(app.state.capture_pattern_instrument_device_values(0, second_pattern).unwrap().bit_exact_eq(&second_before));
+    }
+
+    #[test]
+    fn preset_value_transaction_restores_metadata_and_rolls_back_failures() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        state.pattern.track_sound_state.lock().unwrap()[0] = crate::sequencer::TrackSoundState {
+            engine_id: Some(7),
+            loaded_preset: Some("Old".to_string()),
+            dirty: true,
+        };
+        assert!(state.save_current_pattern_snapshot(
+            1, &[-1], &[44_100], &["Track 1".to_string()], &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app.state.capture_pattern_instrument_device_values(0, pattern).unwrap();
+
+        apply_recorded_instrument_values_mutation(&mut app, 0, "Load preset 'Partial'", |app| {
+            app.state.pattern.instrument_slots[0].defaults.set(0, 0.42);
+            app.state.pattern.track_sound_state.lock().unwrap()[0] = crate::sequencer::TrackSoundState {
+                engine_id: Some(7),
+                loaded_preset: Some("Partial".to_string()),
+                dirty: false,
+            };
+            Ok(())
+        }).unwrap();
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        let restored = app.state.capture_pattern_instrument_device_values(0, pattern).unwrap();
+        assert!(restored.bit_exact_eq(&before), "restored={restored:#?}\nbefore={before:#?}");
+
+        let history_before = (app.history.undo_len(), app.history.redo_len());
+        let failed = apply_recorded_instrument_values_mutation(&mut app, 0, "Invalid preset", |app| {
+            app.state.pattern.instrument_slots[0].defaults.set(0, 0.99);
+            Err("schema mismatch".to_string())
+        });
+        assert!(matches!(failed, Err(EditError::ReplayFailed(_))));
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), history_before);
+        assert!(app.state.capture_pattern_instrument_device_values(0, pattern).unwrap().bit_exact_eq(&before));
+    }
+
+    #[test]
+    fn key_lock_variant_stamp_and_multi_note_clear_round_trip() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        state.pattern.instrument_slots[0].set_key_lock(60, 0, 0.31);
+        let assignment = state.reconcile_key_lock_variant_registry_for_track(0)[60]
+            .clone()
+            .expect("source key-lock variant");
+        assert!(state.save_current_pattern_snapshot(
+            1, &[-1], &[44_100], &["Track 1".to_string()], &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app.state.capture_pattern_instrument_device_values(0, pattern).unwrap();
+
+        try_apply_command(
+            &mut app,
+            AppCommand::StampInstrumentKeyLockVariant {
+                track: 0,
+                notes: vec![61, 64],
+                key: assignment.key,
+            },
+        ).unwrap();
+        let stamped = app.state.capture_pattern_instrument_device_values(0, pattern).unwrap();
+        assert!(!stamped.bit_exact_eq(&before));
+        try_apply_command(
+            &mut app,
+            AppCommand::ClearInstrumentKeyLockVariantsForNotes {
+                track: 0,
+                notes: vec![61, 64],
+            },
+        ).unwrap();
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.state.capture_pattern_instrument_device_values(0, pattern).unwrap().bit_exact_eq(&stamped));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.state.capture_pattern_instrument_device_values(0, pattern).unwrap().bit_exact_eq(&before));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
     }
 
     #[test]

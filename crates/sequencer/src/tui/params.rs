@@ -934,17 +934,26 @@ impl App {
             let Some(&param_idx) = synth_indices.get(self.ui.instrument_param_cursor - 1) else {
                 return;
             };
-            let slot = &self.state.pattern.instrument_slots[self.ui.cursor_track];
             if self.has_selection() {
-                for step in self.selected_steps() {
-                    slot.set_plock(step, param_idx, val);
-                }
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlockMulti {
+                        track: self.ui.cursor_track,
+                        steps: self.selected_steps(),
+                        param_idx,
+                        value: val,
+                    },
+                );
             } else {
-                slot.defaults.set(param_idx, val);
-                self.send_instrument_param(self.ui.cursor_track, param_idx, val);
-                self.mark_track_sound_dirty(self.ui.cursor_track);
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentParam {
+                        track: self.ui.cursor_track,
+                        param_idx,
+                        value: val,
+                    },
+                );
             }
-            self.state.publish_scheduler_snapshot();
             return;
         }
         if self.ui.effect_tab == EffectTab::Mod {
@@ -969,10 +978,6 @@ impl App {
         let val = self.ui.dropdown_cursor as f32;
         let param_idx = self.ui.effect_param_cursor;
 
-        let slot = match self.current_slot() {
-            Some(s) => s,
-            None => return,
-        };
         let Some(slot_idx) = self.selected_effect_slot() else {
             return;
         };
@@ -982,29 +987,34 @@ impl App {
         let Some(param_desc) = desc.params.get(param_idx) else {
             return;
         };
-        if matches!(
-            param_desc.host_control,
-            Some(crate::effects::HostControl::FxSidechain { .. })
-        ) {
-            self.apply_effect_sidechain_selection(
-                self.ui.cursor_track,
-                slot_idx,
-                param_idx,
-                self.ui.dropdown_cursor,
-            );
-            slot.defaults.set(param_idx, val);
-            self.state.publish_scheduler_snapshot();
-            return;
-        }
-
         if self.has_selection() {
-            for step in self.selected_steps() {
-                slot.set_plock(step, param_idx, val);
+            if matches!(
+                param_desc.host_control,
+                Some(crate::effects::HostControl::FxSidechain { .. })
+            ) {
+                return;
             }
+            apply_command(
+                self,
+                AppCommand::SetEffectPlockMulti {
+                    track: self.ui.cursor_track,
+                    steps: self.selected_steps(),
+                    slot_idx,
+                    param_idx,
+                    value: val,
+                },
+            );
         } else {
-            slot.defaults.set(param_idx, val);
+            apply_command(
+                self,
+                AppCommand::SetEffectParam {
+                    track: self.ui.cursor_track,
+                    slot_idx,
+                    param_idx,
+                    value: val,
+                },
+            );
         }
-        self.state.publish_scheduler_snapshot();
     }
 }
 
