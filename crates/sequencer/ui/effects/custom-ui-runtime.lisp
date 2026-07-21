@@ -65,6 +65,39 @@
   (let ((p (custom-ui-param-in-scope scope name)))
     (if p (custom-ui-set-param-in-scope scope p value) false)))
 
+(def custom-ui-set-adsr-in-scope (scope attack decay sustain release env)
+  (let ((attack-p (custom-ui-param-in-scope scope attack))
+        (decay-p (custom-ui-param-in-scope scope decay))
+        (sustain-p (custom-ui-param-in-scope scope sustain))
+        (release-p (if release (custom-ui-param-in-scope scope release) false))
+        (fx (custom-ui-fx-in-scope scope)))
+    (let ((updates (if release-p
+          (list
+            (dict :param-idx (get attack-p :idx) :value (get env :attack))
+            (dict :param-idx (get decay-p :idx) :value (get env :decay))
+            (dict :param-idx (get sustain-p :idx) :value (get env :sustain))
+            (dict :param-idx (get release-p :idx) :value (get env :release)))
+          (list
+            (dict :param-idx (get attack-p :idx) :value (get env :attack))
+            (dict :param-idx (get decay-p :idx) :value (get env :decay))
+            (dict :param-idx (get sustain-p :idx) :value (get env :sustain))))))
+      (if (and fx (not (get fx :rack-fx)) (not (get fx :bus-fx)) (not (get fx :midi-fx)))
+        (host-command
+          (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
+          (dict :slot-idx (get fx :slot-idx) :updates updates
+                :commit (not (get env :active))))
+        (if (and (not fx) (not (instrument-rack-target? attack-p)))
+          (host-command
+            (if (seq-has-selection?) "set-instrument-plock-batch" "set-instrument-param-batch")
+            (dict :updates updates :commit (not (get env :active))))
+          (do
+            (custom-ui-set-param-in-scope scope attack-p (get env :attack))
+            (custom-ui-set-param-in-scope scope decay-p (get env :decay))
+            (custom-ui-set-param-in-scope scope sustain-p (get env :sustain))
+            (if release-p
+              (custom-ui-set-param-in-scope scope release-p (get env :release))
+              false)))))))
+
 (def custom-ui-param-change-callback (p)
   (let ((scope (custom-ui-current-scope)))
     (lambda (v)

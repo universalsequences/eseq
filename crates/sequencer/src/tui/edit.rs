@@ -1521,14 +1521,24 @@ fn device_plock_merge_suffix(cmd: &AppCommand) -> Option<String> {
     }
 }
 
-fn apply_coalesced_device_plock_command(
+fn apply_coalesced_device_plock_commands(
     app: &mut App,
-    cmd: &AppCommand,
+    commands: &[AppCommand],
+    merge_suffix: &str,
+    label: &str,
 ) -> Result<EditOutcome, EditError> {
+    let first = commands.first().ok_or(EditError::UnsupportedCommand)?;
     let (track, affected) =
-        device_plock_command_target(cmd).ok_or(EditError::UnsupportedCommand)?;
+        device_plock_command_target(first).ok_or(EditError::UnsupportedCommand)?;
     if affected.is_empty() {
         return Ok(EditOutcome::NoOp);
+    }
+    for command in commands.iter().skip(1) {
+        if device_plock_command_target(command) != Some((track, affected.clone())) {
+            return Err(EditError::InvalidTarget(
+                "device p-lock batch spans multiple tracks or step selections".to_string(),
+            ));
+        }
     }
     let track_id = app
         .track_registry
@@ -1543,8 +1553,7 @@ fn apply_coalesced_device_plock_command(
         pattern: pattern_id,
     };
     let merge_key = MergeKey::new(format!(
-        "device-plock:{target:?}:{}:steps:{affected:?}",
-        device_plock_merge_suffix(cmd).ok_or(EditError::UnsupportedCommand)?,
+        "device-plock:{target:?}:{merge_suffix}:steps:{affected:?}",
     ));
     if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(&merge_key) {
         finish_active_gesture(app);
@@ -1561,7 +1570,9 @@ fn apply_coalesced_device_plock_command(
             _ => None,
         });
 
-    super::command::execute_command(app, cmd.clone());
+    for command in commands {
+        super::command::execute_command(app, command.clone());
+    }
     app.state.reconcile_plock_variant_registry_for_track(track);
     let (after, registry_after) = match app
         .state
@@ -1681,7 +1692,7 @@ fn apply_coalesced_device_plock_command(
     let history_move = app
         .history
         .stage_active_gesture(
-            device_plock_label(cmd),
+            label,
             &merge_key,
             EditPatch::StepCells(patch),
             retained_bytes,
@@ -1690,7 +1701,47 @@ fn apply_coalesced_device_plock_command(
     Ok(EditOutcome::Applied(history_move))
 }
 
-#[derive(Clone, Copy, Debug)]
+fn apply_coalesced_device_plock_command(
+    app: &mut App,
+    cmd: &AppCommand,
+) -> Result<EditOutcome, EditError> {
+    apply_coalesced_device_plock_commands(
+        app,
+        std::slice::from_ref(cmd),
+        &device_plock_merge_suffix(cmd).ok_or(EditError::UnsupportedCommand)?,
+        device_plock_label(cmd),
+    )
+}
+
+pub fn apply_coalesced_device_plock_batch(
+    app: &mut App,
+    commands: &[AppCommand],
+    gesture: &str,
+    label: &str,
+) -> Result<EditOutcome, EditError> {
+    for command in commands {
+        validate_device_command_target(app, command)?;
+        if !matches!(history_policy(command), HistoryPolicy::Coalesce(_))
+            || device_plock_command_target(command).is_none()
+        {
+            return Err(EditError::UnsupportedCommand);
+        }
+    }
+    let mut parameter_targets = commands
+        .iter()
+        .map(|command| device_plock_merge_suffix(command).ok_or(EditError::UnsupportedCommand))
+        .collect::<Result<Vec<_>, _>>()?;
+    parameter_targets.sort();
+    parameter_targets.dedup();
+    apply_coalesced_device_plock_commands(
+        app,
+        commands,
+        &format!("batch:{gesture}:{parameter_targets:?}"),
+        label,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ResolvedDeviceTarget {
     id: DeviceId,
     track: usize,
@@ -1934,19 +1985,29 @@ fn device_command_changes_key_locks(cmd: &AppCommand) -> bool {
     )
 }
 
-fn apply_recorded_device_value_command(
+fn apply_recorded_device_value_commands(
     app: &mut App,
-    cmd: &AppCommand,
+    commands: &[AppCommand],
     merge_key: Option<MergeKey>,
+    merge_suffix: &str,
+    label: &str,
 ) -> Result<EditOutcome, EditError> {
-    let target = resolve_device_value_target(app, cmd)?;
+    let first = commands.first().ok_or(EditError::UnsupportedCommand)?;
+    let target = resolve_device_value_target(app, first)?;
+    for command in commands.iter().skip(1) {
+        if resolve_device_value_target(app, command)? != target {
+            return Err(EditError::InvalidTarget(
+                "device-value batch spans multiple devices or patterns".to_string(),
+            ));
+        }
+    }
     let current_before = capture_device_value_snapshot(app, target)?;
     let merge_key = merge_key.map(|_| {
         MergeKey::new(format!(
             "device:{:?}:pattern:{}:{}",
             target.id,
             target.pattern.0,
-            device_value_merge_suffix(cmd),
+            merge_suffix,
         ))
     });
     if let Some(key) = merge_key.as_ref() {
@@ -1967,8 +2028,10 @@ fn apply_recorded_device_value_command(
         })
         .unwrap_or_else(|| current_before.clone());
 
-    super::command::execute_command(app, cmd.clone());
-    if device_command_changes_key_locks(cmd) {
+    for command in commands {
+        super::command::execute_command(app, command.clone());
+    }
+    if commands.iter().any(device_command_changes_key_locks) {
         app.state
             .reconcile_key_lock_variant_registry_for_track(target.track);
     }
@@ -1998,7 +2061,7 @@ fn apply_recorded_device_value_command(
         let history_move = app
             .history
             .stage_active_gesture(
-                device_value_label(cmd),
+                label,
                 &key,
                 EditPatch::DeviceValues(patch),
                 retained_bytes,
@@ -2009,12 +2072,55 @@ fn apply_recorded_device_value_command(
     finish_active_gesture(app);
     app.state.publish_scheduler_snapshot();
     let history_move = app.history.commit(
-        device_value_label(cmd),
+        label,
         None,
         EditPatch::DeviceValues(patch),
         retained_bytes,
     );
     Ok(EditOutcome::Applied(history_move))
+}
+
+fn apply_recorded_device_value_command(
+    app: &mut App,
+    cmd: &AppCommand,
+    merge_key: Option<MergeKey>,
+) -> Result<EditOutcome, EditError> {
+    apply_recorded_device_value_commands(
+        app,
+        std::slice::from_ref(cmd),
+        merge_key,
+        &device_value_merge_suffix(cmd),
+        device_value_label(cmd),
+    )
+}
+
+pub fn apply_coalesced_device_value_batch(
+    app: &mut App,
+    commands: &[AppCommand],
+    gesture: &str,
+    label: &str,
+) -> Result<EditOutcome, EditError> {
+    for command in commands {
+        validate_device_command_target(app, command)?;
+        if !matches!(history_policy(command), HistoryPolicy::Coalesce(_))
+            || device_value_command_track(command).is_none()
+        {
+            return Err(EditError::UnsupportedCommand);
+        }
+    }
+    let mut parameter_targets = commands
+        .iter()
+        .map(device_value_merge_suffix)
+        .collect::<Vec<_>>();
+    parameter_targets.sort();
+    parameter_targets.dedup();
+    apply_recorded_device_value_commands(
+        app,
+        commands,
+        Some(MergeKey::new(gesture)),
+        &format!("batch:{gesture}:{parameter_targets:?}"),
+        label,
+    )
 }
 
 pub fn apply_recorded_instrument_values_mutation(
@@ -3733,6 +3839,111 @@ mod tests {
         }
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         for (step, expected) in steps.iter().zip(&after) {
+            assert!(step_snapshot_bit_exact_eq(
+                &app.state.capture_step_snapshot(0, *step),
+                expected,
+            ));
+        }
+    }
+
+    #[test]
+    fn effect_parameter_batch_drag_coalesces_and_round_trips() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.effect_chains[0][0].apply_descriptor(&descriptor, 7);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.effect_descriptors = vec![vec![descriptor]];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap();
+
+        for (cutoff, resonance) in [(300.0, 0.7), (900.0, 1.2), (2_400.0, 2.0)] {
+            let commands = [
+                AppCommand::SetEffectParam {
+                    track: 0,
+                    slot_idx: 0,
+                    param_idx: 2,
+                    value: cutoff,
+                },
+                AppCommand::SetEffectParam {
+                    track: 0,
+                    slot_idx: 0,
+                    param_idx: 3,
+                    value: resonance,
+                },
+            ];
+            let outcome = apply_coalesced_device_value_batch(
+                &mut app,
+                &commands,
+                "effect-curve",
+                "Set effect curve",
+            );
+            assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        }
+        assert_eq!(app.history.undo_len(), 0);
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+        let after = app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap();
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap()
+            .bit_exact_eq(&before));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_effect_device_values(0, pattern, 0)
+            .unwrap()
+            .bit_exact_eq(&after));
+
+        let steps = vec![3, 7];
+        let before_locks = steps
+            .iter()
+            .map(|step| app.state.capture_step_snapshot(0, *step))
+            .collect::<Vec<_>>();
+        for (cutoff, resonance) in [(600.0, 0.9), (1_800.0, 1.7)] {
+            let commands = [
+                AppCommand::SetEffectPlockMulti {
+                    track: 0,
+                    steps: steps.clone(),
+                    slot_idx: 0,
+                    param_idx: 2,
+                    value: cutoff,
+                },
+                AppCommand::SetEffectPlockMulti {
+                    track: 0,
+                    steps: steps.clone(),
+                    slot_idx: 0,
+                    param_idx: 3,
+                    value: resonance,
+                },
+            ];
+            let outcome = apply_coalesced_device_plock_batch(
+                &mut app,
+                &commands,
+                "effect-curve",
+                "Set effect curve",
+            );
+            assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        }
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 2);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        for (step, expected) in steps.iter().zip(&before_locks) {
             assert!(step_snapshot_bit_exact_eq(
                 &app.state.capture_step_snapshot(0, *step),
                 expected,

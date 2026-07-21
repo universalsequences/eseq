@@ -1297,6 +1297,27 @@ fn map_usize(
     })
 }
 
+fn map_param_updates(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+) -> Option<Vec<(usize, f32)>> {
+    let updates = map.get("updates")?;
+    let updates = updates.borrow();
+    let Value::List(items) = &*updates else {
+        return None;
+    };
+    let parsed = items
+        .iter()
+        .map(|item| {
+            let item = item.borrow();
+            let Value::Map(update) = &*item else {
+                return None;
+            };
+            Some((map_usize(update, "param-idx")?, map_number(update, "value")? as f32))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!parsed.is_empty()).then_some(parsed)
+}
+
 fn apply_toggle_step_host_command(
     app: &mut tui::App,
     payload: &Value,
@@ -12608,6 +12629,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-instrument-param-batch" | "set-instrument-plock-batch" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(updates) = map_param_updates(map) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let mut commands = Vec::with_capacity(updates.len());
+                                let steps = selected_steps
+                                    .lock()
+                                    .unwrap()
+                                    .iter()
+                                    .copied()
+                                    .collect::<Vec<_>>();
+                                for (param_idx, user_value) in updates {
+                                    if let Some(desc) = app
+                                        .graph
+                                        .instrument_descriptors
+                                        .get(track)
+                                        .and_then(|descriptor| descriptor.params.get(param_idx))
+                                    {
+                                        let value = desc.clamp(desc.user_input_to_stored(user_value));
+                                        commands.push(if name == "set-instrument-plock-batch" {
+                                            tui::AppCommand::SetInstrumentPlockMulti {
+                                                track,
+                                                steps: steps.clone(),
+                                                param_idx,
+                                                value,
+                                            }
+                                        } else {
+                                            tui::AppCommand::SetInstrumentParam {
+                                                track,
+                                                param_idx,
+                                                value,
+                                            }
+                                        });
+                                    }
+                                }
+                                let result = if name == "set-instrument-plock-batch" {
+                                    tui::edit::apply_coalesced_device_plock_batch(
+                                        &mut app,
+                                        &commands,
+                                        "instrument-envelope",
+                                        "Set instrument envelope",
+                                    )
+                                } else {
+                                    tui::edit::apply_coalesced_device_value_batch(
+                                        &mut app,
+                                        &commands,
+                                        "instrument-envelope",
+                                        "Set instrument envelope",
+                                    )
+                                };
+                                match result {
+                                    Ok(_) if map_bool(map, "commit") => {
+                                        tui::edit::finish_active_gesture(&mut app);
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => editor.handle_host_event(HostEvent::Error(
+                                        format!("instrument parameter batch failed: {error:?}"),
+                                    )),
+                                }
+                            }
+                        }
+                    }
                     "set-instrument-param" => {
                         if let Value::Map(ref map) = payload {
                             let param_idx =
@@ -13041,6 +13126,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-effect-param-batch" | "set-effect-plock-batch" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx = map_usize(map, "slot-idx");
+                            if let (Some(slot_idx), Some(updates)) =
+                                (slot_idx, map_param_updates(map))
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let steps = selected_steps
+                                    .lock()
+                                    .unwrap()
+                                    .iter()
+                                    .copied()
+                                    .collect::<Vec<_>>();
+                                let commands = updates
+                                    .into_iter()
+                                    .filter_map(|(param_idx, value)| {
+                                        let desc = app
+                                            .graph
+                                            .effect_descriptors
+                                            .get(track)?
+                                            .get(slot_idx)?
+                                            .params
+                                            .get(param_idx)?;
+                                        let value = value.clamp(desc.min, desc.max);
+                                        Some(if name == "set-effect-plock-batch" {
+                                            tui::AppCommand::SetEffectPlockMulti {
+                                                track,
+                                                steps: steps.clone(),
+                                                slot_idx,
+                                                param_idx,
+                                                value,
+                                            }
+                                        } else {
+                                            tui::AppCommand::SetEffectParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value,
+                                            }
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                let result = if name == "set-effect-plock-batch" {
+                                    tui::edit::apply_coalesced_device_plock_batch(
+                                        &mut app,
+                                        &commands,
+                                        "effect-curve",
+                                        "Set effect curve",
+                                    )
+                                } else {
+                                    tui::edit::apply_coalesced_device_value_batch(
+                                        &mut app,
+                                        &commands,
+                                        "effect-curve",
+                                        "Set effect curve",
+                                    )
+                                };
+                                match result {
+                                    Ok(_) if map_bool(map, "commit") => {
+                                        tui::edit::finish_active_gesture(&mut app);
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => editor.handle_host_event(HostEvent::Error(
+                                        format!("effect parameter batch failed: {error:?}"),
+                                    )),
                                 }
                             }
                         }

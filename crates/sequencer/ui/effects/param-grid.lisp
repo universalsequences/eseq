@@ -338,11 +338,21 @@
               :width :fill :height :fill
               :background-color :instrument-control-bg
               :on-change (lambda (env)
-                (do
-                  (param-set-control-value fx attack-p (get env :attack))
-                  (param-set-control-value fx decay-p (get env :decay))
-                  (param-set-control-value fx sustain-p (get env :sustain))
-                  (param-set-control-value fx release-p (get env :release))))))
+                (if (and fx (not (get fx :rack-fx)) (not (get fx :bus-fx)) (not (get fx :midi-fx)))
+                  (host-command
+                    (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
+                    (dict :slot-idx (get fx :slot-idx)
+                          :updates (list
+                            (dict :param-idx (get attack-p :idx) :value (get env :attack))
+                            (dict :param-idx (get decay-p :idx) :value (get env :decay))
+                            (dict :param-idx (get sustain-p :idx) :value (get env :sustain))
+                            (dict :param-idx (get release-p :idx) :value (get env :release)))
+                          :commit (not (get env :active))))
+                  (do
+                    (param-set-control-value fx attack-p (get env :attack))
+                    (param-set-control-value fx decay-p (get env :decay))
+                    (param-set-control-value fx sustain-p (get env :sustain))
+                    (param-set-control-value fx release-p (get env :release)))))))
           (box :width :fill :height 1.58 :padding 0.08
             (h-stack :width :fill :gap 0.20 :align :start
               (fx-param-adsr-number attack-p fx (str key-prefix "-attack") "atk" 2 false)

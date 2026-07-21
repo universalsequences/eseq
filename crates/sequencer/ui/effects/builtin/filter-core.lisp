@@ -73,20 +73,13 @@
         (do
           (fx-set-effect-value fx cutoff-p (get event :freq))
           (fx-set-effect-value fx resonance-p (get event :q)))
-        (if (seq-has-selection?)
-          (seq-set-effect-plock-pair
-            (get fx :slot-idx)
-            (get cutoff-p :idx) (get event :freq)
-            (get resonance-p :idx) (get event :q))
-          (if (= (get event :type) :change-band)
-            (seq-set-effect-param-pair-live
-              (get fx :slot-idx)
-              (get cutoff-p :idx) (get event :freq)
-              (get resonance-p :idx) (get event :q))
-            (seq-set-effect-param-pair
-              (get fx :slot-idx)
-              (get cutoff-p :idx) (get event :freq)
-              (get resonance-p :idx) (get event :q))))))
+        (host-command
+          (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
+          (dict :slot-idx (get fx :slot-idx)
+                :updates (list
+                  (dict :param-idx (get cutoff-p :idx) :value (get event :freq))
+                  (dict :param-idx (get resonance-p :idx) :value (get event :q)))
+                :commit (= (get event :type) :commit-band)))))
     nil))
 
 (def builtin-fx-filter-readout (fx label-text p value width)

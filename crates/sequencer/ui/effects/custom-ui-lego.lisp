@@ -639,12 +639,7 @@
           (do
             (custom-ui-select-section-in-scope scope section)
             (custom-ui-set-active-adsr scope section (get env :active))
-            (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
-            (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
-            (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
-            (if release
-              (custom-ui-set-param-by-name-in-scope scope release (get env :release))
-              false))))
+            (custom-ui-set-adsr-in-scope scope attack decay sustain release env))))
       (box :width :fill :height 1.75 :padding 0.15
         (h-stack :width :fill :gap 0.20 :align :start
           (ui-adsr-number-s section :attack attack "atk" 0 "ms")
@@ -670,10 +665,7 @@
         :on-change (lambda (env)
           (do
             (custom-ui-set-active-adsr scope -1 (get env :active))
-            (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
-            (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
-            (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
-            (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+            (custom-ui-set-adsr-in-scope scope attack decay sustain release env))))
       (box :width :fill :height 1.75 :padding 0.15
         (h-stack :width :fill :gap 0.20 :align :start
           (ui-adsr-number :attack attack "atk" 0 "ms")
@@ -706,10 +698,7 @@
             (do
               (custom-ui-select-section-in-scope scope section)
               (custom-ui-set-active-adsr scope section (get env :active))
-              (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
-              (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
-              (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
-              (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+              (custom-ui-set-adsr-in-scope scope attack decay sustain release env))))
         (h-stack :width :fill :height 1.0 :gap 0.24 :align :start
           (box :width 1)
           (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" (ui-accent-cyan))
@@ -745,10 +734,7 @@
           (do
             (custom-ui-select-section-in-scope scope section)
             (custom-ui-set-active-adsr scope section (get env :active))
-            (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
-            (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
-            (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
-            (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+            (custom-ui-set-adsr-in-scope scope attack decay sustain release env))))
       (ui-detail-adsr-divider "adsr-controls-divider")
       (box :width :fill :height 1.75 :h-align :center :v-align :center
         (h-stack :gap 0.42 :align :start
@@ -856,10 +842,7 @@
         :on-change (lambda (env)
           (do
             (custom-ui-set-active-adsr scope -1 (get env :active))
-            (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
-            (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
-            (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
-            (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+            (custom-ui-set-adsr-in-scope scope attack decay sustain release env))))
       (box :width :fill :height 1.45 :padding 0.1
         (h-stack :width :fill :gap 0.15 :align :start
           (ui-adsr-number :attack attack "atk" 0 "ms")
@@ -1015,10 +998,7 @@
             (do
               (custom-ui-select-section-in-scope scope section)
               (custom-ui-set-active-adsr scope section (get env :active))
-              (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
-              (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
-              (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
-              (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+              (custom-ui-set-adsr-in-scope scope attack decay sustain release env))))
         (h-stack :width :fill :height 1.0 :gap 0.24 :align :start
           (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" accent)
           (ui-lego-micro-num-stage-s section :decay decay "dec" 5.1 0 "ms" accent)
