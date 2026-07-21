@@ -8687,13 +8687,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let message = match replay {
                             tui::history::HistoryReplay::Applied(result) => {
                                 track_names.clone_from(&app.tracks);
-                                let replay_track = if app.tracks.len() != track_count_before_replay {
+                                let topology_changed = app.tracks.len() != track_count_before_replay;
+                                let replay_track = if topology_changed {
                                     app.ui.cursor_track
                                 } else {
                                     current_track.load(Ordering::Relaxed)
                                 }.min(app.tracks.len().saturating_sub(1));
                                 current_track.store(replay_track, Ordering::Relaxed);
-                                if app.tracks.len() != track_count_before_replay {
+                                if topology_changed {
                                     {
                                         let mut pan_ids = track_pan_ids.lock().unwrap();
                                         *pan_ids = app.graph.track_node_ids.iter()
@@ -8701,10 +8702,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .collect();
                                         push_solo_mutes(lg_raw, &state, &pan_ids);
                                     }
+                                    cached_track_peak_levels = read_track_peak_levels(
+                                        app.graph.lg,
+                                        &track_pan_ids.lock().unwrap(),
+                                    );
+                                    cached_bus_peak_levels =
+                                        read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                                    (cached_modulator_phases, cached_modulator_levels) =
+                                        read_modulator_display_values(app.graph.lg, &app);
+                                    last_meter_poll_at = Instant::now();
                                     *record_armed.lock().unwrap() = app.graph.record_armed.clone();
                                     *track_groups.lock().unwrap() = app.groups.clone();
+                                }
+                                let rt = editor.runtime_mut();
+                                if topology_changed {
                                     sync_track_topology_state(
-                                        editor.runtime_mut(),
+                                        rt,
                                         &app,
                                         &state,
                                         &mut track_names,
@@ -8715,11 +8728,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &record_armed,
                                         &cached_track_peak_levels,
                                     );
-                                    refresh_visible_track_topology_layouts(&mut editor);
-                                    prev_track_playheads = track_playheads_snapshot(&state, &app);
-                                    prev_track_button_states = track_button_state_snapshot(&state);
+                                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                                    sync_modulator_phase_fields(rt, &cached_modulator_phases);
+                                    sync_modulator_level_fields(rt, &cached_modulator_levels);
+                                    rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
-                                let rt = editor.runtime_mut();
                                 rt.set_reactive(
                                     "SEQ",
                                     "track-names",
@@ -8738,6 +8751,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
+                                if topology_changed {
+                                    refresh_visible_track_topology_layouts(&mut editor);
+                                    prev_track_playheads = track_playheads_snapshot(&state, &app);
+                                    prev_track_button_states = track_button_state_snapshot(&state);
+                                }
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 if !app.buses.is_empty() {
                                     ui_invalidations.push(UiInvalidation::BusMixer {
