@@ -3799,7 +3799,10 @@ fn apply_ui_invalidations(
                 }
                 TrackMixerInvalidation::Collapsed => {
                     let collapsed = track_collapsed.lock().unwrap().clone();
-                    app.replace_track_collapsed(collapsed);
+                    if let Err(error) = app.apply_recorded_track_collapsed(collapsed) {
+                        *track_collapsed.lock().unwrap() = app.track_collapsed.clone();
+                        eprintln!("Could not change track collapse state: {error}");
+                    }
                     needs_reactive_cycle |= rt
                         .set_reactive("SEQ", "track-collapsed", build_track_collapsed(app))
                         .effects_dirty;
@@ -9977,7 +9980,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let slot_idx = extract_usize_from_payload(&payload, "slot");
                         match (track, slot_idx) {
                             (Some(track), Some(slot_idx)) => {
-                                match app.graph_controller().delete_rack_slot(track, slot_idx) {
+                                match app.apply_recorded_instrument_binding_mutation(
+                                    track,
+                                    "Delete rack layer",
+                                    |app| app.graph_controller().delete_rack_slot(track, slot_idx),
+                                ) {
                                     Ok(()) => {
                                         refresh_instrument_panel_reactive(
                                             &mut editor,

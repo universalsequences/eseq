@@ -10010,6 +10010,51 @@ mod tests {
     }
 
     #[test]
+    fn recorded_rack_slot_delete_undoes_with_identity_fx_and_macro_state() {
+        let graph = TestLiveGraph::new("recorded-delete-rack-slot-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf(), sample.to_path_buf()])
+            .expect("rack samples should load");
+        app.add_builtin_rack_slot_effect_sync(0, 0, "OTT")
+            .expect("rack slot should accept OTT");
+        let track_id = app.track_registry.id_at(0).expect("stable track id");
+        let deleted_id = app.device_registry.rack_slot(track_id, 0);
+
+        app.apply_recorded_instrument_binding_mutation(0, "Delete rack layer", |app| {
+            app.graph_controller().delete_rack_slot(0, 0)
+        })
+        .expect("rack deletion should record");
+        assert_eq!(
+            app.state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref().expect("rack state").slots.len(),
+            1
+        );
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone().expect("rack should restore");
+        assert_eq!(restored.slots.len(), 2);
+        assert_eq!(restored.slots[0].effect_descriptors[0].name, "OTT");
+        assert_eq!(app.device_registry.rack_slot(track_id, 0), deleted_id);
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref().expect("rack state").slots.len(),
+            1
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn two_slot_rack_hosts_builtin_and_compiled_fx_independently() {
         let graph = TestLiveGraph::new("two-rack-slot-fx-test");
         let mut app = test_app_with_track_count(&graph, 0);

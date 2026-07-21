@@ -53,7 +53,58 @@ pub enum EditPatch {
     RackSlotStructure(RackSlotStructurePatch),
     TrackCreation(TrackCreationPatch),
     TrackDeletion(TrackDeletionPatch),
+    TrackPresentation(TrackPresentationPatch),
+    SceneStructure(SceneStructurePatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackPresentationState {
+    pub color: crate::track_color::TrackColor,
+    pub collapsed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackPresentationChange {
+    pub track: TrackId,
+    pub before: TrackPresentationState,
+    pub after: TrackPresentationState,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackPresentationPatch {
+    pub changes: Vec<TrackPresentationChange>,
+}
+
+impl TrackPresentationPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.changes.capacity() * std::mem::size_of::<TrackPresentationChange>()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SceneStructurePatch {
+    pub before: crate::sequencer::ProjectScenes,
+    pub after: crate::sequencer::ProjectScenes,
+}
+
+impl SceneStructurePatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &crate::sequencer::ProjectScenes) -> usize {
+            state.track_pools.iter().map(|pool| {
+                pool.patterns.capacity()
+                    * std::mem::size_of::<(
+                        crate::sequencer::PatternId,
+                        crate::sequencer::TrackPatternData,
+                    )>()
+            }).sum::<usize>()
+                + state.scenes.capacity() * std::mem::size_of::<crate::sequencer::Scene>()
+                + state.track_overrides.capacity()
+                    * std::mem::size_of::<Option<crate::sequencer::PatternId>>()
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
 }
 
 #[derive(Clone, Debug)]

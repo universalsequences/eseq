@@ -2109,7 +2109,7 @@ impl TrackPatternPool {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Scene {
     pub name: String,
     pub cells: Vec<Option<PatternId>>,
@@ -2124,7 +2124,7 @@ pub struct Scene {
     pub project_process_chain: crate::process::TrackProcessChain,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProjectScenes {
     pub track_pools: Vec<TrackPatternPool>,
     pub scenes: Vec<Scene>,
@@ -4544,6 +4544,38 @@ impl SequencerState {
                     .unwrap_or((-1, String::new(), 44_100))
             })
             .collect()
+    }
+
+    pub(crate) fn capture_project_scenes(&self) -> ProjectScenes {
+        self.pattern.scenes.lock().unwrap().clone()
+    }
+
+    pub(crate) fn restore_project_scenes(
+        &self,
+        target: &ProjectScenes,
+    ) -> Result<Vec<(i32, String, u32)>, String> {
+        if target.scenes.is_empty() {
+            return Err("Scene history cannot restore an empty project".to_string());
+        }
+        if target.track_pools.len() != self.active_track_count()
+            || target.track_overrides.len() != self.active_track_count()
+            || target.scenes.iter().any(|scene| scene.cells.len() != self.active_track_count())
+        {
+            return Err("Scene history track topology no longer matches the project".to_string());
+        }
+        if target.current_scene >= target.scenes.len() {
+            return Err("Scene history has an invalid current-scene index".to_string());
+        }
+        let _ = self.quantized_launches.cancel_all();
+        *self.pattern.scenes.lock().unwrap() = target.clone();
+        self.pattern.current_pattern.store(target.current_scene as u32, Ordering::Relaxed);
+        self.pattern.num_patterns.store(target.scenes.len() as u32, Ordering::Relaxed);
+        let sample_ids = self.restore_current_pattern_from_repository()
+            .ok_or_else(|| "Scene history could not restore the current scene".to_string())?;
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.schedule_mod_resync();
+        self.publish_scheduler_snapshot();
+        Ok(sample_ids)
     }
 
     pub fn restore_current_pattern_from_repository(&self) -> Option<Vec<(i32, String, u32)>> {

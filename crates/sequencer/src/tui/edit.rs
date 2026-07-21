@@ -18,8 +18,10 @@ use super::history::{
     MidiFxChainState, MidiFxInstanceState, PatternGeometryPatch,
     RackContainerSlotState, RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
     RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
+    SceneStructurePatch,
     TrackInstrumentSource, TrackInstrumentState,
     TrackCreationPatch, TrackDeletionPatch, TrackParamsBatchPatch, TrackParamsPatch,
+    TrackPresentationChange, TrackPresentationPatch, TrackPresentationState,
     TransportAuthoringSnapshot, TransportParamsPatch,
 };
 use super::App;
@@ -1396,6 +1398,126 @@ impl App {
             retained_bytes,
         );
         Ok(result)
+    }
+
+    pub fn apply_recorded_scene_structure_mutation<T>(
+        &mut self,
+        label: &'static str,
+        mutate: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
+        finish_active_gesture(self);
+        self.save_current_bus_pattern();
+        if !self.state.save_current_pattern_snapshot(
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        ) {
+            return Err("Could not snapshot the current scene before editing scenes".to_string());
+        }
+        let before = self.state.capture_project_scenes();
+        let result = match mutate(self) {
+            Ok(result) => result,
+            Err(error) => {
+                return match self.restore_scene_structure_state(&before) {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(format!(
+                        "Scene edit failed ({error}); restoring its before-state also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let after = self.state.capture_project_scenes();
+        let patch = SceneStructurePatch { before, after };
+        let retained_bytes = patch.retained_bytes();
+        self.history.commit(label, None, EditPatch::SceneStructure(patch), retained_bytes);
+        Ok(result)
+    }
+
+    pub fn apply_recorded_track_collapsed(
+        &mut self,
+        collapsed: Vec<bool>,
+    ) -> Result<bool, String> {
+        finish_active_gesture(self);
+        self.normalize_track_colors();
+        self.normalize_track_collapsed();
+        if collapsed.len() != self.tracks.len() {
+            return Err("Collapsed-track state does not match the track topology".to_string());
+        }
+        let changes = collapsed.iter().enumerate().filter_map(|(track, target)| {
+            let before = TrackPresentationState {
+                color: self.track_colors[track],
+                collapsed: self.track_collapsed[track],
+            };
+            if before.collapsed == *target {
+                return None;
+            }
+            let after = TrackPresentationState {
+                color: before.color,
+                collapsed: *target,
+            };
+            Some(TrackPresentationChange {
+                track: self.track_registry.id_at(track)?,
+                before,
+                after,
+            })
+        }).collect::<Vec<_>>();
+        if changes.is_empty() {
+            return Ok(false);
+        }
+        self.replace_track_collapsed(collapsed);
+        let patch = TrackPresentationPatch { changes };
+        let retained_bytes = patch.retained_bytes();
+        self.history.commit(
+            "Toggle track collapse",
+            None,
+            EditPatch::TrackPresentation(patch),
+            retained_bytes,
+        );
+        Ok(true)
+    }
+
+    fn restore_track_presentation(
+        &mut self,
+        patch: &TrackPresentationPatch,
+        mode: ApplyMode,
+    ) -> Result<(), String> {
+        let mut resolved = Vec::with_capacity(patch.changes.len());
+        for change in &patch.changes {
+            let track = self.track_registry.index_of(change.track)
+                .ok_or_else(|| format!("Track {:?} no longer exists", change.track))?;
+            resolved.push((track, match mode {
+                ApplyMode::Undo => &change.before,
+                ApplyMode::Redo => &change.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err("track-presentation replay requires undo or redo mode".to_string());
+                }
+            }));
+        }
+        for (track, target) in resolved {
+            self.track_colors[track] = target.color;
+            self.track_collapsed[track] = target.collapsed;
+        }
+        Ok(())
+    }
+
+    fn restore_scene_structure_state(
+        &mut self,
+        target: &crate::sequencer::ProjectScenes,
+    ) -> Result<(), String> {
+        let sample_ids = self.state.restore_project_scenes(target)?;
+        self.graph_controller().apply_sample_ids(&sample_ids);
+        self.graph_controller().sync_current_pattern_mod_routes();
+        self.graph_controller().sync_track_instrument_run_modes_from_live_state()?;
+        let default_bus_snapshot = self.capture_bus_pattern_snapshot();
+        let bus_snapshot = self.state.bus_pattern_snapshot_or_default(
+            target.current_scene,
+            &default_bus_snapshot,
+        );
+        self.restore_bus_pattern_snapshot(&bus_snapshot);
+        self.push_all_restored_defaults();
+        Ok(())
     }
 
     fn restore_track_instrument_state(
@@ -5881,6 +6003,22 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
                 "track-deletion replay requires undo or redo mode".to_string(),
             )),
         },
+        EditPatch::TrackPresentation(patch) => app
+            .restore_track_presentation(patch, mode)
+            .map_err(EditError::ReplayFailed),
+        EditPatch::SceneStructure(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "scene-structure replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_scene_structure_state(target)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -5905,6 +6043,8 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::RackSlotStructure(_) => true,
         EditPatch::TrackCreation(_) => true,
         EditPatch::TrackDeletion(_) => true,
+        EditPatch::TrackPresentation(_) => false,
+        EditPatch::SceneStructure(_) => true,
         EditPatch::EffectChain(_) => true,
         EditPatch::BusEffectChain(_) => true,
         EditPatch::BusEffectValues(_) => true,
@@ -6034,6 +6174,12 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::TrackDeletion(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
+        EditPatch::TrackPresentation(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::SceneStructure(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
         EditPatch::EffectChain(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
@@ -6121,6 +6267,23 @@ mod tests {
                 expected
             ));
         }
+    }
+
+    #[test]
+    fn recorded_track_collapse_round_trips_by_stable_track_identity() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        app.normalize_track_colors();
+        app.normalize_track_collapsed();
+
+        assert_eq!(app.apply_recorded_track_collapsed(vec![true]), Ok(true));
+        assert!(app.track_collapsed[0]);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(!app.track_collapsed[0]);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.track_collapsed[0]);
     }
 
     #[test]
