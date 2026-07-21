@@ -827,6 +827,78 @@ impl MacroEngine {
         self.rebuild_ownership();
     }
 
+    pub fn capture_effect_mappings_for_bus(&self, bus: BusId) -> TrackEffectMacroMappings {
+        TrackEffectMacroMappings {
+            mappings: self
+                .macros
+                .iter()
+                .filter_map(|macro_definition| {
+                    let mappings = macro_definition
+                        .mappings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mapping)| {
+                            mapping.scope == ParamScope::Bus(bus)
+                                && matches!(mapping.target, ParamTarget::EffectParam { .. })
+                        })
+                        .map(|(index, mapping)| (index, mapping.clone()))
+                        .collect::<Vec<_>>();
+                    (!mappings.is_empty()).then_some((macro_definition.id, mappings))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_effect_mappings_for_bus(
+        &mut self,
+        bus: BusId,
+        snapshot: &TrackEffectMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain(|mapping| {
+                mapping.scope != ParamScope::Bus(bus)
+                    || !matches!(mapping.target, ParamTarget::EffectParam { .. })
+            });
+        }
+        for (macro_id, mappings) in &snapshot.mappings {
+            let macro_definition = self
+                .macros
+                .iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                macro_definition
+                    .mappings
+                    .insert((*index).min(macro_definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
+    pub fn remap_effect_mappings_for_bus(
+        &mut self,
+        bus: BusId,
+        old_to_new: &[Option<usize>],
+    ) {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain_mut(|mapping| {
+                if mapping.scope != ParamScope::Bus(bus) {
+                    return true;
+                }
+                let ParamTarget::EffectParam { slot, .. } = &mut mapping.target else {
+                    return true;
+                };
+                let Some(new_slot) = old_to_new.get(*slot).copied().flatten() else {
+                    return false;
+                };
+                *slot = new_slot;
+                true
+            });
+        }
+        self.rebuild_ownership();
+    }
+
     pub fn capture_midi_fx_mappings_for_track(&self, track: usize) -> TrackMidiFxMacroMappings {
         TrackMidiFxMacroMappings {
             mappings: self

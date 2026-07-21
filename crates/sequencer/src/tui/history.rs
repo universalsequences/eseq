@@ -46,6 +46,7 @@ pub enum EditPatch {
     DeviceValues(DeviceValuesPatch),
     InstrumentBinding(InstrumentBindingPatch),
     EffectChain(EffectChainPatch),
+    BusEffectChain(BusEffectChainPatch),
     MidiFxChain(MidiFxChainPatch),
     RackSlotStructure(RackSlotStructurePatch),
     TransportParams(TransportParamsPatch),
@@ -115,6 +116,43 @@ pub struct EffectChainPatch {
     pub track: TrackId,
     pub before: EffectChainState,
     pub after: EffectChainState,
+}
+
+#[derive(Clone, Debug)]
+pub struct BusEffectChainState {
+    pub instances: Vec<EffectInstanceState>,
+    pub live: crate::sequencer::BusPatternSnapshot,
+    pub live_values: Vec<EffectSlotValuesSnapshot>,
+    pub scenes: Vec<crate::sequencer::BusPatternSnapshot>,
+    pub macro_mappings: crate::macro_engine::TrackEffectMacroMappings,
+}
+
+#[derive(Clone, Debug)]
+pub struct BusEffectChainPatch {
+    pub bus: BusId,
+    pub before: BusEffectChainState,
+    pub after: BusEffectChainState,
+}
+
+impl BusEffectChainPatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &BusEffectChainState) -> usize {
+            let source_bytes = state.instances.iter().map(|instance| match &instance.source {
+                super::fx_chain::RetainedEffectSource::NativeBuiltin { name } => name.capacity(),
+                super::fx_chain::RetainedEffectSource::Compiled { name, source, asset_base, .. } => {
+                    name.capacity()
+                        + source.capacity()
+                        + asset_base.as_ref().map(|path| path.as_os_str().len()).unwrap_or(0)
+                }
+            }).sum::<usize>();
+            source_bytes
+                + state.instances.capacity() * std::mem::size_of::<EffectInstanceState>()
+                + state.live_values.iter().map(EffectSlotValuesSnapshot::retained_bytes).sum::<usize>()
+                + state.scenes.capacity()
+                    * std::mem::size_of::<crate::sequencer::BusPatternSnapshot>()
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
 }
 
 impl EffectChainPatch {

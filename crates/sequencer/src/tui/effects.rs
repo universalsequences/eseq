@@ -1799,6 +1799,27 @@ impl App {
         )
     }
 
+    pub(crate) fn restore_prepared_bus_effect_ir(
+        &self,
+        bus_idx: usize,
+        effect_slot: usize,
+        reference: &str,
+        ir: Arc<crate::effects::conv_reverb::StereoIr>,
+    ) -> Result<(), String> {
+        let node_id = self
+            .buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(effect_slot))
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Bus effect slot not found".to_string())?;
+        self.apply_prepared_conv_reverb_ir_to_node(
+            node_id,
+            ir,
+            reference,
+            std::path::Path::new(reference),
+        )
+    }
+
     /// Load an impulse response into a live Convolution Reverb on a track slot.
     pub fn set_conv_reverb_ir(
         &mut self,
@@ -2928,23 +2949,23 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
     ) -> Result<(), String> {
+        let snapshot_before_remap = self.capture_bus_pattern_snapshot();
+        let active_slots = self.active_bus_effect_slots(bus_idx)?;
+        let source_offset = active_slots.iter().position(|slot| *slot == slot_idx)
+            .ok_or_else(|| format!("Bus effect slot {} is empty", slot_idx + 1))?;
+        let mut entries = self.bus_effect_entries(bus_idx)?;
+        entries.remove(source_offset);
+        let mut new_to_old = active_slots.into_iter().map(Some).collect::<Vec<_>>();
+        new_to_old.remove(source_offset);
+        new_to_old.resize(MAX_CUSTOM_FX, None);
         let locator = self.bus_fx_locator(bus_idx)?;
-        self.remove_fx_slot_node(locator, slot_idx, FxLeaseSlotRemoval::Clear)?;
-        let bus = self
-            .buses
-            .get_mut(bus_idx)
-            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
-        if slot_idx >= bus.effect_descriptors.len() || slot_idx >= bus.effect_slots.len() {
-            return Err(format!("Bus effect slot {} out of range", slot_idx + 1));
-        }
-        bus.effect_descriptors[slot_idx] = EffectDescriptor::empty_custom_slot();
-        bus.effect_slots[slot_idx] = crate::effects::EffectSlotSnapshot::new_empty();
-        if slot_idx < bus.custom_effect_names.len() {
-            bus.custom_effect_names[slot_idx] = None;
-        }
-        let live_snapshot = self.capture_bus_pattern_snapshot();
-        self.state
-            .clear_bus_effect_slot_in_other_scene_patterns(bus_idx, slot_idx, &live_snapshot);
+        self.remove_fx_slot_node(locator, slot_idx, FxLeaseSlotRemoval::Shift)?;
+        self.write_bus_effect_entries(bus_idx, &entries)?;
+        self.remap_other_bus_pattern_effect_slots(
+            bus_idx,
+            &new_to_old,
+            &snapshot_before_remap,
+        );
         Ok(())
     }
 
@@ -5076,7 +5097,49 @@ mod tests {
 
         app.delete_bus_effect_slot(bus_idx, moved_slot)
             .expect("bus effect delete should rewire through the shared host");
-        assert_eq!(app.buses[bus_idx].effect_slots[moved_slot].node_id, 0);
+        assert_eq!(app.buses[bus_idx].effect_descriptors[moved_slot].name, "Filter");
+        assert!(app.buses[bus_idx].effect_slots[moved_slot].node_id > 0);
+        assert_eq!(app.buses[bus_idx].effect_slots[moved_slot + 1].node_id, 0);
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_bus_effect_chain_restores_stable_identity_and_scene_values() {
+        let graph = TestLiveGraph::new("bus-fx-history-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("History Bus");
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+
+        let slot = app
+            .apply_recorded_bus_effect_chain_mutation(bus_idx, "Add bus effect", |app| {
+                app.add_builtin_bus_effect_sync(bus_idx, "Filter")
+            })
+            .expect("recorded bus filter add should succeed");
+        let instance = app.device_registry.bus_audio_effect(bus_id, slot);
+        app.buses[bus_idx].effect_slots[slot].defaults[0] = 0.37;
+        app.save_current_bus_pattern();
+
+        app.apply_recorded_bus_effect_chain_mutation(bus_idx, "Delete bus effect", |app| {
+            app.delete_bus_effect_slot(bus_idx, slot)
+        })
+        .expect("recorded bus filter delete should succeed");
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_descriptors[slot].name, "Filter");
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[0].to_bits(), 0.37_f32.to_bits());
+        assert_eq!(
+            app.device_registry.bus_audio_effect_location(instance),
+            Some((bus_id, slot))
+        );
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].node_id, 0);
+        assert!(app.device_registry.bus_audio_effect_location(instance).is_none());
         graph.process_block();
     }
 

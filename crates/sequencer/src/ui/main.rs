@@ -4526,7 +4526,7 @@ fn apply_compiled_effect_edit_session(
             app.apply_compiled_effect_to_slot_recorded(result, name, slot, track)
         }
         EffectEditTarget::Bus { bus, slot } => {
-            app.apply_compiled_bus_effect_to_slot_sync(bus, slot, name, result)
+            app.apply_compiled_bus_effect_to_slot_recorded(bus, slot, name, result)
         }
     }
 }
@@ -16585,7 +16585,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => None,
                                 });
                             if let (Some(bus_idx), Some(effect_name)) = (bus_idx, effect_name) {
-                                match app.add_bus_effect_sync(bus_idx, &effect_name) {
+                                match app.apply_recorded_bus_effect_chain_mutation(
+                                    bus_idx,
+                                    "Add bus effect",
+                                    |app| app.add_bus_effect_sync(bus_idx, &effect_name),
+                                ) {
                                     Ok(slot_idx) => {
                                         app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
@@ -16629,7 +16633,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => None,
                                 });
                             if let (Some(bus_idx), Some(effect_name)) = (bus_idx, effect_name) {
-                                match app.add_builtin_bus_effect_sync(bus_idx, &effect_name) {
+                                match app.apply_recorded_bus_effect_chain_mutation(
+                                    bus_idx,
+                                    "Add bus effect",
+                                    |app| app.add_builtin_bus_effect_sync(bus_idx, &effect_name),
+                                ) {
                                     Ok(slot_idx) => {
                                         app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
@@ -16660,10 +16668,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(bus_idx), Some(slot), Some(effect_name)) =
                             (bus_idx, slot, effect_name)
                         {
-                            match app.insert_builtin_bus_effect_before_slot_sync(
+                            match app.apply_recorded_bus_effect_chain_mutation(
                                 bus_idx,
-                                slot,
-                                &effect_name,
+                                "Insert bus effect",
+                                |app| app.insert_builtin_bus_effect_before_slot_sync(
+                                    bus_idx,
+                                    slot,
+                                    &effect_name,
+                                ),
                             ) {
                                 Ok(slot_idx) => {
                                     app.publish_bus_gate_runtime();
@@ -16693,10 +16705,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(bus_idx), Some(slot), Some(effect_name)) =
                             (bus_idx, slot, effect_name)
                         {
-                            match app.insert_bus_effect_before_slot_sync(
+                            match app.apply_recorded_bus_effect_chain_mutation(
                                 bus_idx,
-                                slot,
-                                &effect_name,
+                                "Insert bus effect",
+                                |app| app.insert_bus_effect_before_slot_sync(
+                                    bus_idx,
+                                    slot,
+                                    &effect_name,
+                                ),
                             ) {
                                 Ok(slot_idx) => {
                                     app.publish_bus_gate_runtime();
@@ -17334,7 +17350,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let source_slot = extract_usize_from_payload(&payload, "source-slot");
                         let target_slot = extract_usize_from_payload(&payload, "target-slot");
                         if let (Some(bus_idx), Some(source_slot)) = (bus_idx, source_slot) {
-                            match app.move_bus_effect_slot_sync(bus_idx, source_slot, target_slot) {
+                            match app.apply_recorded_bus_effect_chain_mutation(
+                                bus_idx,
+                                "Move bus effect",
+                                |app| app.move_bus_effect_slot_sync(bus_idx, source_slot, target_slot),
+                            ) {
                                 Ok(slot_idx) => {
                                     app.publish_bus_gate_runtime();
                                     *bus_state.lock().unwrap() = app.buses.clone();
@@ -17375,7 +17395,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => None,
                         };
                         if let (Some(bus_idx), Some(slot_idx)) = (bus_idx, slot_idx) {
-                            match app.delete_bus_effect_slot(bus_idx, slot_idx) {
+                            match app.apply_recorded_bus_effect_chain_mutation(
+                                bus_idx,
+                                "Delete bus effect",
+                                |app| app.delete_bus_effect_slot(bus_idx, slot_idx),
+                            ) {
                                 Ok(()) => {
                                     app.publish_bus_gate_runtime();
                                     *bus_state.lock().unwrap() = app.buses.clone();

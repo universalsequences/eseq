@@ -898,6 +898,10 @@ pub struct DeviceIdentityRegistry {
     audio_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::EffectInstanceId>,
     audio_effect_locations:
         HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::TrackId, usize)>,
+    bus_audio_effects:
+        HashMap<(crate::sequencer::BusId, usize), crate::sequencer::EffectInstanceId>,
+    bus_audio_effect_locations:
+        HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::BusId, usize)>,
     midi_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::MidiFxInstanceId>,
     midi_effect_locations:
         HashMap<crate::sequencer::MidiFxInstanceId, (crate::sequencer::TrackId, usize)>,
@@ -965,6 +969,12 @@ impl DeviceIdentityRegistry {
             return Err("audio-effect chain contains a duplicate stable identity".to_string());
         }
         for id in instances {
+            if self.bus_audio_effect_locations.contains_key(id) {
+                return Err(format!(
+                    "effect instance {} is already bound to a bus device",
+                    id.0
+                ));
+            }
             if let Some((owner, slot)) = self.audio_effect_locations.get(id).copied() {
                 if owner != track || slot < first_slot || slot >= end_slot {
                     return Err(format!(
@@ -984,6 +994,70 @@ impl DeviceIdentityRegistry {
             let location = (track, first_slot + offset);
             self.audio_effects.insert(location, id);
             self.audio_effect_locations.insert(id, location);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bus_audio_effect(
+        &mut self,
+        bus: crate::sequencer::BusId,
+        slot: usize,
+    ) -> crate::sequencer::EffectInstanceId {
+        if let Some(id) = self.bus_audio_effects.get(&(bus, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        self.bus_audio_effects.insert((bus, slot), id);
+        self.bus_audio_effect_locations.insert(id, (bus, slot));
+        id
+    }
+
+    pub(crate) fn bus_audio_effect_location(
+        &self,
+        id: crate::sequencer::EffectInstanceId,
+    ) -> Option<(crate::sequencer::BusId, usize)> {
+        self.bus_audio_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn bind_bus_audio_effect_chain(
+        &mut self,
+        bus: crate::sequencer::BusId,
+        instances: &[crate::sequencer::EffectInstanceId],
+    ) -> Result<(), String> {
+        if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
+            return Err("bus effect chain contains a duplicate stable identity".to_string());
+        }
+        for id in instances {
+            if self.audio_effect_locations.contains_key(id) {
+                return Err(format!(
+                    "effect instance {} is already bound to a track device",
+                    id.0
+                ));
+            }
+            if let Some((owner, _)) = self.bus_audio_effect_locations.get(id).copied() {
+                if owner != bus {
+                    return Err(format!(
+                        "effect instance {} is already bound to another bus",
+                        id.0
+                    ));
+                }
+            }
+        }
+        let retained = self
+            .bus_audio_effects
+            .iter()
+            .filter(|((owner, _), _)| *owner != bus)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        self.bus_audio_effects.clear();
+        self.bus_audio_effect_locations.clear();
+        for (location, id) in retained {
+            self.bus_audio_effects.insert(location, id);
+            self.bus_audio_effect_locations.insert(id, location);
+        }
+        for (slot, id) in instances.iter().copied().enumerate() {
+            self.bus_audio_effects.insert((bus, slot), id);
+            self.bus_audio_effect_locations.insert(id, (bus, slot));
         }
         Ok(())
     }

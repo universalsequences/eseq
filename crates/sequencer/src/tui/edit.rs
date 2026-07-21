@@ -10,7 +10,8 @@ use std::time::Instant;
 
 use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
-    step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusMixerPatch, BusMixerSnapshot,
+    step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusEffectChainPatch,
+    BusEffectChainState, BusMixerPatch, BusMixerSnapshot,
     DeviceId, DeviceValueSnapshot, DeviceValuesPatch, EditPatch, EffectChainPatch,
     EffectChainState, EffectInstanceState, EffectPatternSlots, GestureId, HistoryMove,
     HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, MidiFxChainPatch,
@@ -57,6 +58,300 @@ pub struct StepGestureTransaction {
 }
 
 impl App {
+    fn capture_bus_effect_chain_state(
+        &mut self,
+        bus_idx: usize,
+        retained_ids_by_node: Option<&std::collections::HashMap<u32, crate::sequencer::EffectInstanceId>>,
+    ) -> Result<BusEffectChainState, String> {
+        let bus_id = self.buses.get(bus_idx)
+            .map(|bus| bus.id)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        let active_slots = self.buses[bus_idx]
+            .effect_slots
+            .iter()
+            .enumerate()
+            .take_while(|(_, slot)| slot.node_id != 0)
+            .map(|(slot, _)| slot)
+            .collect::<Vec<_>>();
+        if self.buses[bus_idx].effect_slots[active_slots.len()..]
+            .iter()
+            .any(|slot| slot.node_id != 0)
+        {
+            return Err("Bus effect chain contains a sparse logical layout".to_string());
+        }
+        let mut ids = Vec::with_capacity(active_slots.len());
+        for slot in &active_slots {
+            let node_id = self.buses[bus_idx].effect_slots[*slot].node_id;
+            ids.push(
+                retained_ids_by_node
+                    .and_then(|ids| ids.get(&node_id).copied())
+                    .unwrap_or_else(|| self.device_registry.bus_audio_effect(bus_id, *slot)),
+            );
+        }
+        self.device_registry.bind_bus_audio_effect_chain(bus_id, &ids)?;
+        let locator = FxChainLocator::Bus(bus_id);
+        let instances = active_slots
+            .iter()
+            .zip(ids)
+            .map(|(slot, id)| {
+                let descriptor = self.buses[bus_idx].effect_descriptors[*slot].clone();
+                let name = descriptor.name.trim().to_string();
+                let source = self.editor.effect_chain_leases.source(locator, *slot).cloned()
+                    .map(Ok)
+                    .unwrap_or_else(|| self.retained_effect_source_for_name(&name))?;
+                Ok(EffectInstanceState { id, source, descriptor })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for (slot, instance) in active_slots.iter().zip(&instances) {
+            self.retain_effect_source(locator, *slot, instance.source.clone())?;
+        }
+        let live_all = self.capture_bus_pattern_snapshot();
+        let live = live_all.iter().find(|snapshot| snapshot.id == bus_id)
+            .cloned()
+            .ok_or_else(|| format!("Bus {} has no live pattern state", bus_idx + 1))?;
+        let mut repository = self.state.export_bus_pattern_repository(&live_all);
+        let current_scene = self.state.current_scene_index();
+        if let Some(scene) = repository.get_mut(current_scene) {
+            *scene = live_all.clone();
+        }
+        let scenes = repository
+            .into_iter()
+            .map(|scene| {
+                scene.into_iter().find(|snapshot| snapshot.id == bus_id)
+                    .unwrap_or_else(|| live.clone())
+            })
+            .collect();
+        let live_values = active_slots.iter()
+            .map(|slot| self.buses[bus_idx].effect_slots[*slot].authoring_values())
+            .collect();
+        Ok(BusEffectChainState {
+            instances,
+            live,
+            live_values,
+            scenes,
+            macro_mappings: self.macro_engine.capture_effect_mappings_for_bus(bus_id),
+        })
+    }
+
+    pub fn apply_recorded_bus_effect_chain_mutation<T>(
+        &mut self,
+        bus_idx: usize,
+        label: &'static str,
+        mutate: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
+        finish_active_gesture(self);
+        let bus_id = self.buses.get(bus_idx)
+            .map(|bus| bus.id)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        let before = self.capture_bus_effect_chain_state(bus_idx, None)?;
+        let retained_ids_by_node = before.instances.iter().enumerate().map(|(slot, instance)| {
+            (self.buses[bus_idx].effect_slots[slot].node_id, instance.id)
+        }).collect::<std::collections::HashMap<_, _>>();
+        let result = match mutate(self) {
+            Ok(result) => result,
+            Err(error) => {
+                let rollback = self.capture_bus_effect_chain_state(
+                    bus_idx,
+                    Some(&retained_ids_by_node),
+                ).and_then(|partial| self.restore_bus_effect_chain_state(bus_idx, &partial, &before));
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(format!(
+                        "Bus effect edit failed ({error}); restoring the original chain also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let mut after = self.capture_bus_effect_chain_state(bus_idx, Some(&retained_ids_by_node))?;
+        if before.instances.len() == after.instances.len() {
+            let before_ids = before.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+            let after_ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+            let missing_before = before_ids.iter().filter(|id| !after_ids.contains(id)).copied().collect::<Vec<_>>();
+            let new_after = after_ids.iter().filter(|id| !before_ids.contains(id)).copied().collect::<Vec<_>>();
+            if missing_before.len() == 1 && new_after.len() == 1 {
+                if let Some(instance) = after.instances.iter_mut().find(|instance| instance.id == new_after[0]) {
+                    instance.id = missing_before[0];
+                }
+                let ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+                self.device_registry.bind_bus_audio_effect_chain(bus_id, &ids)?;
+            }
+        }
+        let mut old_to_new = vec![None; crate::lisp_host::MAX_CUSTOM_FX];
+        for (old_slot, old) in before.instances.iter().enumerate() {
+            old_to_new[old_slot] = after.instances.iter()
+                .position(|candidate| candidate.id == old.id);
+        }
+        self.macro_engine.remap_effect_mappings_for_bus(bus_id, &old_to_new);
+        self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
+        after = self.capture_bus_effect_chain_state(bus_idx, None)?;
+        let unchanged = before.instances.len() == after.instances.len()
+            && before.instances.iter().zip(&after.instances).all(|(left, right)| {
+                left.id == right.id && left.source == right.source
+            })
+            && before.live_values.len() == after.live_values.len()
+            && before.live_values.iter().zip(&after.live_values)
+                .all(|(left, right)| left.bit_exact_eq(right));
+        if !unchanged {
+            let patch = BusEffectChainPatch { bus: bus_id, before, after };
+            let retained_bytes = patch.retained_bytes();
+            self.history.commit(label, None, EditPatch::BusEffectChain(patch), retained_bytes);
+        }
+        Ok(result)
+    }
+
+    pub fn apply_compiled_bus_effect_to_slot_recorded(
+        &mut self,
+        bus_idx: usize,
+        slot: usize,
+        name: &str,
+        result: crate::lisp_host::CompileResult,
+    ) -> Result<(), String> {
+        let source = self.retained_effect_source_for_name(name)?;
+        let bus_id = self.buses.get(bus_idx)
+            .map(|bus| bus.id)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        self.apply_recorded_bus_effect_chain_mutation(
+            bus_idx,
+            "Replace bus effect",
+            |app| {
+                app.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot, name, result)?;
+                app.retain_effect_source(FxChainLocator::Bus(bus_id), slot, source)
+            },
+        )
+    }
+
+    fn restore_bus_effect_chain_state(
+        &mut self,
+        bus_idx: usize,
+        current: &BusEffectChainState,
+        target: &BusEffectChainState,
+    ) -> Result<(), String> {
+        if target.instances.len() > crate::lisp_host::MAX_CUSTOM_FX {
+            return Err("Retained bus effect chain exceeds host capacity".to_string());
+        }
+        let bus_id = self.buses.get(bus_idx)
+            .map(|bus| bus.id)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        let locator = FxChainLocator::Bus(bus_id);
+        let mut occupied = vec![false; crate::lisp_host::MAX_CUSTOM_FX];
+        for instance in &current.instances {
+            if let Some((owner, slot)) = self.device_registry.bus_audio_effect_location(instance.id) {
+                if owner == bus_id && slot < occupied.len() {
+                    occupied[slot] = true;
+                }
+            }
+        }
+        let mut source_slots = Vec::with_capacity(target.instances.len());
+        for desired in &target.instances {
+            let current_instance = current.instances.iter().find(|item| item.id == desired.id);
+            let existing_slot = self.device_registry.bus_audio_effect_location(desired.id)
+                .and_then(|(owner, slot)| (owner == bus_id).then_some(slot));
+            let slot = match existing_slot {
+                Some(slot) => slot,
+                None => {
+                    let slot = occupied.iter().position(|occupied| !*occupied)
+                        .ok_or_else(|| "No temporary bus effect slot is available for restore".to_string())?;
+                    occupied[slot] = true;
+                    slot
+                }
+            };
+            if current_instance.map(|item| &item.source) != Some(&desired.source) {
+                match &desired.source {
+                    RetainedEffectSource::NativeBuiltin { name } => {
+                        self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot, name)?;
+                    }
+                    RetainedEffectSource::Compiled { name, source, asset_base, origin } => {
+                        let result = self.editor.dylib_cache.acquire(
+                            crate::lisp_host::DGenCompileKind::Effect,
+                            *origin,
+                            source,
+                            self.graph.sample_rate,
+                            asset_base.as_deref(),
+                        )?;
+                        let ir_slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+                        self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot, name, result)?;
+                        self.retain_effect_source(locator, slot, desired.source.clone())?;
+                        if let Some(ir_slots) = ir_slots {
+                            let node_id = self.buses[bus_idx].effect_slots[slot].node_id as i32;
+                            crate::effects::conv_reverb::record_ir_slots(node_id, ir_slots);
+                        }
+                    }
+                }
+            }
+            source_slots.push(slot);
+        }
+        let old_host = self.fx_chain_host(locator)?;
+        let desired_snapshots = source_slots.iter()
+            .map(|slot| self.buses[bus_idx].effect_slots[*slot].clone())
+            .collect::<Vec<_>>();
+        let desired_nodes = desired_snapshots.iter().map(|slot| slot.node_id)
+            .collect::<std::collections::HashSet<_>>();
+        let removed_nodes = old_host.slots.iter()
+            .filter(|slot| slot.node_id > 0 && !desired_nodes.contains(&(slot.node_id as u32)))
+            .copied()
+            .collect::<Vec<_>>();
+        for slot in 0..crate::lisp_host::MAX_CUSTOM_FX {
+            if let Some((instance, mut snapshot)) = target.instances.get(slot)
+                .zip(desired_snapshots.get(slot).cloned())
+            {
+                snapshot.apply_authoring_values(&target.live_values[slot])?;
+                self.buses[bus_idx].effect_descriptors[slot] = instance.descriptor.clone();
+                self.buses[bus_idx].effect_slots[slot] = snapshot;
+                self.buses[bus_idx].custom_effect_names[slot] = Some(match &instance.source {
+                    RetainedEffectSource::NativeBuiltin { name } => name.clone(),
+                    RetainedEffectSource::Compiled { name, .. } => name.clone(),
+                });
+            } else {
+                self.buses[bus_idx].effect_descriptors[slot] = EffectDescriptor::empty_custom_slot();
+                self.buses[bus_idx].effect_slots[slot] = EffectSlotSnapshot::new_empty();
+                self.buses[bus_idx].custom_effect_names[slot] = None;
+            }
+        }
+        self.buses[bus_idx].gate_sequence = target.live.gate_sequence.clone();
+        let new_host = self.fx_chain_host(locator)?;
+        let batch = FxGraphEditBatch::new(self.graph.lg.0);
+        rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        for slot in removed_nodes {
+            unsafe {
+                crate::audiograph::delete_node(self.graph.lg.0, slot.node_id);
+                if slot.modulator_node_id > 0 {
+                    crate::audiograph::delete_node(self.graph.lg.0, slot.modulator_node_id);
+                }
+            }
+            crate::effects::conv_reverb::clear_instance(slot.node_id);
+        }
+        self.editor.effect_chain_leases.remap_slots(locator, &source_slots, batch.serial)?;
+        drop(batch);
+        let live_all = self.capture_bus_pattern_snapshot();
+        let mut repository = self.state.export_bus_pattern_repository(&live_all);
+        for (scene, saved) in repository.iter_mut().zip(&target.scenes) {
+            if let Some(bus) = scene.iter_mut().find(|bus| bus.id == bus_id) {
+                *bus = saved.clone();
+            } else {
+                scene.push(saved.clone());
+            }
+        }
+        self.state.replace_bus_pattern_repository(repository, &live_all);
+        for (slot, values) in target.live_values.iter().enumerate() {
+            if let (Some(reference), Some(ir)) = (&values.ir, &values.prepared_ir) {
+                self.restore_prepared_bus_effect_ir(bus_idx, slot, reference, ir.clone())?;
+            }
+        }
+        let ids = target.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+        self.device_registry.bind_bus_audio_effect_chain(bus_id, &ids)?;
+        self.macro_engine.restore_effect_mappings_for_bus(bus_id, &target.macro_mappings)
+            .map_err(|error| format!("{error:?}"))?;
+        self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
+        self.refresh_effect_sidechain_labels();
+        self.publish_bus_gate_runtime();
+        for slot in 0..target.instances.len() {
+            self.push_bus_effect_slot_defaults(bus_idx, slot);
+        }
+        self.push_all_delay_bpm();
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
     fn capture_track_midi_fx_chain_state(
         &mut self,
         track: usize,
@@ -4712,6 +5007,21 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_track_effect_chain_state(track, current, target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::BusEffectChain(patch) => {
+            let bus_idx = app.buses.iter().position(|bus| bus.id == patch.bus)
+                .ok_or(EditError::MissingStableBus { bus: patch.bus })?;
+            let (current, target) = match mode {
+                ApplyMode::Undo => (&patch.after, &patch.before),
+                ApplyMode::Redo => (&patch.before, &patch.after),
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "bus-effect-chain replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_bus_effect_chain_state(bus_idx, current, target)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::MidiFxChain(patch) => {
             let track = app
                 .track_registry
@@ -4793,6 +5103,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::InstrumentBinding(_) => true,
         EditPatch::RackSlotStructure(_) => true,
         EditPatch::EffectChain(_) => true,
+        EditPatch::BusEffectChain(_) => true,
         EditPatch::MidiFxChain(_) => true,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
     }
@@ -4866,6 +5177,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::EffectChain(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::BusEffectChain(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::MidiFxChain(_) => {

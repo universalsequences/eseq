@@ -563,7 +563,7 @@ impl Default for RackSlotParamPlocks {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BusPatternSnapshot {
     pub id: BusId,
     pub gate_sequence: BusGateSequence,
@@ -621,7 +621,7 @@ impl BusPatternSnapshot {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BusGateSequence {
     pub steps: [bool; MAX_STEPS],
     pub velocities: [f32; MAX_STEPS],
