@@ -1600,7 +1600,9 @@ impl App {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("Sound");
-        self.load_container_preset_onto_track(track, sound, fallback_name)
+        self.load_container_preset_onto_track(track, sound, fallback_name)?;
+        super::edit::commit_history_barrier(self);
+        Ok(())
     }
 
     pub fn add_track_from_sound(&mut self, path: &Path) -> Result<usize, String> {

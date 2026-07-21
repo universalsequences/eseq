@@ -9701,7 +9701,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                 }
                                 let path = Path::new(&path_str);
-                                match app.graph_controller().add_sampler_slot_to_rack(track, path) {
+                                match app.apply_recorded_rack_slot_add(
+                                    track,
+                                    "Add rack sample",
+                                    |app| app.graph_controller().add_sampler_slot_to_rack(track, path),
+                                ) {
                                     Ok(slot_idx) => {
                                         sync_after_instrument_track_apply(
                                             &mut app,
@@ -9759,10 +9763,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &path_str,
                                     );
                                 }
-                                match app.graph_controller().replace_rack_slot_with_sampler(
+                                match app.apply_recorded_rack_slot_source_replacement(
                                     track,
                                     slot,
-                                    Path::new(&path_str),
+                                    "Replace rack sample",
+                                    |app| app.graph_controller().replace_rack_slot_with_sampler(
+                                        track,
+                                        slot,
+                                        Path::new(&path_str),
+                                    ),
                                 ) {
                                     Ok(()) => {
                                         sync_after_instrument_track_apply(

@@ -1335,6 +1335,13 @@ pub struct TrackInstrumentPatternStateSnapshot {
     pub neural_overrides: Vec<NeuralInstrumentOverrideState>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RackSlotPatternStateSnapshot {
+    pub slot_index: usize,
+    pub live: RackSlotSnapshot,
+    pub patterns: Vec<(PatternId, RackSlotSnapshot)>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InstrumentSlotResetSummary {
     pub patterns_reset: usize,
@@ -5742,6 +5749,60 @@ impl SequencerState {
         synced_live && synced_current
     }
 
+    pub fn sync_rack_slot_instrument_bindings_for_all_patterns(
+        &self,
+        track: usize,
+        bindings: &[(EffectDescriptor, u32, u32)],
+    ) -> bool {
+        let sync_slots = |slots: &mut [RackSlotSnapshot]| {
+            if slots.len() != bindings.len() {
+                return false;
+            }
+            for (slot, (descriptor, node_id, modulator_node_id)) in
+                slots.iter_mut().zip(bindings.iter())
+            {
+                slot.instrument_slot.sync_to_descriptor_with_modulator(
+                    descriptor,
+                    *node_id,
+                    *modulator_node_id,
+                );
+            }
+            true
+        };
+        let synced_live = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get_mut(track)
+            .and_then(Option::as_mut)
+            .is_some_and(|rack| sync_slots(&mut rack.slots));
+        if !synced_live {
+            return false;
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return false;
+        };
+        if pool.patterns.values().any(|data| {
+            data.rack_track
+                .as_ref()
+                .is_none_or(|rack| rack.slots.len() != bindings.len())
+        }) {
+            return false;
+        }
+        for data in pool.patterns.values_mut() {
+            sync_slots(
+                &mut data
+                    .rack_track
+                    .as_mut()
+                    .expect("rack topology was validated")
+                    .slots,
+            );
+        }
+        true
+    }
+
     pub fn update_live_rack_slot<F>(&self, track: usize, slot_idx: usize, update: F) -> bool
     where
         F: FnOnce(&mut RackSlotSnapshot),
@@ -6007,6 +6068,186 @@ impl SequencerState {
             update(slot);
         }
         true
+    }
+
+    pub fn capture_rack_slot_pattern_state(
+        &self,
+        track: usize,
+        slot_index: usize,
+    ) -> Result<RackSlotPatternStateSnapshot, String> {
+        let live = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(slot_index))
+            .cloned()
+            .ok_or_else(|| format!("Track {} rack slot {} is missing", track + 1, slot_index + 1))?;
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let mut patterns = Vec::with_capacity(pool.patterns.len());
+        for (pattern_id, data) in &pool.patterns {
+            let slot = data
+                .rack_track
+                .as_ref()
+                .and_then(|rack| rack.slots.get(slot_index))
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} pattern {:?} has no rack slot {}",
+                        track + 1,
+                        pattern_id,
+                        slot_index + 1
+                    )
+                })?;
+            patterns.push((*pattern_id, slot));
+        }
+        Ok(RackSlotPatternStateSnapshot {
+            slot_index,
+            live,
+            patterns,
+        })
+    }
+
+    pub fn restore_rack_slot_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackSlotPatternStateSnapshot,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) -> Result<(), String> {
+        let sync_slot = |slot: &mut RackSlotSnapshot, saved: &RackSlotSnapshot| {
+            *slot = saved.clone();
+            slot.instrument_slot.sync_to_descriptor_with_modulator(
+                descriptor,
+                node_id,
+                modulator_node_id,
+            );
+        };
+        self.validate_rack_slot_pattern_state(track, snapshot)?;
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot.patterns.iter().any(|(id, _)| {
+                pool.patterns
+                    .get(id)
+                    .and_then(|data| data.rack_track.as_ref())
+                    .and_then(|rack| rack.slots.get(snapshot.slot_index))
+                    .is_none()
+            })
+        {
+            return Err(format!(
+                "Track {} rack pattern topology changed before history replay",
+                track + 1
+            ));
+        }
+        for (pattern_id, saved) in &snapshot.patterns {
+            let slot = pool
+                .patterns
+                .get_mut(pattern_id)
+                .and_then(|data| data.rack_track.as_mut())
+                .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
+                .expect("rack pattern topology was validated");
+            sync_slot(slot, saved);
+        }
+        drop(scenes);
+        let mut racks = self.pattern.rack_tracks.lock().unwrap();
+        let slot = racks[track]
+            .as_mut()
+            .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
+            .expect("live rack topology was validated");
+        sync_slot(slot, &snapshot.live);
+        Ok(())
+    }
+
+    pub fn validate_rack_slot_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackSlotPatternStateSnapshot,
+    ) -> Result<(), String> {
+        let racks = self.pattern.rack_tracks.lock().unwrap();
+        if racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(snapshot.slot_index))
+            .is_none()
+        {
+            return Err(format!(
+                "Track {} rack slot {} disappeared before history replay",
+                track + 1,
+                snapshot.slot_index + 1
+            ));
+        }
+        drop(racks);
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot.patterns.iter().any(|(id, _)| {
+                pool.patterns
+                    .get(id)
+                    .and_then(|data| data.rack_track.as_ref())
+                    .and_then(|rack| rack.slots.get(snapshot.slot_index))
+                    .is_none()
+            })
+        {
+            return Err(format!(
+                "Track {} rack pattern topology changed before history replay",
+                track + 1
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_rack_slot_append_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackSlotPatternStateSnapshot,
+    ) -> Result<(), String> {
+        let racks = self.pattern.rack_tracks.lock().unwrap();
+        let live_len = racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .map(|rack| rack.slots.len())
+            .ok_or_else(|| format!("Track {} has no live rack", track + 1))?;
+        if live_len != snapshot.slot_index {
+            return Err(format!(
+                "Track {} rack has {live_len} slots; history expected {} before append",
+                track + 1,
+                snapshot.slot_index
+            ));
+        }
+        drop(racks);
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot.patterns.iter().any(|(id, _)| {
+                pool.patterns
+                    .get(id)
+                    .and_then(|data| data.rack_track.as_ref())
+                    .is_none_or(|rack| rack.slots.len() != snapshot.slot_index)
+            })
+        {
+            return Err(format!(
+                "Track {} rack pattern topology changed before slot append replay",
+                track + 1
+            ));
+        }
+        Ok(())
     }
 
     pub fn insert_effect_slot_in_other_track_patterns(&self, track: usize, slot_idx: usize) {
@@ -15588,6 +15829,53 @@ mod tests {
             assert_eq!(slot.node_id.load(Ordering::Relaxed), 0);
             assert_eq!(slot.num_params.load(Ordering::Relaxed), 0);
         }
+    }
+
+    #[test]
+    fn rack_slot_history_snapshot_restores_every_pattern_with_live_binding_ids() {
+        let state = SequencerState::new(1, Vec::new());
+        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
+        {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            let source_id = scenes.effective_pattern_id(0).unwrap();
+            let clone = scenes.track_pools[0].get(source_id).unwrap().clone();
+            scenes.track_pools[0].insert(clone);
+        }
+        state.append_rack_slot_for_all_pattern_snapshots(
+            0,
+            RackRouting::Broadcast,
+            sample_sampler_rack_slot(12, "before", 48_000, 77, None),
+        );
+        let snapshot = state.capture_rack_slot_pattern_state(0, 1).unwrap();
+        assert!(state.replace_rack_slot_source_in_current_pattern(
+            0,
+            1,
+            sample_sampler_rack_slot(13, "after", 44_100, 88, None),
+        ));
+        state
+            .restore_rack_slot_pattern_state(
+                0,
+                &snapshot,
+                &EffectDescriptor::builtin_sampler(),
+                901,
+                902,
+            )
+            .unwrap();
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .slots[1]
+            .clone();
+        assert_eq!(live.sample_id.as_ref().unwrap().1, "before");
+        assert_eq!(live.instrument_slot.node_id, 901);
+        let scenes = state.pattern.scenes.lock().unwrap();
+        assert!(scenes.track_pools[0].patterns.values().all(|data| {
+            let slot = &data.rack_track.as_ref().unwrap().slots[1];
+            slot.sample_id.as_ref().unwrap().1 == "before"
+                && slot.instrument_slot.node_id == 901
+                && slot.instrument_slot.modulator_node_id == 902
+        }));
     }
 
     #[test]

@@ -323,8 +323,8 @@ impl App {
         let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
         let lib_ptr: *const lisp_host::LoadedDGenLib =
             &self.editor.instrument_libs[prepared.lib_index];
-        unsafe {
-            self.graph_controller().add_custom_slot_to_rack(
+        self.apply_recorded_rack_slot_add(track, "Add rack instrument", |app| unsafe {
+            app.graph_controller().add_custom_slot_to_rack(
                 track,
                 &prepared.name,
                 prepared.engine_id,
@@ -332,7 +332,7 @@ impl App {
                 &*lib_ptr,
                 prepared.run_mode,
             )
-        }
+        })
     }
 
     pub fn replace_rack_slot_with_saved_instrument_sync(
@@ -359,13 +359,20 @@ impl App {
         }
 
         let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
-        self.graph_controller().replace_rack_slot_with_custom(
+        self.apply_recorded_rack_slot_source_replacement(
             track,
             slot,
-            &prepared.name,
-            prepared.engine_id,
-            &prepared.manifest,
-            prepared.run_mode,
+            "Replace rack instrument",
+            |app| {
+                app.graph_controller().replace_rack_slot_with_custom(
+                    track,
+                    slot,
+                    &prepared.name,
+                    prepared.engine_id,
+                    &prepared.manifest,
+                    prepared.run_mode,
+                )
+            },
         )
     }
 

@@ -13,7 +13,8 @@ use super::history::{
     step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusMixerPatch, BusMixerSnapshot,
     DeviceId, DeviceValueSnapshot, DeviceValuesPatch, EditPatch, GestureId, HistoryMove,
     HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, PatternGeometryPatch,
-    StepCellDelta, StepCellsPatch, TrackInstrumentSource, TrackInstrumentState,
+    RackSlotStructureEdit, RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
+    TrackInstrumentSource, TrackInstrumentState,
     TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
 };
 use super::App;
@@ -348,6 +349,266 @@ impl App {
             .publish_macro_overrides(self.macro_engine.override_snapshot());
         self.push_instrument_defaults_for_track(track);
         self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    fn rack_slot_live_binding(
+        &self,
+        track: usize,
+        slot_index: usize,
+    ) -> Result<(crate::effects::EffectDescriptor, u32, u32), String> {
+        let rack = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(slot_index))
+            .cloned()
+            .ok_or_else(|| format!("Rack slot {} is missing", slot_index + 1))?;
+        let nodes = self
+            .graph
+            .track_node_ids
+            .get(track)
+            .and_then(|nodes| nodes.rack_slots.get(slot_index))
+            .ok_or_else(|| format!("Rack slot {} has no graph nodes", slot_index + 1))?;
+        let (descriptor, node, modulator) = match rack.instrument_type {
+            crate::sequencer::InstrumentType::Sampler => (
+                crate::effects::EffectDescriptor::builtin_sampler(),
+                nodes.sampler_ids.first().copied(),
+                nodes.sampler_modulator_ids.first().copied(),
+            ),
+            crate::sequencer::InstrumentType::Custom => {
+                let engine_id = rack
+                    .track_sound_state
+                    .engine_id
+                    .ok_or_else(|| "Rack instrument has no retained engine".to_string())?;
+                let descriptor = self
+                    .editor
+                    .engine_registry
+                    .get_instrument_descriptor(engine_id)
+                    .cloned()
+                    .ok_or_else(|| format!("Rack engine {engine_id} has no descriptor"))?;
+                let engine = self
+                    .graph
+                    .engine_node_ids
+                    .get(engine_id)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| format!("Rack engine {engine_id} has no runtime"))?;
+                (
+                    descriptor,
+                    engine.synth_ids.first().copied(),
+                    engine.modulator_ids.first().copied(),
+                )
+            }
+            other => {
+                return Err(format!(
+                    "Rack slot {} has unsupported source type {other:?}",
+                    slot_index + 1
+                ));
+            }
+        };
+        Ok((
+            descriptor,
+            node.and_then(|id| u32::try_from(id).ok()).unwrap_or(0),
+            modulator
+                .and_then(|id| u32::try_from(id).ok())
+                .unwrap_or(0),
+        ))
+    }
+
+    fn materialize_rack_slot_source(
+        &mut self,
+        track: usize,
+        slot_index: usize,
+        target: &crate::sequencer::RackSlotPatternStateSnapshot,
+        append: bool,
+    ) -> Result<(), String> {
+        if append {
+            self.state
+                .validate_rack_slot_append_pattern_state(track, target)?;
+        } else {
+            self.state.validate_rack_slot_pattern_state(track, target)?;
+        }
+        let slot = &target.live;
+        let materialized_index = match slot.instrument_type {
+            crate::sequencer::InstrumentType::Sampler => {
+                let (buffer_id, sample_name, sample_rate) = slot
+                    .sample_id
+                    .as_ref()
+                    .ok_or_else(|| "Rack sampler history is missing sample metadata".to_string())?;
+                if append {
+                    self.graph_controller().add_sampler_slot_to_rack_buffer(
+                        track,
+                        *buffer_id,
+                        *sample_rate,
+                        sample_name,
+                    )?
+                } else {
+                    self.graph_controller().replace_rack_slot_with_sampler_buffer(
+                        track,
+                        slot_index,
+                        *buffer_id,
+                        *sample_rate,
+                        sample_name,
+                    )?;
+                    slot_index
+                }
+            }
+            crate::sequencer::InstrumentType::Custom => {
+                let engine_id = slot
+                    .track_sound_state
+                    .engine_id
+                    .ok_or_else(|| "Rack instrument history is missing its engine".to_string())?;
+                let retained = self
+                    .editor
+                    .engine_registry
+                    .get(engine_id)
+                    .cloned()
+                    .ok_or_else(|| format!("Retained rack engine {engine_id} is missing"))?;
+                let lib_ptr: *const crate::lisp_host::LoadedDGenLib = self
+                    .editor
+                    .instrument_libs
+                    .get(retained.lib_index)
+                    .ok_or_else(|| {
+                        format!("Retained rack engine {engine_id} has no loaded library")
+                    })?;
+                if append {
+                    unsafe {
+                        self.graph_controller().add_custom_slot_to_rack(
+                            track,
+                            &retained.name,
+                            engine_id,
+                            &retained.manifest,
+                            &*lib_ptr,
+                            slot.instrument_run_mode,
+                        )?
+                    }
+                } else {
+                    self.graph_controller().replace_rack_slot_with_custom(
+                        track,
+                        slot_index,
+                        &retained.name,
+                        engine_id,
+                        &retained.manifest,
+                        slot.instrument_run_mode,
+                    )?;
+                    slot_index
+                }
+            }
+            other => {
+                return Err(format!(
+                    "Rack history cannot materialize source type {other:?}"
+                ));
+            }
+        };
+        if materialized_index != slot_index {
+            return Err(format!(
+                "Rack slot replay appended at {}, expected {}",
+                materialized_index + 1,
+                slot_index + 1
+            ));
+        }
+        let (descriptor, node_id, modulator_node_id) =
+            self.rack_slot_live_binding(track, slot_index)?;
+        self.state.restore_rack_slot_pattern_state(
+            track,
+            target,
+            &descriptor,
+            node_id,
+            modulator_node_id,
+        )?;
+        self.push_all_restored_defaults();
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    pub fn apply_recorded_rack_slot_add(
+        &mut self,
+        track: usize,
+        label: &'static str,
+        mutate: impl FnOnce(&mut App) -> Result<usize, String>,
+    ) -> Result<usize, String> {
+        finish_active_gesture(self);
+        let track_id = self
+            .track_registry
+            .id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let slot_index = mutate(self)?;
+        let slot_id = self.device_registry.rack_slot(track_id, slot_index);
+        let after = match self.state.capture_rack_slot_pattern_state(track, slot_index) {
+            Ok(after) => after,
+            Err(error) => {
+                let _ = self.graph_controller().delete_rack_slot(track, slot_index);
+                return Err(format!(
+                    "Rack slot was rolled back because history capture failed: {error}"
+                ));
+            }
+        };
+        let patch = RackSlotStructurePatch {
+            track: track_id,
+            slot: slot_id,
+            slot_index,
+            edit: RackSlotStructureEdit::Add { after },
+        };
+        let retained_bytes = patch.retained_bytes();
+        self.history.commit(
+            label,
+            None,
+            EditPatch::RackSlotStructure(patch),
+            retained_bytes,
+        );
+        Ok(slot_index)
+    }
+
+    pub fn apply_recorded_rack_slot_source_replacement(
+        &mut self,
+        track: usize,
+        slot_index: usize,
+        label: &'static str,
+        mutate: impl FnOnce(&mut App) -> Result<(), String>,
+    ) -> Result<(), String> {
+        finish_active_gesture(self);
+        let track_id = self
+            .track_registry
+            .id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let slot_id = self.device_registry.rack_slot(track_id, slot_index);
+        let before = self.state.capture_rack_slot_pattern_state(track, slot_index)?;
+        mutate(self)?;
+        let after = match self.state.capture_rack_slot_pattern_state(track, slot_index) {
+            Ok(after) => after,
+            Err(capture_error) => {
+                return match self.materialize_rack_slot_source(
+                    track,
+                    slot_index,
+                    &before,
+                    false,
+                ) {
+                    Ok(()) => Err(format!(
+                        "Rack replacement was rolled back because history capture failed: {capture_error}"
+                    )),
+                    Err(rollback_error) => Err(format!(
+                        "Rack replacement capture failed ({capture_error}); rollback also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let patch = RackSlotStructurePatch {
+            track: track_id,
+            slot: slot_id,
+            slot_index,
+            edit: RackSlotStructureEdit::ReplaceSource { before, after },
+        };
+        let retained_bytes = patch.retained_bytes();
+        self.history.commit(
+            label,
+            None,
+            EditPatch::RackSlotStructure(patch),
+            retained_bytes,
+        );
         Ok(())
     }
 }
@@ -3862,6 +4123,47 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_track_instrument_state(track, target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::RackSlotStructure(patch) => {
+            let track = app
+                .track_registry
+                .index_of(patch.track)
+                .ok_or(EditError::MissingStableTrack { track: patch.track })?;
+            if let Some((stable_track, stable_slot)) =
+                app.device_registry.rack_slot_location(patch.slot)
+            {
+                if stable_track != patch.track || stable_slot != patch.slot_index {
+                    return Err(EditError::ReplayFailed(
+                        "rack slot stable identity moved before history replay".to_string(),
+                    ));
+                }
+            }
+            match (&patch.edit, mode) {
+                (RackSlotStructureEdit::Add { .. }, ApplyMode::Undo) => app
+                    .graph_controller()
+                    .delete_rack_slot(track, patch.slot_index)
+                    .map_err(EditError::ReplayFailed),
+                (RackSlotStructureEdit::Add { after }, ApplyMode::Redo) => app
+                    .materialize_rack_slot_source(track, patch.slot_index, after, true)
+                    .map_err(EditError::ReplayFailed),
+                (
+                    RackSlotStructureEdit::ReplaceSource { before, .. },
+                    ApplyMode::Undo,
+                ) => app
+                    .materialize_rack_slot_source(track, patch.slot_index, before, false)
+                    .map_err(EditError::ReplayFailed),
+                (
+                    RackSlotStructureEdit::ReplaceSource { after, .. },
+                    ApplyMode::Redo,
+                ) => app
+                    .materialize_rack_slot_source(track, patch.slot_index, after, false)
+                    .map_err(EditError::ReplayFailed),
+                (_, ApplyMode::UserEdit | ApplyMode::ProjectLoad) => Err(
+                    EditError::ReplayFailed(
+                        "rack-slot replay requires undo or redo mode".to_string(),
+                    ),
+                ),
+            }
+        }
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -3883,6 +4185,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TransportParams(patch) => patch.before.bpm != patch.after.bpm,
         EditPatch::DeviceValues(_) => true,
         EditPatch::InstrumentBinding(_) => true,
+        EditPatch::RackSlotStructure(_) => true,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
     }
 }
@@ -3949,6 +4252,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_device_values_patch(app, patch, ApplyMode::Undo, false)?;
         }
         EditPatch::InstrumentBinding(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::RackSlotStructure(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => {

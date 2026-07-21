@@ -11,6 +11,7 @@ use crate::sequencer::{
 use crate::effects::EffectSlotValuesSnapshot;
 use crate::macro_engine::TrackInstrumentMacroMappings;
 use crate::sequencer::TrackInstrumentPatternStateSnapshot;
+use crate::sequencer::RackSlotPatternStateSnapshot;
 
 pub const DEFAULT_HISTORY_ENTRY_LIMIT: usize = 256;
 pub const DEFAULT_HISTORY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
@@ -42,7 +43,40 @@ pub enum EditPatch {
     BusMixer(BusMixerPatch),
     DeviceValues(DeviceValuesPatch),
     InstrumentBinding(InstrumentBindingPatch),
+    RackSlotStructure(RackSlotStructurePatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub enum RackSlotStructureEdit {
+    Add {
+        after: RackSlotPatternStateSnapshot,
+    },
+    ReplaceSource {
+        before: RackSlotPatternStateSnapshot,
+        after: RackSlotPatternStateSnapshot,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct RackSlotStructurePatch {
+    pub track: TrackId,
+    pub slot: RackSlotId,
+    pub slot_index: usize,
+    pub edit: RackSlotStructureEdit,
+}
+
+impl RackSlotStructurePatch {
+    pub fn retained_bytes(&self) -> usize {
+        let snapshots = match &self.edit {
+            RackSlotStructureEdit::Add { after } => after.patterns.len() + 1,
+            RackSlotStructureEdit::ReplaceSource { before, after } => {
+                before.patterns.len() + after.patterns.len() + 2
+            }
+        };
+        std::mem::size_of::<Self>()
+            + snapshots * std::mem::size_of::<crate::sequencer::RackSlotSnapshot>()
+    }
 }
 
 #[derive(Clone, Debug)]

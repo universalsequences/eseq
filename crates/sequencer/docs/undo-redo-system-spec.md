@@ -18,9 +18,11 @@ Implemented through Slice 5.
 - Slice 5 covers custom-instrument replacement, sampler/custom conversion,
   retained engine and sample resources, stable async swap targeting, and exact
   restoration of every track pattern's instrument state, process bindings,
-  project macro mappings, and scene neural instrument overrides. Rack-slot
-  source replacement and flat-track-to-rack conversion remain barriers pending
-  the Slice 6 chain-state machinery described below.
+  project macro mappings, and scene neural instrument overrides. The Slice 5
+  rack extension covers appending layer-rack slots and replacing layer-rack
+  instrument/sample sources while preserving slot FX and per-pattern state.
+  Sound-driven flat-track-to-rack conversion remains a barrier pending the
+  Slice 6 chain-state machinery described below.
 - Bus-effect value edits remain explicit barriers; bus device identity and
   scene-pattern addressing land with the generalized effect-chain work in
   Slice 6.
@@ -1122,11 +1124,13 @@ state, stored patterns, compiled resources, and live graph topology.
 - Custom instrument to sampler conversion.
 - Repeated A/B instrument audition through undo/redo.
 - Instrument run-mode change when it is part of source replacement.
+- Append an instrument or sampler to a broadcast/layer rack.
+- Replace a broadcast/layer rack slot's instrument or sampler source without
+  replacing its FX chain.
 
-Rack-slot source replacement may use the same machinery once its graph path is
-adapted; until then it remains a barrier. Likewise "Group to Instrument Rack"
-(racks-spec A7) and Sound-preset load (A8) are this slice's machinery — the
-flat track's before-state is a `TrackInstrumentState` plus an
+Drum-rack pad topology remains in Slice 7A. Likewise "Group to Instrument
+Rack" (racks-spec A7) and Sound-preset load (A8) are this slice's machinery —
+the flat track's before-state is a `TrackInstrumentState` plus an
 `EffectChainState` — but they additionally move the track FX chain, so they
 remain barriers until both this slice and Slice 6A are complete.
 
