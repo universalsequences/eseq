@@ -1601,7 +1601,10 @@ impl App {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("Sound");
-        if self.graph.track_instrument_types.get(track) == Some(&InstrumentType::Rack) {
+        if matches!(
+            self.graph.track_instrument_types.get(track),
+            Some(InstrumentType::Rack | InstrumentType::Sampler)
+        ) {
             let track_id = self.track_registry.id_at(track)
                 .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
             self.apply_recorded_instrument_binding_mutation(track, "Load Sound", |app| {

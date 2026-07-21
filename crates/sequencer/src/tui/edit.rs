@@ -1448,6 +1448,17 @@ impl App {
                 path,
             } => {
                 match self.graph.track_instrument_types.get(track).copied() {
+                    Some(crate::sequencer::InstrumentType::Rack) => {
+                        self.graph_controller().replace_rack_track_with_sampler(
+                            track,
+                            *buffer_id,
+                            *sample_rate,
+                            &target.display_name,
+                        )?;
+                        let track_id = self.track_registry.id_at(track)
+                            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+                        self.device_registry.clear_rack_track(track_id);
+                    }
                     Some(crate::sequencer::InstrumentType::Custom) => {
                         self.graph_controller().convert_custom_track_to_sampler(
                             track,
@@ -1590,8 +1601,11 @@ impl App {
                 return Err("Rack history topology differs between track patterns".to_string());
             }
         }
-        if self.graph.track_instrument_types.get(track) != Some(&crate::sequencer::InstrumentType::Rack) {
-            return Err("Rack-container history can currently replay only onto a rack track".to_string());
+        if !matches!(
+            self.graph.track_instrument_types.get(track),
+            Some(crate::sequencer::InstrumentType::Rack | crate::sequencer::InstrumentType::Sampler)
+        ) {
+            return Err("Rack-container history can replay only onto a rack or sampler track".to_string());
         }
 
         let mut restored_patterns = target.patterns.clone();

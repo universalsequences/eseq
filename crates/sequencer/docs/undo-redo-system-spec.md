@@ -22,9 +22,10 @@ Implemented through Slice 6.
   rack extension covers appending layer-rack slots and replacing layer-rack
   instrument/sample sources while preserving slot FX and per-pattern state.
   Slice 6 extends the binding transaction to whole rack-container replacement
-  from the Sounds browser, including rack-slot/effect identities and values.
-  Sound-driven flat-track-to-rack conversion remains a barrier until the graph
-  has a transactional inverse for restoring a rack container to a flat track.
+  from the Sounds browser, including rack-slot/effect identities and values;
+  sampler-to-rack Sound conversion uses the same transaction and restores the
+  original flat sampler graph on undo. Custom-instrument-to-rack conversion
+  remains a barrier until the graph has the corresponding rack-to-custom inverse.
 - Slice 6A covers track audio-effect insertion, deletion, source replacement,
   and reordering. History retains exact compiled source text and asset roots,
   restores scalar/tensor/IR values across every Track Pattern, rebinds process,
