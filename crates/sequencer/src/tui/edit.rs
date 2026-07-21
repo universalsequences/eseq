@@ -15,7 +15,7 @@ use super::history::{
     BusGroupStructurePatch, BusGroupStructureState, BusStructureState,
     DeviceId, DeviceValueSnapshot, DeviceValuesPatch, EditPatch, EffectChainPatch,
     EffectChainState, EffectInstanceState, EffectPatternSlots, GestureId, HistoryMove,
-    GroupStructureState, HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, MidiFxChainPatch,
+    GroupStructureState, HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MacroConfigurationPatch, MergeKey, MidiFxChainPatch,
     MidiFxChainState, MidiFxInstanceState, PatternGeometryPatch,
     RackContainerSlotState, RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
     RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
@@ -5657,6 +5657,45 @@ pub fn apply_recorded_step_mutation(
     Ok(EditOutcome::Applied(history_move))
 }
 
+fn is_macro_configuration_command(cmd: &AppCommand) -> bool {
+    matches!(
+        cmd,
+        AppCommand::MacroCreate { .. }
+            | AppCommand::MacroCreateScene { .. }
+            | AppCommand::MacroSceneConfig { .. }
+            | AppCommand::MacroEnsure { .. }
+            | AppCommand::MacroDelete { .. }
+            | AppCommand::MacroRename { .. }
+            | AppCommand::MacroMapParam { .. }
+            | AppCommand::MacroSetRange { .. }
+            | AppCommand::MacroSetCurve { .. }
+            | AppCommand::MacroUnmap { .. }
+    )
+}
+
+fn apply_recorded_macro_configuration_command(
+    app: &mut App,
+    cmd: AppCommand,
+) -> Result<EditOutcome, EditError> {
+    let before = app.macro_engine.capture_configuration();
+    super::command::execute_command(app, cmd);
+    let after = app.macro_engine.capture_configuration();
+    if before == after {
+        return Ok(EditOutcome::NoOp);
+    }
+    app.state.publish_macro_overrides(app.macro_engine.override_snapshot());
+    app.state.publish_scheduler_snapshot();
+    let patch = MacroConfigurationPatch { before, after };
+    let retained_bytes = patch.retained_bytes();
+    let history_move = app.history.commit(
+        "Edit macro configuration",
+        None,
+        EditPatch::MacroConfiguration(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(history_move))
+}
+
 pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, EditError> {
     validate_device_command_target(app, &cmd)?;
     let policy = history_policy(&cmd);
@@ -5678,6 +5717,9 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
         }
         HistoryPolicy::Record if device_value_command_track(&cmd).is_some() => {
             apply_recorded_device_value_command(app, &cmd, None)
+        }
+        HistoryPolicy::Record if is_macro_configuration_command(&cmd) => {
+            apply_recorded_macro_configuration_command(app, cmd)
         }
         HistoryPolicy::Record
             if matches!(
@@ -6421,6 +6463,22 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_bus_group_structure_state(target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::MacroConfiguration(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "macro-configuration replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.macro_engine.restore_configuration(target);
+            app.state.publish_macro_overrides(app.macro_engine.override_snapshot());
+            app.push_all_restored_defaults();
+            app.state.publish_scheduler_snapshot();
+            Ok(())
+        }
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -6448,6 +6506,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneStructure(_) => true,
         EditPatch::BusGroupStructure(_) => true,
+        EditPatch::MacroConfiguration(_) => true,
         EditPatch::EffectChain(_) => true,
         EditPatch::BusEffectChain(_) => true,
         EditPatch::BusEffectValues(_) => true,
@@ -6591,6 +6650,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::BusGroupStructure(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
+        EditPatch::MacroConfiguration(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
         EditPatch::EffectChain(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
@@ -6695,6 +6757,48 @@ mod tests {
         assert!(!app.track_collapsed[0]);
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         assert!(app.track_collapsed[0]);
+    }
+
+    #[test]
+    fn macro_configuration_history_restores_ids_without_reusing_them_or_live_values() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::MacroCreate { name: "Depth".to_string() },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
+        let macro_id = app.macro_engine.macros()[0].id;
+        assert_eq!(macro_id, 1);
+        app.set_macro_value(macro_id, 0.72);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.macro_engine.macros().is_empty());
+        assert_eq!(app.macro_engine.next_id(), 2);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.macro_engine.macros()[0].id, macro_id);
+
+        app.set_macro_value(macro_id, 0.41);
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::MacroRename {
+                    id: macro_id,
+                    name: "Renamed".to_string(),
+                },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.macro_engine.macros()[0].name, "Depth");
+        assert_eq!(app.macro_engine.macros()[0].value, 0.41);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.macro_engine.macros()[0].name, "Renamed");
+        assert_eq!(app.macro_engine.macros()[0].value, 0.41);
     }
 
     #[test]

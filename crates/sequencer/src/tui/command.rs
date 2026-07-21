@@ -1217,7 +1217,7 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::MacroMapParam { .. }
         | AppCommand::MacroSetRange { .. }
         | AppCommand::MacroSetCurve { .. }
-        | AppCommand::MacroUnmap { .. } => HistoryPolicy::Barrier,
+        | AppCommand::MacroUnmap { .. } => HistoryPolicy::Record,
     }
 }
 

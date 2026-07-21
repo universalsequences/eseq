@@ -56,7 +56,28 @@ pub enum EditPatch {
     TrackPresentation(TrackPresentationPatch),
     SceneStructure(SceneStructurePatch),
     BusGroupStructure(BusGroupStructurePatch),
+    MacroConfiguration(MacroConfigurationPatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub struct MacroConfigurationPatch {
+    pub before: crate::macro_engine::MacroConfigurationState,
+    pub after: crate::macro_engine::MacroConfigurationState,
+}
+
+impl MacroConfigurationPatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &crate::macro_engine::MacroConfigurationState) -> usize {
+            state.macros.iter().map(|definition| {
+                definition.name.capacity()
+                    + definition.key.as_ref().map(String::capacity).unwrap_or(0)
+                    + definition.mappings.capacity()
+                        * std::mem::size_of::<crate::macro_engine::MacroMapping>()
+            }).sum()
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
 }
 
 #[derive(Clone, Debug)]

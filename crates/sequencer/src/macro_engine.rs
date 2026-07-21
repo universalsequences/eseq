@@ -387,6 +387,12 @@ pub struct MacroEngine {
     scene_push: Option<ScenePushOverride>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacroConfigurationState {
+    pub macros: Vec<Macro>,
+    pub next_id: MacroId,
+}
+
 #[derive(Clone, Debug)]
 pub struct TrackTopologyMacroMappings {
     pub first_track: usize,
@@ -406,6 +412,29 @@ impl Default for MacroEngine {
 }
 
 impl MacroEngine {
+    pub fn capture_configuration(&self) -> MacroConfigurationState {
+        MacroConfigurationState {
+            macros: self.macros.clone(),
+            next_id: self.next_id,
+        }
+    }
+
+    pub fn restore_configuration(&mut self, target: &MacroConfigurationState) {
+        let live = self.macros.iter().map(|definition| {
+            (definition.id, (definition.value, definition.last_write_order))
+        }).collect::<HashMap<_, _>>();
+        let allocation_floor = self.next_id;
+        self.macros = target.macros.clone();
+        for definition in &mut self.macros {
+            if let Some((value, write_order)) = live.get(&definition.id) {
+                definition.value = *value;
+                definition.last_write_order = *write_order;
+            }
+        }
+        self.next_id = allocation_floor.max(target.next_id);
+        self.rebuild_ownership();
+    }
+
     pub fn capture_track_topology_mappings(
         &self,
         first_track: usize,
