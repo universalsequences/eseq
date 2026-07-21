@@ -1301,6 +1301,40 @@ pub struct TrackPatternData {
     pub key_lock_variant_registry: PlockVariantRegistry,
 }
 
+/// Instrument-owned authoring state for one track pattern.  Structural
+/// instrument replacement deliberately resets these fields; keeping them in a
+/// separate snapshot lets undo restore the binding without overwriting notes,
+/// timing, mixer values, or effect state edited by other operations.
+#[derive(Clone, Debug)]
+pub struct TrackInstrumentPatternState {
+    pub instrument_slot: EffectSlotSnapshot,
+    pub instrument_base_note_offset: f32,
+    pub track_sound_state: TrackSoundState,
+    pub sample_id: (i32, String, u32),
+    pub instrument_type: InstrumentType,
+    pub instrument_run_mode: CustomInstrumentRunMode,
+    pub rack_track: Option<RackTrackSnapshot>,
+    pub process_chain: crate::process::TrackProcessChain,
+    pub project_process_lane_overrides: crate::process::ProjectLaneOverrides,
+    pub plock_variant_registry: PlockVariantRegistry,
+    pub key_lock_variant_registry: PlockVariantRegistry,
+}
+
+#[derive(Clone, Debug)]
+pub struct NeuralInstrumentOverrideState {
+    pub scene: usize,
+    pub network: usize,
+    pub neuron: usize,
+    pub entries: Vec<(usize, crate::neural::ProjectParamOverride)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackInstrumentPatternStateSnapshot {
+    pub live: TrackInstrumentPatternState,
+    pub patterns: Vec<(PatternId, TrackInstrumentPatternState)>,
+    pub neural_overrides: Vec<NeuralInstrumentOverrideState>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InstrumentSlotResetSummary {
     pub patterns_reset: usize,
@@ -1370,6 +1404,53 @@ fn instrument_slot_has_locks(slot: &EffectSlotSnapshot) -> bool {
 }
 
 impl TrackPatternData {
+    fn instrument_state(&self) -> TrackInstrumentPatternState {
+        TrackInstrumentPatternState {
+            instrument_slot: self.instrument_slot.clone(),
+            instrument_base_note_offset: self.instrument_base_note_offset,
+            track_sound_state: self.track_sound_state.clone(),
+            sample_id: self.sample_id.clone(),
+            instrument_type: self.instrument_type,
+            instrument_run_mode: self.instrument_run_mode,
+            rack_track: self.rack_track.clone(),
+            process_chain: self.process_chain.clone(),
+            project_process_lane_overrides: self.project_process_lane_overrides.clone(),
+            plock_variant_registry: self.plock_variant_registry.clone(),
+            key_lock_variant_registry: self.key_lock_variant_registry.clone(),
+        }
+    }
+
+    fn restore_instrument_state(
+        &mut self,
+        state: &TrackInstrumentPatternState,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
+        let mut instrument_slot = state.instrument_slot.clone();
+        instrument_slot.sync_to_descriptor_with_modulator(
+            descriptor,
+            node_id,
+            modulator_node_id,
+        );
+        self.instrument_slot = instrument_slot;
+        self.instrument_base_note_offset = state.instrument_base_note_offset;
+        self.track_sound_state = state.track_sound_state.clone();
+        self.sample_id = state.sample_id.clone();
+        self.instrument_type = state.instrument_type;
+        self.instrument_run_mode = state.instrument_run_mode;
+        self.rack_track = state.rack_track.clone();
+        self.process_chain = state.process_chain.clone();
+        crate::process::rebind_track_process_chain_instrument_param_ids(
+            &mut self.process_chain,
+            descriptor,
+            &self.instrument_slot,
+        );
+        self.project_process_lane_overrides = state.project_process_lane_overrides.clone();
+        self.plock_variant_registry = state.plock_variant_registry.clone();
+        self.key_lock_variant_registry = state.key_lock_variant_registry.clone();
+    }
+
     fn capture_step_snapshot(&self, step: usize) -> Option<StepSnapshot> {
         if step >= MAX_STEPS {
             return None;
@@ -4766,6 +4847,243 @@ impl SequencerState {
             process_bindings_dropped,
             neural_overrides_dropped,
         })
+    }
+
+    pub fn capture_track_instrument_pattern_state(
+        &self,
+        track: usize,
+    ) -> Result<TrackInstrumentPatternStateSnapshot, String> {
+        self.validate_instrument_source_reset_target(track)?;
+        let (mut live, patterns, neural_overrides) = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let pool = scenes
+                .track_pools
+                .get(track)
+                .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+            let effective_id = scenes
+                .effective_pattern_id(track)
+                .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+            let live = pool
+                .patterns
+                .get(&effective_id)
+                .ok_or_else(|| format!("Track {} effective pattern is missing", track + 1))?
+                .instrument_state();
+            let patterns = pool
+                .patterns
+                .iter()
+                .map(|(id, data)| (*id, data.instrument_state()))
+                .collect();
+            let mut neural_overrides = Vec::new();
+            for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
+                for (network_idx, network) in scene.neural_networks.iter().enumerate() {
+                    for (neuron_idx, neuron) in network.neurons.iter().enumerate() {
+                        let entries = neuron
+                            .output_overrides
+                            .instrument
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, value)| value.target_track == track)
+                            .map(|(idx, value)| (idx, value.clone()))
+                            .collect::<Vec<_>>();
+                        if !entries.is_empty() {
+                            neural_overrides.push(NeuralInstrumentOverrideState {
+                                scene: scene_idx,
+                                network: network_idx,
+                                neuron: neuron_idx,
+                                entries,
+                            });
+                        }
+                    }
+                }
+            }
+            (live, patterns, neural_overrides)
+        };
+        live.instrument_slot = EffectSlotSnapshot::capture(&self.pattern.instrument_slots[track]);
+        live.instrument_base_note_offset = f32::from_bits(
+            self.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+        );
+        live.instrument_run_mode = CustomInstrumentRunMode::from_runtime_flag(
+            self.pattern.instrument_run_modes[track].load(Ordering::Relaxed),
+        );
+        live.track_sound_state = self.pattern.track_sound_state.lock().unwrap()[track].clone();
+        live.rack_track = self.pattern.rack_tracks.lock().unwrap()[track].clone();
+        live.process_chain = self.pattern.process_chains.lock().unwrap()[track].clone();
+        live.project_process_lane_overrides =
+            self.pattern.project_process_lane_overrides.lock().unwrap()[track].clone();
+        live.plock_variant_registry =
+            self.pattern.plock_variant_registries.lock().unwrap()[track].clone();
+        live.key_lock_variant_registry = self.pattern.key_lock_variant_registries.lock().unwrap()
+            [track]
+            .clone();
+
+        Ok(TrackInstrumentPatternStateSnapshot {
+            live,
+            patterns,
+            neural_overrides,
+        })
+    }
+
+    pub fn restore_track_instrument_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &TrackInstrumentPatternStateSnapshot,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) -> Result<(), String> {
+        self.validate_track_instrument_pattern_state(track, snapshot, descriptor)?;
+        let mut live = snapshot.live.clone();
+        live.instrument_slot.sync_to_descriptor_with_modulator(
+            descriptor,
+            node_id,
+            modulator_node_id,
+        );
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot
+                .patterns
+                .iter()
+                .any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before instrument history replay",
+                track + 1
+            ));
+        }
+        for (id, state) in &snapshot.patterns {
+            pool.patterns
+                .get_mut(id)
+                .expect("pattern set was validated")
+                .restore_instrument_state(state, descriptor, node_id, modulator_node_id);
+        }
+        for scene in &mut scenes.scenes {
+            for network in &mut scene.neural_networks {
+                for neuron in &mut network.neurons {
+                    neuron
+                        .output_overrides
+                        .instrument
+                        .retain(|value| value.target_track != track);
+                }
+            }
+        }
+        for saved in &snapshot.neural_overrides {
+            let neuron = scenes
+                .scenes
+                .get_mut(saved.scene)
+                .and_then(|scene| scene.neural_networks.get_mut(saved.network))
+                .and_then(|network| network.neurons.get_mut(saved.neuron))
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} neural topology changed before instrument history replay",
+                        track + 1
+                    )
+                })?;
+            for (index, value) in &saved.entries {
+                let index = (*index).min(neuron.output_overrides.instrument.len());
+                let mut value = value.clone();
+                let raw_idx = live
+                    .instrument_slot
+                    .param_node_indices
+                    .get(value.param_index)
+                    .copied()
+                    .unwrap_or(value.param_index as u32);
+                value.param_id = crate::neural::ParamNodeId::from_slot_param(
+                    live.instrument_slot.node_id,
+                    live.instrument_slot.modulator_node_id,
+                    raw_idx,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} instrument parameter {} has no live identity",
+                        track + 1,
+                        value.param_index
+                    )
+                })?;
+                neuron
+                    .output_overrides
+                    .instrument
+                    .insert(index, value);
+            }
+        }
+        drop(scenes);
+
+        crate::process::refresh_track_process_chain_binding_param_ids(
+            &mut live.process_chain,
+            Some(descriptor),
+            Some(&live.instrument_slot),
+            &[],
+            &[],
+        );
+        live.instrument_slot.restore(&self.pattern.instrument_slots[track]);
+        self.pattern.instrument_base_note_offsets[track]
+            .store(live.instrument_base_note_offset.to_bits(), Ordering::Relaxed);
+        self.pattern.instrument_run_modes[track]
+            .store(live.instrument_run_mode.runtime_flag(), Ordering::Relaxed);
+        self.runtime.instrument_run_mode_flags[track]
+            .store(live.instrument_run_mode.runtime_flag(), Ordering::Release);
+        self.pattern.track_sound_state.lock().unwrap()[track] = live.track_sound_state;
+        self.pattern.rack_tracks.lock().unwrap()[track] = live.rack_track;
+        self.pattern.process_chains.lock().unwrap()[track] = live.process_chain;
+        self.pattern.project_process_lane_overrides.lock().unwrap()[track] =
+            live.project_process_lane_overrides;
+        self.pattern.plock_variant_registries.lock().unwrap()[track] =
+            live.plock_variant_registry;
+        self.pattern.key_lock_variant_registries.lock().unwrap()[track] =
+            live.key_lock_variant_registry;
+        Ok(())
+    }
+
+    pub fn validate_track_instrument_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &TrackInstrumentPatternStateSnapshot,
+        descriptor: &EffectDescriptor,
+    ) -> Result<(), String> {
+        self.validate_instrument_source_reset_target(track)?;
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot
+                .patterns
+                .iter()
+                .any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before instrument history replay",
+                track + 1
+            ));
+        }
+        for saved in &snapshot.neural_overrides {
+            if scenes
+                .scenes
+                .get(saved.scene)
+                .and_then(|scene| scene.neural_networks.get(saved.network))
+                .and_then(|network| network.neurons.get(saved.neuron))
+                .is_none()
+            {
+                return Err(format!(
+                    "Track {} neural topology changed before instrument history replay",
+                    track + 1
+                ));
+            }
+            if saved.entries.iter().any(|(_, value)| {
+                value.param_index >= descriptor.params.len()
+                    || value.target_track != track
+            }) {
+                return Err(format!(
+                    "Track {} neural instrument override no longer matches its descriptor",
+                    track + 1
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn copy_current_rack_slot_instrument_values_to_all_track_patterns(
@@ -15270,5 +15588,72 @@ mod tests {
             assert_eq!(slot.node_id.load(Ordering::Relaxed), 0);
             assert_eq!(slot.num_params.load(Ordering::Relaxed), 0);
         }
+    }
+
+    #[test]
+    fn instrument_pattern_snapshot_restores_all_patterns_live_state_and_neural_overrides() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            let first_id = scenes.effective_pattern_id(0).unwrap();
+            let first = scenes.track_pools[0].patterns.get_mut(&first_id).unwrap();
+            first.instrument_base_note_offset = 11.0;
+            let mut second = first.clone();
+            second.instrument_base_note_offset = 22.0;
+            let mut third = first.clone();
+            third.instrument_base_note_offset = 33.0;
+            scenes.track_pools[0].insert(second);
+            scenes.track_pools[0].insert(third);
+            let mut network = crate::neural::ProjectNeuralNetwork::default();
+            network.neurons[0].output_overrides.instrument.push(
+                crate::neural::ProjectParamOverride {
+                    target_track: 0,
+                    param_id: crate::neural::ParamNodeId {
+                        logical_id: 7,
+                        node_param_idx: 0,
+                    },
+                    param_index: 0,
+                    value: 0.625,
+                },
+            );
+            scenes.scenes[0].neural_networks.push(network);
+        }
+        state.pattern.instrument_base_note_offsets[0]
+            .store(99.0_f32.to_bits(), Ordering::Relaxed);
+
+        let snapshot = state.capture_track_instrument_pattern_state(0).unwrap();
+        let descriptor = EffectDescriptor::builtin_sampler();
+        state
+            .reset_sampler_slot_all_patterns(
+                0,
+                &descriptor,
+                42,
+                43,
+                (9, "replacement".to_string(), 48_000),
+            )
+            .unwrap();
+        state
+            .restore_track_instrument_pattern_state(0, &snapshot, &descriptor, 42, 43)
+            .unwrap();
+
+        assert_eq!(
+            f32::from_bits(
+                state.pattern.instrument_base_note_offsets[0].load(Ordering::Relaxed)
+            ),
+            99.0
+        );
+        let scenes = state.pattern.scenes.lock().unwrap();
+        let mut offsets = scenes.track_pools[0]
+            .patterns
+            .values()
+            .map(|pattern| pattern.instrument_base_note_offset)
+            .collect::<Vec<_>>();
+        offsets.sort_by(f32::total_cmp);
+        assert_eq!(offsets, vec![11.0, 22.0, 33.0]);
+        let restored = &scenes.scenes[0].neural_networks[0].neurons[0]
+            .output_overrides
+            .instrument[0];
+        assert_eq!(restored.value, 0.625);
+        assert_eq!(restored.param_id.logical_id, 42);
     }
 }

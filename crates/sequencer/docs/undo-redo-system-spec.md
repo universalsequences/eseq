@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Slice 4.
+Implemented through Slice 5.
 
 - Slice 0 provides stable track identity, bounded linear history, barriers,
   revision tracking, and global undo/redo shortcuts.
@@ -15,6 +15,12 @@ Implemented through Slice 4.
   defaults, scalar and tensor p-locks, instrument key locks and variants, rack
   strip/instrument/effect values, instrument preset application, and
   convolution IR selection with retained prepared data for fileless redo.
+- Slice 5 covers custom-instrument replacement, sampler/custom conversion,
+  retained engine and sample resources, stable async swap targeting, and exact
+  restoration of every track pattern's instrument state, process bindings,
+  project macro mappings, and scene neural instrument overrides. Rack-slot
+  source replacement and flat-track-to-rack conversion remain barriers pending
+  the Slice 6 chain-state machinery described below.
 - Bus-effect value edits remain explicit barriers; bus device identity and
   scene-pattern addressing land with the generalized effect-chain work in
   Slice 6.

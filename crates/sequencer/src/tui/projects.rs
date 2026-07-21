@@ -26,7 +26,7 @@ use super::graph::{
 };
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
 
-fn resolve_live_macro_target(
+pub(super) fn resolve_live_macro_target(
     state: &crate::sequencer::SequencerState,
     effect_descriptors: &[Vec<EffectDescriptor>],
     instrument_descriptors: &[EffectDescriptor],

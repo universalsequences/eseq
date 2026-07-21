@@ -80,6 +80,11 @@ pub struct MacroMapping {
     resolved_key: Option<MacroParamKey>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TrackInstrumentMacroMappings {
+    pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
+}
+
 impl MacroMapping {
     pub fn new(
         scope: impl Into<ParamScope>,
@@ -688,6 +693,56 @@ impl MacroEngine {
             self.rebuild_ownership();
         }
         removed
+    }
+
+    pub fn capture_instrument_mappings_for_track(
+        &self,
+        track: usize,
+    ) -> TrackInstrumentMacroMappings {
+        TrackInstrumentMacroMappings {
+            mappings: self
+                .macros
+                .iter()
+                .filter_map(|macro_definition| {
+                    let mappings = macro_definition
+                        .mappings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mapping)| {
+                            mapping.scope == ParamScope::Track(track)
+                                && matches!(
+                                    mapping.target,
+                                    ParamTarget::InstrumentParam { .. }
+                                )
+                        })
+                        .map(|(index, mapping)| (index, mapping.clone()))
+                        .collect::<Vec<_>>();
+                    (!mappings.is_empty()).then_some((macro_definition.id, mappings))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_instrument_mappings_for_track(
+        &mut self,
+        track: usize,
+        snapshot: &TrackInstrumentMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        self.remove_instrument_mappings_for_track(track);
+        for (macro_id, mappings) in &snapshot.mappings {
+            let macro_definition = self
+                .macros
+                .iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                macro_definition
+                    .mappings
+                    .insert((*index).min(macro_definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
     }
 
     fn mapping_mut(
@@ -1493,5 +1548,56 @@ mod tests {
             engine.ensure_macro(" : ", "Invalid"),
             Err(MacroEngineError::InvalidMacroKey)
         );
+    }
+
+    #[test]
+    fn track_instrument_mapping_snapshot_restores_order_without_touching_other_targets() {
+        let mut engine = MacroEngine::default();
+        let id = engine.create_macro("instrument history", MacroKind::Mapped).unwrap();
+        let track_zero = MacroMapping::new_resolved(
+            0,
+            ParamTarget::InstrumentParam {
+                param: "tone".to_string(),
+                param_id: None,
+            },
+            Some(0),
+            0.1,
+            0.9,
+            MacroCurve::Linear,
+        )
+        .unwrap();
+        let effect = MacroMapping::new_resolved(
+            0,
+            effect_target(11),
+            Some(0),
+            0.0,
+            1.0,
+            MacroCurve::Linear,
+        )
+        .unwrap();
+        let track_one = MacroMapping::new_resolved(
+            1,
+            ParamTarget::InstrumentParam {
+                param: "tone".to_string(),
+                param_id: None,
+            },
+            Some(0),
+            0.2,
+            0.8,
+            MacroCurve::Linear,
+        )
+        .unwrap();
+        engine.add_mapping(id, track_zero.clone()).unwrap();
+        engine.add_mapping(id, effect.clone()).unwrap();
+        engine.add_mapping(id, track_one.clone()).unwrap();
+
+        let snapshot = engine.capture_instrument_mappings_for_track(0);
+        assert_eq!(engine.remove_instrument_mappings_for_track(0), 1);
+        engine
+            .restore_instrument_mappings_for_track(0, &snapshot)
+            .unwrap();
+
+        let mappings = &engine.macro_definition(id).unwrap().mappings;
+        assert_eq!(mappings, &[track_zero, effect, track_one]);
     }
 }

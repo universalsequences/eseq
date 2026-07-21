@@ -446,12 +446,15 @@ impl App {
         } else {
             cache_idx
         };
-        Some(unsafe {
-            self.graph_controller()
-                .replace_track_with_custom_instrument(
+        Some(self.apply_recorded_instrument_binding_mutation(
+            track,
+            "Replace instrument",
+            |app| unsafe {
+                app.graph_controller().replace_track_with_custom_instrument(
                     track, name, engine_id, &manifest, &*lib_ptr, run_mode,
                 )
-        })
+            },
+        ))
     }
 
     pub fn add_compiled_saved_instrument_track_sync(
@@ -502,12 +505,15 @@ impl App {
         } else {
             cache_idx
         };
-        unsafe {
-            self.graph_controller()
-                .replace_track_with_custom_instrument(
+        self.apply_recorded_instrument_binding_mutation(
+            track,
+            "Replace instrument",
+            |app| unsafe {
+                app.graph_controller().replace_track_with_custom_instrument(
                     track, name, engine_id, &manifest, &*lib_ptr, run_mode,
                 )
-        }
+            },
+        )
     }
 
     pub fn add_transient_instrument_track_sync(
@@ -4426,6 +4432,7 @@ mod tests {
             .expect("initial saved instrument track should load");
         assert_eq!(initial_track, 0);
         assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
+        graph.process_block();
 
         let cached_engine_id = app.cache_instrument_engine(
             "bank/cached",
@@ -4447,6 +4454,7 @@ mod tests {
         assert_eq!(app.graph.track_engine_ids, vec![Some(cached_engine_id)]);
         assert_eq!(app.tracks, vec!["cached"]);
         assert!(app.graph.engine_node_ids[0].is_none());
+        graph.process_block();
 
         let compiled_summary = app
             .swap_track_to_compiled_saved_instrument_sync(
@@ -4464,6 +4472,45 @@ mod tests {
         assert_eq!(compiled_summary.patterns_reset, 1);
         assert_eq!(app.graph.track_engine_ids, vec![Some(2)]);
         assert!(app.graph.engine_node_ids[cached_engine_id].is_none());
+        assert_eq!(app.tracks, vec!["compiled"]);
+        graph.process_block();
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids, vec![Some(cached_engine_id)]);
+        assert_eq!(app.tracks, vec!["cached"]);
+        graph.process_block();
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
+        assert_eq!(app.tracks, vec!["old"]);
+        graph.process_block();
+        for _ in 0..3 {
+            assert!(matches!(
+                crate::tui::edit::redo(&mut app),
+                crate::tui::history::HistoryReplay::Applied(_)
+            ));
+            graph.process_block();
+            assert!(matches!(
+                crate::tui::edit::undo(&mut app),
+                crate::tui::history::HistoryReplay::Applied(_)
+            ));
+            graph.process_block();
+        }
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        graph.process_block();
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids, vec![Some(2)]);
         assert_eq!(app.tracks, vec!["compiled"]);
         graph.process_block();
     }
@@ -4519,6 +4566,112 @@ mod tests {
         );
         assert_eq!(snapshot.transport.topology_epoch, live_topology_epoch);
         assert!(app.state.scheduler_snapshot_version() > snapshot_version_before);
+        graph.process_block();
+    }
+
+    #[test]
+    fn instrument_history_replays_custom_sampler_conversion() {
+        let graph = TestLiveGraph::new("instrument-history-conversion-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let manifest = test_instrument_manifest();
+        app.add_compiled_saved_instrument_track_sync(
+            "old",
+            "old source",
+            CustomInstrumentRunMode::Instrument,
+            lisp_host::CompileResult {
+                manifest,
+                lib: lisp_host::test_loaded_dgen_lib(),
+                lease: None,
+            },
+        )
+        .expect("initial custom track should load");
+        let buffer_id = crate::sampler::create_silent_buffer(graph.ptr.0)
+            .expect("silent sampler buffer should allocate");
+
+        app.apply_recorded_instrument_binding_mutation(
+            0,
+            "Replace instrument",
+            |app| {
+                app.graph_controller().convert_custom_track_to_sampler(
+                    0,
+                    buffer_id,
+                    44_100,
+                    "silent",
+                )
+            },
+        )
+        .expect("custom track should convert to sampler");
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
+        assert_eq!(app.tracks[0], "silent");
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
+        assert_eq!(app.graph.track_engine_ids[0], Some(0));
+        assert_eq!(app.tracks[0], "old");
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
+        assert_eq!(app.graph.track_buffer_ids[0], buffer_id);
+        assert_eq!(app.tracks[0], "silent");
+        graph.process_block();
+    }
+
+    #[test]
+    fn instrument_history_retains_free_patch_dedicated_engine() {
+        let graph = TestLiveGraph::new("instrument-history-free-patch-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let manifest = test_instrument_manifest();
+        app.add_compiled_saved_instrument_track_sync(
+            "old",
+            "old source",
+            CustomInstrumentRunMode::Instrument,
+            lisp_host::CompileResult {
+                manifest: manifest.clone(),
+                lib: lisp_host::test_loaded_dgen_lib(),
+                lease: None,
+            },
+        )
+        .unwrap();
+        app.cache_instrument_engine(
+            "free",
+            "free source",
+            &manifest,
+            lisp_host::test_loaded_dgen_lib(),
+            None,
+        );
+        app.try_swap_track_to_cached_saved_instrument_sync(
+            0,
+            "free",
+            "free source",
+            CustomInstrumentRunMode::FreePatch,
+        )
+        .unwrap()
+        .unwrap();
+        let dedicated_engine = app.graph.track_engine_ids[0].unwrap();
+        assert_eq!(
+            app.graph.track_instrument_run_modes[0],
+            CustomInstrumentRunMode::FreePatch
+        );
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids[0], Some(0));
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids[0], Some(dedicated_engine));
+        assert_eq!(
+            app.graph.track_instrument_run_modes[0],
+            CustomInstrumentRunMode::FreePatch
+        );
         graph.process_block();
     }
 

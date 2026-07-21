@@ -12,7 +12,8 @@ use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
     step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusMixerPatch, BusMixerSnapshot,
     DeviceId, DeviceValueSnapshot, DeviceValuesPatch, EditPatch, GestureId, HistoryMove,
-    HistoryPolicy, HistoryReplay, MergeKey, PatternGeometryPatch, StepCellDelta, StepCellsPatch,
+    HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, PatternGeometryPatch,
+    StepCellDelta, StepCellsPatch, TrackInstrumentSource, TrackInstrumentState,
     TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
 };
 use super::App;
@@ -47,6 +48,308 @@ pub struct StepGestureTransaction {
     label: &'static str,
     before: BTreeMap<usize, StepCellSnapshot>,
     variant_registry_before: PlockVariantRegistry,
+}
+
+impl App {
+    pub fn capture_track_instrument_state(
+        &self,
+        track: usize,
+    ) -> Result<TrackInstrumentState, String> {
+        let source = match self.graph.track_instrument_types.get(track).copied() {
+            Some(crate::sequencer::InstrumentType::Custom) => {
+                let engine_id = self
+                    .graph
+                    .track_engine_ids
+                    .get(track)
+                    .and_then(|engine_id| *engine_id)
+                    .ok_or_else(|| format!("Custom track {} has no engine binding", track + 1))?;
+                if self.editor.engine_registry.get(engine_id).is_none() {
+                    return Err(format!(
+                        "Custom track {} references missing retained engine {}",
+                        track + 1,
+                        engine_id
+                    ));
+                }
+                TrackInstrumentSource::Custom { engine_id }
+            }
+            Some(crate::sequencer::InstrumentType::Sampler) => {
+                TrackInstrumentSource::Sampler {
+                    buffer_id: *self
+                        .graph
+                        .track_buffer_ids
+                        .get(track)
+                        .ok_or_else(|| format!("Sampler track {} has no buffer", track + 1))?,
+                    sample_rate: *self
+                        .graph
+                        .track_sample_rates
+                        .get(track)
+                        .ok_or_else(|| {
+                            format!("Sampler track {} has no sample rate", track + 1)
+                        })?,
+                    path: self.sampler_path_for_track(track),
+                }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "Track {} has instrument type {other:?}, which is not replaceable",
+                    track + 1
+                ));
+            }
+            None => return Err(format!("Track {} does not exist", track + 1)),
+        };
+        Ok(TrackInstrumentState {
+            source,
+            display_name: self.tracks[track].clone(),
+            patterns: self.state.capture_track_instrument_pattern_state(track)?,
+            macro_mappings: self
+                .macro_engine
+                .capture_instrument_mappings_for_track(track),
+        })
+    }
+
+    pub fn apply_recorded_instrument_binding_mutation<T>(
+        &mut self,
+        track: usize,
+        label: &'static str,
+        mutate: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
+        finish_active_gesture(self);
+        let track_id = self
+            .track_registry
+            .id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let before = self.capture_track_instrument_state(track)?;
+        let result = mutate(self)?;
+        let after = match self.capture_track_instrument_state(track) {
+            Ok(after) => after,
+            Err(capture_error) => {
+                return match self.restore_track_instrument_state(track, &before) {
+                    Ok(()) => Err(format!(
+                        "Instrument replacement was rolled back because its after-state could not be captured: {capture_error}"
+                    )),
+                    Err(rollback_error) => Err(format!(
+                        "Instrument replacement after-state capture failed ({capture_error}); rollback also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let patch = InstrumentBindingPatch {
+            track: track_id,
+            before,
+            after,
+        };
+        let retained_bytes = patch.retained_bytes();
+        self.history.commit(
+            label,
+            None,
+            EditPatch::InstrumentBinding(patch),
+            retained_bytes,
+        );
+        Ok(result)
+    }
+
+    fn restore_track_instrument_state(
+        &mut self,
+        track: usize,
+        target: &TrackInstrumentState,
+    ) -> Result<(), String> {
+        let target_descriptor = match &target.source {
+            TrackInstrumentSource::Custom { engine_id } => {
+                let retained = self
+                    .editor
+                    .engine_registry
+                    .get(*engine_id)
+                    .ok_or_else(|| format!("Retained instrument engine {engine_id} is missing"))?;
+                if self.editor.instrument_libs.get(retained.lib_index).is_none() {
+                    return Err(format!(
+                        "Retained instrument engine {engine_id} references missing library {}",
+                        retained.lib_index
+                    ));
+                }
+                crate::lisp_host::instrument_descriptor_from_manifest(
+                    &retained.name,
+                    &retained.manifest,
+                )
+            }
+            TrackInstrumentSource::Sampler { buffer_id, .. } => {
+                if *buffer_id < 0 {
+                    return Err("Retained sampler buffer is invalid".to_string());
+                }
+                crate::effects::EffectDescriptor::builtin_sampler()
+            }
+        };
+        self.state.validate_track_instrument_pattern_state(
+            track,
+            &target.patterns,
+            &target_descriptor,
+        )?;
+        for (macro_id, _) in &target.macro_mappings.mappings {
+            if self.macro_engine.macro_definition(*macro_id).is_none() {
+                return Err(format!(
+                    "Instrument history references missing macro {macro_id}"
+                ));
+            }
+        }
+        match &target.source {
+            TrackInstrumentSource::Custom { engine_id } => {
+                let retained = self
+                    .editor
+                    .engine_registry
+                    .get(*engine_id)
+                    .cloned()
+                    .ok_or_else(|| format!("Retained instrument engine {engine_id} is missing"))?;
+                let lib_ptr: *const crate::lisp_host::LoadedDGenLib = self
+                    .editor
+                    .instrument_libs
+                    .get(retained.lib_index)
+                    .ok_or_else(|| {
+                        format!(
+                            "Retained instrument engine {engine_id} references missing library {}",
+                            retained.lib_index
+                        )
+                    })?;
+                unsafe {
+                    self.graph_controller().replace_track_with_custom_instrument(
+                        track,
+                        &retained.name,
+                        *engine_id,
+                        &retained.manifest,
+                        &*lib_ptr,
+                        target.patterns.live.instrument_run_mode,
+                    )?;
+                }
+                if let Some(path) = self.sampler_paths.get_mut(track) {
+                    *path = None;
+                }
+            }
+            TrackInstrumentSource::Sampler {
+                buffer_id,
+                sample_rate,
+                path,
+            } => {
+                match self.graph.track_instrument_types.get(track).copied() {
+                    Some(crate::sequencer::InstrumentType::Custom) => {
+                        self.graph_controller().convert_custom_track_to_sampler(
+                            track,
+                            *buffer_id,
+                            *sample_rate,
+                            &target.display_name,
+                        )?;
+                    }
+                    Some(crate::sequencer::InstrumentType::Sampler) => {
+                        self.graph_controller().send_sample_to_all_voices(
+                            track,
+                            *buffer_id,
+                            *sample_rate,
+                        );
+                        self.graph.track_buffer_ids[track] = *buffer_id;
+                        self.graph.track_sample_rates[track] = *sample_rate;
+                        let nodes = &self.graph.track_node_ids[track];
+                        let node_id = nodes
+                            .sampler_ids
+                            .first()
+                            .copied()
+                            .and_then(|id| u32::try_from(id).ok())
+                            .unwrap_or(0);
+                        let modulator_node_id = nodes
+                            .sampler_modulator_ids
+                            .first()
+                            .copied()
+                            .and_then(|id| u32::try_from(id).ok())
+                            .unwrap_or(0);
+                        let descriptor = self.graph.instrument_descriptors[track].clone();
+                        self.state.reset_sampler_slot_all_patterns(
+                            track,
+                            &descriptor,
+                            node_id,
+                            modulator_node_id,
+                            (*buffer_id, target.display_name.clone(), *sample_rate),
+                        ).ok_or_else(|| {
+                            format!("Sampler track {} could not reset its pattern state", track + 1)
+                        })?;
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "Track {} has instrument type {other:?}, which cannot restore a sampler",
+                            track + 1
+                        ));
+                    }
+                    None => return Err(format!("Track {} does not exist", track + 1)),
+                }
+                if let Some(sampler_path) = self.sampler_paths.get_mut(track) {
+                    *sampler_path = path.clone();
+                }
+                if let Some(path) = path {
+                    self.register_loaded_sample_path(
+                        &target.display_name,
+                        *buffer_id,
+                        path.clone(),
+                    );
+                }
+            }
+        }
+        self.tracks[track] = target.display_name.clone();
+        let descriptor = self.graph.instrument_descriptors[track].clone();
+        let (node_id, modulator_node_id) = match self.graph.track_instrument_types[track] {
+            crate::sequencer::InstrumentType::Custom => {
+                let engine_id = self.graph.track_engine_ids[track]
+                    .ok_or_else(|| format!("Custom track {} lost its engine", track + 1))?;
+                let engine = self.graph.engine_node_ids[engine_id]
+                    .as_ref()
+                    .ok_or_else(|| format!("Instrument engine {engine_id} has no runtime"))?;
+                (
+                    engine.synth_ids.first().copied(),
+                    engine.modulator_ids.first().copied(),
+                )
+            }
+            crate::sequencer::InstrumentType::Sampler => {
+                let nodes = &self.graph.track_node_ids[track];
+                (
+                    nodes.sampler_ids.first().copied(),
+                    nodes.sampler_modulator_ids.first().copied(),
+                )
+            }
+            other => {
+                return Err(format!(
+                    "Track {} restored unexpected instrument type {other:?}",
+                    track + 1
+                ));
+            }
+        };
+        let node_id = node_id.and_then(|id| u32::try_from(id).ok()).unwrap_or(0);
+        let modulator_node_id = modulator_node_id
+            .and_then(|id| u32::try_from(id).ok())
+            .unwrap_or(0);
+        self.state.restore_track_instrument_pattern_state(
+            track,
+            &target.patterns,
+            &descriptor,
+            node_id,
+            modulator_node_id,
+        )?;
+        self.macro_engine
+            .restore_instrument_mappings_for_track(track, &target.macro_mappings)
+            .map_err(|error| format!("{error:?}"))?;
+        let state = std::sync::Arc::clone(&self.state);
+        let effect_descriptors = &self.graph.effect_descriptors;
+        let instrument_descriptors = &self.graph.instrument_descriptors;
+        let buses = &self.buses;
+        self.macro_engine.revalidate_mappings(|scope, target| {
+            super::projects::resolve_live_macro_target(
+                &state,
+                effect_descriptors,
+                instrument_descriptors,
+                buses,
+                scope,
+                target,
+            )
+        });
+        self.state
+            .publish_macro_overrides(self.macro_engine.override_snapshot());
+        self.push_instrument_defaults_for_track(track);
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
 }
 
 impl StepGestureTransaction {
@@ -3542,6 +3845,23 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
         EditPatch::DeviceValues(patch) => {
             replay_device_values_patch(app, patch, mode, true).map(|_| ())
         }
+        EditPatch::InstrumentBinding(patch) => {
+            let track = app
+                .track_registry
+                .index_of(patch.track)
+                .ok_or(EditError::MissingStableTrack { track: patch.track })?;
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "instrument-binding replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_track_instrument_state(track, target)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -3562,6 +3882,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         }),
         EditPatch::TransportParams(patch) => patch.before.bpm != patch.after.bpm,
         EditPatch::DeviceValues(_) => true,
+        EditPatch::InstrumentBinding(_) => true,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
     }
 }
@@ -3626,6 +3947,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::BusMixer(patch) => replay_bus_mixer_patch(app, patch, ApplyMode::Undo)?,
         EditPatch::DeviceValues(patch) => {
             replay_device_values_patch(app, patch, ApplyMode::Undo, false)?;
+        }
+        EditPatch::InstrumentBinding(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;

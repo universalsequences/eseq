@@ -68,7 +68,7 @@ use sequencer::engine;
 use sequencer::sequencer::{
     CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
     MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
-    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
+    TrackId, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::tui;
 use std::sync::atomic::AtomicBool;
@@ -219,8 +219,7 @@ enum SavedInstrumentLoadTarget {
         group_id: Option<u64>,
     },
     SwapTrack {
-        requested_track: usize,
-        voice_sum_id: i32,
+        track_id: TrackId,
     },
 }
 
@@ -254,45 +253,22 @@ fn capture_instrument_swap_target(
         }
         None => return Err(format!("Track {} does not exist", track + 1)),
     }
-    let voice_sum_id = app
-        .graph
-        .track_node_ids
-        .get(track)
-        .map(|nodes| nodes.voice_sum_id)
-        .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
     Ok(SavedInstrumentLoadTarget::SwapTrack {
-        requested_track: track,
-        voice_sum_id,
+        track_id,
     })
 }
 
 fn resolve_instrument_swap_target(
     app: &tui::App,
-    requested_track: usize,
-    voice_sum_id: i32,
+    track_id: TrackId,
 ) -> Result<usize, String> {
-    let voice_sum_ids = app
-        .graph
-        .track_node_ids
-        .iter()
-        .map(|nodes| nodes.voice_sum_id)
-        .collect::<Vec<_>>();
-    resolve_instrument_swap_target_index(&voice_sum_ids, requested_track, voice_sum_id)
+    app.track_registry
+        .index_of(track_id)
         .ok_or_else(|| "The instrument swap target was removed while loading".to_string())
-}
-
-fn resolve_instrument_swap_target_index(
-    voice_sum_ids: &[i32],
-    requested_track: usize,
-    voice_sum_id: i32,
-) -> Option<usize> {
-    if voice_sum_ids.get(requested_track) == Some(&voice_sum_id) {
-        Some(requested_track)
-    } else {
-        voice_sum_ids
-            .iter()
-            .position(|candidate| *candidate == voice_sum_id)
-    }
 }
 
 fn try_apply_cached_saved_instrument(
@@ -307,10 +283,9 @@ fn try_apply_cached_saved_instrument(
             .try_add_cached_saved_instrument_track_sync(name, source, run_mode)
             .map(|result| result.map(|track| SavedInstrumentLoadApply::Added { track, group_id })),
         SavedInstrumentLoadTarget::SwapTrack {
-            requested_track,
-            voice_sum_id,
+            track_id,
         } => {
-            let track = match resolve_instrument_swap_target(app, requested_track, voice_sum_id) {
+            let track = match resolve_instrument_swap_target(app, track_id) {
                 Ok(track) => track,
                 Err(error) => return Some(Err(error)),
             };
@@ -333,10 +308,9 @@ fn apply_compiled_saved_instrument(
             .add_compiled_saved_instrument_track_sync(name, source, run_mode, result)
             .map(|track| SavedInstrumentLoadApply::Added { track, group_id }),
         SavedInstrumentLoadTarget::SwapTrack {
-            requested_track,
-            voice_sum_id,
+            track_id,
         } => {
-            let track = resolve_instrument_swap_target(app, requested_track, voice_sum_id)?;
+            let track = resolve_instrument_swap_target(app, track_id)?;
             app.swap_track_to_compiled_saved_instrument_sync(track, name, source, run_mode, result)
                 .map(|summary| SavedInstrumentLoadApply::Swapped { summary })
         }
@@ -4185,29 +4159,37 @@ fn load_or_convert_sampler_track(
         )
     };
 
-    let reset_summary = if instrument_type == InstrumentType::Sampler {
-        app.graph_controller()
-            .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
-        app.graph.track_buffer_ids[track] = new_buffer_id;
-        app.graph.track_sample_rates[track] = sample_rate;
-        app.tracks[track] = new_name.clone();
-        None
-    } else {
-        Some(app.graph_controller().convert_custom_track_to_sampler(
-            track,
-            new_buffer_id,
-            sample_rate,
-            &new_name,
-        )?)
-    };
-    if let Some(path) = resolved_path {
-        app.register_loaded_sample_path(&new_name, new_buffer_id, path.clone());
-        if track < app.sampler_paths.len() {
-            app.sampler_paths[track] = Some(path);
-        }
-    }
-    app.reset_sampler_bpm_for_analysis(track);
-    app.publish_sampler_analysis_runtime(track);
+    let history_path = resolved_path.clone();
+    let reset_summary = app.apply_recorded_instrument_binding_mutation(
+        track,
+        "Replace instrument",
+        |app| {
+            let reset_summary = if instrument_type == InstrumentType::Sampler {
+                app.graph_controller()
+                    .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
+                app.graph.track_buffer_ids[track] = new_buffer_id;
+                app.graph.track_sample_rates[track] = sample_rate;
+                app.tracks[track] = new_name.clone();
+                None
+            } else {
+                Some(app.graph_controller().convert_custom_track_to_sampler(
+                    track,
+                    new_buffer_id,
+                    sample_rate,
+                    &new_name,
+                )?)
+            };
+            if let Some(path) = history_path.as_ref() {
+                app.register_loaded_sample_path(&new_name, new_buffer_id, path.clone());
+                if track < app.sampler_paths.len() {
+                    app.sampler_paths[track] = Some(path.clone());
+                }
+            }
+            app.reset_sampler_bpm_for_analysis(track);
+            app.publish_sampler_analysis_runtime(track);
+            Ok(reset_summary)
+        },
+    )?;
     reset_sampler_waveform_view(editor);
     if let Some(track_name) = track_names.get_mut(track) {
         *track_name = new_name.clone();
@@ -5005,7 +4987,6 @@ mod tests {
         escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
         key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
         reconciled_track_index,
-        resolve_instrument_swap_target_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
         track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
@@ -5734,24 +5715,6 @@ mod tests {
         assert_eq!(reconciled_track_index(7, 1, 4), Some(1));
         assert_eq!(reconciled_track_index(7, 9, 4), Some(3));
         assert_eq!(reconciled_track_index(0, 0, 0), None);
-    }
-
-    #[test]
-    fn pending_instrument_swap_follows_stable_track_shell_identity() {
-        assert_eq!(
-            resolve_instrument_swap_target_index(&[101, 202, 303], 1, 202),
-            Some(1)
-        );
-        assert_eq!(
-            resolve_instrument_swap_target_index(&[202, 303], 1, 202),
-            Some(0),
-            "a track shifted by deletion should still receive its pending swap"
-        );
-        assert_eq!(
-            resolve_instrument_swap_target_index(&[101, 303], 1, 202),
-            None,
-            "a removed target must not redirect the swap to its former index"
-        );
     }
 
     #[test]
@@ -8693,6 +8656,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let message = match replay {
                             tui::history::HistoryReplay::Applied(result) => {
+                                track_names.clone_from(&app.tracks);
+                                let replay_track = current_track
+                                    .load(Ordering::Relaxed)
+                                    .min(app.tracks.len().saturating_sub(1));
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "track-names",
+                                    build_track_names(&track_names),
+                                );
+                                if !app.tracks.is_empty() {
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "instrument-panel",
+                                        build_instrument_panel_value(
+                                            &app,
+                                            replay_track,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                }
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 if !app.buses.is_empty() {
                                     ui_invalidations.push(UiInvalidation::BusMixer {

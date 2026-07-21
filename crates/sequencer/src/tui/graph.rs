@@ -9641,16 +9641,15 @@ mod tests {
             assert_eq!(engine_id, expected_id);
         }
         install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
+        app.editor
+            .instrument_libs
+            .push(lisp_host::test_loaded_dgen_lib());
 
-        app.graph_controller()
-            .swap_custom_track_instrument(
-                0,
-                "new",
-                1,
-                &manifest,
-                &lib,
-                CustomInstrumentRunMode::Instrument,
+        app.apply_recorded_instrument_binding_mutation(0, "Replace instrument", |app| {
+            app.graph_controller().swap_custom_track_instrument(
+                0, "new", 1, &manifest, &lib, CustomInstrumentRunMode::Instrument,
             )
+        })
             .expect("track should swap before saving");
         assert_eq!(app.graph.track_engine_ids, vec![Some(1)]);
 
@@ -9658,6 +9657,33 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should follow the Unix epoch")
             .as_nanos();
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let undo_project_name = format!(
+            "__test-instrument-swap-undo-roundtrip-{}-{nonce}",
+            std::process::id()
+        );
+        let undo_captured = app
+            .capture_project(&undo_project_name)
+            .expect("undone project should capture");
+        let undo_project_path = crate::project::save_project(&undo_project_name, &undo_captured)
+            .expect("undone project should save");
+        let _undo_cleanup = TestProjectFile(undo_project_path);
+        let undo_restored = crate::project::load_project(&undo_project_name)
+            .expect("undone project should load");
+        assert!(matches!(
+            undo_restored.tracks.as_slice(),
+            [crate::project::ProjectTrack {
+                kind: crate::project::ProjectTrackKind::Custom { instrument_name },
+                ..
+            }] if instrument_name == "old"
+        ));
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
         let project_name = format!(
             "__test-instrument-swap-roundtrip-{}-{nonce}",
             std::process::id()

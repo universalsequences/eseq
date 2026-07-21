@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::plock_variants::PlockVariantRegistry;
@@ -8,6 +9,8 @@ use crate::sequencer::{
     TrackParamsSnapshot, TrackPatternId,
 };
 use crate::effects::EffectSlotValuesSnapshot;
+use crate::macro_engine::TrackInstrumentMacroMappings;
+use crate::sequencer::TrackInstrumentPatternStateSnapshot;
 
 pub const DEFAULT_HISTORY_ENTRY_LIMIT: usize = 256;
 pub const DEFAULT_HISTORY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
@@ -38,7 +41,62 @@ pub enum EditPatch {
     TrackParamsBatch(TrackParamsBatchPatch),
     BusMixer(BusMixerPatch),
     DeviceValues(DeviceValuesPatch),
+    InstrumentBinding(InstrumentBindingPatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub enum TrackInstrumentSource {
+    Custom { engine_id: usize },
+    Sampler {
+        buffer_id: i32,
+        sample_rate: u32,
+        path: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackInstrumentState {
+    pub source: TrackInstrumentSource,
+    pub display_name: String,
+    pub patterns: TrackInstrumentPatternStateSnapshot,
+    pub macro_mappings: TrackInstrumentMacroMappings,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstrumentBindingPatch {
+    pub track: TrackId,
+    pub before: TrackInstrumentState,
+    pub after: TrackInstrumentState,
+}
+
+impl InstrumentBindingPatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &TrackInstrumentState) -> usize {
+            let source_bytes = match &state.source {
+                TrackInstrumentSource::Custom { .. } => 0,
+                TrackInstrumentSource::Sampler { path, .. } => path
+                    .as_ref()
+                    .map(|path| path.as_os_str().len())
+                    .unwrap_or(0),
+            };
+            source_bytes
+                + state.display_name.capacity()
+                + state.patterns.patterns.capacity()
+                    * std::mem::size_of::<(
+                        PatternId,
+                        crate::sequencer::TrackInstrumentPatternState,
+                    )>()
+                + state.patterns.neural_overrides.capacity()
+                    * std::mem::size_of::<crate::sequencer::NeuralInstrumentOverrideState>()
+                + state.macro_mappings.mappings.capacity()
+                    * std::mem::size_of::<(
+                        crate::macro_engine::MacroId,
+                        Vec<(usize, crate::macro_engine::MacroMapping)>,
+                    )>()
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

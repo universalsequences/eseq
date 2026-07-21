@@ -33,6 +33,7 @@ pub use state::{
     RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotId, RackSlotParam,
     RackSlotParamPlocks, RackSlotSnapshot, RackSlotValuesSnapshot, RackTrackSnapshot,
     RecordPosition, SequencerState, StepCellSnapshot, StepSlotPlocks, StepSnapshot, TrackId,
-    TrackOutputEvent, TrackPatternCellView, TrackPatternData, TrackPatternId, TrackRegistry,
-    TrackRegistryError, RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
+    TrackInstrumentPatternState, TrackInstrumentPatternStateSnapshot, TrackOutputEvent,
+    TrackPatternCellView, TrackPatternData, TrackPatternId, TrackRegistry, TrackRegistryError,
+    NeuralInstrumentOverrideState, RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
 };
