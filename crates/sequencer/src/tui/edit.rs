@@ -16,7 +16,7 @@ use super::history::{
     EffectChainState, EffectInstanceState, EffectPatternSlots, GestureId, HistoryMove,
     HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, MidiFxChainPatch,
     MidiFxChainState, MidiFxInstanceState, PatternGeometryPatch,
-    RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
+    RackContainerSlotState, RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
     RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
     TrackInstrumentSource, TrackInstrumentState,
     TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
@@ -1243,7 +1243,7 @@ impl App {
         Ok(())
     }
     pub fn capture_track_instrument_state(
-        &self,
+        &mut self,
         track: usize,
     ) -> Result<TrackInstrumentState, String> {
         let source = match self.graph.track_instrument_types.get(track).copied() {
@@ -1280,6 +1280,21 @@ impl App {
                     path: self.sampler_path_for_track(track),
                 }
             }
+            Some(crate::sequencer::InstrumentType::Rack) => {
+                let track_id = self.track_registry.id_at(track)
+                    .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+                let slot_count = self.state.pattern.rack_tracks.lock().unwrap()
+                    .get(track).and_then(Option::as_ref)
+                    .map(|rack| rack.slots.len())
+                    .ok_or_else(|| format!("Rack track {} has no rack state", track + 1))?;
+                let mut slots = Vec::with_capacity(slot_count);
+                for slot_index in 0..slot_count {
+                    let id = self.device_registry.rack_slot(track_id, slot_index);
+                    let effects = self.capture_rack_effect_chain_state(track, slot_index, None)?;
+                    slots.push(RackContainerSlotState { id, effects });
+                }
+                TrackInstrumentSource::Rack { slots }
+            }
             Some(other) => {
                 return Err(format!(
                     "Track {} has instrument type {other:?}, which is not replaceable",
@@ -1310,7 +1325,17 @@ impl App {
             .id_at(track)
             .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         let before = self.capture_track_instrument_state(track)?;
-        let result = mutate(self)?;
+        let result = match mutate(self) {
+            Ok(result) => result,
+            Err(error) => {
+                return match self.restore_track_instrument_state(track, &before) {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(format!(
+                        "Instrument replacement failed ({error}); restoring the original container also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
         let after = match self.capture_track_instrument_state(track) {
             Ok(after) => after,
             Err(capture_error) => {
@@ -1344,6 +1369,9 @@ impl App {
         track: usize,
         target: &TrackInstrumentState,
     ) -> Result<(), String> {
+        if matches!(&target.source, TrackInstrumentSource::Rack { .. }) {
+            return self.restore_rack_instrument_container_state(track, target);
+        }
         let target_descriptor = match &target.source {
             TrackInstrumentSource::Custom { engine_id } => {
                 let retained = self
@@ -1368,6 +1396,7 @@ impl App {
                 }
                 crate::effects::EffectDescriptor::builtin_sampler()
             }
+            TrackInstrumentSource::Rack { .. } => unreachable!(),
         };
         self.state.validate_track_instrument_pattern_state(
             track,
@@ -1478,6 +1507,7 @@ impl App {
                     );
                 }
             }
+            TrackInstrumentSource::Rack { .. } => unreachable!(),
         }
         self.tracks[track] = target.display_name.clone();
         let descriptor = self.graph.instrument_descriptors[track].clone();
@@ -1538,6 +1568,97 @@ impl App {
         self.state
             .publish_macro_overrides(self.macro_engine.override_snapshot());
         self.push_instrument_defaults_for_track(track);
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    fn restore_rack_instrument_container_state(
+        &mut self,
+        track: usize,
+        target: &TrackInstrumentState,
+    ) -> Result<(), String> {
+        let TrackInstrumentSource::Rack { slots } = &target.source else {
+            return Err("Rack-container restore requires rack history state".to_string());
+        };
+        let target_rack = target.patterns.live.rack_track.as_ref()
+            .ok_or_else(|| "Rack history has no live rack state".to_string())?;
+        if target_rack.slots.len() != slots.len() {
+            return Err("Rack history slot identities do not match its rack state".to_string());
+        }
+        for (_, pattern) in &target.patterns.patterns {
+            if pattern.rack_track.as_ref().is_none_or(|rack| rack.slots.len() != slots.len()) {
+                return Err("Rack history topology differs between track patterns".to_string());
+            }
+        }
+        if self.graph.track_instrument_types.get(track) != Some(&crate::sequencer::InstrumentType::Rack) {
+            return Err("Rack-container history can currently replay only onto a rack track".to_string());
+        }
+
+        let mut restored_patterns = target.patterns.clone();
+        let clear_effect_runtime = |rack: &mut crate::sequencer::RackTrackSnapshot| {
+            for slot in &mut rack.slots {
+                for effect in &mut slot.effect_slots {
+                    effect.node_id = 0;
+                    effect.modulator_node_id = 0;
+                }
+            }
+        };
+        clear_effect_runtime(
+            restored_patterns.live.rack_track.as_mut()
+                .expect("live rack was validated"),
+        );
+        for (_, pattern) in &mut restored_patterns.patterns {
+            clear_effect_runtime(
+                pattern.rack_track.as_mut().expect("pattern rack was validated"),
+            );
+        }
+        let rack = restored_patterns.live.rack_track.clone()
+            .expect("live rack was validated");
+        self.graph_controller()
+            .replace_track_instrument_container_with_rack(track, rack, &target.display_name)?;
+        let empty_descriptor = EffectDescriptor::empty_custom_slot();
+        self.state.restore_track_instrument_pattern_state(
+            track,
+            &restored_patterns,
+            &empty_descriptor,
+            0,
+            0,
+        )?;
+        let bindings = (0..slots.len())
+            .map(|slot| self.rack_slot_live_binding(track, slot))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !self.state.sync_rack_slot_instrument_bindings_for_all_patterns(track, &bindings) {
+            return Err("Failed to restore rack instrument bindings across patterns".to_string());
+        }
+
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        self.device_registry.clear_rack_track(track_id);
+        for (slot_index, slot) in slots.iter().enumerate() {
+            self.device_registry.bind_rack_slot(track_id, slot_index, slot.id)?;
+            let current = self.capture_rack_effect_chain_state(track, slot_index, None)?;
+            self.restore_rack_effect_chain_state(track, slot_index, &current, &slot.effects)?;
+        }
+        self.tracks[track] = target.display_name.clone();
+        self.macro_engine
+            .restore_instrument_mappings_for_track(track, &target.macro_mappings)
+            .map_err(|error| format!("{error:?}"))?;
+        let state = std::sync::Arc::clone(&self.state);
+        let effect_descriptors = &self.graph.effect_descriptors;
+        let instrument_descriptors = &self.graph.instrument_descriptors;
+        let buses = &self.buses;
+        self.macro_engine.revalidate_mappings(|scope, target| {
+            super::projects::resolve_live_macro_target(
+                &state,
+                effect_descriptors,
+                instrument_descriptors,
+                buses,
+                scope,
+                target,
+            )
+        });
+        self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
+        self.push_all_restored_defaults();
         self.state.publish_scheduler_snapshot();
         Ok(())
     }

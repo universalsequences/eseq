@@ -1601,8 +1601,18 @@ impl App {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("Sound");
-        self.load_container_preset_onto_track(track, sound, fallback_name)?;
-        super::edit::commit_history_barrier(self);
+        if self.graph.track_instrument_types.get(track) == Some(&InstrumentType::Rack) {
+            let track_id = self.track_registry.id_at(track)
+                .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+            self.apply_recorded_instrument_binding_mutation(track, "Load Sound", |app| {
+                app.load_container_preset_onto_track(track, sound, fallback_name)?;
+                app.device_registry.clear_rack_track(track_id);
+                Ok(())
+            })?;
+        } else {
+            self.load_container_preset_onto_track(track, sound, fallback_name)?;
+            super::edit::commit_history_barrier(self);
+        }
         Ok(())
     }
 

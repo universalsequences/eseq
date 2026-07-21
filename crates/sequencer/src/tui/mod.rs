@@ -1304,6 +1304,25 @@ impl DeviceIdentityRegistry {
         Ok(())
     }
 
+    pub(crate) fn clear_rack_track(&mut self, track: crate::sequencer::TrackId) {
+        let removed = self.rack_slots.iter()
+            .filter(|((owner, _), _)| *owner == track)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        for (location, rack_slot) in removed {
+            self.rack_slots.remove(&location);
+            self.rack_slot_locations.remove(&rack_slot);
+            let effects = self.rack_audio_effects.iter()
+                .filter(|((owner, _), _)| *owner == rack_slot)
+                .map(|(effect_location, id)| (*effect_location, *id))
+                .collect::<Vec<_>>();
+            for (effect_location, effect_id) in effects {
+                self.rack_audio_effects.remove(&effect_location);
+                self.rack_audio_effect_locations.remove(&effect_id);
+            }
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.audio_effects.clear();
         self.audio_effect_locations.clear();

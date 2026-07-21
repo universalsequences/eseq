@@ -190,24 +190,27 @@ pub struct RackEffectChainPatch {
 }
 
 impl RackEffectChainPatch {
+    fn state_bytes(state: &RackEffectChainState) -> usize {
+        let source_bytes = state.instances.iter().map(|instance| match &instance.source {
+            super::fx_chain::RetainedEffectSource::NativeBuiltin { name } => name.capacity(),
+            super::fx_chain::RetainedEffectSource::Compiled { name, source, asset_base, .. } => {
+                name.capacity()
+                    + source.capacity()
+                    + asset_base.as_ref().map(|path| path.as_os_str().len()).unwrap_or(0)
+            }
+        }).sum::<usize>();
+        source_bytes
+            + state.instances.capacity() * std::mem::size_of::<EffectInstanceState>()
+            + state.patterns.patterns.capacity()
+                * std::mem::size_of::<(PatternId, crate::sequencer::RackSlotSnapshot)>()
+            + state.macros.patterns.capacity()
+                * std::mem::size_of::<(PatternId, Vec<crate::sequencer::RackMacro>)>()
+    }
+
     pub fn retained_bytes(&self) -> usize {
-        fn state_bytes(state: &RackEffectChainState) -> usize {
-            let source_bytes = state.instances.iter().map(|instance| match &instance.source {
-                super::fx_chain::RetainedEffectSource::NativeBuiltin { name } => name.capacity(),
-                super::fx_chain::RetainedEffectSource::Compiled { name, source, asset_base, .. } => {
-                    name.capacity()
-                        + source.capacity()
-                        + asset_base.as_ref().map(|path| path.as_os_str().len()).unwrap_or(0)
-                }
-            }).sum::<usize>();
-            source_bytes
-                + state.instances.capacity() * std::mem::size_of::<EffectInstanceState>()
-                + state.patterns.patterns.capacity()
-                    * std::mem::size_of::<(PatternId, crate::sequencer::RackSlotSnapshot)>()
-                + state.macros.patterns.capacity()
-                    * std::mem::size_of::<(PatternId, Vec<crate::sequencer::RackMacro>)>()
-        }
-        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+        std::mem::size_of::<Self>()
+            + Self::state_bytes(&self.before)
+            + Self::state_bytes(&self.after)
     }
 }
 
@@ -277,6 +280,15 @@ pub enum TrackInstrumentSource {
         sample_rate: u32,
         path: Option<PathBuf>,
     },
+    Rack {
+        slots: Vec<RackContainerSlotState>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct RackContainerSlotState {
+    pub id: RackSlotId,
+    pub effects: RackEffectChainState,
 }
 
 #[derive(Clone, Debug)]
@@ -303,6 +315,9 @@ impl InstrumentBindingPatch {
                     .as_ref()
                     .map(|path| path.as_os_str().len())
                     .unwrap_or(0),
+                TrackInstrumentSource::Rack { slots } => slots.iter()
+                    .map(|slot| RackEffectChainPatch::state_bytes(&slot.effects))
+                    .sum(),
             };
             source_bytes
                 + state.display_name.capacity()

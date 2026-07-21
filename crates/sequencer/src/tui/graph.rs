@@ -9714,6 +9714,123 @@ mod tests {
     }
 
     #[test]
+    fn loading_sound_over_rack_undoes_as_one_container_replacement() {
+        let graph = TestLiveGraph::new("sound-rack-replacement-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample_path = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample_path.to_path_buf()])
+            .expect("target rack should be created");
+        let filter_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "Filter")
+            .expect("target rack should accept Filter");
+        app.set_rack_slot_effect_param(0, 0, filter_slot, 2, 2_345.0)
+            .expect("target rack Filter should accept a cutoff value");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let original_rack_slot_id = app.device_registry.rack_slot(track_id, 0);
+        let original_effect_id = app.device_registry
+            .rack_audio_effect(original_rack_slot_id, filter_slot);
+
+        let ott = EffectDescriptor::builtin_ott();
+        let ott_snapshot = EffectSlotSnapshot::new_default(&ott, 0);
+        let sound = crate::project::ProjectSoundPreset {
+            version: crate::project::project_file_version(),
+            metadata: crate::project::ProjectSoundMetadata {
+                name: "Replacement Rack".to_string(),
+                tags: Vec::new(),
+                author: "test".to_string(),
+            },
+            track: crate::project::ProjectTrack {
+                id: crate::sequencer::TrackId(1),
+                color: None,
+                collapsed: false,
+                kind: crate::project::ProjectTrackKind::Rack {
+                    routing: crate::project::ProjectRackRouting::Broadcast,
+                    slots: (0..2).map(|slot| crate::project::ProjectRackTrackSlot {
+                        instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                        sample_path: Some(sample_path.to_string_lossy().into_owned()),
+                        sample_name: Some(format!("replacement-{}", slot + 1)),
+                        instrument_name: None,
+                    }).collect(),
+                },
+            },
+            rack: crate::project::ProjectRackTrackPattern {
+                macros: crate::project::default_project_rack_macros(),
+                routing: crate::project::ProjectRackRouting::Broadcast,
+                slots: (0..2).map(|slot| crate::project::ProjectRackSlotPattern {
+                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                    instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 4,
+                    param_plocks: Vec::new(),
+                    instrument_slot: crate::project::ProjectEffectSlot::default(),
+                    effect_slots: vec![crate::project::ProjectEffectSlot::from(&ott_snapshot)],
+                    custom_effects: vec![Some("builtin:OTT".to_string())],
+                    track_sound_state: crate::project::ProjectTrackSoundState::default(),
+                    sample_path: Some(sample_path.to_string_lossy().into_owned()),
+                    sample_name: Some(format!("replacement-{}", slot + 1)),
+                }).collect(),
+            },
+        };
+        let sound_path = std::env::temp_dir().join(format!(
+            "eseq-sound-rack-history-{}-{}.sound",
+            std::process::id(),
+            original_effect_id.0,
+        ));
+        std::fs::write(
+            &sound_path,
+            serde_json::to_string(&sound).expect("serialize replacement Sound"),
+        ).expect("write replacement Sound");
+        let _sound_guard = TestProjectFile(sound_path.clone());
+
+        app.load_sound_onto_track(0, &sound_path)
+            .expect("replacement Sound should load");
+        let replacement = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone().expect("replacement rack should be live");
+        assert_eq!(replacement.slots.len(), 2);
+        assert_eq!(replacement.slots[0].effect_descriptors[0].name, "OTT");
+        let replacement_rack_slot_id = app.device_registry.rack_slot(track_id, 0);
+        assert_ne!(replacement_rack_slot_id, original_rack_slot_id);
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone().expect("original rack should be restored");
+        assert_eq!(restored.slots[0].effect_descriptors[0].name, "Filter");
+        assert_eq!(restored.slots[0].effect_slots[0].defaults[2].to_bits(), 2_345.0_f32.to_bits());
+        assert_eq!(
+            app.device_registry.rack_slot_location(original_rack_slot_id),
+            Some((track_id, 0)),
+        );
+        assert_eq!(
+            app.device_registry.rack_audio_effect_location(original_effect_id),
+            Some((original_rack_slot_id, 0)),
+        );
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let redone = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone().expect("replacement rack should be restored on redo");
+        assert_eq!(redone.slots.len(), 2);
+        assert_eq!(redone.slots[0].effect_descriptors[0].name, "OTT");
+        assert_eq!(
+            app.device_registry.rack_slot_location(replacement_rack_slot_id),
+            Some((track_id, 0)),
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn sampler_to_custom_conversion_keeps_sampler_binding_when_engine_build_fails() {
         let graph = TestLiveGraph::new("sampler-to-custom-conversion-rollback-test");
         let manifest = test_instrument_manifest();
