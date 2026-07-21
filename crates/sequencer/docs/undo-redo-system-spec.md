@@ -2,7 +2,17 @@
 
 ## Status
 
-Proposed implementation specification.
+Implemented through Slice 3.
+
+- Slice 0 provides stable track identity, bounded linear history, barriers,
+  revision tracking, and global undo/redo shortcuts.
+- Slice 1 covers lossless step cells, bulk deletion/paste, drum lanes, and
+  piano-roll add/remove/move/resize/note changes.
+- Slice 2 covers pattern geometry, track-level p-locks, and variant stamp/clear.
+- Slice 3 covers track, mixer, routing, accumulator, base-note, master-volume,
+  and BPM edits with stable Track Pattern targets and gesture coalescing.
+- Recorded takes remain an explicit history barrier until Slice 7F; arming and
+  other performance-only controls remain outside authoring history.
 
 Related: `docs/racks-spec.md` (Amendment A: `FxChainHost`, rack-slot chains,
 rack macro banks), `docs/MACRO_MAPPING_SPEC.md`, `docs/instrument-swap-spec.md`.

@@ -1480,30 +1480,7 @@ impl TrackPatternData {
 
         let tp = &state.pattern.track_params[track];
         let snap = &self.track_params;
-        tp.gate.store(snap.gate, Ordering::Relaxed);
-        tp.set_attack_ms(snap.attack_ms);
-        tp.set_release_ms(snap.release_ms);
-        tp.set_swing(snap.swing);
-        tp.set_swing_resolution(snap.swing_resolution);
-        tp.set_num_steps(snap.num_steps);
-        tp.set_volume(snap.volume);
-        tp.set_pan(snap.pan);
-        tp.set_mute(snap.mute);
-        tp.set_solo(snap.solo);
-        tp.set_send(snap.send);
-        tp.set_output(snap.output.clone());
-        tp.set_sends(snap.sends.clone());
-        tp.polyphonic.store(snap.polyphonic, Ordering::Relaxed);
-        tp.set_max_polyphony(snap.max_polyphony);
-        tp.set_timebase(snap.timebase);
-        tp.set_accumulator_idx(snap.accumulator_idx);
-        tp.set_script_accumulator_name(snap.script_accumulator_name.clone());
-        tp.set_midi_fx_chain(snap.midi_fx_chain.clone());
-        tp.set_midi_fx_position(snap.midi_fx_position);
-        tp.set_accum_limit(snap.accum_limit);
-        tp.set_accum_mode(snap.accum_mode);
-        tp.set_fts_scale(snap.fts_scale);
-        tp.set_mute_group(snap.mute_group);
+        restore_track_params_snapshot(tp, snap);
 
         for (slot_idx, slot_snap) in self.effect_slots.iter().enumerate() {
             if slot_idx < state.pattern.effect_chains[track].len() {
@@ -3837,6 +3814,34 @@ fn capture_track_params_snapshot(track_params: &TrackParams) -> TrackParamsSnaps
     }
 }
 
+fn restore_track_params_snapshot(track_params: &TrackParams, snapshot: &TrackParamsSnapshot) {
+    track_params.gate.store(snapshot.gate, Ordering::Relaxed);
+    track_params.set_attack_ms(snapshot.attack_ms);
+    track_params.set_release_ms(snapshot.release_ms);
+    track_params.set_swing(snapshot.swing);
+    track_params.set_swing_resolution(snapshot.swing_resolution);
+    track_params.set_num_steps(snapshot.num_steps);
+    track_params.set_volume(snapshot.volume);
+    track_params.set_pan(snapshot.pan);
+    track_params.set_mute(snapshot.mute);
+    track_params.set_solo(snapshot.solo);
+    track_params.set_send(snapshot.send);
+    track_params.set_output(snapshot.output.clone());
+    track_params.set_sends(snapshot.sends.clone());
+    track_params.polyphonic.store(snapshot.polyphonic, Ordering::Relaxed);
+    track_params.set_max_polyphony(snapshot.max_polyphony);
+    track_params.set_timebase(snapshot.timebase);
+    track_params.set_accumulator_idx(snapshot.accumulator_idx);
+    track_params.set_script_accumulator_name(snapshot.script_accumulator_name.clone());
+    track_params.set_midi_fx_chain(snapshot.midi_fx_chain.clone());
+    track_params.set_midi_fx_position(snapshot.midi_fx_position);
+    track_params.set_accum_limit(snapshot.accum_limit);
+    track_params.set_accum_mode(snapshot.accum_mode);
+    track_params.set_fts_scale(snapshot.fts_scale);
+    track_params.set_mute_group(snapshot.mute_group);
+    track_params.set_global_transpose(snapshot.global_transpose);
+}
+
 impl SequencerState {
     pub fn capture_current_pattern_snapshot(
         &self,
@@ -5603,13 +5608,22 @@ impl SequencerState {
     /// otherwise per-scene, but a track group is a global concept — its members
     /// must reach the backing bus in every scene, or switching scenes would tear
     /// the group's routing apart (and a saved project would silently lose it).
-    pub fn set_track_output_in_all_track_patterns(&self, track: usize, output: TrackOutput) {
+    pub fn set_track_output_in_all_track_patterns(
+        &self,
+        track: usize,
+        output: TrackOutput,
+    ) -> bool {
         let mut scenes = self.pattern.scenes.lock().unwrap();
+        let mut changed = false;
         if let Some(pool) = scenes.track_pools.get_mut(track) {
             for data in pool.patterns.values_mut() {
-                data.track_params.output = output.clone();
+                if data.track_params.output != output {
+                    data.track_params.output = output.clone();
+                    changed = true;
+                }
             }
         }
+        changed
     }
 
     fn ensure_scene_bus_patterns_len_locked(
@@ -8747,6 +8761,99 @@ impl SequencerState {
             .ok_or_else(|| "Track Pattern target no longer exists".to_string())
     }
 
+    pub(crate) fn capture_pattern_track_params(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+    ) -> Result<TrackParamsSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .track_params
+                .get(track)
+                .map(capture_track_params_snapshot)
+                .ok_or_else(|| "live track target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .map(|data| data.track_params.clone())
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_track_params_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        snapshot: &TrackParamsSnapshot,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        data.track_params = snapshot.clone();
+        if is_effective {
+            let live = self
+                .pattern
+                .track_params
+                .get(track)
+                .ok_or_else(|| "live track target no longer exists".to_string())?;
+            restore_track_params_snapshot(live, snapshot);
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn capture_pattern_instrument_base_note_offset(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+    ) -> Result<f32, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .instrument_base_note_offsets
+                .get(track)
+                .map(|value| f32::from_bits(value.load(Ordering::Relaxed)))
+                .ok_or_else(|| "live track target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .map(|data| data.instrument_base_note_offset)
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_instrument_base_note_offset_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        value: f32,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        data.instrument_base_note_offset = value;
+        if is_effective {
+            self.pattern
+                .instrument_base_note_offsets
+                .get(track)
+                .ok_or_else(|| "live track target no longer exists".to_string())?
+                .store(value.to_bits(), Ordering::Relaxed);
+        }
+        Ok(is_effective)
+    }
+
     pub(crate) fn restore_pattern_num_steps_no_publish(
         &self,
         track: usize,
@@ -9041,6 +9148,18 @@ impl SequencerState {
     }
 
     pub fn clear_variant_locks_for_steps(&self, track: usize, steps: &[usize]) -> bool {
+        let changed = self.clear_variant_locks_for_steps_no_publish(track, steps);
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    pub fn clear_variant_locks_for_steps_no_publish(
+        &self,
+        track: usize,
+        steps: &[usize],
+    ) -> bool {
         if track >= self.pattern.instrument_slots.len() {
             return false;
         }
@@ -9050,7 +9169,6 @@ impl SequencerState {
         }
         if changed {
             let _ = self.reconcile_plock_variant_registry_for_track(track);
-            self.publish_scheduler_snapshot();
         }
         changed
     }
@@ -9061,13 +9179,43 @@ impl SequencerState {
         key: &PlockVariantKey,
         steps: &[usize],
     ) -> bool {
+        let changed = self.stamp_variant_key_to_steps_no_publish(track, key, steps);
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    pub fn stamp_variant_key_to_steps_no_publish(
+        &self,
+        track: usize,
+        key: &PlockVariantKey,
+        steps: &[usize],
+    ) -> bool {
         let Some(source_step) = self.find_step_with_variant_key(track, key) else {
             return false;
         };
-        self.copy_variant_locks_from_step_to_steps(track, source_step, steps)
+        self.copy_variant_locks_from_step_to_steps_no_publish(track, source_step, steps)
     }
 
     pub fn copy_variant_locks_from_step_to_steps(
+        &self,
+        track: usize,
+        source_step: usize,
+        steps: &[usize],
+    ) -> bool {
+        let changed = self.copy_variant_locks_from_step_to_steps_no_publish(
+            track,
+            source_step,
+            steps,
+        );
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    pub(crate) fn copy_variant_locks_from_step_to_steps_no_publish(
         &self,
         track: usize,
         source_step: usize,
@@ -9082,7 +9230,6 @@ impl SequencerState {
         }
         if changed {
             let _ = self.reconcile_plock_variant_registry_for_track(track);
-            self.publish_scheduler_snapshot();
         }
         changed
     }

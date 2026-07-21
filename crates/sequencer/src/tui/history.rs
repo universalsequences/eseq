@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::plock_variants::PlockVariantRegistry;
-use crate::sequencer::{StepCellSnapshot, StepSlotPlocks, TrackPatternId};
+use crate::sequencer::{StepCellSnapshot, StepSlotPlocks, TrackParamsSnapshot, TrackPatternId};
 
 pub const DEFAULT_HISTORY_ENTRY_LIMIT: usize = 256;
 pub const DEFAULT_HISTORY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
+pub const FALLBACK_GESTURE_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplyMode {
@@ -27,6 +29,65 @@ pub enum HistoryPolicy {
 pub enum EditPatch {
     StepCells(StepCellsPatch),
     PatternGeometry(PatternGeometryPatch),
+    TrackParams(TrackParamsPatch),
+    TrackParamsBatch(TrackParamsBatchPatch),
+    TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackParamsBatchPatch {
+    pub tracks: Vec<TrackParamsPatch>,
+}
+
+impl TrackParamsBatchPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.tracks.capacity() * std::mem::size_of::<TrackParamsPatch>()
+            + self
+                .tracks
+                .iter()
+                .map(|patch| {
+                    patch
+                        .retained_bytes()
+                        .saturating_sub(std::mem::size_of::<TrackParamsPatch>())
+                })
+                .sum::<usize>()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackParamsPatch {
+    pub target: TrackPatternId,
+    pub before: TrackParamsSnapshot,
+    pub after: TrackParamsSnapshot,
+    pub instrument_base_note_offset_before: u32,
+    pub instrument_base_note_offset_after: u32,
+}
+
+impl TrackParamsPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + track_params_heap_bytes(&self.before)
+            + track_params_heap_bytes(&self.after)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportAuthoringSnapshot {
+    pub bpm: u32,
+    pub master_volume_bits: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct TransportParamsPatch {
+    pub before: TransportAuthoringSnapshot,
+    pub after: TransportAuthoringSnapshot,
+}
+
+impl TransportParamsPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +154,13 @@ pub struct ActiveGesture {
     pub merge_key: MergeKey,
 }
 
+struct PendingGesture<P> {
+    label: String,
+    merge_key: MergeKey,
+    patch: P,
+    retained_bytes: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryBudget {
     pub max_entries: usize,
@@ -144,6 +212,8 @@ pub struct UndoManager<P> {
     retained_bytes: usize,
     budget: HistoryBudget,
     active_gesture: Option<ActiveGesture>,
+    active_gesture_updated_at: Option<Instant>,
+    pending_gesture: Option<PendingGesture<P>>,
     newest_entry_exceeds_byte_budget: bool,
 }
 
@@ -164,6 +234,8 @@ impl<P> UndoManager<P> {
             retained_bytes: 0,
             budget,
             active_gesture: None,
+            active_gesture_updated_at: None,
+            pending_gesture: None,
             newest_entry_exceeds_byte_budget: false,
         }
     }
@@ -201,7 +273,7 @@ impl<P> UndoManager<P> {
     }
 
     pub fn is_at_saved_revision(&self) -> bool {
-        self.saved_revision == Some(self.current_revision)
+        self.pending_gesture.is_none() && self.saved_revision == Some(self.current_revision)
     }
 
     pub fn begin_gesture(&mut self, gesture: ActiveGesture) -> Result<(), ActiveGesture> {
@@ -209,6 +281,7 @@ impl<P> UndoManager<P> {
             return Err(gesture);
         }
         self.active_gesture = Some(gesture);
+        self.active_gesture_updated_at = Some(Instant::now());
         Ok(())
     }
 
@@ -216,7 +289,83 @@ impl<P> UndoManager<P> {
         if self.active_gesture.as_ref().map(|gesture| gesture.id) != Some(id) {
             return None;
         }
-        self.active_gesture.take()
+        self.finish_active_gesture()
+    }
+
+    pub fn finish_active_gesture(&mut self) -> Option<ActiveGesture> {
+        self.active_gesture_updated_at = None;
+        let gesture = self.active_gesture.take();
+        if let Some(pending) = self.pending_gesture.take() {
+            self.commit(
+                pending.label,
+                Some(pending.merge_key),
+                pending.patch,
+                pending.retained_bytes,
+            );
+        }
+        gesture
+    }
+
+    pub fn finish_active_gesture_if_idle(&mut self, idle_for: Duration) -> Option<ActiveGesture> {
+        if !self.active_gesture_is_idle(idle_for) {
+            return None;
+        }
+        self.finish_active_gesture()
+    }
+
+    pub fn active_gesture_is_idle(&self, idle_for: Duration) -> bool {
+        self.active_gesture_updated_at
+            .is_some_and(|updated| updated.elapsed() >= idle_for)
+    }
+
+    pub fn active_gesture_patch(&self, merge_key: &MergeKey) -> Option<&P> {
+        if self.active_gesture.as_ref().map(|gesture| &gesture.merge_key) != Some(merge_key) {
+            return None;
+        }
+        self.pending_gesture
+            .as_ref()
+            .filter(|pending| &pending.merge_key == merge_key)
+            .map(|pending| &pending.patch)
+    }
+
+    pub fn stage_active_gesture(
+        &mut self,
+        label: impl Into<String>,
+        merge_key: &MergeKey,
+        patch: P,
+        retained_bytes: usize,
+    ) -> Option<HistoryMove> {
+        if self.active_gesture.as_ref().map(|gesture| &gesture.merge_key) != Some(merge_key) {
+            return None;
+        }
+        let label = label.into();
+        self.pending_gesture = Some(PendingGesture {
+            label: label.clone(),
+            merge_key: merge_key.clone(),
+            patch,
+            retained_bytes,
+        });
+        self.active_gesture_updated_at = Some(Instant::now());
+        Some(HistoryMove {
+            label,
+            revision: self.current_revision,
+        })
+    }
+
+    pub fn discard_active_gesture_entry(&mut self, merge_key: &MergeKey) -> bool {
+        if self.active_gesture.as_ref().map(|gesture| &gesture.merge_key) != Some(merge_key)
+            || self
+                .pending_gesture
+                .as_ref()
+                .map(|pending| &pending.merge_key)
+                != Some(merge_key)
+        {
+            return false;
+        }
+        self.pending_gesture = None;
+        self.active_gesture = None;
+        self.active_gesture_updated_at = None;
+        true
     }
 
     pub fn commit(
@@ -291,6 +440,8 @@ impl<P> UndoManager<P> {
     pub fn barrier(&mut self) {
         self.clear_entries();
         self.active_gesture = None;
+        self.active_gesture_updated_at = None;
+        self.pending_gesture = None;
         self.current_revision = self.take_revision();
     }
 
@@ -301,6 +452,8 @@ impl<P> UndoManager<P> {
         self.next_revision = 1;
         self.saved_revision = None;
         self.active_gesture = None;
+        self.active_gesture_updated_at = None;
+        self.pending_gesture = None;
     }
 
     fn take_revision(&mut self) -> u64 {
@@ -471,6 +624,21 @@ fn slot_plocks_heap_bytes(plocks: &StepSlotPlocks) -> usize {
             .sum::<usize>()
 }
 
+fn track_params_heap_bytes(snapshot: &TrackParamsSnapshot) -> usize {
+    snapshot.sends.capacity() * std::mem::size_of::<crate::sequencer::TrackSendSnapshot>()
+        + snapshot
+            .script_accumulator_name
+            .as_ref()
+            .map(String::capacity)
+            .unwrap_or(0)
+        + snapshot.midi_fx_chain.capacity() * std::mem::size_of::<String>()
+        + snapshot
+            .midi_fx_chain
+            .iter()
+            .map(String::capacity)
+            .sum::<usize>()
+}
+
 fn step_snapshot_heap_bytes(snapshot: &StepCellSnapshot) -> usize {
     let slot_slice_bytes = |slots: &Vec<StepSlotPlocks>| {
         slots.capacity() * std::mem::size_of::<StepSlotPlocks>()
@@ -588,6 +756,55 @@ mod tests {
         history.reset();
         assert_eq!(history.current_revision(), 0);
         assert_eq!(history.saved_revision(), None);
+    }
+
+    #[test]
+    fn fallback_idle_boundary_finishes_sources_without_end_events() {
+        let mut history = manager(8, 1024);
+        history
+            .begin_gesture(ActiveGesture {
+                id: GestureId(9),
+                merge_key: MergeKey::new("wheel-volume"),
+            })
+            .expect("begin wheel gesture");
+        assert!(history
+            .finish_active_gesture_if_idle(Duration::ZERO)
+            .is_some());
+        assert_eq!(history.active_gesture(), None);
+    }
+
+    #[test]
+    fn staged_gesture_commits_once_at_end_and_marks_pending_state_dirty() {
+        let mut history = manager(8, 1024);
+        let key = MergeKey::new("volume-drag");
+        history
+            .begin_gesture(ActiveGesture {
+                id: GestureId(10),
+                merge_key: key.clone(),
+            })
+            .expect("begin volume gesture");
+        assert!(history
+            .stage_active_gesture("Volume", &key, 1, 8)
+            .is_some());
+        assert!(history
+            .stage_active_gesture("Volume", &key, 2, 8)
+            .is_some());
+        assert_eq!(history.undo_len(), 0);
+        history.finish_active_gesture();
+        assert_eq!(history.undo_len(), 1);
+        history.mark_saved();
+        assert!(history.is_at_saved_revision());
+
+        history
+            .begin_gesture(ActiveGesture {
+                id: GestureId(11),
+                merge_key: key.clone(),
+            })
+            .expect("begin second volume gesture");
+        history.stage_active_gesture("Volume", &key, 3, 8);
+        assert!(!history.is_at_saved_revision());
+        history.finish_active_gesture();
+        assert_eq!(history.undo_len(), 2);
     }
 
     #[test]

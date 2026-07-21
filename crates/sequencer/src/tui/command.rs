@@ -343,10 +343,20 @@ pub enum AppCommand {
     ToggleTrackPolyphonic {
         track: usize,
     },
+    ToggleTrackMute {
+        track: usize,
+    },
+    ToggleTrackSolo {
+        track: usize,
+    },
 
     AdjustTrackMaxPolyphony {
         track: usize,
         delta: isize,
+    },
+    SetTrackMaxPolyphony {
+        track: usize,
+        value: usize,
     },
 
     SetTrackAttack {
@@ -494,6 +504,7 @@ pub enum AppCommand {
         track: usize,
         idx: usize,
         default_limit: Option<f32>,
+        script_name: Option<String>,
     },
     SetTrackAccumLimit {
         track: usize,
@@ -506,6 +517,14 @@ pub enum AppCommand {
     SetTrackAccumMode {
         track: usize,
         mode: u32,
+    },
+    SetTrackMuteGroup {
+        track: usize,
+        group: u8,
+    },
+    SetTrackGlobalTranspose {
+        track: usize,
+        enabled: bool,
     },
 
     // ── Effect params ─────────────────────────────────────────────────────────
@@ -791,7 +810,6 @@ pub enum AppCommand {
 
 /// Exhaustive staged history classification for every command intent.
 ///
-/// `Record` is restricted to the lossless step-cell command family in Slice 1.
 /// Unsupported authoring commands remain barriers until their patch family is
 /// implemented. Live macro gestures and transport playback are performance
 /// actions and never affect authoring history.
@@ -823,44 +841,80 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackNumSteps { .. }
         | AppCommand::AdjustTrackNumSteps { .. } => HistoryPolicy::Record,
 
-        AppCommand::MacroSetValue { .. }
-        | AppCommand::MacroRelease { .. }
-        | AppCommand::ScenePushBegin { .. }
-        | AppCommand::ScenePushSetValue { .. }
-        | AppCommand::ScenePushEnd
-        | AppCommand::TogglePlay => HistoryPolicy::Ignore,
-
         AppCommand::ToggleTrackGate { .. }
         | AppCommand::ToggleTrackPolyphonic { .. }
-        | AppCommand::AdjustTrackMaxPolyphony { .. }
-        | AppCommand::SetTrackAttack { .. }
-        | AppCommand::AdjustTrackAttack { .. }
-        | AppCommand::SetTrackRelease { .. }
-        | AppCommand::AdjustTrackRelease { .. }
-        | AppCommand::SetTrackSwing { .. }
-        | AppCommand::AdjustTrackSwing { .. }
+        | AppCommand::ToggleTrackMute { .. }
+        | AppCommand::ToggleTrackSolo { .. }
         | AppCommand::SetTrackSwingResolution { .. }
         | AppCommand::NextTrackSwingResolution { .. }
         | AppCommand::PrevTrackSwingResolution { .. }
-        | AppCommand::SetTrackVolume { .. }
-        | AppCommand::AdjustTrackVolume { .. }
-        | AppCommand::SetTrackPan { .. }
-        | AppCommand::AdjustTrackPan { .. }
-        | AppCommand::SetTrackSend { .. }
-        | AppCommand::AdjustTrackSend { .. }
         | AppCommand::SetTrackOutput { .. }
         | AppCommand::SetTrackSends { .. }
-        | AppCommand::SetMasterVolume { .. }
-        | AppCommand::AdjustMasterVolume { .. }
         | AppCommand::SetTrackTimebase { .. }
         | AppCommand::NextTrackTimebase { .. }
         | AppCommand::PrevTrackTimebase { .. }
         | AppCommand::SetTrackFtsScale { .. }
         | AppCommand::SetTrackAccumIdx { .. }
-        | AppCommand::SetTrackAccumLimit { .. }
-        | AppCommand::AdjustTrackAccumLimit { .. }
         | AppCommand::SetTrackAccumMode { .. }
-        | AppCommand::SetEffectParam { .. }
+        | AppCommand::SetTrackMuteGroup { .. }
+        | AppCommand::SetTrackGlobalTranspose { .. } => HistoryPolicy::Record,
+
+        AppCommand::AdjustTrackMaxPolyphony { track, .. }
+        | AppCommand::SetTrackMaxPolyphony { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:max-polyphony")),
+        ),
+        AppCommand::SetTrackAttack { track, .. } | AppCommand::AdjustTrackAttack { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:attack"
+            )))
+        }
+        AppCommand::SetTrackRelease { track, .. }
+        | AppCommand::AdjustTrackRelease { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:release")),
+        ),
+        AppCommand::SetTrackSwing { track, .. } | AppCommand::AdjustTrackSwing { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:swing"
+            )))
+        }
+        AppCommand::SetTrackVolume { track, .. } | AppCommand::AdjustTrackVolume { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:volume"
+            )))
+        }
+        AppCommand::SetTrackPan { track, .. } | AppCommand::AdjustTrackPan { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:pan"
+            )))
+        }
+        AppCommand::SetTrackSend { track, .. } | AppCommand::AdjustTrackSend { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:send"
+            )))
+        }
+        AppCommand::SetTrackAccumLimit { track, .. }
+        | AppCommand::AdjustTrackAccumLimit { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:accum-limit")),
+        ),
+        AppCommand::SetInstrumentBaseNoteOffset { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:base-note")),
+        ),
+        AppCommand::SetMasterVolume { .. } | AppCommand::AdjustMasterVolume { .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new("transport:master-volume"))
+        }
+        AppCommand::SetBpm { .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new("transport:bpm"))
+        }
+
+        AppCommand::MacroSetValue { .. }
+        | AppCommand::MacroRelease { .. }
+        | AppCommand::ScenePushBegin { .. }
+        | AppCommand::ScenePushSetValue { .. }
+        | AppCommand::ScenePushEnd
+        | AppCommand::TogglePlay
+        | AppCommand::AdjustRecordQuantizeThresh { .. } => HistoryPolicy::Ignore,
+
+        AppCommand::SetEffectParam { .. }
         | AppCommand::SetEffectPlock { .. }
         | AppCommand::SetEffectPlockMulti { .. }
         | AppCommand::SetInstrumentParam { .. }
@@ -874,7 +928,6 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::ClearInstrumentKeyLockVariantsForNotes { .. }
         | AppCommand::SetInstrumentTensorCell { .. }
         | AppCommand::SetInstrumentTensorPlockCellMulti { .. }
-        | AppCommand::SetInstrumentBaseNoteOffset { .. }
         | AppCommand::SetRackSlotGain { .. }
         | AppCommand::SetRackSlotPan { .. }
         | AppCommand::SetRackSlotMute { .. }
@@ -896,9 +949,7 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::MacroMapParam { .. }
         | AppCommand::MacroSetRange { .. }
         | AppCommand::MacroSetCurve { .. }
-        | AppCommand::MacroUnmap { .. }
-        | AppCommand::SetBpm { .. }
-        | AppCommand::AdjustRecordQuantizeThresh { .. } => HistoryPolicy::Barrier,
+        | AppCommand::MacroUnmap { .. } => HistoryPolicy::Barrier,
     }
 }
 
@@ -1046,6 +1097,24 @@ mod tests {
         );
         assert_eq!(
             history_policy(&AppCommand::TogglePlay),
+            HistoryPolicy::Ignore
+        );
+        assert!(matches!(
+            history_policy(&AppCommand::SetTrackVolume {
+                track: 0,
+                value: 0.75,
+            }),
+            HistoryPolicy::Coalesce(_)
+        ));
+        assert_eq!(
+            history_policy(&AppCommand::SetTrackTimebase {
+                track: 0,
+                timebase: Timebase::Eighth,
+            }),
+            HistoryPolicy::Record
+        );
+        assert_eq!(
+            history_policy(&AppCommand::AdjustRecordQuantizeThresh { delta: 0.1 }),
             HistoryPolicy::Ignore
         );
     }
@@ -2492,10 +2561,24 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.pattern.track_params[track].toggle_polyphonic();
         }
 
+        AppCommand::ToggleTrackMute { track } => {
+            app.state.pattern.track_params[track].toggle_mute();
+            app.push_track_mute(track);
+        }
+
+        AppCommand::ToggleTrackSolo { track } => {
+            app.state.pattern.track_params[track].toggle_solo();
+            app.push_track_solo_mutes();
+        }
+
         AppCommand::AdjustTrackMaxPolyphony { track, delta } => {
             let tp = &app.state.pattern.track_params[track];
             let cur = tp.get_max_polyphony() as isize;
             tp.set_max_polyphony((cur + delta).max(1) as usize);
+        }
+
+        AppCommand::SetTrackMaxPolyphony { track, value } => {
+            app.state.pattern.track_params[track].set_max_polyphony(value);
         }
 
         AppCommand::SetTrackAttack { track, ms } => {
@@ -2675,11 +2758,14 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
             track,
             idx,
             default_limit,
+            script_name,
         } => {
             app.state.pattern.track_params[track].set_accumulator_idx(idx);
+            app.state.pattern.track_params[track].set_script_accumulator_name(script_name);
             if let Some(limit) = default_limit {
                 app.state.pattern.track_params[track].set_accum_limit(limit);
             }
+            app.state.request_accumulator_reset(track);
         }
 
         AppCommand::SetTrackAccumLimit { track, value } => {
@@ -2693,6 +2779,14 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
 
         AppCommand::SetTrackAccumMode { track, mode } => {
             app.state.pattern.track_params[track].set_accum_mode(mode);
+        }
+
+        AppCommand::SetTrackMuteGroup { track, group } => {
+            app.state.pattern.track_params[track].set_mute_group(group);
+        }
+
+        AppCommand::SetTrackGlobalTranspose { track, enabled } => {
+            app.state.pattern.track_params[track].set_global_transpose(enabled);
         }
 
         // ── Effect params ─────────────────────────────────────────────────

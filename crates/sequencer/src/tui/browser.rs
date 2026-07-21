@@ -734,6 +734,7 @@ impl App {
         self.state.publish_scheduler_snapshot();
         let engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
         self.set_track_sound_state(track, engine_id, Some(preset.name.clone()), false);
+        super::edit::commit_history_barrier(self);
         self.editor.status_message =
             Some((format!("Loaded preset '{}'", preset.name), Instant::now()));
     }

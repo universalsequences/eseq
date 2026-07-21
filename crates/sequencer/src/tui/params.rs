@@ -785,6 +785,7 @@ impl App {
                                         track,
                                         idx: self.ui.dropdown_cursor,
                                         default_limit,
+                                        script_name: None,
                                     },
                                 );
                             }

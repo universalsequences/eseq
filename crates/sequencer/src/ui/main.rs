@@ -1543,6 +1543,114 @@ fn apply_slice2_history_host_command(
         .map_err(|error| format!("could not apply Slice 2 edit: {error:?}"))
 }
 
+fn apply_slice3_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, Option<usize>), String> {
+    let Value::Map(map) = payload else {
+        return Err("Slice 3 edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "Slice 3 edit operation was missing".to_string())?;
+    let value = || {
+        map_number(map, "value")
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| "Slice 3 edit value was invalid".to_string())
+    };
+    let track = map_usize(map, "track");
+    let track_required = || track.ok_or_else(|| "Slice 3 edit track was invalid".to_string());
+    let command = match op.as_str() {
+        "volume" => tui::AppCommand::SetTrackVolume {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "pan" => tui::AppCommand::SetTrackPan {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "send" => tui::AppCommand::SetTrackSend {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "attack" => tui::AppCommand::SetTrackAttack {
+            track: track_required()?,
+            ms: value()? as f32,
+        },
+        "release" => tui::AppCommand::SetTrackRelease {
+            track: track_required()?,
+            ms: value()? as f32,
+        },
+        "swing" => tui::AppCommand::SetTrackSwing {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "toggle-gate" => tui::AppCommand::ToggleTrackGate {
+            track: track_required()?,
+        },
+        "toggle-poly" => tui::AppCommand::ToggleTrackPolyphonic {
+            track: track_required()?,
+        },
+        "toggle-mute" => tui::AppCommand::ToggleTrackMute {
+            track: track_required()?,
+        },
+        "toggle-solo" => tui::AppCommand::ToggleTrackSolo {
+            track: track_required()?,
+        },
+        "max-polyphony" => tui::AppCommand::SetTrackMaxPolyphony {
+            track: track_required()?,
+            value: value()?.round().max(1.0) as usize,
+        },
+        "swing-resolution" => tui::AppCommand::SetTrackSwingResolution {
+            track: track_required()?,
+            resolution: SwingResolution::from_index(value()? as u32),
+        },
+        "timebase" => tui::AppCommand::SetTrackTimebase {
+            track: track_required()?,
+            timebase: Timebase::from_index(value()? as u32),
+        },
+        "fts" => tui::AppCommand::SetTrackFtsScale {
+            track: track_required()?,
+            scale_idx: value()? as usize,
+        },
+        "accumulator" => tui::AppCommand::SetTrackAccumIdx {
+            track: track_required()?,
+            idx: value()? as usize,
+            default_limit: map_number(map, "default-limit").map(|value| value as f32),
+            script_name: map_string(map, "script-name"),
+        },
+        "accum-limit" => tui::AppCommand::SetTrackAccumLimit {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "accum-mode" => tui::AppCommand::SetTrackAccumMode {
+            track: track_required()?,
+            mode: value()? as u32,
+        },
+        "mute-group" => tui::AppCommand::SetTrackMuteGroup {
+            track: track_required()?,
+            group: value()?.round().clamp(0.0, 8.0) as u8,
+        },
+        "global-transpose" => tui::AppCommand::SetTrackGlobalTranspose {
+            track: track_required()?,
+            enabled: value()? != 0.0,
+        },
+        "base-note" => tui::AppCommand::SetInstrumentBaseNoteOffset {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "master-volume" => tui::AppCommand::SetMasterVolume {
+            value: value()? as f32,
+        },
+        "bpm" => tui::AppCommand::SetBpm {
+            bpm: value()?.round() as u32,
+        },
+        _ => return Err(format!("unknown Slice 3 edit operation {op}")),
+    };
+    tui::try_apply_command(app, command)
+        .map(|outcome| (outcome, track))
+        .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum DrumLaneHistoryAction {
     Toggle {
@@ -4760,7 +4868,8 @@ mod tests {
     use super::{
         apply_drum_lane_history_host_command, apply_piano_roll_gesture_update,
         apply_piano_roll_history_host_command,
-        apply_selected_steps_delete, apply_toggle_step_host_command,
+        apply_selected_steps_delete, apply_slice3_history_host_command,
+        apply_toggle_step_host_command,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
         key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
@@ -4819,6 +4928,29 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn slice3_host_action_enters_track_parameter_history() {
+        let (state, mut app) = history_test_app();
+        let before = state.pattern.track_params[0].get_volume();
+        let payload = history_value_map([
+            ("op", Value::Keyword("volume".to_string())),
+            ("track", Value::Number(0.0)),
+            ("value", Value::Number(0.25)),
+        ]);
+
+        let (outcome, track) = apply_slice3_history_host_command(&mut app, &payload)
+            .expect("apply Slice 3 host action");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(track, Some(0));
+        sequencer::tui::edit::finish_active_gesture(&mut app);
+        assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), 0.25f32.to_bits());
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), before.to_bits());
     }
 
     #[test]
@@ -8079,6 +8211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("metal_seq: entering event loop");
     let mut ui_loop_stats = UiLoopStats::new();
+    let mut pointer_is_down = false;
 
     loop {
         let mut pointer_released_this_loop = false;
@@ -8304,6 +8437,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 BackendEvent::Terminal(Event::Key(raw_key)) => {
+                    if raw_key.kind == crossterm::event::KeyEventKind::Release {
+                        tui::edit::finish_active_gesture(&mut app);
+                    }
                     if editor.active_buffer().name == "*sample-import*" {
                         let key = normalize_command_shortcuts(raw_key);
                         if let Some(session) = sample_import_session.as_mut() {
@@ -8347,6 +8483,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     if raw_key.kind == crossterm::event::KeyEventKind::Press {
+                        if raw_key.code == crossterm::event::KeyCode::Esc
+                            && raw_key.modifiers == crossterm::event::KeyModifiers::NONE
+                            && app.history.active_gesture().is_some()
+                        {
+                            match tui::edit::cancel_active_gesture(&mut app) {
+                                Ok(true) => editor.show_transient_message("Parameter edit canceled"),
+                                Ok(false) => {}
+                                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                                    "Could not cancel parameter edit: {error:?}"
+                                ))),
+                            }
+                            pending_drag = None;
+                            pointer_is_down = false;
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            ui_loop_stats.note_event(event_started.elapsed());
+                            continue;
+                        }
                         if let Some(gesture) = piano_roll_history_gesture.take() {
                             let track = gesture.track;
                             let cancel = raw_key.code == crossterm::event::KeyCode::Esc
@@ -8546,6 +8699,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 BackendEvent::Terminal(Event::Mouse(mouse)) => {
+                    if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
+                        pointer_is_down = true;
+                    }
                     let (precise_col, precise_row) = backend
                         .take_last_precise_mouse()
                         .unwrap_or((mouse.column as f32, mouse.row as f32));
@@ -8558,6 +8714,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_)) {
                             pending_drag = None;
                             pointer_released_this_loop = true;
+                            pointer_is_down = false;
                         }
                         editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                         backend.set_widget_cursor(editor.widget_cursor());
@@ -8671,6 +8828,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     MacroHostCommandOutcome::NotMacro => {}
                 }
                 match name.as_str() {
+                    "unsupported-authoring-history-barrier" => {
+                        let label = match payload {
+                            Value::String(label) => label,
+                            _ => "This edit".to_string(),
+                        };
+                        let cleared = app.history.undo_len() + app.history.redo_len();
+                        tui::edit::commit_history_barrier(&mut app);
+                        if cleared > 0 {
+                            editor.show_transient_message(format!(
+                                "Undo history cleared: {label} are not undoable yet"
+                            ));
+                        }
+                    }
                     "piano-roll-gesture-update" => {
                         match apply_piano_roll_gesture_update(
                             &mut app,
@@ -8954,6 +9124,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Slice 2 edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "slice3-history-action" => {
+                        match apply_slice3_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                if let Some(track) = track {
+                                    ui_invalidations.push(UiInvalidation::Pattern(
+                                        PatternInvalidation::WholeTrack { track },
+                                    ));
+                                }
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Slice 3 edit was applied without history".to_string(),
                                 ));
                             }
                             Err(error) => editor.handle_host_event(HostEvent::Error(error)),
@@ -15677,21 +15869,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let track = current_track.load(Ordering::Relaxed);
                             let is_clear = name == "clear-step-variant-locks"
                                 || label.as_deref() == Some("def");
-                            let changed = if is_clear {
-                                state.clear_variant_locks_for_steps(track, &steps)
-                            } else if let Some(label) = label {
+                            let assignment = label.as_ref().and_then(|label| {
                                 state
                                     .plock_variant_registry_snapshot(track)
-                                    .assignment_for_label(&label)
-                                    .is_some_and(|assignment| {
-                                        state.stamp_variant_key_to_steps(
+                                    .assignment_for_label(label)
+                                    .map(|assignment| assignment.key.clone())
+                            });
+                            let outcome = tui::edit::apply_recorded_step_mutation(
+                                &mut app,
+                                track,
+                                &steps,
+                                if is_clear {
+                                    "Clear step variant locks"
+                                } else {
+                                    "Stamp step variant"
+                                },
+                                |app| {
+                                    if is_clear {
+                                        app.state.clear_variant_locks_for_steps_no_publish(
                                             track,
-                                            &assignment.key,
                                             &steps,
-                                        )
-                                    })
-                            } else {
-                                false
+                                        );
+                                    } else if let Some(key) = &assignment {
+                                        app.state.stamp_variant_key_to_steps_no_publish(
+                                            track,
+                                            key,
+                                            &steps,
+                                        );
+                                    }
+                                    Ok(())
+                                },
+                            );
+                            let changed = match outcome {
+                                Ok(tui::edit::EditOutcome::Applied(_)) => true,
+                                Ok(tui::edit::EditOutcome::NoOp) => false,
+                                Ok(tui::edit::EditOutcome::AppliedUnrecorded) => {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        "Variant edit was applied without history".to_string(),
+                                    ));
+                                    false
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Could not apply variant edit: {error:?}"
+                                    )));
+                                    false
+                                }
                             };
                             if changed {
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -20257,6 +20480,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if pointer_released_this_loop && rack_control_snapshot_dirty {
             state.publish_scheduler_snapshot();
             rack_control_snapshot_dirty = false;
+        }
+        if pointer_released_this_loop {
+            tui::edit::finish_active_gesture(&mut app);
+        } else if !pointer_is_down {
+            tui::edit::finish_active_gesture_if_idle(&mut app);
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 

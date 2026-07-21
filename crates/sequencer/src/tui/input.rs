@@ -33,6 +33,12 @@ fn primary_undo_modifier(modifiers: KeyModifiers) -> bool {
     }
 }
 
+fn apply_track_param_batch(app: &mut App, commands: Vec<AppCommand>) {
+    if let Err(error) = super::edit::apply_recorded_track_params_batch(app, &commands) {
+        app.editor.status_message = Some((format!("Command failed: {error:?}"), Instant::now()));
+    }
+}
+
 fn sequencer_history_shortcut(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -55,6 +61,9 @@ impl App {
             }
         }
         self.tick_control_hooks();
+        if self.ui.param_mouse_drag.is_none() {
+            super::edit::finish_active_gesture_if_idle(self);
+        }
         self.poll_agent_request();
         self.reclaim_applied_effect_leases();
 
@@ -133,6 +142,7 @@ impl App {
                 Event::Key(key) => {
                     // Handle key release for note-off (armed keyboard playing)
                     if key.kind == KeyEventKind::Release {
+                        super::edit::finish_active_gesture(self);
                         if self.any_track_armed() {
                             if let KeyCode::Char(c) = key.code {
                                 self.handle_note_release(c);
@@ -141,6 +151,16 @@ impl App {
                         return Ok(());
                     }
                     if key.kind != KeyEventKind::Press {
+                        return Ok(());
+                    }
+                    if key.code == KeyCode::Esc && self.history.active_gesture().is_some() {
+                        if let Err(error) = super::edit::cancel_active_gesture(self) {
+                            self.editor.status_message = Some((
+                                format!("Could not cancel parameter edit: {error:?}"),
+                                Instant::now(),
+                            ));
+                        }
+                        self.ui.param_mouse_drag = None;
                         return Ok(());
                     }
                     // Tab/BackTab: always exit current mode and cycle region
@@ -195,6 +215,7 @@ impl App {
                         self.handle_mouse_drag(mouse.column, mouse.row, mouse.modifiers);
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
+                        super::edit::finish_active_gesture(self);
                         self.ui.param_mouse_drag = None;
                         self.ui.track_drag_anchor = None;
                         self.ui.step_drag_anchor = None;
@@ -971,16 +992,17 @@ impl App {
                         let (lo, hi) = self.track_selected_range();
                         idx >= lo && idx <= hi
                     };
-                    if apply_bulk {
-                        self.for_each_selected_track(|app, track| {
-                            app.state.pattern.track_params[track].set_volume(volume);
-                            app.push_track_volume(track);
-                        });
+                    let tracks = if apply_bulk {
+                        self.selected_tracks()
                     } else {
                         self.ui.track_selection_anchor = None;
-                        self.state.pattern.track_params[idx].set_volume(volume);
-                        self.push_track_volume(idx);
-                    }
+                        vec![idx]
+                    };
+                    let commands = tracks
+                        .into_iter()
+                        .map(|track| AppCommand::SetTrackVolume { track, value: volume })
+                        .collect();
+                    apply_track_param_batch(self, commands);
                     self.ui.param_mouse_drag = Some(ParamMouseDrag {
                         track: idx,
                         target: ParamMouseDragTarget::TrackListVolume,
@@ -1524,28 +1546,25 @@ impl App {
                 if self.ui.focused_region == Region::Sidebar || self.ui.params_column == 0 {
                     match self.active_tool_row() {
                         super::params::ToolRow::Accum(super::AC_LIMIT) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackAccumLimit {
-                                        track,
-                                        value: val.max(0.0),
-                                    },
-                                );
-                            }
+                            let commands = self.selected_tracks().into_iter().map(|track| {
+                                AppCommand::SetTrackAccumLimit {
+                                    track,
+                                    value: val.max(0.0),
+                                }
+                            }).collect();
+                            apply_track_param_batch(self, commands);
                         }
                         super::params::ToolRow::Track(super::TP_ATTACK) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(self, AppCommand::SetTrackAttack { track, ms: val });
-                            }
+                            let commands = self.selected_tracks().into_iter().map(|track| {
+                                AppCommand::SetTrackAttack { track, ms: val }
+                            }).collect();
+                            apply_track_param_batch(self, commands);
                         }
                         super::params::ToolRow::Track(super::TP_RELEASE) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(self, AppCommand::SetTrackRelease { track, ms: val });
-                            }
+                            let commands = self.selected_tracks().into_iter().map(|track| {
+                                AppCommand::SetTrackRelease { track, ms: val }
+                            }).collect();
+                            apply_track_param_batch(self, commands);
                         }
                         super::params::ToolRow::Track(super::TP_SWING) => {
                             let tracks = self.selected_tracks();
@@ -1567,40 +1586,31 @@ impl App {
                             self.clamp_cursor_to_steps();
                         }
                         super::params::ToolRow::Track(super::TP_VOLUME) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackVolume {
-                                        track,
-                                        value: val.clamp(0.0, 1.0),
-                                    },
-                                );
-                            }
+                            let commands = self.selected_tracks().into_iter().map(|track| {
+                                AppCommand::SetTrackVolume {
+                                    track,
+                                    value: val.clamp(0.0, 1.0),
+                                }
+                            }).collect();
+                            apply_track_param_batch(self, commands);
                         }
                         super::params::ToolRow::Track(super::TP_PAN) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackPan {
-                                        track,
-                                        value: val.clamp(-1.0, 1.0),
-                                    },
-                                );
-                            }
+                            let commands = self.selected_tracks().into_iter().map(|track| {
+                                AppCommand::SetTrackPan {
+                                    track,
+                                    value: val.clamp(-1.0, 1.0),
+                                }
+                            }).collect();
+                            apply_track_param_batch(self, commands);
                         }
                         super::params::ToolRow::Track(super::TP_SEND) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackSend {
-                                        track,
-                                        value: val.clamp(0.0, 1.0),
-                                    },
-                                );
-                            }
+                            let commands = self.selected_tracks().into_iter().map(|track| {
+                                AppCommand::SetTrackSend {
+                                    track,
+                                    value: val.clamp(0.0, 1.0),
+                                }
+                            }).collect();
+                            apply_track_param_batch(self, commands);
                         }
                         super::params::ToolRow::Track(super::TP_MASTER) => {
                             apply_command(
@@ -1611,19 +1621,11 @@ impl App {
                             );
                         }
                         super::params::ToolRow::Track(super::TP_MAX_POLY) => {
-                            let tracks = self.selected_tracks();
-                            for track in tracks {
-                                let tp = &self.state.pattern.track_params[track];
-                                let cur = tp.get_max_polyphony() as isize;
-                                let target = val.round().max(1.0) as isize;
-                                apply_command(
-                                    self,
-                                    AppCommand::AdjustTrackMaxPolyphony {
-                                        track,
-                                        delta: target - cur,
-                                    },
-                                );
-                            }
+                            let value = val.round().max(1.0) as usize;
+                            let commands = self.selected_tracks().into_iter().map(|track| {
+                                AppCommand::SetTrackMaxPolyphony { track, value }
+                            }).collect();
+                            apply_track_param_batch(self, commands);
                         }
                         _ => {}
                     }

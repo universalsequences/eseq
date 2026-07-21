@@ -1234,10 +1234,14 @@ impl App {
         if track >= self.state.pattern.track_params.len() {
             return;
         }
+        let live_changed = self.state.pattern.track_params[track].output() != output;
         self.state.pattern.track_params[track].set_output(output.clone());
-        self.state
+        let stored_changed = self.state
             .set_track_output_in_all_track_patterns(track, output);
         self.graph_controller().apply_track_output_routing(track);
+        if live_changed || stored_changed {
+            super::edit::commit_history_barrier(self);
+        }
     }
 
     fn remove_bus_references_from_live_pattern(&self, id: BusId) {
@@ -1431,6 +1435,7 @@ impl App {
     }
 
     pub(super) fn save_project_named(&mut self, project_name: &str) -> Result<(), String> {
+        super::edit::finish_active_gesture(self);
         let project = self.capture_project(project_name)?;
         project::save_project(project_name, &project).map_err(|error| error.to_string())?;
         self.history.mark_saved();

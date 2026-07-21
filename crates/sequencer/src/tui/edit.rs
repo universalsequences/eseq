@@ -5,12 +5,14 @@ use crate::sequencer::{
     StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
 };
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
-    step_snapshot_bit_exact_eq, ApplyMode, EditPatch, HistoryMove, HistoryPolicy, HistoryReplay,
-    PatternGeometryPatch, StepCellDelta, StepCellsPatch,
+    step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, EditPatch, GestureId, HistoryMove,
+    HistoryPolicy, HistoryReplay, MergeKey, PatternGeometryPatch, StepCellDelta, StepCellsPatch,
+    TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
 };
 use super::App;
 
@@ -237,6 +239,7 @@ impl StepGestureTransaction {
             };
         }
         let retained_bytes = patch.retained_bytes();
+        finish_active_gesture(app);
         let history_move = app.history.commit(
             self.label,
             None,
@@ -395,9 +398,22 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
     bytes.usize(snapshot.max_polyphony);
     bytes.u32(snapshot.timebase as u32);
     bytes.usize(snapshot.accumulator_idx);
+    bytes.bool(snapshot.script_accumulator_name.is_some());
+    if let Some(name) = &snapshot.script_accumulator_name {
+        bytes.usize(name.len());
+        bytes.0.extend_from_slice(name.as_bytes());
+    }
+    bytes.usize(snapshot.midi_fx_chain.len());
+    for name in &snapshot.midi_fx_chain {
+        bytes.usize(name.len());
+        bytes.0.extend_from_slice(name.as_bytes());
+    }
+    bytes.u32(snapshot.midi_fx_position as u32);
     bytes.f32(snapshot.accum_limit);
     bytes.u32(snapshot.accum_mode);
     bytes.usize(snapshot.fts_scale);
+    bytes.u32(snapshot.mute_group as u32);
+    bytes.bool(snapshot.global_transpose);
     bytes.0
 }
 
@@ -705,7 +721,10 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
 
         AppCommand::ToggleTrackGate { track }
         | AppCommand::ToggleTrackPolyphonic { track }
+        | AppCommand::ToggleTrackMute { track }
+        | AppCommand::ToggleTrackSolo { track }
         | AppCommand::AdjustTrackMaxPolyphony { track, .. }
+        | AppCommand::SetTrackMaxPolyphony { track, .. }
         | AppCommand::SetTrackAttack { track, .. }
         | AppCommand::AdjustTrackAttack { track, .. }
         | AppCommand::SetTrackRelease { track, .. }
@@ -732,7 +751,9 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::SetTrackAccumIdx { track, .. }
         | AppCommand::SetTrackAccumLimit { track, .. }
         | AppCommand::AdjustTrackAccumLimit { track, .. }
-        | AppCommand::SetTrackAccumMode { track, .. } => {
+        | AppCommand::SetTrackAccumMode { track, .. }
+        | AppCommand::SetTrackMuteGroup { track, .. }
+        | AppCommand::SetTrackGlobalTranspose { track, .. } => {
             capture_track_params_witness(app, *track)
         }
 
@@ -1257,6 +1278,466 @@ fn is_pattern_geometry_command(cmd: &AppCommand) -> bool {
     )
 }
 
+fn track_params_command_track(cmd: &AppCommand) -> Option<usize> {
+    match cmd {
+        AppCommand::ToggleTrackGate { track }
+        | AppCommand::ToggleTrackPolyphonic { track }
+        | AppCommand::ToggleTrackMute { track }
+        | AppCommand::ToggleTrackSolo { track }
+        | AppCommand::AdjustTrackMaxPolyphony { track, .. }
+        | AppCommand::SetTrackMaxPolyphony { track, .. }
+        | AppCommand::SetTrackAttack { track, .. }
+        | AppCommand::AdjustTrackAttack { track, .. }
+        | AppCommand::SetTrackRelease { track, .. }
+        | AppCommand::AdjustTrackRelease { track, .. }
+        | AppCommand::SetTrackSwing { track, .. }
+        | AppCommand::AdjustTrackSwing { track, .. }
+        | AppCommand::SetTrackSwingResolution { track, .. }
+        | AppCommand::NextTrackSwingResolution { track }
+        | AppCommand::PrevTrackSwingResolution { track }
+        | AppCommand::SetTrackVolume { track, .. }
+        | AppCommand::AdjustTrackVolume { track, .. }
+        | AppCommand::SetTrackPan { track, .. }
+        | AppCommand::AdjustTrackPan { track, .. }
+        | AppCommand::SetTrackSend { track, .. }
+        | AppCommand::AdjustTrackSend { track, .. }
+        | AppCommand::SetTrackOutput { track, .. }
+        | AppCommand::SetTrackSends { track, .. }
+        | AppCommand::SetTrackTimebase { track, .. }
+        | AppCommand::NextTrackTimebase { track }
+        | AppCommand::PrevTrackTimebase { track }
+        | AppCommand::SetTrackFtsScale { track, .. }
+        | AppCommand::SetTrackAccumIdx { track, .. }
+        | AppCommand::SetTrackAccumLimit { track, .. }
+        | AppCommand::AdjustTrackAccumLimit { track, .. }
+        | AppCommand::SetTrackAccumMode { track, .. }
+        | AppCommand::SetTrackMuteGroup { track, .. }
+        | AppCommand::SetTrackGlobalTranspose { track, .. }
+        | AppCommand::SetInstrumentBaseNoteOffset { track, .. } => Some(*track),
+        _ => None,
+    }
+}
+
+fn track_params_label(cmd: &AppCommand) -> &'static str {
+    match cmd {
+        AppCommand::ToggleTrackGate { .. } => "Toggle track gate",
+        AppCommand::ToggleTrackPolyphonic { .. } => "Toggle track polyphony",
+        AppCommand::ToggleTrackMute { .. } => "Toggle track mute",
+        AppCommand::ToggleTrackSolo { .. } => "Toggle track solo",
+        AppCommand::AdjustTrackMaxPolyphony { .. }
+        | AppCommand::SetTrackMaxPolyphony { .. } => "Set track max polyphony",
+        AppCommand::SetTrackAttack { .. } | AppCommand::AdjustTrackAttack { .. } => {
+            "Set track attack"
+        }
+        AppCommand::SetTrackRelease { .. } | AppCommand::AdjustTrackRelease { .. } => {
+            "Set track release"
+        }
+        AppCommand::SetTrackSwing { .. } | AppCommand::AdjustTrackSwing { .. } => {
+            "Set track swing"
+        }
+        AppCommand::SetTrackSwingResolution { .. }
+        | AppCommand::NextTrackSwingResolution { .. }
+        | AppCommand::PrevTrackSwingResolution { .. } => "Set track swing resolution",
+        AppCommand::SetTrackVolume { .. } | AppCommand::AdjustTrackVolume { .. } => {
+            "Set track volume"
+        }
+        AppCommand::SetTrackPan { .. } | AppCommand::AdjustTrackPan { .. } => "Set track pan",
+        AppCommand::SetTrackSend { .. } | AppCommand::AdjustTrackSend { .. } => "Set track send",
+        AppCommand::SetTrackOutput { .. } => "Set track output",
+        AppCommand::SetTrackSends { .. } => "Set track sends",
+        AppCommand::SetTrackTimebase { .. }
+        | AppCommand::NextTrackTimebase { .. }
+        | AppCommand::PrevTrackTimebase { .. } => "Set track timebase",
+        AppCommand::SetTrackFtsScale { .. } => "Set track FTS scale",
+        AppCommand::SetTrackAccumIdx { .. } => "Set track accumulator",
+        AppCommand::SetTrackAccumLimit { .. } | AppCommand::AdjustTrackAccumLimit { .. } => {
+            "Set accumulator limit"
+        }
+        AppCommand::SetTrackAccumMode { .. } => "Set accumulator mode",
+        AppCommand::SetTrackMuteGroup { .. } => "Set track mute group",
+        AppCommand::SetTrackGlobalTranspose { .. } => "Set global transpose",
+        AppCommand::SetInstrumentBaseNoteOffset { .. } => "Set instrument base note",
+        _ => "Set track parameters",
+    }
+}
+
+fn track_params_bit_exact_eq(left: &TrackParamsSnapshot, right: &TrackParamsSnapshot) -> bool {
+    encode_track_params(left) == encode_track_params(right)
+}
+
+fn scheduler_track_params_changed(
+    before: &TrackParamsSnapshot,
+    after: &TrackParamsSnapshot,
+) -> bool {
+    let mut normalized = before.clone();
+    normalized.volume = after.volume;
+    normalized.pan = after.pan;
+    normalized.mute = after.mute;
+    normalized.solo = after.solo;
+    normalized.send = after.send;
+    normalized.sends = after.sends.clone();
+    !track_params_bit_exact_eq(&normalized, after)
+}
+
+fn apply_live_track_param_effects(
+    app: &mut App,
+    track: usize,
+    before: &TrackParamsSnapshot,
+    after: &TrackParamsSnapshot,
+    base_note_before: u32,
+    base_note_after: u32,
+) -> bool {
+    if before.volume.to_bits() != after.volume.to_bits() {
+        app.push_track_volume(track);
+    }
+    if before.pan.to_bits() != after.pan.to_bits() {
+        app.push_track_pan(track);
+    }
+    if before.send.to_bits() != after.send.to_bits() {
+        app.push_send_gain(track);
+    }
+    if before.mute != after.mute {
+        app.push_track_mute(track);
+    }
+    if before.solo != after.solo {
+        app.push_track_solo_mutes();
+    }
+    if before.output != after.output {
+        app.graph_controller().apply_track_output_routing(track);
+    }
+    let sends_changed = before.sends.len() != after.sends.len()
+        || before.sends.iter().zip(&after.sends).any(|(left, right)| {
+            left.destination != right.destination || left.amount.to_bits() != right.amount.to_bits()
+        });
+    if sends_changed {
+        app.graph_controller().apply_track_bus_sends(track);
+    }
+    if before.accumulator_idx != after.accumulator_idx
+        || before.script_accumulator_name != after.script_accumulator_name
+    {
+        app.state.request_accumulator_reset(track);
+    }
+    scheduler_track_params_changed(before, after) || base_note_before != base_note_after
+}
+
+fn capture_transport_authoring(app: &App) -> TransportAuthoringSnapshot {
+    TransportAuthoringSnapshot {
+        bpm: app.state.transport.bpm.load(Ordering::Relaxed),
+        master_volume_bits: app.state.transport.master_volume.load(Ordering::Relaxed),
+    }
+}
+
+static NEXT_HISTORY_GESTURE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
+    if app.history.active_gesture().map(|gesture| &gesture.merge_key) == Some(merge_key) {
+        return;
+    }
+    finish_active_gesture(app);
+    let _ = app.history.begin_gesture(ActiveGesture {
+        id: GestureId(NEXT_HISTORY_GESTURE_ID.fetch_add(1, Ordering::Relaxed)),
+        merge_key: merge_key.clone(),
+    });
+}
+
+fn apply_recorded_track_params_command(
+    app: &mut App,
+    cmd: &AppCommand,
+    merge_key: Option<MergeKey>,
+) -> Result<EditOutcome, EditError> {
+    let track = track_params_command_track(cmd).ok_or(EditError::UnsupportedCommand)?;
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern_id = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let target = TrackPatternId { track: track_id, pattern: pattern_id };
+    let merge_key = merge_key.map(|_| {
+        MergeKey::new(format!(
+            "track-pattern:{}:{}:{}",
+            target.track.0,
+            target.pattern.0,
+            track_params_label(cmd),
+        ))
+    });
+    if let Some(key) = merge_key.as_ref() {
+        if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(key) {
+            finish_active_gesture(app);
+        }
+    }
+    let current_before = app
+        .state
+        .capture_pattern_track_params(track, pattern_id)
+        .map_err(EditError::ReplayFailed)?;
+    let current_base_before = app
+        .state
+        .capture_pattern_instrument_base_note_offset(track, pattern_id)
+        .map_err(EditError::ReplayFailed)?
+        .to_bits();
+    let (entry_before, entry_base_before) = merge_key
+        .as_ref()
+        .and_then(|key| app.history.active_gesture_patch(key))
+        .and_then(|patch| match patch {
+            EditPatch::TrackParams(patch) if patch.target == target => Some((
+                patch.before.clone(),
+                patch.instrument_base_note_offset_before,
+            )),
+            _ => None,
+        })
+        .unwrap_or_else(|| (current_before.clone(), current_base_before));
+
+    super::command::execute_command(app, cmd.clone());
+    let after = app
+        .state
+        .capture_pattern_track_params(track, pattern_id)
+        .map_err(EditError::ReplayFailed)?;
+    let base_after = app
+        .state
+        .capture_pattern_instrument_base_note_offset(track, pattern_id)
+        .map_err(EditError::ReplayFailed)?
+        .to_bits();
+    if track_params_bit_exact_eq(&current_before, &after) && current_base_before == base_after {
+        return Ok(EditOutcome::NoOp);
+    }
+
+    app.state
+        .restore_pattern_track_params_no_publish(track, pattern_id, &after)
+        .map_err(EditError::ReplayFailed)?;
+    app.state
+        .restore_pattern_instrument_base_note_offset_no_publish(
+            track,
+            pattern_id,
+            f32::from_bits(base_after),
+        )
+        .map_err(EditError::ReplayFailed)?;
+    if merge_key.is_none()
+        && (scheduler_track_params_changed(&current_before, &after)
+            || current_base_before != base_after)
+    {
+        app.state.publish_scheduler_snapshot();
+    }
+
+    let patch = TrackParamsPatch {
+        target,
+        before: entry_before,
+        after,
+        instrument_base_note_offset_before: entry_base_before,
+        instrument_base_note_offset_after: base_after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    if let Some(key) = merge_key {
+        if track_params_bit_exact_eq(&patch.before, &patch.after)
+            && patch.instrument_base_note_offset_before
+                == patch.instrument_base_note_offset_after
+            && app.history.discard_active_gesture_entry(&key)
+        {
+            return Ok(EditOutcome::NoOp);
+        }
+        ensure_coalescing_gesture(app, &key);
+        let move_result = app.history.stage_active_gesture(
+            track_params_label(cmd),
+            &key,
+            EditPatch::TrackParams(patch),
+            retained_bytes,
+        ).ok_or(EditError::UnsupportedCommand)?;
+        return Ok(EditOutcome::Applied(move_result));
+    }
+    finish_active_gesture(app);
+    let move_result = app.history.commit(
+        track_params_label(cmd),
+        None,
+        EditPatch::TrackParams(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(move_result))
+}
+
+pub fn apply_recorded_track_params_batch(
+    app: &mut App,
+    commands: &[AppCommand],
+) -> Result<EditOutcome, EditError> {
+    if commands.is_empty() {
+        return Ok(EditOutcome::NoOp);
+    }
+    let label = track_params_label(&commands[0]);
+    if commands.iter().any(|command| {
+        track_params_command_track(command).is_none() || track_params_label(command) != label
+    }) {
+        return Err(EditError::UnsupportedCommand);
+    }
+
+    let mut resolved = Vec::with_capacity(commands.len());
+    for command in commands {
+        let track = track_params_command_track(command).ok_or(EditError::UnsupportedCommand)?;
+        let track_id = app
+            .track_registry
+            .id_at(track)
+            .ok_or(EditError::TrackOutOfRange { track })?;
+        let pattern_id = app
+            .state
+            .effective_track_pattern_id(track)
+            .ok_or(EditError::MissingTrackPattern)?;
+        let target = TrackPatternId { track: track_id, pattern: pattern_id };
+        let before = app
+            .state
+            .capture_pattern_track_params(track, pattern_id)
+            .map_err(EditError::ReplayFailed)?;
+        let base_before = app
+            .state
+            .capture_pattern_instrument_base_note_offset(track, pattern_id)
+            .map_err(EditError::ReplayFailed)?
+            .to_bits();
+        resolved.push((track, target, before, base_before));
+    }
+    resolved.sort_by_key(|(_, target, _, _)| target.track);
+    resolved.dedup_by_key(|(_, target, _, _)| target.track);
+    if resolved.len() != commands.len() {
+        return Err(EditError::InvalidTarget(
+            "track-parameter batch contains duplicate tracks".to_string(),
+        ));
+    }
+    let merge_key = MergeKey::new(format!(
+        "track-batch:{label}:{:?}",
+        resolved
+            .iter()
+            .map(|(_, target, _, _)| *target)
+            .collect::<Vec<_>>()
+    ));
+    if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(&merge_key) {
+        finish_active_gesture(app);
+    }
+    let original = app
+        .history
+        .active_gesture_patch(&merge_key)
+        .and_then(|patch| match patch {
+            EditPatch::TrackParamsBatch(patch) => Some(patch.tracks.clone()),
+            _ => None,
+        });
+
+    for command in commands {
+        super::command::execute_command(app, command.clone());
+    }
+
+    let mut patches = Vec::with_capacity(resolved.len());
+    let mut changed = false;
+    for (track, target, current_before, current_base_before) in resolved {
+        let after = app
+            .state
+            .capture_pattern_track_params(track, target.pattern)
+            .map_err(EditError::ReplayFailed)?;
+        let base_after = app
+            .state
+            .capture_pattern_instrument_base_note_offset(track, target.pattern)
+            .map_err(EditError::ReplayFailed)?
+            .to_bits();
+        changed |= !track_params_bit_exact_eq(&current_before, &after)
+            || current_base_before != base_after;
+        app.state
+            .restore_pattern_track_params_no_publish(track, target.pattern, &after)
+            .map_err(EditError::ReplayFailed)?;
+        app.state
+            .restore_pattern_instrument_base_note_offset_no_publish(
+                track,
+                target.pattern,
+                f32::from_bits(base_after),
+            )
+            .map_err(EditError::ReplayFailed)?;
+        let entry_before = original
+            .as_ref()
+            .and_then(|patches| patches.iter().find(|patch| patch.target == target));
+        patches.push(TrackParamsPatch {
+            target,
+            before: entry_before
+                .map(|patch| patch.before.clone())
+                .unwrap_or(current_before),
+            after,
+            instrument_base_note_offset_before: entry_before
+                .map(|patch| patch.instrument_base_note_offset_before)
+                .unwrap_or(current_base_before),
+            instrument_base_note_offset_after: base_after,
+        });
+    }
+    if !changed {
+        return Ok(EditOutcome::NoOp);
+    }
+    let patch = TrackParamsBatchPatch { tracks: patches };
+    let net_no_op = patch.tracks.iter().all(|patch| {
+        track_params_bit_exact_eq(&patch.before, &patch.after)
+            && patch.instrument_base_note_offset_before == patch.instrument_base_note_offset_after
+    });
+    if net_no_op && app.history.discard_active_gesture_entry(&merge_key) {
+        return Ok(EditOutcome::NoOp);
+    }
+    let retained_bytes = patch.retained_bytes();
+    ensure_coalescing_gesture(app, &merge_key);
+    let history_move = app.history.stage_active_gesture(
+        label,
+        &merge_key,
+        EditPatch::TrackParamsBatch(patch),
+        retained_bytes,
+    ).ok_or(EditError::UnsupportedCommand)?;
+    Ok(EditOutcome::Applied(history_move))
+}
+
+fn apply_recorded_transport_command(
+    app: &mut App,
+    cmd: &AppCommand,
+    merge_key: Option<MergeKey>,
+) -> Result<EditOutcome, EditError> {
+    if let Some(key) = merge_key.as_ref() {
+        if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(key) {
+            finish_active_gesture(app);
+        }
+    }
+    let current_before = capture_transport_authoring(app);
+    let entry_before = merge_key
+        .as_ref()
+        .and_then(|key| app.history.active_gesture_patch(key))
+        .and_then(|patch| match patch {
+            EditPatch::TransportParams(patch) => Some(patch.before),
+            _ => None,
+        })
+        .unwrap_or(current_before);
+    super::command::execute_command(app, cmd.clone());
+    let after = capture_transport_authoring(app);
+    if current_before == after {
+        return Ok(EditOutcome::NoOp);
+    }
+    if merge_key.is_none() && current_before.bpm != after.bpm {
+        app.state.publish_scheduler_snapshot();
+    }
+    let label = match cmd {
+        AppCommand::SetBpm { .. } => "Set BPM",
+        _ => "Set master volume",
+    };
+    let patch = TransportParamsPatch { before: entry_before, after };
+    let retained_bytes = patch.retained_bytes();
+    if let Some(key) = merge_key {
+        if patch.before == patch.after && app.history.discard_active_gesture_entry(&key) {
+            return Ok(EditOutcome::NoOp);
+        }
+        ensure_coalescing_gesture(app, &key);
+        let move_result = app.history.stage_active_gesture(
+            label,
+            &key,
+            EditPatch::TransportParams(patch),
+            retained_bytes,
+        ).ok_or(EditError::UnsupportedCommand)?;
+        return Ok(EditOutcome::Applied(move_result));
+    }
+    finish_active_gesture(app);
+    let move_result = app.history.commit(
+        label,
+        None,
+        EditPatch::TransportParams(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(move_result))
+}
+
 fn pattern_geometry_track(cmd: &AppCommand) -> Option<usize> {
     match cmd {
         AppCommand::DuplicateTrackPattern { track }
@@ -1351,6 +1832,7 @@ fn apply_recorded_pattern_geometry_command(
         };
     }
     let retained_bytes = patch.retained_bytes();
+    finish_active_gesture(app);
     let history_move = app.history.commit(
         pattern_geometry_label(cmd),
         None,
@@ -1486,6 +1968,7 @@ pub fn apply_recorded_step_mutation(
         };
     }
     let retained_bytes = patch.retained_bytes();
+    finish_active_gesture(app);
     let history_move = app.history.commit(
         label,
         None,
@@ -1496,9 +1979,26 @@ pub fn apply_recorded_step_mutation(
 }
 
 pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, EditError> {
-    match history_policy(&cmd) {
+    let policy = history_policy(&cmd);
+    if matches!(policy, HistoryPolicy::Record) {
+        finish_active_gesture(app);
+    }
+    match policy {
         HistoryPolicy::Record if is_pattern_geometry_command(&cmd) => {
             apply_recorded_pattern_geometry_command(app, &cmd)
+        }
+        HistoryPolicy::Record if track_params_command_track(&cmd).is_some() => {
+            apply_recorded_track_params_command(app, &cmd, None)
+        }
+        HistoryPolicy::Record
+            if matches!(
+                cmd,
+                AppCommand::SetMasterVolume { .. }
+                    | AppCommand::AdjustMasterVolume { .. }
+                    | AppCommand::SetBpm { .. }
+            ) =>
+        {
+            apply_recorded_transport_command(app, &cmd, None)
         }
         HistoryPolicy::Record => apply_recorded_step_command(app, &cmd),
         HistoryPolicy::Ignore => {
@@ -1531,6 +2031,19 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
             }
             commit_history_barrier(app);
             Ok(EditOutcome::AppliedUnrecorded)
+        }
+        HistoryPolicy::Coalesce(key) if track_params_command_track(&cmd).is_some() => {
+            apply_recorded_track_params_command(app, &cmd, Some(key))
+        }
+        HistoryPolicy::Coalesce(key)
+            if matches!(
+                cmd,
+                AppCommand::SetMasterVolume { .. }
+                    | AppCommand::AdjustMasterVolume { .. }
+                    | AppCommand::SetBpm { .. }
+            ) =>
+        {
+            apply_recorded_transport_command(app, &cmd, Some(key))
         }
         HistoryPolicy::Coalesce(_) => Err(EditError::UnsupportedCommand),
         HistoryPolicy::Reset => Err(EditError::UnsupportedCommand),
@@ -1614,16 +2127,189 @@ fn replay_pattern_geometry_patch(
     })
 }
 
+fn replay_track_params_patch(
+    app: &mut App,
+    patch: &TrackParamsPatch,
+    mode: ApplyMode,
+    publish: bool,
+) -> Result<MutationEffects, EditError> {
+    let track = app
+        .track_registry
+        .index_of(patch.target.track)
+        .ok_or(EditError::MissingStableTrack { track: patch.target.track })?;
+    let (snapshot, base_note_bits) = match mode {
+        ApplyMode::Undo => (&patch.before, patch.instrument_base_note_offset_before),
+        ApplyMode::Redo => (&patch.after, patch.instrument_base_note_offset_after),
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "track-parameter replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
+    let before = app
+        .state
+        .capture_pattern_track_params(track, patch.target.pattern)
+        .map_err(EditError::ReplayFailed)?;
+    let base_note_before = app
+        .state
+        .capture_pattern_instrument_base_note_offset(track, patch.target.pattern)
+        .map_err(EditError::ReplayFailed)?
+        .to_bits();
+    let is_effective = app
+        .state
+        .restore_pattern_track_params_no_publish(track, patch.target.pattern, snapshot)
+        .map_err(EditError::ReplayFailed)?;
+    app.state
+        .restore_pattern_instrument_base_note_offset_no_publish(
+            track,
+            patch.target.pattern,
+            f32::from_bits(base_note_bits),
+        )
+        .map_err(EditError::ReplayFailed)?;
+    let publish_scheduler = is_effective
+        && (scheduler_track_params_changed(&before, snapshot)
+            || base_note_before != base_note_bits);
+    if is_effective {
+        let needs_publish = apply_live_track_param_effects(
+            app,
+            track,
+            &before,
+            snapshot,
+            base_note_before,
+            base_note_bits,
+        );
+        if needs_publish && publish {
+            app.state.publish_scheduler_snapshot();
+        }
+    }
+    Ok(MutationEffects { publish_scheduler })
+}
+
+fn replay_track_params_batch_patch(
+    app: &mut App,
+    patch: &TrackParamsBatchPatch,
+    mode: ApplyMode,
+    publish: bool,
+) -> Result<MutationEffects, EditError> {
+    for track_patch in &patch.tracks {
+        let track = app
+            .track_registry
+            .index_of(track_patch.target.track)
+            .ok_or(EditError::MissingStableTrack {
+                track: track_patch.target.track,
+            })?;
+        app.state
+            .capture_pattern_track_params(track, track_patch.target.pattern)
+            .map_err(EditError::ReplayFailed)?;
+        app.state
+            .capture_pattern_instrument_base_note_offset(track, track_patch.target.pattern)
+            .map_err(EditError::ReplayFailed)?;
+    }
+    let mut publish_scheduler = false;
+    for track_patch in &patch.tracks {
+        publish_scheduler |= replay_track_params_patch(app, track_patch, mode, false)?
+            .publish_scheduler;
+    }
+    if publish_scheduler && publish {
+        app.state.publish_scheduler_snapshot();
+    }
+    Ok(MutationEffects { publish_scheduler })
+}
+
+fn replay_transport_params_patch(
+    app: &mut App,
+    patch: &TransportParamsPatch,
+    mode: ApplyMode,
+    publish: bool,
+) -> Result<MutationEffects, EditError> {
+    let target = match mode {
+        ApplyMode::Undo => patch.before,
+        ApplyMode::Redo => patch.after,
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "transport-parameter replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
+    let before = capture_transport_authoring(app);
+    app.state.transport.bpm.store(target.bpm, Ordering::Relaxed);
+    app.state
+        .transport
+        .master_volume
+        .store(target.master_volume_bits, Ordering::Relaxed);
+    if before.master_volume_bits != target.master_volume_bits {
+        app.push_master_volume();
+    }
+    let publish_scheduler = before.bpm != target.bpm;
+    if publish_scheduler {
+        app.push_all_delay_bpm();
+        if publish {
+            app.state.publish_scheduler_snapshot();
+        }
+    }
+    Ok(MutationEffects { publish_scheduler })
+}
+
 fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(), EditError> {
     match patch {
         EditPatch::StepCells(patch) => replay_step_patch(app, patch, mode).map(|_| ()),
         EditPatch::PatternGeometry(patch) => {
             replay_pattern_geometry_patch(app, patch, mode).map(|_| ())
         }
+        EditPatch::TrackParams(patch) => {
+            replay_track_params_patch(app, patch, mode, true).map(|_| ())
+        }
+        EditPatch::TrackParamsBatch(patch) => {
+            replay_track_params_batch_patch(app, patch, mode, true).map(|_| ())
+        }
+        EditPatch::TransportParams(patch) => {
+            replay_transport_params_patch(app, patch, mode, true).map(|_| ())
+        }
     }
 }
 
+fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
+    match patch {
+        EditPatch::TrackParams(patch) => {
+            scheduler_track_params_changed(&patch.before, &patch.after)
+                || patch.instrument_base_note_offset_before
+                    != patch.instrument_base_note_offset_after
+        }
+        EditPatch::TrackParamsBatch(patch) => patch.tracks.iter().any(|patch| {
+            scheduler_track_params_changed(&patch.before, &patch.after)
+                || patch.instrument_base_note_offset_before
+                    != patch.instrument_base_note_offset_after
+        }),
+        EditPatch::TransportParams(patch) => patch.before.bpm != patch.after.bpm,
+        EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => false,
+    }
+}
+
+pub fn finish_active_gesture(app: &mut App) -> bool {
+    let publish_scheduler = app
+        .history
+        .active_gesture()
+        .and_then(|gesture| app.history.active_gesture_patch(&gesture.merge_key))
+        .is_some_and(pending_gesture_publishes_scheduler);
+    let finished = app.history.finish_active_gesture().is_some();
+    if finished && publish_scheduler {
+        app.state.publish_scheduler_snapshot();
+    }
+    finished
+}
+
+pub fn finish_active_gesture_if_idle(app: &mut App) -> bool {
+    if !app
+        .history
+        .active_gesture_is_idle(super::history::FALLBACK_GESTURE_IDLE_TIMEOUT)
+    {
+        return false;
+    }
+    finish_active_gesture(app)
+}
+
 pub fn undo(app: &mut App) -> HistoryReplay<EditError> {
+    finish_active_gesture(app);
     let mut history = std::mem::take(&mut app.history);
     let result = history.undo(|patch| replay_patch(app, patch, ApplyMode::Undo));
     app.history = history;
@@ -1631,10 +2317,41 @@ pub fn undo(app: &mut App) -> HistoryReplay<EditError> {
 }
 
 pub fn redo(app: &mut App) -> HistoryReplay<EditError> {
+    finish_active_gesture(app);
     let mut history = std::mem::take(&mut app.history);
     let result = history.redo(|patch| replay_patch(app, patch, ApplyMode::Redo));
     app.history = history;
     result
+}
+
+pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
+    let Some(gesture) = app.history.active_gesture().cloned() else {
+        return Ok(false);
+    };
+    let Some(patch) = app.history.active_gesture_patch(&gesture.merge_key).cloned() else {
+        finish_active_gesture(app);
+        return Ok(false);
+    };
+    match &patch {
+        EditPatch::TrackParams(patch) => {
+            replay_track_params_patch(app, patch, ApplyMode::Undo, false)?;
+        }
+        EditPatch::TrackParamsBatch(patch) => {
+            replay_track_params_batch_patch(app, patch, ApplyMode::Undo, false)?;
+        }
+        EditPatch::TransportParams(patch) => {
+            replay_transport_params_patch(app, patch, ApplyMode::Undo, false)?;
+        }
+        EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+    }
+    if !app.history.discard_active_gesture_entry(&gesture.merge_key) {
+        return Err(EditError::ReplayFailed(
+            "active gesture changed while cancellation was applied".to_string(),
+        ));
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1961,7 +2678,7 @@ mod tests {
         assert_eq!(app.state.scheduler_snapshot_version(), version + 1);
 
         let version = app.state.scheduler_snapshot_version();
-        assert_eq!(
+        assert!(matches!(
             try_apply_command(
                 &mut app,
                 AppCommand::SetTrackAttack {
@@ -1969,15 +2686,18 @@ mod tests {
                     ms: 12.0,
                 },
             ),
-            Ok(EditOutcome::AppliedUnrecorded)
-        );
-        assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 0));
+            Ok(EditOutcome::Applied(_))
+        ));
+        finish_active_gesture(&mut app);
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), (2, 0));
         assert_eq!(app.state.scheduler_snapshot_version(), version + 1);
-        assert!(app
-            .editor
-            .status_message
-            .as_ref()
-            .is_some_and(|(message, _)| message.starts_with("Undo history cleared")));
+        let version = app.state.scheduler_snapshot_version();
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scheduler_snapshot_version(), version + 1);
+        assert_eq!(
+            app.state.pattern.track_params[0].get_attack_ms().to_bits(),
+            0.0f32.to_bits()
+        );
     }
 
     #[test]
@@ -2191,5 +2911,490 @@ mod tests {
             .expect("begin no-op gesture");
         assert_eq!(gesture.commit(&mut app), Ok(EditOutcome::NoOp));
         assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 1));
+    }
+
+    #[test]
+    fn track_parameter_drag_coalesces_and_round_trips_bit_exactly() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let before = app.state.live_track_params_snapshot(0).unwrap();
+        let scheduler_version = app.state.scheduler_snapshot_version();
+
+        for update in 1..=200 {
+            try_apply_command(
+                &mut app,
+                AppCommand::SetTrackVolume {
+                    track: 0,
+                    value: update as f32 / 200.0,
+                },
+            )
+            .expect("apply volume gesture update");
+        }
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version);
+        let after = app.state.live_track_params_snapshot(0).unwrap();
+        assert_eq!(after.volume.to_bits(), 1.0f32.to_bits());
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version);
+        assert!(track_params_bit_exact_eq(
+            &app.state.live_track_params_snapshot(0).unwrap(),
+            &before,
+        ));
+        assert_eq!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetTrackVolume {
+                    track: 0,
+                    value: before.volume,
+                },
+            ),
+            Ok(EditOutcome::NoOp)
+        );
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 1));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version);
+        assert!(track_params_bit_exact_eq(
+            &app.state.live_track_params_snapshot(0).unwrap(),
+            &after,
+        ));
+    }
+
+    #[test]
+    fn canceling_track_parameter_gesture_restores_before_state_without_history() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let before = app.state.live_track_params_snapshot(0).unwrap();
+        try_apply_command(
+            &mut app,
+            AppCommand::SetTrackVolume {
+                track: 0,
+                value: 0.2,
+            },
+        )
+        .expect("begin volume gesture");
+        assert_eq!(app.history.undo_len(), 0);
+
+        assert_eq!(cancel_active_gesture(&mut app), Ok(true));
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 0));
+        assert!(track_params_bit_exact_eq(
+            &app.state.live_track_params_snapshot(0).unwrap(),
+            &before,
+        ));
+    }
+
+    #[test]
+    fn track_parameter_gesture_returning_to_origin_commits_nothing() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let before = app.state.pattern.track_params[0].get_volume();
+        try_apply_command(
+            &mut app,
+            AppCommand::SetTrackVolume {
+                track: 0,
+                value: 0.2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetTrackVolume {
+                    track: 0,
+                    value: before,
+                },
+            ),
+            Ok(EditOutcome::NoOp)
+        );
+        assert!(app.history.active_gesture().is_none());
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), (0, 0));
+    }
+
+    #[test]
+    fn coupled_track_params_and_base_note_restore_after_scene_switch() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        let mut app = test_app(state);
+        let first_pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let first_before = app
+            .state
+            .capture_pattern_track_params(0, first_pattern)
+            .unwrap();
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetTrackAccumIdx {
+                track: 0,
+                idx: 2,
+                default_limit: Some(31.0),
+                script_name: None,
+            },
+        )
+        .expect("set coupled accumulator fields");
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentBaseNoteOffset {
+                track: 0,
+                value: -12.0,
+            },
+        )
+        .expect("set base note offset");
+        finish_active_gesture(&mut app);
+
+        app.state
+            .launch_scene(
+                1,
+                1,
+                &[-1],
+                &[44_100],
+                &["Track 1".to_string()],
+                &[InstrumentType::Sampler],
+            )
+            .expect("launch second scene");
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        let restored = app
+            .state
+            .capture_pattern_track_params(0, first_pattern)
+            .unwrap();
+        assert!(track_params_bit_exact_eq(&restored, &first_before));
+        assert_eq!(
+            app.state
+                .capture_pattern_instrument_base_note_offset(0, first_pattern)
+                .unwrap()
+                .to_bits(),
+            0.0f32.to_bits()
+        );
+    }
+
+    #[test]
+    fn transport_params_round_trip_bpm_and_master_volume() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let before = capture_transport_authoring(&app);
+        let scheduler_version = app.state.scheduler_snapshot_version();
+        try_apply_command(&mut app, AppCommand::SetBpm { bpm: 173 }).unwrap();
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version);
+        finish_active_gesture(&mut app);
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version + 1);
+        try_apply_command(
+            &mut app,
+            AppCommand::SetMasterVolume { value: 1.25 },
+        )
+        .unwrap();
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version + 1);
+        finish_active_gesture(&mut app);
+        let after = capture_transport_authoring(&app);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version + 1);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version + 2);
+        assert_eq!(capture_transport_authoring(&app), before);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(capture_transport_authoring(&app), after);
+    }
+
+    #[test]
+    fn multi_track_mixer_drag_is_one_coalesced_entry() {
+        let mut app = test_app(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        let before = (0..2)
+            .map(|track| app.state.live_track_params_snapshot(track).unwrap())
+            .collect::<Vec<_>>();
+
+        for update in 1..=200 {
+            let value = update as f32 / 200.0;
+            apply_recorded_track_params_batch(
+                &mut app,
+                &[
+                    AppCommand::SetTrackVolume { track: 0, value },
+                    AppCommand::SetTrackVolume { track: 1, value },
+                ],
+            )
+            .expect("apply multi-track mixer update");
+        }
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        for (track, expected) in before.iter().enumerate() {
+            assert!(track_params_bit_exact_eq(
+                &app.state.live_track_params_snapshot(track).unwrap(),
+                expected,
+            ));
+        }
+    }
+
+    #[test]
+    fn track_parameter_gesture_splits_when_the_active_scene_changes() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        let mut app = test_app(state);
+        let first_pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let first_before = app
+            .state
+            .capture_pattern_track_params(0, first_pattern)
+            .unwrap();
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetTrackVolume {
+                track: 0,
+                value: 0.2,
+            },
+        )
+        .expect("edit first scene");
+        app.state
+            .launch_scene(
+                1,
+                1,
+                &[-1],
+                &[44_100],
+                &["Track 1".to_string()],
+                &[InstrumentType::Sampler],
+            )
+            .expect("launch second scene");
+        let second_pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let second_before = app
+            .state
+            .capture_pattern_track_params(0, second_pattern)
+            .unwrap();
+        try_apply_command(
+            &mut app,
+            AppCommand::SetTrackVolume {
+                track: 0,
+                value: 0.4,
+            },
+        )
+        .expect("edit second scene");
+        finish_active_gesture(&mut app);
+
+        assert_eq!(app.history.undo_len(), 2);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(track_params_bit_exact_eq(
+            &app
+                .state
+                .capture_pattern_track_params(0, second_pattern)
+                .unwrap(),
+            &second_before,
+        ));
+        assert!(!track_params_bit_exact_eq(
+            &app
+                .state
+                .capture_pattern_track_params(0, first_pattern)
+                .unwrap(),
+            &first_before,
+        ));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(track_params_bit_exact_eq(
+            &app
+                .state
+                .capture_pattern_track_params(0, first_pattern)
+                .unwrap(),
+            &first_before,
+        ));
+    }
+
+    #[test]
+    fn scheduler_observed_multi_track_gesture_publishes_once_at_end() {
+        let mut app = test_app(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        let version = app.state.scheduler_snapshot_version();
+        for update in 1..=200 {
+            let ms = update as f32;
+            apply_recorded_track_params_batch(
+                &mut app,
+                &[
+                    AppCommand::SetTrackAttack { track: 0, ms },
+                    AppCommand::SetTrackAttack { track: 1, ms },
+                ],
+            )
+            .expect("apply multi-track attack update");
+        }
+        assert_eq!(app.state.scheduler_snapshot_version(), version);
+        finish_active_gesture(&mut app);
+        assert_eq!(app.state.scheduler_snapshot_version(), version + 1);
+        assert_eq!(app.history.undo_len(), 1);
+    }
+
+    #[test]
+    fn variant_stamp_and_clear_are_lossless_step_transactions() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        app.state.pattern.timebase_plocks[0].set(2, Timebase::Eighth);
+        app.state.pattern.swing_plocks[0].set(2, 63.0);
+        app.state.pattern.swing_resolution_plocks[0]
+            .set(2, SwingResolution::Eighth);
+        let assignment = app.state.reconcile_plock_variant_registry_for_track(0)[2]
+            .clone()
+            .expect("source variant");
+        let before = app.state.capture_step_snapshot(0, 5);
+
+        apply_recorded_step_mutation(&mut app, 0, &[5], "Stamp step variant", |app| {
+            app.state
+                .stamp_variant_key_to_steps_no_publish(0, &assignment.key, &[5]);
+            Ok(())
+        })
+        .expect("record variant stamp");
+        let stamped = app.state.capture_step_snapshot(0, 5);
+        assert!(!step_snapshot_bit_exact_eq(&before, &stamped));
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(step_snapshot_bit_exact_eq(
+            &before,
+            &app.state.capture_step_snapshot(0, 5),
+        ));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(step_snapshot_bit_exact_eq(
+            &stamped,
+            &app.state.capture_step_snapshot(0, 5),
+        ));
+
+        apply_recorded_step_mutation(&mut app, 0, &[5], "Clear step variant locks", |app| {
+            app.state.clear_variant_locks_for_steps_no_publish(0, &[5]);
+            Ok(())
+        })
+        .expect("record variant clear");
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(step_snapshot_bit_exact_eq(
+            &stamped,
+            &app.state.capture_step_snapshot(0, 5),
+        ));
+    }
+
+    #[test]
+    fn slice3_track_command_families_obey_the_round_trip_law() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let before = app.state.live_track_params_snapshot(0).unwrap();
+        let base_before = app.state.pattern.instrument_base_note_offsets[0]
+            .load(Ordering::Relaxed);
+        let commands = vec![
+            AppCommand::ToggleTrackGate { track: 0 },
+            AppCommand::ToggleTrackPolyphonic { track: 0 },
+            AppCommand::ToggleTrackMute { track: 0 },
+            AppCommand::ToggleTrackSolo { track: 0 },
+            AppCommand::SetTrackMaxPolyphony { track: 0, value: 12 },
+            AppCommand::SetTrackAttack { track: 0, ms: 17.25 },
+            AppCommand::SetTrackRelease { track: 0, ms: 912.5 },
+            AppCommand::SetTrackSwing { track: 0, value: 61.5 },
+            AppCommand::SetTrackSwingResolution {
+                track: 0,
+                resolution: SwingResolution::Eighth,
+            },
+            AppCommand::SetTrackVolume { track: 0, value: 0.31 },
+            AppCommand::SetTrackPan { track: 0, value: -0.42 },
+            AppCommand::SetTrackSend { track: 0, value: 0.63 },
+            AppCommand::SetTrackOutput {
+                track: 0,
+                output: crate::sequencer::TrackOutput::None,
+            },
+            AppCommand::SetTrackSends {
+                track: 0,
+                sends: vec![crate::sequencer::TrackSendSnapshot {
+                    destination: crate::sequencer::BusId(44),
+                    amount: 0.27,
+                }],
+            },
+            AppCommand::SetTrackTimebase {
+                track: 0,
+                timebase: Timebase::Quarter,
+            },
+            AppCommand::SetTrackFtsScale {
+                track: 0,
+                scale_idx: 3,
+            },
+            AppCommand::SetTrackAccumIdx {
+                track: 0,
+                idx: 2,
+                default_limit: Some(24.0),
+                script_name: None,
+            },
+            AppCommand::SetTrackAccumLimit {
+                track: 0,
+                value: 19.5,
+            },
+            AppCommand::SetTrackAccumMode { track: 0, mode: 2 },
+            AppCommand::SetTrackMuteGroup { track: 0, group: 4 },
+            AppCommand::SetTrackGlobalTranspose {
+                track: 0,
+                enabled: false,
+            },
+            AppCommand::SetInstrumentBaseNoteOffset {
+                track: 0,
+                value: -7.0,
+            },
+        ];
+        for (index, command) in commands.into_iter().enumerate() {
+            let outcome = try_apply_command(&mut app, command);
+            assert!(
+                matches!(outcome, Ok(EditOutcome::Applied(_))),
+                "Slice 3 command {index} returned {outcome:?}",
+            );
+        }
+        finish_active_gesture(&mut app);
+        let after = app.state.live_track_params_snapshot(0).unwrap();
+        let base_after = app.state.pattern.instrument_base_note_offsets[0]
+            .load(Ordering::Relaxed);
+        let entry_count = app.history.undo_len();
+        assert!(entry_count > 0);
+
+        for _ in 0..entry_count {
+            assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        }
+        assert!(track_params_bit_exact_eq(
+            &app.state.live_track_params_snapshot(0).unwrap(),
+            &before,
+        ));
+        assert_eq!(
+            app.state.pattern.instrument_base_note_offsets[0].load(Ordering::Relaxed),
+            base_before,
+        );
+        for _ in 0..entry_count {
+            assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        }
+        assert!(track_params_bit_exact_eq(
+            &app.state.live_track_params_snapshot(0).unwrap(),
+            &after,
+        ));
+        assert_eq!(
+            app.state.pattern.instrument_base_note_offsets[0].load(Ordering::Relaxed),
+            base_after,
+        );
     }
 }

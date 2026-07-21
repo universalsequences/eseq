@@ -92,6 +92,35 @@ fn value_string_field(value: &Value, field: &str) -> Option<String> {
     })
 }
 
+fn slice3_numeric_history_command(op: &str, track: Option<usize>, value: f64) -> HostCommand {
+    let mut payload = HashMap::new();
+    payload.insert(
+        "op".to_string(),
+        Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
+    );
+    if let Some(track) = track {
+        payload.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(track as f64))),
+        );
+    }
+    payload.insert(
+        "value".to_string(),
+        Rc::new(RefCell::new(Value::Number(value))),
+    );
+    HostCommand::Custom {
+        name: "slice3-history-action".to_string(),
+        payload: Value::Map(payload),
+    }
+}
+
+fn unsupported_authoring_barrier(label: &str) -> HostCommand {
+    HostCommand::Custom {
+        name: "unsupported-authoring-history-barrier".to_string(),
+        payload: Value::String(label.to_string()),
+    }
+}
+
 fn value_symbol_name(value: &Value) -> Option<String> {
     match value {
         Value::String(value) | Value::Symbol(value) | Value::Keyword(value) => {
@@ -746,7 +775,7 @@ pub(crate) fn init_runtime(
     app: &tui::App,
     state: Arc<SequencerState>,
     track_names: &[String],
-    track_pan_ids: Arc<Mutex<Vec<i32>>>,
+    _track_pan_ids: Arc<Mutex<Vec<i32>>>,
     track_collapsed: Arc<Mutex<Vec<bool>>>,
     buses: Arc<Mutex<Vec<tui::BusChannelState>>>,
     bus_node_ids: Arc<Mutex<Vec<tui::BusNodeIds>>>,
@@ -2649,9 +2678,8 @@ pub(crate) fn init_runtime(
 
     // seq-set-track-volume — (seq-set-track-volume track-idx volume)
     let st = state.clone();
-    let pan_ids = track_pan_ids.clone();
     let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-track-volume", move |args, _ctx| {
+    runtime.register_native("seq-set-track-volume", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(vol))) = (args.first(), args.get(1))
         else {
             return Err("seq-set-track-volume: expected (track volume)".into());
@@ -2661,33 +2689,22 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-set-track-volume: track {track} out of range").into());
         }
         let vol = (*vol as f32).clamp(0.0, 1.0);
-        st.pattern.track_params[track].set_volume(vol);
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "volume",
+            Some(track),
+            vol as f64,
+        ));
         ui_inv.push(UiInvalidation::TrackMixer {
             track,
             change: TrackMixerInvalidation::Volume,
         });
-        // Push volume to audiograph's stereo panner node
-        let pan_ids_lock = pan_ids.lock().unwrap();
-        if let Some(&pan_id) = pan_ids_lock.get(track) {
-            unsafe {
-                sequencer::audiograph::params_push_wrapper(
-                    lg_raw,
-                    sequencer::audiograph::ParamMsg {
-                        idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
-                        logical_id: pan_id as u64,
-                        fvalue: sequencer::mixer_volume::fader_to_gain(vol),
-                    },
-                );
-            }
-        }
         Ok(Value::Number(vol as f64))
     });
 
     // seq-set-track-pan — (seq-set-track-pan track-idx pan)
     let st = state.clone();
-    let pan_ids = track_pan_ids.clone();
     let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-track-pan", move |args, _ctx| {
+    runtime.register_native("seq-set-track-pan", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(pan))) = (args.first(), args.get(1))
         else {
             return Err("seq-set-track-pan: expected (track pan)".into());
@@ -2697,32 +2714,22 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-set-track-pan: track {track} out of range").into());
         }
         let pan = (*pan as f32).clamp(-1.0, 1.0);
-        st.pattern.track_params[track].set_pan(pan);
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "pan",
+            Some(track),
+            pan as f64,
+        ));
         ui_inv.push(UiInvalidation::TrackMixer {
             track,
             change: TrackMixerInvalidation::Pan,
         });
-        let pan_ids_lock = pan_ids.lock().unwrap();
-        if let Some(&pan_id) = pan_ids_lock.get(track) {
-            unsafe {
-                sequencer::audiograph::params_push_wrapper(
-                    lg_raw,
-                    sequencer::audiograph::ParamMsg {
-                        idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_PAN,
-                        logical_id: pan_id as u64,
-                        fvalue: pan,
-                    },
-                );
-            }
-        }
         Ok(Value::Number(pan as f64))
     });
 
     // seq-toggle-track-mute — (seq-toggle-track-mute track-idx)
     let st = state.clone();
-    let pan_ids = track_pan_ids.clone();
     let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-toggle-track-mute", move |args, _ctx| {
+    runtime.register_native("seq-toggle-track-mute", move |args, ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-toggle-track-mute: expected track".into());
         };
@@ -2730,7 +2737,10 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-toggle-track-mute: track {track} out of range").into());
         }
-        let muted = st.pattern.track_params[track].toggle_mute();
+        let muted = !st.pattern.track_params[track].is_muted();
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "toggle-mute", Some(track), 0.0,
+        ));
         ui_inv.push(UiInvalidation::TrackMixer {
             track,
             change: TrackMixerInvalidation::Mute,
@@ -2739,15 +2749,6 @@ pub(crate) fn init_runtime(
             eprintln!(
                 "[ui-trace][native] seq-toggle-track-mute track={} muted={}",
                 track, muted
-            );
-        }
-        let pan_ids_lock = pan_ids.lock().unwrap();
-        if let Some(&pan_id) = pan_ids_lock.get(track) {
-            push_panner_bool(
-                lg_raw,
-                pan_id,
-                sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE,
-                muted,
             );
         }
         Ok(Value::Bool(muted))
@@ -2782,9 +2783,8 @@ pub(crate) fn init_runtime(
 
     // seq-toggle-track-solo — (seq-toggle-track-solo track-idx)
     let st = state.clone();
-    let pan_ids = track_pan_ids.clone();
     let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-toggle-track-solo", move |args, _ctx| {
+    runtime.register_native("seq-toggle-track-solo", move |args, ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-toggle-track-solo: expected track".into());
         };
@@ -2792,7 +2792,10 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-toggle-track-solo: track {track} out of range").into());
         }
-        let solo = st.pattern.track_params[track].toggle_solo();
+        let solo = !st.pattern.track_params[track].is_solo();
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "toggle-solo", Some(track), 0.0,
+        ));
         ui_inv.push(UiInvalidation::TrackMixer {
             track,
             change: TrackMixerInvalidation::Solo,
@@ -2803,8 +2806,6 @@ pub(crate) fn init_runtime(
                 track, solo
             );
         }
-        let pan_ids_lock = pan_ids.lock().unwrap();
-        push_solo_mutes(lg_raw, &st, &pan_ids_lock);
         Ok(Value::Bool(solo))
     });
 
@@ -3964,14 +3965,12 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(st.toggle_play()))
     });
 
-    let st = state.clone();
-    runtime.register_native("seq-set-bpm", move |args, _ctx| {
+    runtime.register_native("seq-set-bpm", move |args, ctx| {
         let Some(Value::Number(bpm)) = args.first() else {
             return Err("seq-set-bpm: expected bpm number".into());
         };
         let bpm = (*bpm as u32).clamp(20, 300);
-        st.transport.bpm.store(bpm, Ordering::Relaxed);
-        st.publish_scheduler_snapshot();
+        ctx.enqueue_command(slice3_numeric_history_command("bpm", None, bpm as f64));
         Ok(Value::Number(bpm as f64))
     });
 
@@ -3998,7 +3997,9 @@ pub(crate) fn init_runtime(
                     return Err("seq-set-track-param: :attack expects a number".into());
                 };
                 let v = (val as f32).clamp(0.0, 500.0);
-                tp.set_attack_ms(v);
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "attack", Some(track), v as f64,
+                ));
                 (TrackParamInvalidation::Attack, Ok(Value::Number(v as f64)))
             }
             "release" => {
@@ -4006,7 +4007,9 @@ pub(crate) fn init_runtime(
                     return Err("seq-set-track-param: :release expects a number".into());
                 };
                 let v = (val as f32).clamp(0.0, 2000.0);
-                tp.set_release_ms(v);
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "release", Some(track), v as f64,
+                ));
                 (TrackParamInvalidation::Release, Ok(Value::Number(v as f64)))
             }
             "swing" => {
@@ -4016,7 +4019,9 @@ pub(crate) fn init_runtime(
                 let v = (val as f32).clamp(50.0, 75.0);
                 let steps = sel.lock().unwrap();
                 if steps.is_empty() {
-                    tp.set_swing(v);
+                    ctx.enqueue_command(slice3_numeric_history_command(
+                        "swing", Some(track), v as f64,
+                    ));
                 } else {
                     let values = steps.iter().map(|step| Rc::new(RefCell::new(Value::Number(*step as f64)))).collect();
                     let mut payload = HashMap::new();
@@ -4052,7 +4057,9 @@ pub(crate) fn init_runtime(
                     return Err("seq-set-track-param: :send expects a number".into());
                 };
                 let v = (val as f32).clamp(0.0, 1.0);
-                tp.set_send(v);
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "send", Some(track), v as f64,
+                ));
                 (TrackParamInvalidation::Send, Ok(Value::Number(v as f64)))
             }
             "gate" => {
@@ -4061,11 +4068,13 @@ pub(crate) fn init_runtime(
                 };
                 let want_on = val != 0.0;
                 if want_on != tp.is_gate_on() {
-                    tp.toggle_gate();
+                    ctx.enqueue_command(slice3_numeric_history_command(
+                        "toggle-gate", Some(track), 0.0,
+                    ));
                 }
                 (
                     TrackParamInvalidation::Gate,
-                    Ok(Value::Bool(tp.is_gate_on())),
+                    Ok(Value::Bool(want_on)),
                 )
             }
             "poly" => {
@@ -4074,31 +4083,39 @@ pub(crate) fn init_runtime(
                 };
                 let want_on = val != 0.0;
                 if want_on != tp.is_polyphonic() {
-                    tp.toggle_polyphonic();
+                    ctx.enqueue_command(slice3_numeric_history_command(
+                        "toggle-poly", Some(track), 0.0,
+                    ));
                 }
                 (
                     TrackParamInvalidation::Poly,
-                    Ok(Value::Bool(tp.is_polyphonic())),
+                    Ok(Value::Bool(want_on)),
                 )
             }
             "max-poly" | "max-polyphony" | "voices" => {
                 let Some(val) = numeric_value else {
                     return Err("seq-set-track-param: :max-poly expects a number".into());
                 };
-                tp.set_max_polyphony(val.round().max(1.0) as usize);
+                let value = val.round().max(1.0) as usize;
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "max-polyphony", Some(track), value as f64,
+                ));
                 (
                     TrackParamInvalidation::MaxPolyphony,
-                    Ok(Value::Number(tp.get_max_polyphony() as f64)),
+                    Ok(Value::Number(value as f64)),
                 )
             }
             "mute-group" => {
                 let Some(val) = numeric_value else {
                     return Err("seq-set-track-param: :mute-group expects a number".into());
                 };
-                tp.set_mute_group(val.round().clamp(0.0, 8.0) as u8);
+                let value = val.round().clamp(0.0, 8.0) as u8;
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "mute-group", Some(track), value as f64,
+                ));
                 (
                     TrackParamInvalidation::MuteGroup,
-                    Ok(Value::Number(tp.get_mute_group() as f64)),
+                    Ok(Value::Number(value as f64)),
                 )
             }
             "global-transpose" => {
@@ -4112,17 +4129,20 @@ pub(crate) fn init_runtime(
                         );
                     }
                 };
-                tp.set_global_transpose(enabled);
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "global-transpose",
+                    Some(track),
+                    if enabled { 1.0 } else { 0.0 },
+                ));
                 (
                     TrackParamInvalidation::GlobalTranspose,
-                    Ok(Value::Bool(tp.uses_global_transpose())),
+                    Ok(Value::Bool(enabled)),
                 )
             }
             other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),
         };
         let result = invalidation.1;
         result.inspect(|_| {
-            st.publish_scheduler_snapshot();
             *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
             ui_inv.push(UiInvalidation::TrackParam {
                 track,
@@ -4131,12 +4151,11 @@ pub(crate) fn init_runtime(
         })
     });
 
-    let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
     let accumulator_names_for_native = accumulator_names.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    runtime.register_native("seq-set-accumulator", move |args, _ctx| {
+    runtime.register_native("seq-set-accumulator", move |args, ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
             _ => return Err("seq-set-accumulator: expected string label".into()),
@@ -4147,15 +4166,27 @@ pub(crate) fn init_runtime(
             .position(|name| name.eq_ignore_ascii_case(label))
             .ok_or_else(|| format!("seq-set-accumulator: unknown accumulator '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
-        let tp = &st.pattern.track_params[track];
-        tp.set_accumulator_idx(idx);
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("accumulator".to_string()))));
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(idx as f64))));
         if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
-            tp.set_script_accumulator_name(None);
-            tp.set_accum_limit(builtin_accumulator_default_limit(idx));
+            payload.insert(
+                "default-limit".to_string(),
+                Rc::new(RefCell::new(Value::Number(
+                    builtin_accumulator_default_limit(idx) as f64,
+                ))),
+            );
         } else {
-            tp.set_script_accumulator_name(Some(names[idx].clone()));
+            payload.insert(
+                "script-name".to_string(),
+                Rc::new(RefCell::new(Value::String(names[idx].clone()))),
+            );
         }
-        st.publish_scheduler_snapshot();
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "slice3-history-action".to_string(),
+            payload: Value::Map(payload),
+        });
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(names[idx].clone()))
@@ -4245,7 +4276,7 @@ pub(crate) fn init_runtime(
     let accumulator_names_for_native = accumulator_names.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let debug_accum_use = debug_accum;
-    runtime.register_native("seq-use-accumulator", move |args, _ctx| {
+    runtime.register_native("seq-use-accumulator", move |args, ctx| {
         let (track, label) = match args.as_slice() {
             [Value::String(label)] => (ct.load(Ordering::Relaxed), label.clone()),
             [Value::Number(track), Value::String(label)] if *track >= 0.0 => {
@@ -4270,16 +4301,27 @@ pub(crate) fn init_runtime(
             .position(|name| name.eq_ignore_ascii_case(&label))
             .ok_or_else(|| format!("seq-use-accumulator: unknown accumulator '{label}'"))?;
 
-        let tp = &st.pattern.track_params[track];
-        tp.set_accumulator_idx(idx);
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("accumulator".to_string()))));
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(idx as f64))));
         if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
-            tp.set_script_accumulator_name(None);
-            tp.set_accum_limit(builtin_accumulator_default_limit(idx));
+            payload.insert(
+                "default-limit".to_string(),
+                Rc::new(RefCell::new(Value::Number(
+                    builtin_accumulator_default_limit(idx) as f64,
+                ))),
+            );
         } else {
-            tp.set_script_accumulator_name(Some(names[idx].clone()));
+            payload.insert(
+                "script-name".to_string(),
+                Rc::new(RefCell::new(Value::String(names[idx].clone()))),
+            );
         }
-        st.request_accumulator_reset(track);
-        st.publish_scheduler_snapshot();
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "slice3-history-action".to_string(),
+            payload: Value::Map(payload),
+        });
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         if debug_accum_use {
@@ -4288,7 +4330,11 @@ pub(crate) fn init_runtime(
                 track,
                 label,
                 idx,
-                tp.script_accumulator_name(),
+                if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
+                    None
+                } else {
+                    Some(names[idx].clone())
+                },
                 *names
             );
         }
@@ -4301,7 +4347,7 @@ pub(crate) fn init_runtime(
     let midi_fx_names_for_native = midi_fx_names.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let debug_midi_fx_use = debug_accum;
-    runtime.register_native("seq-use-midi-fx", move |args, _ctx| {
+    runtime.register_native("seq-use-midi-fx", move |args, ctx| {
         if args.is_empty() {
             return Err("seq-use-midi-fx: expected one or more MIDI FX names".into());
         }
@@ -4328,8 +4374,12 @@ pub(crate) fn init_runtime(
                 names.push(label.clone());
             }
         }
+        let changed = st.pattern.track_params[track].midi_fx_chain() != chain;
         st.pattern.track_params[track].set_midi_fx_chain(chain.clone());
-        st.publish_scheduler_snapshot();
+        if changed {
+            st.publish_scheduler_snapshot();
+            ctx.enqueue_command(unsupported_authoring_barrier("MIDI FX chain edits"));
+        }
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         if debug_midi_fx_use {
@@ -4346,7 +4396,7 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
-    runtime.register_native("seq-clear-midi-fx", move |args, _ctx| {
+    runtime.register_native("seq-clear-midi-fx", move |args, ctx| {
         let track = match args.first() {
             Some(Value::Number(track)) if *track >= 0.0 => *track as usize,
             None => ct.load(Ordering::Relaxed),
@@ -4355,8 +4405,11 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err("seq-clear-midi-fx: track out of range".into());
         }
-        st.pattern.track_params[track].set_midi_fx_chain(Vec::new());
-        st.publish_scheduler_snapshot();
+        if !st.pattern.track_params[track].midi_fx_chain().is_empty() {
+            st.pattern.track_params[track].set_midi_fx_chain(Vec::new());
+            st.publish_scheduler_snapshot();
+            ctx.enqueue_command(unsupported_authoring_barrier("MIDI FX chain edits"));
+        }
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(true))
     });
@@ -4364,7 +4417,7 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
-    runtime.register_native("seq-set-midi-fx-position", move |args, _ctx| {
+    runtime.register_native("seq-set-midi-fx-position", move |args, ctx| {
         if args.is_empty() {
             return Err("seq-set-midi-fx-position: expected position".into());
         }
@@ -4395,17 +4448,19 @@ pub(crate) fn init_runtime(
                 );
             }
         };
-        st.pattern.track_params[track].set_midi_fx_position(position);
-        st.publish_scheduler_snapshot();
+        if st.pattern.track_params[track].get_midi_fx_position() != position {
+            st.pattern.track_params[track].set_midi_fx_position(position);
+            st.publish_scheduler_snapshot();
+            ctx.enqueue_command(unsupported_authoring_barrier("MIDI FX position edits"));
+        }
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(true))
     });
 
-    let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    runtime.register_native("seq-set-accum-mode", move |args, _ctx| {
+    runtime.register_native("seq-set-accum-mode", move |args, ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
             _ => return Err("seq-set-accum-mode: expected string label".into()),
@@ -4416,25 +4471,26 @@ pub(crate) fn init_runtime(
             .map(|idx| idx as u32)
             .ok_or_else(|| format!("seq-set-accum-mode: unknown mode '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
-        st.pattern.track_params[track].set_accum_mode(mode);
-        st.publish_scheduler_snapshot();
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "accum-mode", Some(track), mode as f64,
+        ));
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(accum_mode_label(mode).to_string()))
     });
 
-    let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    runtime.register_native("seq-set-accum-limit", move |args, _ctx| {
+    runtime.register_native("seq-set-accum-limit", move |args, ctx| {
         let Some(Value::Number(limit)) = args.first() else {
             return Err("seq-set-accum-limit: expected number".into());
         };
         let limit = (*limit as f32).clamp(0.0, 127.0);
         let track = ct.load(Ordering::Relaxed);
-        st.pattern.track_params[track].set_accum_limit(limit);
-        st.publish_scheduler_snapshot();
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "accum-limit", Some(track), limit as f64,
+        ));
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(limit as f64))
@@ -4486,11 +4542,10 @@ pub(crate) fn init_runtime(
     );
 
     // seq-set-timebase — set the default timebase for the current track (by label string)
-    let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    runtime.register_native("seq-set-timebase", move |args, _ctx| {
+    runtime.register_native("seq-set-timebase", move |args, ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
             _ => return Err("seq-set-timebase: expected string label".into()),
@@ -4502,18 +4557,18 @@ pub(crate) fn init_runtime(
             .map(|i| Timebase::ALL[i])
             .ok_or_else(|| format!("seq-set-timebase: unknown timebase '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
-        st.pattern.track_params[track].set_timebase(tb);
-        st.publish_scheduler_snapshot();
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "timebase", Some(track), tb as u32 as f64,
+        ));
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(tb.label().to_string()))
     });
 
-    let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    runtime.register_native("seq-set-fts", move |args, _ctx| {
+    runtime.register_native("seq-set-fts", move |args, ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
             _ => return Err("seq-set-fts: expected string label".into()),
@@ -4524,8 +4579,9 @@ pub(crate) fn init_runtime(
             .position(|scale| scale.to_ascii_lowercase() == normalized)
             .ok_or_else(|| format!("seq-set-fts: unknown scale '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
-        st.pattern.track_params[track].set_fts_scale(scale_idx);
-        st.publish_scheduler_snapshot();
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "fts", Some(track), scale_idx as f64,
+        ));
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(FTS_SCALE_NAMES[scale_idx].to_string()))
@@ -4561,7 +4617,6 @@ pub(crate) fn init_runtime(
     });
 
     // seq-set-swing-resolution — set the default swing resolution for the current track (by label string)
-    let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
@@ -4580,7 +4635,11 @@ pub(crate) fn init_runtime(
         let track = ct.load(Ordering::Relaxed);
         let steps = sel.lock().unwrap();
         if steps.is_empty() {
-            st.pattern.track_params[track].set_swing_resolution(resolution);
+            ctx.enqueue_command(slice3_numeric_history_command(
+                "swing-resolution",
+                Some(track),
+                resolution as u32 as f64,
+            ));
         } else {
             let values = steps.iter().map(|step| Rc::new(RefCell::new(Value::Number(*step as f64)))).collect();
             let mut payload = HashMap::new();
@@ -4594,7 +4653,6 @@ pub(crate) fn init_runtime(
             });
             return Ok(Value::String(resolution.label().to_string()));
         }
-        st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(resolution.label().to_string()))
