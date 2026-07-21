@@ -1339,6 +1339,354 @@ fn apply_selected_steps_delete(
     Ok((outcome, steps))
 }
 
+fn apply_step_paste_host_command(
+    app: &mut tui::App,
+    clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("step paste payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "step paste track was invalid".to_string())?;
+    let dest_start = map_usize(map, "dest-start")
+        .ok_or_else(|| "step paste destination was invalid".to_string())?;
+    let Some((source_track, clipboard)) = clipboard.lock().unwrap().clone() else {
+        return Ok((tui::edit::EditOutcome::NoOp, track));
+    };
+    let num_steps = app
+        .state
+        .pattern
+        .track_params
+        .get(track)
+        .ok_or_else(|| format!("step paste track {track} was out of range"))?
+        .get_num_steps();
+    tui::try_apply_command(
+        app,
+        tui::AppCommand::PasteSteps {
+            track,
+            source_track,
+            clipboard,
+            dest_start,
+            num_steps,
+        },
+    )
+    .map(|outcome| (outcome, track))
+    .map_err(|error| format!("could not paste steps: {error:?}"))
+}
+
+fn step_param_from_name(name: &str) -> Option<StepParam> {
+    match name.trim_start_matches(':') {
+        "velocity" | "vel" => Some(StepParam::Velocity),
+        "duration" | "dur" => Some(StepParam::Duration),
+        "aux-a" | "aux_a" | "auxa" | "axa" => Some(StepParam::AuxA),
+        "aux-b" | "aux_b" | "auxb" => Some(StepParam::AuxB),
+        "transpose" => Some(StepParam::Transpose),
+        "pan" => Some(StepParam::Pan),
+        "sync" | "syn" => Some(StepParam::Sync),
+        "delay" | "dly" => Some(StepParam::Delay),
+        "speed" => Some(StepParam::Speed),
+        "chop" => Some(StepParam::Chop),
+        _ => None,
+    }
+}
+
+fn apply_step_param_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize, Vec<usize>, StepParam), String> {
+    let Value::Map(map) = payload else {
+        return Err("step parameter payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "step parameter track was invalid".to_string())?;
+    let param = map_string(map, "param")
+        .and_then(|name| step_param_from_name(&name))
+        .ok_or_else(|| "step parameter name was invalid".to_string())?;
+    let value = map_number(map, "value")
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "step parameter value was invalid".to_string())?
+        as f32;
+    let steps = map_usize_list(map, "steps")
+        .ok_or_else(|| "step parameter targets were invalid".to_string())?;
+    let outcome = tui::edit::apply_recorded_step_mutation(
+        app,
+        track,
+        &steps,
+        "Set step parameter",
+        |app| {
+            for step in &steps {
+                app.state.pattern.step_data[track].set(*step, param, value);
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("could not set step parameter: {error:?}"))?;
+    Ok((outcome, track, steps, param))
+}
+
+fn apply_move_step_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize, Vec<usize>, isize, bool), String> {
+    let Value::Map(map) = payload else {
+        return Err("step move payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "step move track was invalid".to_string())?;
+    let steps = map_usize_list(map, "steps")
+        .ok_or_else(|| "step move targets were invalid".to_string())?;
+    let delta = map_number(map, "delta")
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "step move delta was invalid".to_string())?
+        .round() as isize;
+    let move_selection = map_bool(map, "move-selection");
+    let num_steps = app
+        .state
+        .pattern
+        .track_params
+        .get(track)
+        .ok_or_else(|| format!("step move track {track} was out of range"))?
+        .get_num_steps()
+        .min(MAX_STEPS);
+    if steps.is_empty()
+        || delta == 0
+        || steps.iter().any(|step| {
+            *step >= num_steps
+                || (*step as isize + delta) < 0
+                || (*step as isize + delta) >= num_steps as isize
+        })
+    {
+        return Err("step move range was invalid".to_string());
+    }
+    let mut affected = steps.clone();
+    affected.extend(steps.iter().map(|step| (*step as isize + delta) as usize));
+    let sources = steps
+        .iter()
+        .map(|step| (*step, app.state.capture_step_snapshot(track, *step)))
+        .collect::<Vec<_>>();
+    let outcome = tui::edit::apply_recorded_step_mutation(
+        app,
+        track,
+        &affected,
+        "Move steps",
+        |app| {
+            for (step, _) in &sources {
+                app.state.clear_step_payload_no_publish(track, *step);
+            }
+            for (step, snapshot) in &sources {
+                app.state.restore_step_snapshot_no_publish(
+                    track,
+                    (*step as isize + delta) as usize,
+                    snapshot,
+                );
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("could not move steps: {error:?}"))?;
+    Ok((outcome, track, steps, delta, move_selection))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum DrumLaneHistoryAction {
+    Toggle {
+        track: usize,
+        pad_note: i32,
+        step: usize,
+    },
+    Duration {
+        track: usize,
+        pad_note: i32,
+        step: usize,
+        duration: f32,
+    },
+    Move {
+        track: usize,
+        pad_note: i32,
+        steps: Vec<usize>,
+        delta: isize,
+        move_selection: bool,
+    },
+    Clear {
+        track: usize,
+        pad_note: i32,
+        steps: Vec<usize>,
+    },
+}
+
+impl DrumLaneHistoryAction {
+    fn track(&self) -> usize {
+        match self {
+            Self::Toggle { track, .. }
+            | Self::Duration { track, .. }
+            | Self::Move { track, .. }
+            | Self::Clear { track, .. } => *track,
+        }
+    }
+
+    fn affected_steps(&self) -> Vec<usize> {
+        let mut affected = match self {
+            Self::Toggle { step, .. } | Self::Duration { step, .. } => vec![*step],
+            Self::Clear { steps, .. } => steps.clone(),
+            Self::Move { steps, delta, .. } => {
+                let mut affected = steps.clone();
+                affected.extend(steps.iter().map(|step| (*step as isize + *delta) as usize));
+                affected
+            }
+        };
+        affected.sort_unstable();
+        affected.dedup();
+        affected
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Toggle { .. } => "Toggle drum-lane step",
+            Self::Duration { .. } => "Set drum-lane duration",
+            Self::Move { .. } => "Move drum-lane steps",
+            Self::Clear { .. } => "Delete drum-lane steps",
+        }
+    }
+}
+
+fn map_usize_list(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Option<Vec<usize>> {
+    let cell = map.get(key)?;
+    let Value::List(values) = &*cell.borrow() else {
+        return None;
+    };
+    values
+        .iter()
+        .map(|value| match &*value.borrow() {
+            Value::Number(value)
+                if value.is_finite() && *value >= 0.0 && *value <= usize::MAX as f64 =>
+            {
+                Some(*value as usize)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn parse_drum_lane_history_action(payload: &Value) -> Result<DrumLaneHistoryAction, String> {
+    let Value::Map(map) = payload else {
+        return Err("drum-lane edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "drum-lane edit operation was missing".to_string())?;
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "drum-lane edit track was invalid".to_string())?;
+    let pad_note = map_number(map, "pad-note")
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "drum-lane pad note was invalid".to_string())?
+        .round() as i32;
+    match op.as_str() {
+        "toggle" => Ok(DrumLaneHistoryAction::Toggle {
+            track,
+            pad_note,
+            step: map_usize(map, "step")
+                .ok_or_else(|| "drum-lane step was invalid".to_string())?,
+        }),
+        "duration" => Ok(DrumLaneHistoryAction::Duration {
+            track,
+            pad_note,
+            step: map_usize(map, "step")
+                .ok_or_else(|| "drum-lane step was invalid".to_string())?,
+            duration: map_number(map, "duration")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| "drum-lane duration was invalid".to_string())?
+                as f32,
+        }),
+        "move" => Ok(DrumLaneHistoryAction::Move {
+            track,
+            pad_note,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "drum-lane move steps were invalid".to_string())?,
+            delta: map_number(map, "delta")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| "drum-lane move delta was invalid".to_string())?
+                .round() as isize,
+            move_selection: map_bool(map, "move-selection"),
+        }),
+        "clear" => Ok(DrumLaneHistoryAction::Clear {
+            track,
+            pad_note,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "drum-lane clear steps were invalid".to_string())?,
+        }),
+        _ => Err(format!("unknown drum-lane history operation {op}")),
+    }
+}
+
+fn apply_drum_lane_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, DrumLaneHistoryAction), String> {
+    let action = parse_drum_lane_history_action(payload)?;
+    let track = action.track();
+    if track >= app.state.active_track_count() {
+        return Err(format!("drum-lane track {track} was out of range"));
+    }
+    let affected = action.affected_steps();
+    if affected.is_empty() || affected.iter().any(|step| *step >= MAX_STEPS) {
+        return Err("drum-lane affected steps were invalid".to_string());
+    }
+    let label = action.label();
+    let mutation = action.clone();
+    let outcome = tui::edit::apply_recorded_step_mutation(
+        app,
+        track,
+        &affected,
+        label,
+        |app| {
+            match &mutation {
+                DrumLaneHistoryAction::Toggle {
+                    pad_note, step, ..
+                } => {
+                    app.state.toggle_drum_lane_step_no_publish(track, *step, *pad_note);
+                }
+                DrumLaneHistoryAction::Duration {
+                    pad_note,
+                    step,
+                    duration,
+                    ..
+                } => {
+                    app.state.set_drum_lane_step_duration_no_publish(
+                        track,
+                        *step,
+                        *pad_note,
+                        *duration,
+                    );
+                }
+                DrumLaneHistoryAction::Move {
+                    pad_note,
+                    steps,
+                    delta,
+                    ..
+                } => {
+                    app.state.move_drum_lane_steps_no_publish(
+                        track,
+                        *pad_note,
+                        steps,
+                        *delta,
+                    );
+                }
+                DrumLaneHistoryAction::Clear {
+                    pad_note, steps, ..
+                } => {
+                    app.state.clear_drum_lane_steps_no_publish(track, *pad_note, steps);
+                }
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("could not apply drum-lane edit: {error:?}"))?;
+    Ok((outcome, action))
+}
+
 fn apply_piano_roll_history_host_command(
     app: &mut tui::App,
     selection: &Arc<Mutex<HashSet<u64>>>,
@@ -4355,7 +4703,8 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_piano_roll_gesture_update, apply_piano_roll_history_host_command,
+        apply_drum_lane_history_host_command, apply_piano_roll_gesture_update,
+        apply_piano_roll_history_host_command,
         apply_selected_steps_delete, apply_toggle_step_host_command,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
@@ -4488,6 +4837,85 @@ mod tests {
             sequencer::tui::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+    }
+
+    #[test]
+    fn metal_drum_lane_edits_are_individually_replayable() {
+        let (state, mut app) = history_test_app();
+
+        let toggle = history_value_map([
+            ("op", Value::Keyword("toggle".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("step", Value::Number(2.0)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &toggle)
+            .expect("toggle drum-lane step");
+        assert!(state.pattern.patterns[0].is_active(2));
+
+        let duration = history_value_map([
+            ("op", Value::Keyword("duration".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("step", Value::Number(2.0)),
+            ("duration", Value::Number(3.0)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &duration)
+            .expect("set drum-lane duration");
+        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+
+        let move_action = history_value_map([
+            ("op", Value::Keyword("move".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("steps", piano_roll_id_list([2])),
+            ("delta", Value::Number(3.0)),
+            ("move-selection", Value::Bool(false)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &move_action)
+            .expect("move drum-lane step");
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
+
+        let clear = history_value_map([
+            ("op", Value::Keyword("clear".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("steps", piano_roll_id_list([5])),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &clear)
+            .expect("clear drum-lane step");
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(app.history.undo_len(), 4);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_ne!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+
+        for _ in 0..4 {
+            assert!(matches!(
+                sequencer::tui::edit::redo(&mut app),
+                sequencer::tui::history::HistoryReplay::Applied(_)
+            ));
+        }
         assert!(!state.pattern.patterns[0].is_active(5));
     }
 
@@ -4656,6 +5084,86 @@ mod tests {
         assert!(!state.pattern.patterns[0].is_active(2));
         assert!(state.pattern.patterns[0].is_active(6));
         assert_eq!(state.pattern.chord_data[0].get(6, 0), 7.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_multi_note_move_round_trips_every_touched_cell() {
+        let (state, mut app) = history_test_app();
+        for (step, transpose) in [(2, 0.0), (4, 7.0)] {
+            state.pattern.patterns[0].set_step_active(step, true);
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Transpose,
+                transpose,
+            );
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Duration,
+                1.0,
+            );
+        }
+        let first = super::piano_roll_item_id(2, 0);
+        let second = super::piano_roll_item_id(4, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new(
+            [first, second].into_iter().collect(),
+        ));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let move_action = history_value_map([
+            ("type", Value::Keyword("move-items-absolute".to_string())),
+            ("ids", piano_roll_id_list([first, second])),
+            ("anchor-id", Value::Number(first as f64)),
+            ("start", Value::Number(6.0)),
+            ("lane", Value::Number(43.0)),
+        ]);
+        apply_piano_roll_gesture_update(
+            &mut app,
+            &selection,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(move_action),
+        )
+        .expect("preview multi-note move");
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("ids", piano_roll_id_list([first, second])),
+            ("anchor-id", Value::Number(first as f64)),
+        ]);
+        finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish multi-note move");
+
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(4));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 5.0);
+        assert_eq!(state.pattern.chord_data[0].get(8, 0), 12.0);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+        assert_eq!(
+            state.pattern.step_data[0].get(4, sequencer::sequencer::StepParam::Transpose),
+            7.0,
+        );
+        assert!(!state.pattern.patterns[0].is_active(6));
+        assert!(!state.pattern.patterns[0].is_active(8));
+
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 5.0);
+        assert_eq!(state.pattern.chord_data[0].get(8, 0), 12.0);
     }
 
     #[test]
@@ -5529,6 +6037,7 @@ mod tests {
             midi_fx_names: _,
             sample_browser: _,
             piano_roll_clipboard: _,
+            selected_drum_lane_steps: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -5992,6 +6501,7 @@ mod tests {
             midi_fx_names: _,
             sample_browser: _,
             piano_roll_clipboard: _,
+            selected_drum_lane_steps: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -7396,6 +7906,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         midi_fx_names: _,
         sample_browser,
         piano_roll_clipboard,
+        selected_drum_lane_steps,
     } = init_runtime(
         &app,
         state.clone(),
@@ -7917,7 +8428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if handle_metal_soft_step_param_key(
                         &mut editor,
                         &key,
-                        &state,
+                        &mut app,
                         &current_track,
                         &expanded_step_projection,
                         &mut soft_step_param_edit,
@@ -8188,6 +8699,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(error) => editor.handle_host_event(HostEvent::Error(error)),
                         }
                     }
+                    "drum-lane-history-action" => {
+                        match apply_drum_lane_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), action)) => {
+                                let track = action.track();
+                                let bindings = editor.runtime().reactive_binding_store();
+                                match action {
+                                    DrumLaneHistoryAction::Toggle { .. } => {
+                                        if !selected_steps.lock().unwrap().is_empty() {
+                                            selected_steps.lock().unwrap().clear();
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        clear_drum_lane_selection(
+                                            &bindings,
+                                            &mut selected_drum_lane_steps.lock().unwrap(),
+                                        );
+                                    }
+                                    DrumLaneHistoryAction::Move {
+                                        pad_note,
+                                        steps,
+                                        delta,
+                                        move_selection: true,
+                                        ..
+                                    } => {
+                                        let mut selected = selected_drum_lane_steps.lock().unwrap();
+                                        for step in steps {
+                                            let old = DrumLaneStepSelection {
+                                                track,
+                                                pad_note,
+                                                step,
+                                            };
+                                            selected.remove(&old);
+                                            write_drum_lane_selection(&bindings, old, false);
+                                            let new = DrumLaneStepSelection {
+                                                track,
+                                                pad_note,
+                                                step: (step as isize + delta) as usize,
+                                            };
+                                            selected.insert(new);
+                                            write_drum_lane_selection(&bindings, new, true);
+                                        }
+                                    }
+                                    DrumLaneHistoryAction::Clear { .. } => {
+                                        clear_drum_lane_selection(
+                                            &bindings,
+                                            &mut selected_drum_lane_steps.lock().unwrap(),
+                                        );
+                                    }
+                                    DrumLaneHistoryAction::Duration { .. }
+                                    | DrumLaneHistoryAction::Move {
+                                        move_selection: false,
+                                        ..
+                                    } => {}
+                                }
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Drum-lane edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
                     "delete-selected-steps" => {
                         let track = match &payload {
                             Value::Map(map) => map_usize(map, "track"),
@@ -8218,6 +8799,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                             Ok(_) => {}
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "paste-steps" => {
+                        match apply_step_paste_host_command(&mut app, &step_clipboard, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Step paste was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "set-step-param-history" => {
+                        match apply_step_param_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track, steps, param)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                for step in steps {
+                                    ui_invalidations.push(UiInvalidation::Step {
+                                        track,
+                                        step,
+                                        change: StepInvalidation::Param(param.into()),
+                                    });
+                                    if param == StepParam::Duration {
+                                        ui_invalidations.push(UiInvalidation::Step {
+                                            track,
+                                            step,
+                                            change: StepInvalidation::DurationSpan,
+                                        });
+                                    }
+                                }
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, ..)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, ..)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Step parameter edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "move-step-history" => {
+                        match apply_move_step_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track, steps, delta, move_selection)) => {
+                                if move_selection {
+                                    let mut selected = selected_steps.lock().unwrap();
+                                    selected.clear();
+                                    selected.extend(
+                                        steps.iter().map(|step| (*step as isize + delta) as usize),
+                                    );
+                                }
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_invalidations.push(UiInvalidation::StepSelection {
+                                    track,
+                                    changed_steps: Vec::new(),
+                                });
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, ..)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, ..)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Step move was applied without history".to_string(),
+                                ));
+                            }
                             Err(error) => editor.handle_host_event(HostEvent::Error(error)),
                         }
                     }

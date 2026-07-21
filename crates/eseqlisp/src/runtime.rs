@@ -2583,6 +2583,10 @@ impl Runtime {
         self.shared.borrow_mut().status_message.take()
     }
 
+    pub fn enqueue_host_command(&mut self, command: HostCommand) {
+        self.shared.borrow_mut().queued_commands.push(command);
+    }
+
     pub fn layout_revision(&self) -> u64 {
         self.layout_revision
     }

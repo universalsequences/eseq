@@ -6,16 +6,17 @@ pub(crate) struct RuntimeInit {
     pub(crate) midi_fx_names: Arc<Mutex<Vec<String>>>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
     pub(crate) piano_roll_clipboard: PianoRollClipboard,
+    pub(crate) selected_drum_lane_steps: Arc<Mutex<HashSet<DrumLaneStepSelection>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct DrumLaneStepSelection {
-    track: usize,
-    pad_note: i32,
-    step: usize,
+pub(crate) struct DrumLaneStepSelection {
+    pub(crate) track: usize,
+    pub(crate) pad_note: i32,
+    pub(crate) step: usize,
 }
 
-fn write_drum_lane_selection(
+pub(crate) fn write_drum_lane_selection(
     bindings: &eseqlisp::reactive::ReactiveBindingStore,
     selection: DrumLaneStepSelection,
     selected: bool,
@@ -27,7 +28,7 @@ fn write_drum_lane_selection(
     );
 }
 
-fn clear_drum_lane_selection(
+pub(crate) fn clear_drum_lane_selection(
     bindings: &eseqlisp::reactive::ReactiveBindingStore,
     selected: &mut HashSet<DrumLaneStepSelection>,
 ) {
@@ -1995,13 +1996,7 @@ pub(crate) fn init_runtime(
 
     // seq-toggle-drum-lane-step — toggle one occupied pad lane at a track step
     let st = state.clone();
-    let sel = selected_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let fx_ep = fx_epoch.clone();
-    let ui_inv = ui_invalidations.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
-    let drum_selection_bindings = runtime.reactive_binding_store();
-    runtime.register_native("seq-toggle-drum-lane-step", move |args, _ctx| {
+    runtime.register_native("seq-toggle-drum-lane-step", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(pad_note)), Some(Value::Number(step))) =
             (args.first(), args.get(1), args.get(2))
         else {
@@ -2040,27 +2035,16 @@ pub(crate) fn init_runtime(
             ));
         }
 
-        let active = st.toggle_drum_lane_step(track, step, pad_note);
-        {
-            let mut set = sel.lock().unwrap();
-            if !set.is_empty() {
-                set.clear();
-                fx_ep.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        clear_drum_lane_selection(&drum_selection_bindings, &mut drum_sel.lock().unwrap());
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        for change in [
-            StepInvalidation::Active,
-            StepInvalidation::Payload,
-            StepInvalidation::PlockPresence,
-        ] {
-            ui_inv.push(UiInvalidation::Step {
-                track,
-                step,
-                change,
-            });
-        }
+        let active = !drum_lane_step_active(&st, track, pad_note, step);
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("toggle".to_string()))));
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
+        payload.insert("step".to_string(), Rc::new(RefCell::new(Value::Number(step as f64))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "drum-lane-history-action".to_string(),
+            payload: Value::Map(payload),
+        });
         Ok(Value::Bool(active))
     });
 
@@ -2079,9 +2063,7 @@ pub(crate) fn init_runtime(
     });
 
     let st = state.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-drum-lane-step-duration", move |args, _ctx| {
+    runtime.register_native("seq-set-drum-lane-step-duration", move |args, ctx| {
         let (
             Some(Value::Number(track)),
             Some(Value::Number(pad_note)),
@@ -2099,33 +2081,29 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() || step >= MAX_STEPS {
             return Ok(Value::Bool(false));
         }
-        let Some(duration) =
-            st.set_drum_lane_step_duration(track, step, pad_note, *duration as f32)
-        else {
+        if st.drum_lane_step_duration(track, step, pad_note).is_none() {
             return Ok(Value::Bool(false));
-        };
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::Param(StepParam::Duration.into()),
-        });
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::DurationSpan,
+        }
+        let duration = (*duration as f32)
+            .clamp(StepParam::Duration.min(), StepParam::Duration.max());
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("duration".to_string()))));
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
+        payload.insert("step".to_string(), Rc::new(RefCell::new(Value::Number(step as f64))));
+        payload.insert("duration".to_string(), Rc::new(RefCell::new(Value::Number(duration as f64))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "drum-lane-history-action".to_string(),
+            payload: Value::Map(payload),
         });
         Ok(Value::Number(duration as f64))
     });
 
     // seq-set-step-param — set param on current track
-    let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
     let fx_ep = fx_epoch.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-step-param", move |args, _ctx| {
+    runtime.register_native("seq-set-step-param", move |args, ctx| {
         let (Some(Value::Number(step)), Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
         else {
@@ -2155,21 +2133,18 @@ pub(crate) fn init_runtime(
                 fx_ep.fetch_add(1, Ordering::Relaxed);
             }
         }
-        st.pattern.step_data[track].set(step, param, val);
-        st.publish_scheduler_snapshot();
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::Step {
-            track,
-            step,
-            change: StepInvalidation::Param(param.into()),
+        let mut payload = HashMap::new();
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("param".to_string(), Rc::new(RefCell::new(Value::Keyword(param_name.clone()))));
+        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(val as f64))));
+        payload.insert(
+            "steps".to_string(),
+            Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(Value::Number(step as f64)))]))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "set-step-param-history".to_string(),
+            payload: Value::Map(payload),
         });
-        if param == StepParam::Duration {
-            ui_inv.push(UiInvalidation::Step {
-                track,
-                step,
-                change: StepInvalidation::DurationSpan,
-            });
-        }
         Ok(Value::Number(val as f64))
     });
 
@@ -3434,10 +3409,7 @@ pub(crate) fn init_runtime(
 
     let st = state.clone();
     let drum_sel = selected_drum_lane_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let ui_inv = ui_invalidations.clone();
-    let bindings = runtime.reactive_binding_store();
-    runtime.register_native("seq-move-drum-lane-step-drag", move |args, _ctx| {
+    runtime.register_native("seq-move-drum-lane-step-drag", move |args, ctx| {
         let (
             Some(Value::Number(track)),
             Some(Value::Number(pad_note)),
@@ -3492,34 +3464,21 @@ pub(crate) fn init_runtime(
         {
             return Ok(Value::Bool(false));
         }
-        if !st.move_drum_lane_steps(track, pad_note, &steps, delta) {
-            return Ok(Value::Bool(false));
-        }
-        if move_selection {
-            let mut set = drum_sel.lock().unwrap();
-            for step in &steps {
-                let selection = DrumLaneStepSelection {
-                    track,
-                    pad_note,
-                    step: *step,
-                };
-                set.remove(&selection);
-                write_drum_lane_selection(&bindings, selection, false);
-            }
-            for step in new_steps {
-                let selection = DrumLaneStepSelection {
-                    track,
-                    pad_note,
-                    step: step as usize,
-                };
-                set.insert(selection);
-                write_drum_lane_selection(&bindings, selection, true);
-            }
-        }
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
-            track,
-        }));
+        let step_values = steps
+            .iter()
+            .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
+            .collect();
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("move".to_string()))));
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
+        payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
+        payload.insert("delta".to_string(), Rc::new(RefCell::new(Value::Number(delta as f64))));
+        payload.insert("move-selection".to_string(), Rc::new(RefCell::new(Value::Bool(move_selection))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "drum-lane-history-action".to_string(),
+            payload: Value::Map(payload),
+        });
         Ok(Value::Bool(true))
     });
 
@@ -3648,16 +3607,12 @@ pub(crate) fn init_runtime(
     });
 
     // seq-delete-selected-steps — clear all selected steps and clear selection
-    let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let drum_sel = selected_drum_lane_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let ui_inv = ui_invalidations.clone();
-    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-delete-selected-steps", move |_args, ctx| {
         let drum_steps = {
-            let mut selected = drum_sel.lock().unwrap();
+            let selected = drum_sel.lock().unwrap();
             if selected.is_empty() {
                 None
             } else {
@@ -3670,21 +3625,24 @@ pub(crate) fn init_runtime(
                     .map(|selection| selection.step)
                     .collect::<Vec<_>>();
                 steps.sort_unstable();
-                clear_drum_lane_selection(&drum_selection_bindings, &mut selected);
                 Some((first.track, first.pad_note, steps))
             }
         };
         if let Some((track, pad_note, steps)) = drum_steps {
-            let cleared = st.clear_drum_lane_steps(track, pad_note, &steps);
+            let step_values = steps
+                .iter()
+                .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
+                .collect();
+            let mut payload = HashMap::new();
+            payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("clear".to_string()))));
+            payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+            payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
+            payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
             ctx.enqueue_command(HostCommand::Custom {
-                name: "history-barrier".to_string(),
-                payload: Value::String("drum-lane step deletion".to_string()),
+                name: "drum-lane-history-action".to_string(),
+                payload: Value::Map(payload),
             });
-            *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-            ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
-                track,
-            }));
-            return Ok(Value::Number(cleared as f64));
+            return Ok(Value::Number(steps.len() as f64));
         }
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
@@ -3709,9 +3667,7 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-move-step-drag", move |args, _ctx| {
+    runtime.register_native("seq-move-step-drag", move |args, ctx| {
         let (Some(Value::Number(start)), Some(Value::Number(target))) = (args.first(), args.get(1))
         else {
             return Err("seq-move-step-drag: expected start and target steps".into());
@@ -3753,33 +3709,18 @@ pub(crate) fn init_runtime(
         if new_first < 0 || new_last >= num_steps as isize {
             return Ok(Value::Bool(false));
         }
-        let snapshots: Vec<(usize, sequencer::sequencer::StepSnapshot)> = steps
+        let step_values = steps
             .iter()
-            .map(|&step| (step, st.capture_step_snapshot(track, step)))
+            .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
             .collect();
-        for &(step, _) in &snapshots {
-            st.clear_step_payload(track, step);
-        }
-        let moved_steps: Vec<usize> = snapshots
-            .iter()
-            .map(|(step, _)| (*step as isize + delta) as usize)
-            .collect();
-        for ((_, snapshot), dst_step) in snapshots.iter().zip(moved_steps.iter().copied()) {
-            st.restore_step_snapshot(track, dst_step, snapshot);
-        }
-        if move_selection {
-            let mut set = sel.lock().unwrap();
-            set.clear();
-            set.extend(moved_steps.iter().copied());
-        }
-        st.publish_scheduler_snapshot();
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
-            track,
-        }));
-        ui_inv.push(UiInvalidation::StepSelection {
-            track,
-            changed_steps: Vec::new(),
+        let mut payload = HashMap::new();
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
+        payload.insert("delta".to_string(), Rc::new(RefCell::new(Value::Number(delta as f64))));
+        payload.insert("move-selection".to_string(), Rc::new(RefCell::new(Value::Bool(move_selection))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "move-step-history".to_string(),
+            payload: Value::Map(payload),
         });
         Ok(Value::Bool(true))
     });
@@ -3789,10 +3730,7 @@ pub(crate) fn init_runtime(
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let drum_sel = selected_drum_lane_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let ui_inv = ui_invalidations.clone();
-    let drum_selection_bindings = runtime.reactive_binding_store();
-    runtime.register_native("seq-shift-selected-steps", move |args, _ctx| {
+    runtime.register_native("seq-shift-selected-steps", move |args, ctx| {
         let Some(Value::Number(direction)) = args.first() else {
             return Err("seq-shift-selected-steps: expected direction".into());
         };
@@ -3826,33 +3764,24 @@ pub(crate) fn init_runtime(
                     .last()
                     .is_some_and(|step| step.saturating_add(1) < num_steps)
             };
-            if !can_shift || !st.move_drum_lane_steps(track, pad_note, &steps, delta) {
+            if !can_shift {
                 return Ok(Value::Bool(false));
             }
-            let mut set = drum_sel.lock().unwrap();
-            for step in &steps {
-                let selection = DrumLaneStepSelection {
-                    track,
-                    pad_note,
-                    step: *step,
-                };
-                set.remove(&selection);
-                write_drum_lane_selection(&drum_selection_bindings, selection, false);
-            }
-            for step in steps {
-                let selection = DrumLaneStepSelection {
-                    track,
-                    pad_note,
-                    step: (step as isize + delta) as usize,
-                };
-                set.insert(selection);
-                write_drum_lane_selection(&drum_selection_bindings, selection, true);
-            }
-            drop(set);
-            *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-            ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
-                track,
-            }));
+            let step_values = steps
+                .iter()
+                .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
+                .collect();
+            let mut payload = HashMap::new();
+            payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("move".to_string()))));
+            payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+            payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
+            payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
+            payload.insert("delta".to_string(), Rc::new(RefCell::new(Value::Number(delta as f64))));
+            payload.insert("move-selection".to_string(), Rc::new(RefCell::new(Value::Bool(true))));
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "drum-lane-history-action".to_string(),
+                payload: Value::Map(payload),
+            });
             return Ok(Value::Bool(true));
         }
         let track = ct.load(Ordering::Relaxed);
@@ -3875,33 +3804,18 @@ pub(crate) fn init_runtime(
             return Ok(Value::Bool(false));
         }
 
-        let snapshots: Vec<(usize, sequencer::sequencer::StepSnapshot)> = steps
+        let step_values = steps
             .iter()
-            .map(|&step| (step, st.capture_step_snapshot(track, step)))
+            .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
             .collect();
-        for &(step, _) in &snapshots {
-            st.clear_step_payload(track, step);
-        }
-        let shifted_steps: Vec<usize> = snapshots
-            .iter()
-            .map(|(step, _)| (*step as isize + delta) as usize)
-            .collect();
-        for ((_, snapshot), dst_step) in snapshots.iter().zip(shifted_steps.iter().copied()) {
-            st.restore_step_snapshot(track, dst_step, snapshot);
-        }
-        {
-            let mut set = sel.lock().unwrap();
-            set.clear();
-            set.extend(shifted_steps);
-        }
-        st.publish_scheduler_snapshot();
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
-            track,
-        }));
-        ui_inv.push(UiInvalidation::StepSelection {
-            track,
-            changed_steps: Vec::new(),
+        let mut payload = HashMap::new();
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
+        payload.insert("delta".to_string(), Rc::new(RefCell::new(Value::Number(delta as f64))));
+        payload.insert("move-selection".to_string(), Rc::new(RefCell::new(Value::Bool(true))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "move-step-history".to_string(),
+            payload: Value::Map(payload),
         });
         Ok(Value::Bool(true))
     });
@@ -4006,12 +3920,9 @@ pub(crate) fn init_runtime(
     });
 
     // seq-set-step-param-plock — apply step param p-lock to selected steps
-    let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-step-param-plock", move |args, _ctx| {
+    runtime.register_native("seq-set-step-param-plock", move |args, ctx| {
         let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1))
         else {
@@ -4030,24 +3941,20 @@ pub(crate) fn init_runtime(
         };
         let track = ct.load(Ordering::Relaxed);
         let val = (*val as f32).clamp(param.min(), param.max());
-        let steps = sel.lock().unwrap();
-        for &step in steps.iter() {
-            st.pattern.step_data[track].set(step, param, val);
-            ui_inv.push(UiInvalidation::Step {
-                track,
-                step,
-                change: StepInvalidation::Param(param.into()),
-            });
-            if param == StepParam::Duration {
-                ui_inv.push(UiInvalidation::Step {
-                    track,
-                    step,
-                    change: StepInvalidation::DurationSpan,
-                });
-            }
-        }
-        st.publish_scheduler_snapshot();
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        let steps = sel.lock().unwrap().iter().copied().collect::<Vec<_>>();
+        let step_values = steps
+            .iter()
+            .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
+            .collect();
+        let mut payload = HashMap::new();
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("param".to_string(), Rc::new(RefCell::new(Value::Keyword(param_name.clone()))));
+        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(val as f64))));
+        payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "set-step-param-history".to_string(),
+            payload: Value::Map(payload),
+        });
         Ok(Value::Number(val as f64))
     });
 
@@ -4865,6 +4772,7 @@ pub(crate) fn init_runtime(
         midi_fx_names,
         sample_browser,
         piano_roll_clipboard: piano_clipboard,
+        selected_drum_lane_steps,
     }
 }
 

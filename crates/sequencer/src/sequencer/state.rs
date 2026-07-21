@@ -8370,6 +8370,23 @@ impl SequencerState {
         pad_note: i32,
         duration: f32,
     ) -> Option<f32> {
+        let duration = self.set_drum_lane_step_duration_no_publish(
+            track,
+            step,
+            pad_note,
+            duration,
+        )?;
+        self.publish_scheduler_snapshot();
+        Some(duration)
+    }
+
+    pub fn set_drum_lane_step_duration_no_publish(
+        &self,
+        track: usize,
+        step: usize,
+        pad_note: i32,
+        duration: f32,
+    ) -> Option<f32> {
         if track >= MAX_TRACKS || step >= MAX_STEPS {
             return None;
         }
@@ -8380,7 +8397,6 @@ impl SequencerState {
             .find(|(note, _, _)| note.round() as i32 == pad_note)?;
         *note_duration = duration;
         self.write_drum_lane_notes(track, step, notes);
-        self.publish_scheduler_snapshot();
         Some(duration)
     }
 
@@ -8390,6 +8406,17 @@ impl SequencerState {
     /// in chord data. Removing the final lane clears the complete step payload,
     /// matching the normal step-toggle behavior.
     pub fn toggle_drum_lane_step(&self, track: usize, step: usize, pad_note: i32) -> bool {
+        let activated = self.toggle_drum_lane_step_no_publish(track, step, pad_note);
+        self.publish_scheduler_snapshot();
+        activated
+    }
+
+    pub fn toggle_drum_lane_step_no_publish(
+        &self,
+        track: usize,
+        step: usize,
+        pad_note: i32,
+    ) -> bool {
         if track >= MAX_TRACKS || step >= MAX_STEPS {
             return false;
         }
@@ -8415,7 +8442,6 @@ impl SequencerState {
         };
 
         self.write_drum_lane_notes(track, step, notes);
-        self.publish_scheduler_snapshot();
         activated
     }
 
@@ -8423,6 +8449,20 @@ impl SequencerState {
     /// simultaneous hits belonging to other pads. Destination hits in this
     /// lane are replaced, matching the overwrite behavior of normal step drag.
     pub fn move_drum_lane_steps(
+        &self,
+        track: usize,
+        pad_note: i32,
+        steps: &[usize],
+        delta: isize,
+    ) -> bool {
+        let moved = self.move_drum_lane_steps_no_publish(track, pad_note, steps, delta);
+        if moved {
+            self.publish_scheduler_snapshot();
+        }
+        moved
+    }
+
+    pub fn move_drum_lane_steps_no_publish(
         &self,
         track: usize,
         pad_note: i32,
@@ -8494,13 +8534,25 @@ impl SequencerState {
             notes.push(note);
             self.write_drum_lane_notes(track, destination, notes);
         }
-        self.publish_scheduler_snapshot();
         true
     }
 
     /// Clear selected hits from one drum-pad lane while retaining every other
     /// pad hit and the shared payload of steps that remain active.
     pub fn clear_drum_lane_steps(&self, track: usize, pad_note: i32, steps: &[usize]) -> usize {
+        let cleared = self.clear_drum_lane_steps_no_publish(track, pad_note, steps);
+        if cleared > 0 {
+            self.publish_scheduler_snapshot();
+        }
+        cleared
+    }
+
+    pub fn clear_drum_lane_steps_no_publish(
+        &self,
+        track: usize,
+        pad_note: i32,
+        steps: &[usize],
+    ) -> usize {
         if track >= MAX_TRACKS {
             return 0;
         }
@@ -8516,9 +8568,6 @@ impl SequencerState {
                 self.write_drum_lane_notes(track, step, retained);
                 cleared += 1;
             }
-        }
-        if cleared > 0 {
-            self.publish_scheduler_snapshot();
         }
         cleared
     }
@@ -8834,6 +8883,10 @@ impl SequencerState {
     pub fn clear_step_payload(&self, track: usize, step: usize) {
         self.clear_step_payload_inner(track, step);
         self.publish_scheduler_snapshot();
+    }
+
+    pub fn clear_step_payload_no_publish(&self, track: usize, step: usize) {
+        self.clear_step_payload_inner(track, step);
     }
 
     pub fn reconcile_plock_variant_registry_for_track(
@@ -9243,6 +9296,15 @@ impl SequencerState {
     pub fn restore_step_snapshot(&self, track: usize, step: usize, snapshot: &StepSnapshot) {
         self.restore_step_snapshot_inner(track, step, snapshot);
         self.publish_scheduler_snapshot();
+    }
+
+    pub fn restore_step_snapshot_no_publish(
+        &self,
+        track: usize,
+        step: usize,
+        snapshot: &StepSnapshot,
+    ) {
+        self.restore_step_snapshot_inner(track, step, snapshot);
     }
 
     /// Cyclically rotate `steps` (sorted) left (direction < 0) or right (direction > 0).

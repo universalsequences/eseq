@@ -650,7 +650,7 @@ fn sync_soft_step_param_commit(
 
 fn commit_soft_step_param_edit(
     editor: &mut Editor,
-    state: &Arc<SequencerState>,
+    app: &mut tui::App,
     current_track: &Arc<AtomicUsize>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     target: &SoftStepParamEditTarget,
@@ -658,16 +658,33 @@ fn commit_soft_step_param_edit(
 ) -> bool {
     match &target.kind {
         SoftStepParamEditKind::StepParam(param) => {
-            state.pattern.step_data[target.track].set(target.step, *param, value as f32);
-            state.publish_scheduler_snapshot();
-            sync_soft_step_param_commit(editor, state, expanded_step_projection, target, *param);
+            if tui::try_apply_command(
+                app,
+                tui::AppCommand::SetStepParam {
+                    track: target.track,
+                    step: target.step,
+                    param: *param,
+                    value: value as f32,
+                },
+            )
+            .is_err()
+            {
+                return false;
+            }
+            sync_soft_step_param_commit(
+                editor,
+                &app.state,
+                expanded_step_projection,
+                target,
+                *param,
+            );
             true
         }
         SoftStepParamEditKind::ProcessLane {
             instance_id,
             inlet_name,
         } => {
-            if !state.set_process_lane_value(
+            if !app.state.set_process_lane_value(
                 target.track,
                 *instance_id,
                 inlet_name.clone(),
@@ -676,9 +693,10 @@ fn commit_soft_step_param_edit(
             ) {
                 return false;
             }
+            tui::edit::commit_history_barrier(app);
             sync_soft_process_lane_commit(
                 editor,
-                state,
+                &app.state,
                 current_track,
                 expanded_step_projection,
                 target,
@@ -799,7 +817,7 @@ fn starts_unarmed_number_picker_edit(key: &crossterm::event::KeyEvent) -> bool {
 pub(crate) fn handle_metal_soft_step_param_key(
     editor: &mut Editor,
     key: &crossterm::event::KeyEvent,
-    state: &Arc<SequencerState>,
+    app: &mut tui::App,
     current_track: &Arc<AtomicUsize>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     edit: &mut SoftStepParamEdit,
@@ -819,7 +837,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         let pending_edit_key = number_picker_pending_edit_key(key);
         if pending_edit_key {
             if let (Some(target), Some(widget_id)) = (
-                current_soft_step_param_target(editor, state, current_track),
+                current_soft_step_param_target(editor, &app.state, current_track),
                 current_step_param_number_picker_id(editor),
             ) {
                 if number_picker_edit_state(widget_id).editing {
@@ -843,7 +861,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         if !edit.is_active() && !starts_unarmed_number_picker_edit(key) {
             return false;
         }
-        let Some(target) = current_soft_step_param_target(editor, state, current_track) else {
+        let Some(target) = current_soft_step_param_target(editor, &app.state, current_track) else {
             return false;
         };
         let Some(widget_id) = current_step_param_number_picker_id(editor) else {
@@ -863,7 +881,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
     let Some(widget_id) = edit.widget_id else {
         return false;
     };
-    let Some(spec) = soft_step_param_edit_spec(state, &target) else {
+    let Some(spec) = soft_step_param_edit_spec(&app.state, &target) else {
         edit.clear();
         editor.mark_needs_redraw();
         return true;
@@ -892,7 +910,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         Some(NumberPickerEditOutcome::Commit(value)) => {
             if !commit_soft_step_param_edit(
                 editor,
-                state,
+                app,
                 current_track,
                 expanded_step_projection,
                 &target,
@@ -945,7 +963,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     step_clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
-    ui_epoch: &AtomicUsize,
+    _ui_epoch: &AtomicUsize,
 ) -> bool {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
@@ -1272,43 +1290,23 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                     Some(step) => step,
                     None => return true,
                 };
-                let clipboard = {
-                    let guard = step_clipboard.lock().unwrap();
-                    guard.clone()
-                };
-                let Some((source_track, clipboard)) = clipboard else {
+                if step_clipboard.lock().unwrap().is_none() {
                     return true;
-                };
+                }
                 let track = current_track.load(Ordering::Relaxed);
-                let preserve_audio_plocks = source_track == track;
-                let num_steps = state.pattern.track_params[track].get_num_steps();
-                let mut applied_count = 0usize;
-                for (offset, snapshot) in &clipboard {
-                    let dest = dest_start + offset;
-                    if dest >= num_steps {
-                        continue;
-                    }
-                    if !snapshot.active && state.pattern.patterns[track].is_active(dest) {
-                        continue;
-                    }
-                    let sanitized = if preserve_audio_plocks {
-                        snapshot.clone()
-                    } else {
-                        snapshot.without_audio_plocks()
-                    };
-                    state.restore_step_snapshot(track, dest, &sanitized);
-                    applied_count += 1;
-                }
-                if applied_count > 0 {
-                    state.publish_scheduler_snapshot();
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    editor.mark_needs_redraw();
-                }
-                editor.handle_host_event(HostEvent::Status(format!(
-                    "Pasted {} step{}",
-                    applied_count,
-                    if applied_count == 1 { "" } else { "s" }
-                )));
+                let mut payload = HashMap::new();
+                payload.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(track as f64))),
+                );
+                payload.insert(
+                    "dest-start".to_string(),
+                    Rc::new(RefCell::new(Value::Number(dest_start as f64))),
+                );
+                editor.runtime_mut().enqueue_host_command(HostCommand::Custom {
+                    name: "paste-steps".to_string(),
+                    payload: Value::Map(payload),
+                });
                 return true;
             }
             _ => {}
@@ -1567,6 +1565,30 @@ mod live_keyboard_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+
+    fn soft_edit_test_app(state: Arc<SequencerState>) -> sequencer::tui::App {
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = sequencer::tui::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::tui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = sequencer::sequencer::TrackRegistry::for_legacy_track_count(1)
+            .expect("test track registry");
+        app
+    }
 
     #[test]
     fn global_sequencer_history_shortcuts_only_capture_ui_buffers() {
@@ -3262,6 +3284,7 @@ mod live_keyboard_tests {
             .expect("sequencer number picker should lay out");
 
         let state = Arc::new(SequencerState::new(1, vec![]));
+        let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
         let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
         expanded_step_projection.set_viewport(ExpandedStepViewport {
@@ -3283,7 +3306,7 @@ mod live_keyboard_tests {
                 handle_metal_soft_step_param_key(
                     &mut editor,
                     &key,
-                    &state,
+                    &mut app,
                     &current_track,
                     &expanded_step_projection,
                     &mut edit,
@@ -3334,6 +3357,7 @@ mod live_keyboard_tests {
     #[test]
     fn sequencer_soft_number_entry_edits_current_process_lane_step() {
         let state = Arc::new(SequencerState::new(1, vec![]));
+        let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.set_layout_viewport(80, 20);
@@ -3413,7 +3437,7 @@ mod live_keyboard_tests {
                 handle_metal_soft_step_param_key(
                     &mut editor,
                     &key,
-                    &state,
+                    &mut app,
                     &current_track,
                     &expanded_step_projection,
                     &mut edit,
@@ -3550,6 +3574,7 @@ mod live_keyboard_tests {
         }
 
         let state = Arc::new(SequencerState::new(1, vec![]));
+        let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
         let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
         expanded_step_projection.set_viewport(ExpandedStepViewport {
@@ -3588,7 +3613,7 @@ mod live_keyboard_tests {
             handle_metal_soft_step_param_key(
                 &mut editor,
                 &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                &state,
+                &mut app,
                 &current_track,
                 &expanded_step_projection,
                 &mut edit,
