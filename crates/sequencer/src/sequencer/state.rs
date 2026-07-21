@@ -1276,7 +1276,7 @@ fn replace_rack_slot_source_preserving_controls(
     slot.custom_effect_names = custom_effect_names;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrackPatternData {
     pub track_bits: [u64; TRACK_PATTERN_WORDS],
     pub neural_reset_bits: [u64; TRACK_PATTERN_WORDS],
@@ -1927,14 +1927,19 @@ impl TrackPatternData {
                     ) as f32;
                 }
                 for step in 0..MAX_STEPS {
-                    if let Some(selection) = slot.plocks[step].get(param_idx).and_then(|v| *v) {
-                        slot.plocks[step][param_idx] =
-                            Some(remap_sidechain_selection_after_track_delete(
-                                owner_track_old,
-                                selection.round().max(0.0) as usize,
-                                deleted_track,
-                                old_track_count,
-                            ) as f32);
+                    let selection = slot.plocks.get(step)
+                        .and_then(|params| params.get(param_idx))
+                        .and_then(|value| *value);
+                    if let (Some(selection), Some(value)) = (
+                        selection,
+                        slot.plocks.get_mut(step).and_then(|params| params.get_mut(param_idx)),
+                    ) {
+                        *value = Some(remap_sidechain_selection_after_track_delete(
+                            owner_track_old,
+                            selection.round().max(0.0) as usize,
+                            deleted_track,
+                            old_track_count,
+                        ) as f32);
                     }
                 }
             }
@@ -2040,10 +2045,33 @@ pub struct TrackPatternCellView {
     pub overridden: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrackPatternPool {
     pub patterns: HashMap<PatternId, TrackPatternData>,
     pub next_id: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SceneTrackReferenceState {
+    pub mod_connections: Vec<ModConnection>,
+    pub neural_networks: Vec<ProjectNeuralNetwork>,
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackSidechainPatternState {
+    pub owner_track: usize,
+    pub pattern: PatternId,
+    pub slots: Vec<(usize, EffectSlotSnapshot)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackPatternLaneState {
+    pub pool: TrackPatternPool,
+    pub scene_cells: Vec<Option<PatternId>>,
+    pub track_override: Option<PatternId>,
+    pub scene_references: Vec<SceneTrackReferenceState>,
+    pub sidechains: Vec<TrackSidechainPatternState>,
 }
 
 impl Default for TrackPatternPool {
@@ -3766,14 +3794,19 @@ fn remap_snapshot_sidechain_references_after_track_delete(
                     slot.defaults[param_idx] = remapped;
                 }
                 for step in 0..MAX_STEPS {
-                    if let Some(selection) = slot.plocks[step].get(param_idx).and_then(|v| *v) {
-                        slot.plocks[step][param_idx] =
-                            Some(remap_sidechain_selection_after_track_delete(
-                                owner_track,
-                                selection.round().max(0.0) as usize,
-                                deleted_track,
-                                old_track_count,
-                            ) as f32);
+                    let selection = slot.plocks.get(step)
+                        .and_then(|params| params.get(param_idx))
+                        .and_then(|value| *value);
+                    if let (Some(selection), Some(value)) = (
+                        selection,
+                        slot.plocks.get_mut(step).and_then(|params| params.get_mut(param_idx)),
+                    ) {
+                        *value = Some(remap_sidechain_selection_after_track_delete(
+                            owner_track,
+                            selection.round().max(0.0) as usize,
+                            deleted_track,
+                            old_track_count,
+                        ) as f32);
                     }
                 }
             }
@@ -7387,6 +7420,141 @@ impl SequencerState {
     /// the deleted lane disappears from the current pattern and all snapshots in
     /// memory, higher lanes shift down immediately, and the old trailing lane is
     /// cleared so stale state cannot leak back after future restores.
+    pub fn capture_track_pattern_lane_state(
+        &self,
+        track_idx: usize,
+        effect_descriptors: &[Vec<EffectDescriptor>],
+    ) -> Result<TrackPatternLaneState, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get(track_idx)
+            .cloned()
+            .ok_or_else(|| format!("Track {} has no pattern pool", track_idx + 1))?;
+        let scene_cells = scenes.scenes.iter()
+            .map(|scene| scene.cells.get(track_idx).copied().flatten())
+            .collect();
+        let track_override = scenes.track_overrides.get(track_idx).copied().flatten();
+        let scene_references = scenes.scenes.iter().map(|scene| SceneTrackReferenceState {
+            mod_connections: scene.mod_connections.clone(),
+            neural_networks: scene.neural_networks.clone(),
+            graph_overrides: scene.graph_overrides.clone(),
+        }).collect();
+        let mut sidechains = Vec::new();
+        for (owner_track, owner_pool) in scenes.track_pools.iter().enumerate() {
+            if owner_track == track_idx {
+                continue;
+            }
+            let Some(descriptors) = effect_descriptors.get(owner_track) else {
+                continue;
+            };
+            let sidechain_slots = descriptors.iter().enumerate()
+                .filter(|(_, descriptor)| descriptor.params.iter().any(|param| {
+                    matches!(param.host_control, Some(HostControl::FxSidechain { .. }))
+                }))
+                .map(|(slot, _)| slot)
+                .collect::<Vec<_>>();
+            if sidechain_slots.is_empty() {
+                continue;
+            }
+            for (pattern, data) in &owner_pool.patterns {
+                let slots = sidechain_slots.iter().filter_map(|slot| {
+                    data.effect_slots.get(*slot).cloned().map(|state| (*slot, state))
+                }).collect::<Vec<_>>();
+                if !slots.is_empty() {
+                    sidechains.push(TrackSidechainPatternState {
+                        owner_track,
+                        pattern: *pattern,
+                        slots,
+                    });
+                }
+            }
+        }
+        Ok(TrackPatternLaneState {
+            pool,
+            scene_cells,
+            track_override,
+            scene_references,
+            sidechains,
+        })
+    }
+
+    pub fn replace_appended_track_pattern_lane(
+        &self,
+        snapshot: &TrackPatternLaneState,
+    ) -> Result<usize, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let track = scenes.track_pools.len().checked_sub(1)
+            .ok_or_else(|| "Cannot restore a track lane into an empty project".to_string())?;
+        scenes.track_pools[track] = snapshot.pool.clone();
+        scenes.track_overrides[track] = snapshot.track_override;
+        if scenes.scenes.len() != snapshot.scene_cells.len() {
+            return Err("Track history scene topology no longer matches the project".to_string());
+        }
+        for (scene, cell) in scenes.scenes.iter_mut().zip(&snapshot.scene_cells) {
+            scene.cells[track] = *cell;
+        }
+        let current = scenes.current_scene;
+        let live = scenes.scene_snapshot(current)
+            .ok_or_else(|| "Current scene is missing during track restore".to_string())?;
+        drop(scenes);
+        live.restore(self);
+        Ok(track)
+    }
+
+    pub fn move_appended_track_pattern_lane_to(
+        &self,
+        target: usize,
+        snapshot: &TrackPatternLaneState,
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let last = scenes.track_pools.len().checked_sub(1)
+            .ok_or_else(|| "Cannot move a track lane in an empty project".to_string())?;
+        if target > last || scenes.scenes.len() != snapshot.scene_references.len() {
+            return Err("Track history topology no longer matches the project".to_string());
+        }
+        let pool = scenes.track_pools.remove(last);
+        scenes.track_pools.insert(target, pool);
+        let track_override = scenes.track_overrides.remove(last);
+        scenes.track_overrides.insert(target, track_override);
+        for ((scene, references), expected_cell) in scenes.scenes.iter_mut()
+            .zip(&snapshot.scene_references)
+            .zip(&snapshot.scene_cells)
+        {
+            let cell = scene.cells.remove(last);
+            scene.cells.insert(target, cell);
+            if scene.cells[target] != *expected_cell {
+                return Err("Restored Track Pattern assignment changed during insertion".to_string());
+            }
+            scene.mod_connections = references.mod_connections.clone();
+            scene.neural_networks = references.neural_networks.clone();
+            scene.graph_overrides = references.graph_overrides.clone();
+        }
+        for saved in &snapshot.sidechains {
+            let Some(data) = scenes.track_pools.get_mut(saved.owner_track)
+                .and_then(|pool| pool.patterns.get_mut(&saved.pattern)) else {
+                return Err(format!(
+                    "Sidechain history target track {} pattern {:?} is missing",
+                    saved.owner_track + 1,
+                    saved.pattern,
+                ));
+            };
+            for (slot, state) in &saved.slots {
+                let Some(target_slot) = data.effect_slots.get_mut(*slot) else {
+                    return Err(format!("Sidechain history effect slot {} is missing", slot + 1));
+                };
+                *target_slot = state.clone();
+            }
+        }
+        let current = scenes.current_scene;
+        let live = scenes.scene_snapshot(current)
+            .ok_or_else(|| "Current scene is missing during track insertion".to_string())?;
+        drop(scenes);
+        live.restore(self);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.schedule_mod_resync();
+        self.request_all_accumulator_resets();
+        Ok(())
+    }
+
     pub fn remove_track(
         &self,
         track_idx: usize,

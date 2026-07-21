@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Slice 6.
+Implemented through Slice 6, plus Slice 7A track creation and deletion.
 
 - Slice 0 provides stable track identity, bounded linear history, barriers,
   revision tracking, and global undo/redo shortcuts.
@@ -26,7 +26,7 @@ Implemented through Slice 6.
   and values;
   sampler-to-rack Sound conversion uses the same transaction and restores the
   original flat sampler graph on undo. Custom-instrument-to-rack conversion
-  remains a barrier until the graph has the corresponding rack-to-custom inverse.
+  and its rack-to-custom inverse use the same retained binding transaction.
 - Slice 6A covers track audio-effect insertion, deletion, source replacement,
   and reordering. History retains exact compiled source text and asset roots,
   restores scalar/tensor/IR values across every Track Pattern, rebinds process,
@@ -43,6 +43,13 @@ Implemented through Slice 6.
   reordering through the shared `FxChainHost`/`MonoPair` path. Per-pattern
   values and rack macro tables are restored transactionally, including mappings
   dropped by deletion.
+- Slice 7A currently covers track creation from explicit add actions and all
+  sample/instrument/Sound drop zones, plus deletion and reinsertion at the
+  original dense position. Replay retains the `TrackId`, Track Pattern pool,
+  scene cells and routing references, sidechains, groups, track-scoped macro
+  mappings, instruments/racks, audio and MIDI FX, and runtime graph bindings.
+  Duplicate/reorder commands and standalone persisted color/collapse/rack-bank
+  edits remain for the rest of Slice 7A.
 - Project schema version 4 serializes authoritative stable instance records for
   track audio effects, MIDI effects, bus effects, rack slots, and rack-slot
   effects. Dense pattern slots remain value snapshots and are rebound to those

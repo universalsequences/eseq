@@ -395,6 +395,42 @@ impl FxChainLeaseStore {
             .collect();
     }
 
+    pub fn reindex_tracks_move_last_to(&mut self, last: usize, target: usize) {
+        let remap = |track: usize| {
+            if track == last {
+                target
+            } else if (target..last).contains(&track) {
+                track + 1
+            } else {
+                track
+            }
+        };
+        let rows = std::mem::take(&mut self.rows);
+        self.rows = rows.into_iter().map(|(locator, row)| {
+            let locator = match locator {
+                FxChainLocator::Track(track) => FxChainLocator::Track(remap(track)),
+                FxChainLocator::RackSlot { track, slot } => FxChainLocator::RackSlot {
+                    track: remap(track),
+                    slot,
+                },
+                other => other,
+            };
+            (locator, row)
+        }).collect();
+        let sources = std::mem::take(&mut self.sources);
+        self.sources = sources.into_iter().map(|(locator, row)| {
+            let locator = match locator {
+                FxChainLocator::Track(track) => FxChainLocator::Track(remap(track)),
+                FxChainLocator::RackSlot { track, slot } => FxChainLocator::RackSlot {
+                    track: remap(track),
+                    slot,
+                },
+                other => other,
+            };
+            (locator, row)
+        }).collect();
+    }
+
     pub fn reindex_rack_slots_after_delete(&mut self, track: usize, deleted_slot: usize) {
         let rows = std::mem::take(&mut self.rows);
         self.rows = rows
@@ -1493,6 +1529,31 @@ mod tests {
 
         assert!(!store.contains_host(FxChainLocator::Track(3)));
         assert!(store.contains_host(FxChainLocator::Track(2)));
+    }
+
+    #[test]
+    fn inserting_appended_track_rekeys_track_and_rack_lease_hosts() {
+        let mut store = FxChainLeaseStore::default();
+        for locator in [
+            FxChainLocator::Track(1),
+            FxChainLocator::Track(2),
+            FxChainLocator::RackSlot { track: 1, slot: 0 },
+            FxChainLocator::RackSlot { track: 2, slot: 0 },
+        ] {
+            store.rows.insert(
+                locator,
+                std::iter::repeat_with(|| None)
+                    .take(lisp_host::MAX_CUSTOM_FX)
+                    .collect(),
+            );
+        }
+
+        store.reindex_tracks_move_last_to(2, 1);
+
+        assert!(store.contains_host(FxChainLocator::Track(1)));
+        assert!(store.contains_host(FxChainLocator::Track(2)));
+        assert!(store.contains_host(FxChainLocator::RackSlot { track: 1, slot: 0 }));
+        assert!(store.contains_host(FxChainLocator::RackSlot { track: 2, slot: 0 }));
     }
 
     #[test]

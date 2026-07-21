@@ -5266,6 +5266,206 @@ impl GraphController<'_> {
         Ok(())
     }
 
+    pub fn move_appended_track_to(&mut self, target: usize) -> Result<(), String> {
+        let track_count = self.app.tracks.len();
+        let last = track_count.checked_sub(1)
+            .ok_or_else(|| "Cannot insert into an empty track topology".to_string())?;
+        if target > last {
+            return Err(format!("Track insertion index {} is out of range", target + 1));
+        }
+        if target == last {
+            return Ok(());
+        }
+        let track_id = self.app.track_registry.id_at(last)
+            .ok_or_else(|| "Appended track has no stable identity".to_string())?;
+        self.move_engine_route_tables_from_end_to(target, track_count);
+
+        fn move_last_to<T>(values: &mut Vec<T>, target: usize) {
+            let value = values.pop().expect("aligned track vector must be non-empty");
+            values.insert(target, value);
+        }
+        move_last_to(&mut self.app.tracks, target);
+        move_last_to(&mut self.app.track_colors, target);
+        move_last_to(&mut self.app.track_collapsed, target);
+        move_last_to(&mut self.app.rack_selected_slots, target);
+        move_last_to(&mut self.app.rack_pad_bank_starts, target);
+        move_last_to(&mut self.app.sampler_paths, target);
+        move_last_to(&mut self.app.graph.track_node_ids, target);
+        move_last_to(&mut self.app.graph.track_buffer_ids, target);
+        move_last_to(&mut self.app.graph.track_sample_rates, target);
+        move_last_to(&mut self.app.graph.track_voice_lids, target);
+        move_last_to(&mut self.app.graph.track_instrument_types, target);
+        move_last_to(&mut self.app.graph.track_instrument_run_modes, target);
+        move_last_to(&mut self.app.graph.track_engine_ids, target);
+        move_last_to(&mut self.app.graph.track_synth_node_ids, target);
+        move_last_to(&mut self.app.graph.track_gatepitch_node_ids, target);
+        move_last_to(&mut self.app.graph.effect_descriptors, target);
+        move_last_to(&mut self.app.graph.instrument_descriptors, target);
+        move_last_to(&mut self.app.graph.record_armed, target);
+        self.app.track_registry.move_to(track_id, target)
+            .map_err(|error| format!("Failed to insert stable track identity: {error:?}"))?;
+        self.app.editor.effect_chain_leases.reindex_tracks_move_last_to(last, target);
+        self.rebind_live_track_runtime_after_delete();
+        self.rebind_all_track_graph_runtime();
+        self.app.refresh_effect_sidechain_labels();
+        self.app.push_all_restored_defaults();
+        self.debug_assert_track_vectors_aligned();
+        Ok(())
+    }
+
+    fn move_engine_route_tables_from_end_to(&mut self, target: usize, track_count: usize) {
+        let last = track_count - 1;
+        for engine in self.app.graph.engine_node_ids.iter_mut().filter_map(Option::as_mut) {
+            let route = std::mem::take(&mut engine.route_gain_ids[last]);
+            let ext = std::mem::take(&mut engine.ext_route_gain_ids[last]);
+            for track in (target + 1..=last).rev() {
+                engine.route_gain_ids[track] = std::mem::take(&mut engine.route_gain_ids[track - 1]);
+                engine.ext_route_gain_ids[track] =
+                    std::mem::take(&mut engine.ext_route_gain_ids[track - 1]);
+            }
+            engine.route_gain_ids[target] = route;
+            engine.ext_route_gain_ids[target] = ext;
+            for slot in 0..MAX_RACK_SLOTS {
+                let last_pool = rack_slot_pool_index(last, slot).expect("valid rack pool");
+                let route = std::mem::take(&mut engine.route_gain_ids[last_pool]);
+                let ext = std::mem::take(&mut engine.ext_route_gain_ids[last_pool]);
+                for track in (target + 1..=last).rev() {
+                    let dst = rack_slot_pool_index(track, slot).expect("valid rack pool");
+                    let src = rack_slot_pool_index(track - 1, slot).expect("valid rack pool");
+                    engine.route_gain_ids[dst] = std::mem::take(&mut engine.route_gain_ids[src]);
+                    engine.ext_route_gain_ids[dst] =
+                        std::mem::take(&mut engine.ext_route_gain_ids[src]);
+                }
+                let target_pool = rack_slot_pool_index(target, slot).expect("valid rack pool");
+                engine.route_gain_ids[target_pool] = route;
+                engine.ext_route_gain_ids[target_pool] = ext;
+            }
+        }
+        for engine_id in 0..self.app.state.runtime.engine_route_lids.len() {
+            for voice in 0..MAX_VOICES {
+                let left = self.app.state.runtime.engine_route_lids[engine_id][voice][last]
+                    .load(Ordering::Acquire);
+                let right = self.app.state.runtime.engine_route_lids_r[engine_id][voice][last]
+                    .load(Ordering::Acquire);
+                let ext: [u64; EXT_MOD_INPUT_COUNT] = std::array::from_fn(|input| {
+                    self.app.state.runtime.engine_ext_route_lids[engine_id][voice][last][input]
+                        .load(Ordering::Acquire)
+                });
+                for track in (target + 1..=last).rev() {
+                    let source = track - 1;
+                    self.app.state.runtime.engine_route_lids[engine_id][voice][track].store(
+                        self.app.state.runtime.engine_route_lids[engine_id][voice][source]
+                            .load(Ordering::Acquire), Ordering::Release);
+                    self.app.state.runtime.engine_route_lids_r[engine_id][voice][track].store(
+                        self.app.state.runtime.engine_route_lids_r[engine_id][voice][source]
+                            .load(Ordering::Acquire), Ordering::Release);
+                    for input in 0..EXT_MOD_INPUT_COUNT {
+                        self.app.state.runtime.engine_ext_route_lids[engine_id][voice][track][input]
+                            .store(self.app.state.runtime.engine_ext_route_lids[engine_id][voice]
+                                [source][input].load(Ordering::Acquire), Ordering::Release);
+                    }
+                }
+                self.app.state.runtime.engine_route_lids[engine_id][voice][target]
+                    .store(left, Ordering::Release);
+                self.app.state.runtime.engine_route_lids_r[engine_id][voice][target]
+                    .store(right, Ordering::Release);
+                for input in 0..EXT_MOD_INPUT_COUNT {
+                    self.app.state.runtime.engine_ext_route_lids[engine_id][voice][target][input]
+                        .store(ext[input], Ordering::Release);
+                }
+            }
+        }
+        for slot in 0..MAX_RACK_SLOTS {
+            let last_pool = rack_slot_pool_index(last, slot).expect("valid rack pool");
+            let engine_id = self.app.state.runtime.rack_engine_route_engine_ids[last_pool]
+                .load(Ordering::Acquire);
+            let left: [u64; MAX_VOICES] = std::array::from_fn(|voice| {
+                self.app.state.runtime.rack_engine_route_lids[last_pool][voice]
+                    .load(Ordering::Acquire)
+            });
+            let right: [u64; MAX_VOICES] = std::array::from_fn(|voice| {
+                self.app.state.runtime.rack_engine_route_lids_r[last_pool][voice]
+                    .load(Ordering::Acquire)
+            });
+            let ext: [[u64; EXT_MOD_INPUT_COUNT]; MAX_VOICES] =
+                std::array::from_fn(|voice| std::array::from_fn(|input| {
+                    self.app.state.runtime.rack_engine_ext_route_lids[last_pool][voice][input]
+                        .load(Ordering::Acquire)
+                }));
+            for track in (target + 1..=last).rev() {
+                let dst = rack_slot_pool_index(track, slot).expect("valid rack pool");
+                let src = rack_slot_pool_index(track - 1, slot).expect("valid rack pool");
+                self.app.state.runtime.rack_engine_route_engine_ids[dst].store(
+                    self.app.state.runtime.rack_engine_route_engine_ids[src]
+                        .load(Ordering::Acquire), Ordering::Release);
+                for voice in 0..MAX_VOICES {
+                    self.app.state.runtime.rack_engine_route_lids[dst][voice].store(
+                        self.app.state.runtime.rack_engine_route_lids[src][voice]
+                            .load(Ordering::Acquire), Ordering::Release);
+                    self.app.state.runtime.rack_engine_route_lids_r[dst][voice].store(
+                        self.app.state.runtime.rack_engine_route_lids_r[src][voice]
+                            .load(Ordering::Acquire), Ordering::Release);
+                    for input in 0..EXT_MOD_INPUT_COUNT {
+                        self.app.state.runtime.rack_engine_ext_route_lids[dst][voice][input].store(
+                            self.app.state.runtime.rack_engine_ext_route_lids[src][voice][input]
+                                .load(Ordering::Acquire), Ordering::Release);
+                    }
+                }
+            }
+            let target_pool = rack_slot_pool_index(target, slot).expect("valid rack pool");
+            self.app.state.runtime.rack_engine_route_engine_ids[target_pool]
+                .store(engine_id, Ordering::Release);
+            for voice in 0..MAX_VOICES {
+                self.app.state.runtime.rack_engine_route_lids[target_pool][voice]
+                    .store(left[voice], Ordering::Release);
+                self.app.state.runtime.rack_engine_route_lids_r[target_pool][voice]
+                    .store(right[voice], Ordering::Release);
+                for input in 0..EXT_MOD_INPUT_COUNT {
+                    self.app.state.runtime.rack_engine_ext_route_lids[target_pool][voice][input]
+                        .store(ext[voice][input], Ordering::Release);
+                }
+            }
+        }
+        self.rebind_rack_sampler_runtime_pools();
+    }
+
+    fn rebind_all_track_graph_runtime(&mut self) {
+        for track in 0..self.app.tracks.len() {
+            let nodes = &self.app.graph.track_node_ids[track];
+            let voices = &self.app.graph.track_voice_lids[track];
+            self.app.state.runtime.voice_counts[track]
+                .store(voices.len() as u32, Ordering::Release);
+            self.app.state.runtime.sampler_lids[track]
+                .store(voices.first().copied().unwrap_or(0), Ordering::Release);
+            self.app.state.runtime.pan_lids[track].store(nodes.pan_id as u64, Ordering::Release);
+            self.app.state.runtime.delay_lids[track].store(nodes.delay_id as u64, Ordering::Release);
+            self.app.state.runtime.send_lids[track].store(nodes.send_id as u64, Ordering::Release);
+            self.app.state.runtime.modulator_lids[track].store(
+                if self.app.graph.track_instrument_types[track] == InstrumentType::Modulator {
+                    nodes.mod_env_id as u64
+                } else { 0 },
+                Ordering::Release,
+            );
+            self.app.state.runtime.instrument_type_flags[track].store(
+                self.app.graph.track_instrument_types[track].runtime_flag(), Ordering::Release);
+            for voice in 0..MAX_VOICES {
+                self.app.state.runtime.voice_lids[track][voice]
+                    .store(voices.get(voice).copied().unwrap_or(0), Ordering::Release);
+                self.app.state.runtime.synth_node_ids[track][voice].store(
+                    nodes.sampler_ids.get(voice).copied().and_then(|id| u32::try_from(id).ok())
+                        .unwrap_or(0), Ordering::Release);
+                self.app.state.runtime.sampler_gatepitch_node_ids[track][voice].store(
+                    nodes.sampler_gatepitch_ids.get(voice).copied()
+                        .and_then(|id| u32::try_from(id).ok()).unwrap_or(0), Ordering::Release);
+                self.app.state.runtime.sampler_modulator_node_ids[track][voice].store(
+                    nodes.sampler_modulator_ids.get(voice).copied()
+                        .and_then(|id| u32::try_from(id).ok()).unwrap_or(0), Ordering::Release);
+            }
+            self.app.publish_sampler_analysis_runtime(track);
+        }
+        self.rebind_rack_sampler_runtime_pools();
+    }
+
     fn create_dedicated_engine_descriptor_from(
         &mut self,
         engine_id: usize,
@@ -8551,6 +8751,185 @@ mod tests {
             app.graph.track_instrument_types[1],
             InstrumentType::Sampler
         );
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_modulator_track_creation_round_trips() {
+        let graph = TestLiveGraph::new("modulator-track-creation-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let created = app.graph_controller().add_modulator_track().unwrap();
+        let created_id = app.track_registry.id_at(created).unwrap();
+        app.commit_created_track(created, "Add modulator track").unwrap();
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.track_registry.index_of(created_id), Some(1));
+        assert_eq!(app.graph.track_instrument_types[1], InstrumentType::Modulator);
+        assert_ne!(app.state.runtime.modulator_lids[1].load(Ordering::Acquire), 0);
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_middle_track_deletion_restores_order_identity_and_pattern_lane() {
+        let graph = TestLiveGraph::new("track-deletion-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        for _ in 0..3 {
+            app.graph_controller().add_blank_sampler_track()
+                .expect("seed sampler track");
+        }
+        app.tracks[0] = "First".to_string();
+        app.tracks[1] = "Deleted".to_string();
+        app.tracks[2] = "Last".to_string();
+        app.state.pattern.patterns[1].set_step_active(7, true);
+        let effect_slot = app.add_builtin_effect_sync(1, "OTT")
+            .expect("add retained track effect");
+        let compressor_slot = app.add_builtin_effect_sync(0, "compressor")
+            .expect("add sidechain compressor");
+        let sidechain_param = app.graph.effect_descriptors[0][compressor_slot].params.iter()
+            .position(|param| matches!(
+                param.host_control,
+                Some(crate::effects::HostControl::FxSidechain { .. })
+            )).expect("compressor sidechain parameter");
+        app.state.pattern.effect_chains[0][compressor_slot]
+            .defaults.set(sidechain_param, 2.0);
+        app.groups.push(crate::project::ProjectTrackGroup {
+            id: 9,
+            name: "All tracks".to_string(),
+            color: [0.2, 0.3, 0.4],
+            collapsed: false,
+            members: vec![0, 1, 2],
+            bus_id: crate::sequencer::DEFAULT_BUS_A_ID,
+        });
+        let ids = app.track_registry.ids().to_vec();
+
+        app.delete_track_recorded(1).expect("delete middle track");
+        assert_eq!(app.tracks, ["First", "Last"]);
+        assert_eq!(app.track_registry.ids(), &[ids[0], ids[2]]);
+        assert_eq!(app.groups[0].members, [0, 1]);
+        assert_eq!(
+            app.state.pattern.effect_chains[0][compressor_slot]
+                .defaults.get(sidechain_param).to_bits(),
+            1.0f32.to_bits(),
+        );
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks, ["First", "Deleted", "Last"]);
+        assert_eq!(app.track_registry.ids(), ids.as_slice());
+        assert_eq!(app.groups[0].members, [0, 1, 2]);
+        assert!(app.state.pattern.patterns[1].is_active(7));
+        assert_eq!(app.graph.effect_descriptors[1][effect_slot].name, "OTT");
+        assert_ne!(
+            app.state.pattern.effect_chains[1][effect_slot]
+                .node_id.load(Ordering::Relaxed),
+            0,
+        );
+        assert_eq!(
+            app.state.pattern.effect_chains[0][compressor_slot]
+                .defaults.get(sidechain_param).to_bits(),
+            2.0f32.to_bits(),
+        );
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks, ["First", "Last"]);
+        assert_eq!(app.track_registry.ids(), &[ids[0], ids[2]]);
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_rack_track_deletion_restores_slot_effect_graph() {
+        let graph = TestLiveGraph::new("rack-track-deletion-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        for _ in 0..3 {
+            app.graph_controller().add_blank_sampler_track()
+                .expect("seed sampler track");
+        }
+        app.graph_controller().group_track_to_instrument_rack(1)
+            .expect("build rack track");
+        app.add_builtin_rack_slot_effect_sync(1, 0, "OTT")
+            .expect("add rack slot effect");
+        let rack_id = app.track_registry.id_at(1).unwrap();
+
+        app.delete_track_recorded(1).expect("delete rack track");
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.track_registry.index_of(rack_id), Some(1));
+        assert_eq!(app.graph.track_instrument_types[1], InstrumentType::Rack);
+        let rack = app.state.pattern.rack_tracks.lock().unwrap()[1]
+            .clone().expect("rack state restored");
+        assert_eq!(rack.slots.len(), 1);
+        assert_eq!(rack.slots[0].effect_descriptors[0].name, "OTT");
+        assert_ne!(rack.slots[0].effect_slots[0].node_id, 0);
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.track_registry.index_of(rack_id), None);
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[1], InstrumentType::Rack);
+        assert_eq!(
+            app.state.pattern.rack_tracks.lock().unwrap()[1]
+                .as_ref().unwrap().slots[0].effect_descriptors[0].name,
+            "OTT",
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_custom_track_deletion_rebuilds_engine_route_at_original_index() {
+        let graph = TestLiveGraph::new("custom-track-deletion-history-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+            name: "history-engine".to_string(),
+            source: "history-engine.lisp".to_string(),
+            manifest: manifest.clone(),
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        app.graph_controller().add_custom_track(
+            "history-engine",
+            engine_id,
+            &manifest,
+            &lib,
+            CustomInstrumentRunMode::Instrument,
+        ).expect("add custom track");
+        app.editor.instrument_libs.push(lib);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let custom_id = app.track_registry.id_at(1).unwrap();
+
+        app.delete_track_recorded(1).expect("delete custom track");
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.track_registry.index_of(custom_id), Some(1));
+        assert_eq!(app.graph.track_instrument_types[1], InstrumentType::Custom);
+        assert_eq!(app.graph.track_engine_ids[1], Some(engine_id));
+        let engine = app.graph.engine_node_ids[engine_id].as_ref()
+            .expect("engine runtime restored");
+        assert_eq!(engine.route_gain_ids[1].len(), MAX_VOICES);
+        assert!(engine.route_gain_ids[1].iter().all(|route| route[0] > 0 && route[1] > 0));
         graph.process_block();
     }
 

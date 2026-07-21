@@ -8687,9 +8687,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let message = match replay {
                             tui::history::HistoryReplay::Applied(result) => {
                                 track_names.clone_from(&app.tracks);
-                                let replay_track = current_track
-                                    .load(Ordering::Relaxed)
-                                    .min(app.tracks.len().saturating_sub(1));
+                                let replay_track = if app.tracks.len() != track_count_before_replay {
+                                    app.ui.cursor_track
+                                } else {
+                                    current_track.load(Ordering::Relaxed)
+                                }.min(app.tracks.len().saturating_sub(1));
                                 current_track.store(replay_track, Ordering::Relaxed);
                                 if app.tracks.len() != track_count_before_replay {
                                     {
@@ -11230,7 +11232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             None
                         };
 
-                        match app.graph_controller().delete_track(track) {
+                        match app.delete_track_recorded(track) {
                             Ok(new_idx) => {
                                 if let Some(request_id) = request_id {
                                     state.complete_topology_edit(request_id);
@@ -11257,6 +11259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     read_modulator_display_values(app.graph.lg, &app);
                                 last_meter_poll_at = Instant::now();
                                 *record_armed.lock().unwrap() = app.graph.record_armed.clone();
+                                *track_groups.lock().unwrap() = app.groups.clone();
 
                                 let rt = editor.runtime_mut();
                                 sync_track_topology_state(

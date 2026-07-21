@@ -613,7 +613,7 @@ impl From<ProjectStealQuantize> for StealQuantize {
 /// unit backed by an auto-created bus. It references tracks by index and owns a
 /// backing bus by id; it does not own track data. See
 /// `docs/track-groups-spec.md`.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectTrackGroup {
     pub id: u64,
     pub name: String,

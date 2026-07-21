@@ -52,6 +52,7 @@ pub enum EditPatch {
     MidiFxChain(MidiFxChainPatch),
     RackSlotStructure(RackSlotStructurePatch),
     TrackCreation(TrackCreationPatch),
+    TrackDeletion(TrackDeletionPatch),
     TransportParams(TransportParamsPatch),
 }
 
@@ -337,6 +338,34 @@ impl TrackCreationPatch {
                     PatternId,
                     crate::sequencer::TrackInstrumentPatternState,
                 )>()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackDeletionPatch {
+    pub track: TrackId,
+    pub index: usize,
+    pub instrument: TrackInstrumentState,
+    pub effects: EffectChainState,
+    pub midi_fx: MidiFxChainState,
+    pub patterns: crate::sequencer::TrackPatternLaneState,
+    pub color: Option<crate::track_color::TrackColor>,
+    pub collapsed: bool,
+    pub rack_selected_slot: usize,
+    pub rack_pad_bank_start: i32,
+    pub record_armed: bool,
+    pub groups: Vec<crate::project::ProjectTrackGroup>,
+    pub macro_mappings: crate::macro_engine::TrackTopologyMacroMappings,
+}
+
+impl TrackDeletionPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.instrument.display_name.capacity()
+            + self.patterns.pool.patterns.capacity()
+                * std::mem::size_of::<(PatternId, crate::sequencer::TrackPatternData)>()
+            + self.effects.instances.capacity() * std::mem::size_of::<EffectInstanceState>()
+            + self.midi_fx.instances.capacity() * std::mem::size_of::<MidiFxInstanceState>()
     }
 }
 
@@ -656,6 +685,14 @@ impl<P> UndoManager<P> {
 
     pub fn redo_len(&self) -> usize {
         self.redo.len()
+    }
+
+    pub fn next_undo_patch(&self) -> Option<&P> {
+        self.undo.back().map(|entry| &entry.patch)
+    }
+
+    pub fn next_redo_patch(&self) -> Option<&P> {
+        self.redo.last().map(|entry| &entry.patch)
     }
 
     pub fn current_revision(&self) -> u64 {

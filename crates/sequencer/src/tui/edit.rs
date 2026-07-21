@@ -19,8 +19,8 @@ use super::history::{
     RackContainerSlotState, RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
     RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
     TrackInstrumentSource, TrackInstrumentState,
-    TrackCreationPatch, TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot,
-    TransportParamsPatch,
+    TrackCreationPatch, TrackDeletionPatch, TrackParamsBatchPatch, TrackParamsPatch,
+    TransportAuthoringSnapshot, TransportParamsPatch,
 };
 use super::App;
 use super::fx_chain::{
@@ -1666,6 +1666,117 @@ impl App {
                 crate::sequencer::TrackOutput::Bus(crate::sequencer::BusId(bus_id)),
             );
         }
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    fn remap_groups_after_track_delete(&mut self, deleted: usize) {
+        for group in &mut self.groups {
+            group.members.retain(|member| *member != deleted);
+            for member in &mut group.members {
+                if *member > deleted {
+                    *member -= 1;
+                }
+            }
+        }
+        self.groups.retain(|group| !group.members.is_empty());
+    }
+
+    pub fn delete_track_recorded(&mut self, track: usize) -> Result<usize, String> {
+        finish_active_gesture(self);
+        if track >= self.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        if self.tracks.len() <= 1 {
+            return Err("Cannot delete the last remaining track".to_string());
+        }
+        let names = self.tracks.clone();
+        let buffer_ids = self.graph.track_buffer_ids.clone();
+        let sample_rates = self.graph.track_sample_rates.clone();
+        let instrument_types = self.graph.track_instrument_types.clone();
+        if !self.state.save_current_pattern_snapshot(
+            self.tracks.len(),
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ) {
+            return Err("Could not snapshot the current scene before deleting the track".to_string());
+        }
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let instrument = self.capture_track_instrument_state(track)?;
+        let effects = self.capture_track_effect_chain_state(track, None)?;
+        let midi_fx = self.capture_track_midi_fx_chain_state(track)?;
+        let patterns = self.state.capture_track_pattern_lane_state(
+            track,
+            &self.graph.effect_descriptors,
+        )?;
+        let patch = TrackDeletionPatch {
+            track: track_id,
+            index: track,
+            instrument,
+            effects,
+            midi_fx,
+            patterns,
+            color: self.track_colors.get(track).copied(),
+            collapsed: self.track_collapsed.get(track).copied().unwrap_or(false),
+            rack_selected_slot: self.rack_selected_slots.get(track).copied().unwrap_or(0),
+            rack_pad_bank_start: self.rack_pad_bank_starts.get(track).copied()
+                .unwrap_or(crate::sequencer::DRUM_RACK_FIRST_PAD_NOTE),
+            record_armed: self.graph.record_armed.get(track).copied().unwrap_or(false),
+            groups: self.groups.clone(),
+            macro_mappings: self.macro_engine.capture_track_topology_mappings(track),
+        };
+        let retained_bytes = patch.retained_bytes();
+        let selected = self.graph_controller().delete_track(track)?;
+        self.remap_groups_after_track_delete(track);
+        self.macro_engine.remap_after_track_delete(track);
+        self.device_registry.clear_track(track_id);
+        self.history.commit(
+            "Delete track",
+            None,
+            EditPatch::TrackDeletion(patch),
+            retained_bytes,
+        );
+        Ok(selected)
+    }
+
+    fn restore_deleted_track(&mut self, patch: &TrackDeletionPatch) -> Result<(), String> {
+        if self.track_registry.index_of(patch.track).is_some() {
+            return Err(format!("Deleted track {:?} already exists", patch.track));
+        }
+        if patch.index > self.tracks.len() {
+            return Err("Deleted track insertion point is no longer valid".to_string());
+        }
+        let appended = match patch.instrument.source {
+            TrackInstrumentSource::Modulator => self.graph_controller().add_modulator_track()?,
+            _ => self.graph_controller().add_blank_sampler_track()?,
+        };
+        let allocated = self.track_registry.replace_at(appended, patch.track)
+            .map_err(|error| format!("Failed to restore stable track id: {error:?}"))?;
+        self.device_registry.clear_track(allocated);
+        let empty_effects = self.capture_track_effect_chain_state(appended, None)?;
+        self.state.replace_appended_track_pattern_lane(&patch.patterns)?;
+        self.restore_track_instrument_state(appended, &patch.instrument)?;
+        self.restore_track_effect_chain_state(appended, &empty_effects, &patch.effects)?;
+        self.restore_track_midi_fx_chain_state(appended, &patch.midi_fx)?;
+        self.track_colors[appended] = patch.color.unwrap_or(self.track_colors[appended]);
+        self.track_collapsed[appended] = patch.collapsed;
+        self.rack_selected_slots[appended] = patch.rack_selected_slot;
+        self.rack_pad_bank_starts[appended] = patch.rack_pad_bank_start;
+        self.graph.record_armed[appended] = patch.record_armed;
+        self.state.move_appended_track_pattern_lane_to(patch.index, &patch.patterns)?;
+        self.graph_controller().move_appended_track_to(patch.index)?;
+        self.groups = patch.groups.clone();
+        self.macro_engine.restore_track_topology_mappings(&patch.macro_mappings)
+            .map_err(|error| format!("Could not restore track macro mappings: {error:?}"))?;
+        self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
+        self.ui.cursor_track = patch.index;
+        self.ui.cursor_step = self.ui.cursor_step.min(
+            self.state.pattern.track_params[patch.index].get_num_steps().saturating_sub(1),
+        );
+        self.push_all_restored_defaults();
         self.state.publish_scheduler_snapshot();
         Ok(())
     }
@@ -5753,6 +5864,23 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
                 "track-creation replay requires undo or redo mode".to_string(),
             )),
         },
+        EditPatch::TrackDeletion(patch) => match mode {
+            ApplyMode::Undo => app.restore_deleted_track(patch)
+                .map_err(EditError::ReplayFailed),
+            ApplyMode::Redo => {
+                let track = app.track_registry.index_of(patch.track)
+                    .ok_or(EditError::MissingStableTrack { track: patch.track })?;
+                app.graph_controller().delete_track(track)
+                    .map_err(EditError::ReplayFailed)?;
+                app.remap_groups_after_track_delete(track);
+                app.macro_engine.remap_after_track_delete(track);
+                app.device_registry.clear_track(patch.track);
+                Ok(())
+            }
+            ApplyMode::UserEdit | ApplyMode::ProjectLoad => Err(EditError::ReplayFailed(
+                "track-deletion replay requires undo or redo mode".to_string(),
+            )),
+        },
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -5776,6 +5904,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::InstrumentBinding(_) => true,
         EditPatch::RackSlotStructure(_) => true,
         EditPatch::TrackCreation(_) => true,
+        EditPatch::TrackDeletion(_) => true,
         EditPatch::EffectChain(_) => true,
         EditPatch::BusEffectChain(_) => true,
         EditPatch::BusEffectValues(_) => true,
@@ -5810,18 +5939,62 @@ pub fn finish_active_gesture_if_idle(app: &mut App) -> bool {
 
 pub fn undo(app: &mut App) -> HistoryReplay<EditError> {
     finish_active_gesture(app);
+    let topology_request = if app.history.next_undo_patch().is_some_and(structural_track_patch) {
+        match wait_for_track_topology_boundary(app) {
+            Ok(request) => request,
+            Err(error) => return HistoryReplay::Failed(error),
+        }
+    } else { None };
     let mut history = std::mem::take(&mut app.history);
     let result = history.undo(|patch| replay_patch(app, patch, ApplyMode::Undo));
     app.history = history;
+    if let Some(request) = topology_request {
+        app.state.complete_topology_edit(request);
+        app.state.publish_scheduler_snapshot();
+    }
     result
 }
 
 pub fn redo(app: &mut App) -> HistoryReplay<EditError> {
     finish_active_gesture(app);
+    let topology_request = if app.history.next_redo_patch().is_some_and(structural_track_patch) {
+        match wait_for_track_topology_boundary(app) {
+            Ok(request) => request,
+            Err(error) => return HistoryReplay::Failed(error),
+        }
+    } else { None };
     let mut history = std::mem::take(&mut app.history);
     let result = history.redo(|patch| replay_patch(app, patch, ApplyMode::Redo));
     app.history = history;
+    if let Some(request) = topology_request {
+        app.state.complete_topology_edit(request);
+        app.state.publish_scheduler_snapshot();
+    }
     result
+}
+
+fn structural_track_patch(patch: &EditPatch) -> bool {
+    matches!(patch, EditPatch::TrackCreation(_) | EditPatch::TrackDeletion(_))
+}
+
+fn wait_for_track_topology_boundary(app: &mut App) -> Result<Option<u64>, EditError> {
+    if !app.state.is_playing() {
+        return Ok(None);
+    }
+    let track = app.ui.cursor_track.min(app.tracks.len().saturating_sub(1));
+    let request = app.state.request_track_delete_boundary(track);
+    let deadline = Instant::now() + std::time::Duration::from_millis(250);
+    while !app.state.topology_edit_ready(request) && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    if !app.state.topology_edit_ready(request) {
+        app.state.complete_topology_edit(request);
+        app.state.publish_scheduler_snapshot();
+        return Err(EditError::ReplayFailed(
+            "Timed out waiting for a playback boundary".to_string(),
+        ));
+    }
+    Ok(Some(request))
 }
 
 pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
@@ -5856,6 +6029,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::TrackCreation(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::TrackDeletion(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::EffectChain(_) => {

@@ -387,6 +387,12 @@ pub struct MacroEngine {
     scene_push: Option<ScenePushOverride>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TrackTopologyMacroMappings {
+    pub first_track: usize,
+    pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
+}
+
 impl Default for MacroEngine {
     fn default() -> Self {
         Self {
@@ -400,6 +406,57 @@ impl Default for MacroEngine {
 }
 
 impl MacroEngine {
+    pub fn capture_track_topology_mappings(
+        &self,
+        first_track: usize,
+    ) -> TrackTopologyMacroMappings {
+        TrackTopologyMacroMappings {
+            first_track,
+            mappings: self.macros.iter().filter_map(|definition| {
+                let mappings = definition.mappings.iter().enumerate()
+                    .filter(|(_, mapping)| matches!(mapping.scope, ParamScope::Track(track) if track >= first_track))
+                    .map(|(index, mapping)| (index, mapping.clone()))
+                    .collect::<Vec<_>>();
+                (!mappings.is_empty()).then_some((definition.id, mappings))
+            }).collect(),
+        }
+    }
+
+    pub fn remap_after_track_delete(&mut self, deleted: usize) {
+        for definition in &mut self.macros {
+            definition.mappings.retain_mut(|mapping| match &mut mapping.scope {
+                ParamScope::Track(track) if *track == deleted => false,
+                ParamScope::Track(track) if *track > deleted => {
+                    *track -= 1;
+                    true
+                }
+                ParamScope::Track(_) | ParamScope::Bus(_) => true,
+            });
+        }
+        self.rebuild_ownership();
+    }
+
+    pub fn restore_track_topology_mappings(
+        &mut self,
+        snapshot: &TrackTopologyMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        for definition in &mut self.macros {
+            definition.mappings.retain(|mapping| {
+                !matches!(mapping.scope, ParamScope::Track(track) if track >= snapshot.first_track)
+            });
+        }
+        for (macro_id, mappings) in &snapshot.mappings {
+            let definition = self.macros.iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                definition.mappings.insert((*index).min(definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
     pub fn macros(&self) -> &[Macro] {
         &self.macros
     }
@@ -1791,6 +1848,42 @@ mod tests {
             Err(MacroEngineError::DuplicateMacroKey(
                 "player/filter".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn track_topology_mapping_snapshot_restores_deleted_and_shifted_scopes() {
+        let mut engine = MacroEngine::default();
+        let id = engine.create_macro("Topology", MacroKind::Mapped).unwrap();
+        for track in 0..3 {
+            engine.add_mapping(id, MacroMapping::new(
+                track,
+                ParamTarget::RackMacroParam { macro_id: 0 },
+                0.0,
+                1.0,
+                MacroCurve::Linear,
+            ).unwrap()).unwrap();
+        }
+        let snapshot = engine.capture_track_topology_mappings(1);
+
+        engine.remap_after_track_delete(1);
+        assert_eq!(
+            engine.macro_definition(id).unwrap().mappings.iter()
+                .filter_map(|mapping| match mapping.scope {
+                    ParamScope::Track(track) => Some(track),
+                    ParamScope::Bus(_) => None,
+                }).collect::<Vec<_>>(),
+            vec![0, 1],
+        );
+
+        engine.restore_track_topology_mappings(&snapshot).unwrap();
+        assert_eq!(
+            engine.macro_definition(id).unwrap().mappings.iter()
+                .filter_map(|mapping| match mapping.scope {
+                    ParamScope::Track(track) => Some(track),
+                    ParamScope::Bus(_) => None,
+                }).collect::<Vec<_>>(),
+            vec![0, 1, 2],
         );
     }
 
