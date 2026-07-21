@@ -152,6 +152,21 @@ fn unsupported_authoring_barrier(label: &str) -> HostCommand {
     }
 }
 
+fn process_history_command(op: &str, fields: Vec<(&str, Value)>) -> HostCommand {
+    let mut payload = HashMap::new();
+    payload.insert(
+        "op".to_string(),
+        Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
+    );
+    for (name, value) in fields {
+        payload.insert(name.to_string(), Rc::new(RefCell::new(value)));
+    }
+    HostCommand::Custom {
+        name: "process-history-action".to_string(),
+        payload: Value::Map(payload),
+    }
+}
+
 fn value_symbol_name(value: &Value) -> Option<String> {
     match value {
         Value::String(value) | Value::Symbol(value) | Value::Keyword(value) => {
@@ -2208,9 +2223,7 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(val as f64))
     });
 
-    let st = state.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-process-lane-step", move |args, _ctx| {
+    runtime.register_native("seq-set-process-lane-step", move |args, ctx| {
         let (
             Some(Value::Number(track)),
             Some(Value::Number(instance_id)),
@@ -2235,22 +2248,17 @@ pub(crate) fn init_runtime(
             .ok_or_else(|| "seq-set-process-lane-step: inlet must be a name".to_string())?;
         let step = *step as usize;
         let value = *value as f32;
-        if !st.set_process_lane_value(
-            track,
-            sequencer::process::ProcessInstanceId(instance_id),
-            inlet,
-            step,
-            value,
-        ) {
-            return Err("seq-set-process-lane-step: no matching attached process lane".into());
-        }
-        ui_inv.push(UiInvalidation::ProcessChain { track });
+        ctx.enqueue_command(process_history_command("set-lane-step", vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(instance_id as f64)),
+            ("inlet", Value::String(inlet)),
+            ("step", Value::Number(step as f64)),
+            ("value", Value::Number(value as f64)),
+        ]));
         Ok(Value::Number(value as f64))
     });
 
-    let state_for_clear_project_lane = Arc::clone(&state);
-    let ui_for_clear_project_lane = ui_invalidations.clone();
-    runtime.register_native("seq-clear-project-lane-override", move |args, _ctx| {
+    runtime.register_native("seq-clear-project-lane-override", move |args, ctx| {
         if args.len() != 3 {
             return Err(
                 "seq-clear-project-lane-override: expected (track instance-id inlet)".into(),
@@ -2264,22 +2272,15 @@ pub(crate) fn init_runtime(
         };
         let inlet = value_symbol_name(&args[2])
             .ok_or_else(|| "seq-clear-project-lane-override: inlet must be a name".to_string())?;
-        let cleared = state_for_clear_project_lane.clear_project_process_lane_override(
-            track as usize,
-            sequencer::process::ProcessInstanceId(instance_id as u64),
-            &inlet,
-        );
-        if cleared {
-            ui_for_clear_project_lane.push(UiInvalidation::ProcessChain {
-                track: track as usize,
-            });
-        }
-        Ok(Value::Bool(cleared))
+        ctx.enqueue_command(process_history_command("clear-project-lane-override", vec![
+            ("track", Value::Number(track)),
+            ("instance-id", Value::Number(instance_id)),
+            ("inlet", Value::String(inlet)),
+        ]));
+        Ok(Value::Bool(true))
     });
 
-    let st = state.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-process-inlet", move |args, _ctx| {
+    runtime.register_native("seq-set-process-inlet", move |args, ctx| {
         let (
             Some(Value::Number(track)),
             Some(Value::Number(instance_id)),
@@ -2293,7 +2294,7 @@ pub(crate) fn init_runtime(
         let instance_id = *instance_id as u64;
         let inlet = value_symbol_name(inlet)
             .ok_or_else(|| "seq-set-process-inlet: inlet must be a name".to_string())?;
-        let literal = match value {
+        let _literal = match value {
             Value::Number(value) => sequencer::process::ProcessLiteral::Number(*value),
             Value::Bool(value) => sequencer::process::ProcessLiteral::Bool(*value),
             Value::String(value) => sequencer::process::ProcessLiteral::String(value.clone()),
@@ -2308,22 +2309,16 @@ pub(crate) fn init_runtime(
                 .into());
             }
         };
-        let updated = st.set_track_process_inlet_value(
-            track,
-            sequencer::process::ProcessInstanceId(instance_id),
-            &inlet,
-            literal,
-        );
-        if !updated {
-            return Err("seq-set-process-inlet: no matching attached process slot".into());
-        }
-        ui_inv.push(UiInvalidation::ProcessChain { track });
+        ctx.enqueue_command(process_history_command("set-inlet", vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(instance_id as f64)),
+            ("inlet", Value::String(inlet)),
+            ("value", value.clone()),
+        ]));
         Ok(Value::Bool(true))
     });
 
-    let st = state.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-process-slot-enabled", move |args, _ctx| {
+    runtime.register_native("seq-set-process-slot-enabled", move |args, ctx| {
         let (
             Some(Value::Number(track)),
             Some(Value::Number(instance_id)),
@@ -2335,20 +2330,15 @@ pub(crate) fn init_runtime(
             );
         };
         let track = *track as usize;
-        if !st.set_track_process_slot_enabled(
-            track,
-            sequencer::process::ProcessInstanceId(*instance_id as u64),
-            *enabled,
-        ) {
-            return Err("seq-set-process-slot-enabled: no matching attached process slot".into());
-        }
-        ui_inv.push(UiInvalidation::ProcessChain { track });
+        ctx.enqueue_command(process_history_command("set-enabled", vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(*instance_id)),
+            ("enabled", Value::Bool(*enabled)),
+        ]));
         Ok(Value::Bool(*enabled))
     });
 
-    let st = state.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-move-process-slot-before", move |args, _ctx| {
+    runtime.register_native("seq-move-process-slot-before", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(instance_id)), Some(target)) =
             (args.first(), args.get(1), args.get(2))
         else {
@@ -2367,39 +2357,32 @@ pub(crate) fn init_runtime(
                 )
             }
         };
-        if !st.move_track_process_slot_before(
-            track,
-            sequencer::process::ProcessInstanceId(*instance_id as u64),
-            before,
-        ) {
-            return Err("seq-move-process-slot-before: no matching process slot".into());
-        }
-        ui_inv.push(UiInvalidation::ProcessChain { track });
+        ctx.enqueue_command(process_history_command("move-slot", vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(*instance_id)),
+            ("before-instance-id", before
+                .map(|id| Value::Number(id.0 as f64))
+                .unwrap_or(Value::Nil)),
+        ]));
         Ok(Value::Bool(true))
     });
 
-    let st = state.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-remove-process-slot", move |args, _ctx| {
+    runtime.register_native("seq-remove-process-slot", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(instance_id))) =
             (args.first(), args.get(1))
         else {
             return Err("seq-remove-process-slot: expected (track instance-id)".into());
         };
         let track = *track as usize;
-        if !st.remove_track_process_slot(
-            track,
-            sequencer::process::ProcessInstanceId(*instance_id as u64),
-        ) {
-            return Err("seq-remove-process-slot: no matching attached process slot".into());
-        }
-        ui_inv.push(UiInvalidation::ProcessChain { track });
+        ctx.enqueue_command(process_history_command("remove-slot", vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(*instance_id)),
+        ]));
         Ok(Value::Bool(true))
     });
 
     let st = state.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-bind-process-port", move |args, _ctx| {
+    runtime.register_native("seq-bind-process-port", move |args, ctx| {
         let (
             Some(Value::Number(track)),
             Some(Value::Number(instance_id)),
@@ -2428,6 +2411,7 @@ pub(crate) fn init_runtime(
             )
             .into());
         }
+        let target_value = target.clone();
         let target = param_target_from_value(&st, track, target)
             .map_err(|error| format!("seq-bind-process-port: {error}"))?;
         if !port_def.allows_parameter_mapping_target(&target) {
@@ -2449,16 +2433,16 @@ pub(crate) fn init_runtime(
                 target
             );
         }
-        if !st.set_process_port_binding(track, instance_id, &port, target) {
-            return Err("seq-bind-process-port: no matching attached process slot".into());
-        }
-        ui_inv.push(UiInvalidation::ProcessChain { track });
+        ctx.enqueue_command(process_history_command("bind-port", vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(instance_id.0 as f64)),
+            ("port", Value::String(port)),
+            ("target", target_value),
+        ]));
         Ok(Value::Bool(true))
     });
 
-    let st = state.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-clear-process-port-binding", move |args, _ctx| {
+    runtime.register_native("seq-clear-process-port-binding", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(instance_id)), Some(port)) =
             (args.first(), args.get(1), args.get(2))
         else {
@@ -2468,10 +2452,11 @@ pub(crate) fn init_runtime(
         let instance_id = sequencer::process::ProcessInstanceId(*instance_id as u64);
         let port = value_symbol_name(port)
             .ok_or_else(|| "seq-clear-process-port-binding: port must be a name".to_string())?;
-        if !st.clear_process_port_binding(track, instance_id, &port) {
-            return Err("seq-clear-process-port-binding: no matching attached process slot".into());
-        }
-        ui_inv.push(UiInvalidation::ProcessChain { track });
+        ctx.enqueue_command(process_history_command("clear-port-binding", vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(instance_id.0 as f64)),
+            ("port", Value::String(port)),
+        ]));
         Ok(Value::Bool(true))
     });
 

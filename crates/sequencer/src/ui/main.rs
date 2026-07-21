@@ -3169,8 +3169,14 @@ fn record_selected_neural_instrument_plock(
     track: usize,
     param_idx: usize,
     value: f32,
-) -> (BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>, bool) {
+) -> (
+    BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    bool,
+    Option<sequencer::sequencer::ProjectScenes>,
+) {
     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
+    let history_before = (!neural_selection.is_empty())
+        .then(|| state.capture_project_scenes());
     let wrote_neural_plock = write_selected_neural_instrument_plock(
         editor,
         state,
@@ -3179,7 +3185,11 @@ fn record_selected_neural_instrument_plock(
         param_idx,
         value,
     );
-    (neural_selection, wrote_neural_plock)
+    (
+        neural_selection,
+        wrote_neural_plock,
+        history_before.filter(|_| wrote_neural_plock),
+    )
 }
 
 fn write_selected_neural_instrument_plock(
@@ -3213,8 +3223,14 @@ fn record_selected_neural_effect_plock(
     slot_idx: usize,
     param_idx: usize,
     value: f32,
-) -> (BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>, bool) {
+) -> (
+    BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    bool,
+    Option<sequencer::sequencer::ProjectScenes>,
+) {
     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
+    let history_before = (!neural_selection.is_empty())
+        .then(|| state.capture_project_scenes());
     let wrote_neural_plock = write_selected_neural_effect_plock(
         editor,
         state,
@@ -3224,7 +3240,11 @@ fn record_selected_neural_effect_plock(
         param_idx,
         value,
     );
-    (neural_selection, wrote_neural_plock)
+    (
+        neural_selection,
+        wrote_neural_plock,
+        history_before.filter(|_| wrote_neural_plock),
+    )
 }
 
 fn write_selected_neural_effect_plock(
@@ -9062,6 +9082,147 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     MacroHostCommandOutcome::NotMacro => {}
                 }
                 match name.as_str() {
+                    "process-history-action" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Process edit failed: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let field = |name: &str| map.get(name).map(|cell| cell.borrow().clone());
+                        let op = field("op").and_then(|value| match value {
+                            Value::Keyword(value) | Value::String(value) | Value::Symbol(value) => Some(value),
+                            _ => None,
+                        });
+                        let track = field("track").and_then(|value| match value {
+                            Value::Number(value) if value >= 0.0 => Some(value as usize),
+                            _ => None,
+                        });
+                        let instance_id = field("instance-id").and_then(|value| match value {
+                            Value::Number(value) if value >= 0.0 => {
+                                Some(sequencer::process::ProcessInstanceId(value as u64))
+                            }
+                            _ => None,
+                        });
+                        let (Some(op), Some(track), Some(instance_id)) =
+                            (op, track, instance_id)
+                        else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Process edit failed: missing operation target".to_string(),
+                            ));
+                            continue;
+                        };
+                        let result = app.apply_recorded_scene_structure_mutation(
+                            "Edit process chain",
+                            |app| {
+                                let changed = match op.as_str() {
+                                    "set-lane-step" => {
+                                        let inlet = field("inlet").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process lane inlet is missing".to_string())?;
+                                        let step = field("step").and_then(|value| match value {
+                                            Value::Number(value) if value >= 0.0 => Some(value as usize),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process lane step is missing".to_string())?;
+                                        let value = field("value").and_then(|value| match value {
+                                            Value::Number(value) => Some(value as f32),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process lane value is missing".to_string())?;
+                                        app.state.set_process_lane_value(
+                                            track, instance_id, inlet, step, value,
+                                        )
+                                    }
+                                    "clear-project-lane-override" => {
+                                        let inlet = field("inlet").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process lane inlet is missing".to_string())?;
+                                        app.state.clear_project_process_lane_override(
+                                            track, instance_id, &inlet,
+                                        )
+                                    }
+                                    "set-inlet" => {
+                                        let inlet = field("inlet").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process inlet is missing".to_string())?;
+                                        let literal = match field("value")
+                                            .ok_or_else(|| "Process inlet value is missing".to_string())?
+                                        {
+                                            Value::Number(value) => sequencer::process::ProcessLiteral::Number(value),
+                                            Value::Bool(value) => sequencer::process::ProcessLiteral::Bool(value),
+                                            Value::String(value) => sequencer::process::ProcessLiteral::String(value),
+                                            Value::Keyword(value) => sequencer::process::ProcessLiteral::Keyword(value),
+                                            Value::Symbol(value) => sequencer::process::ProcessLiteral::Symbol(value),
+                                            Value::Nil => sequencer::process::ProcessLiteral::Nil,
+                                            _ => return Err("Unsupported process inlet literal".to_string()),
+                                        };
+                                        app.state.set_track_process_inlet_value(
+                                            track, instance_id, &inlet, literal,
+                                        )
+                                    }
+                                    "set-enabled" => {
+                                        let enabled = field("enabled").and_then(|value| match value {
+                                            Value::Bool(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process enabled state is missing".to_string())?;
+                                        app.state.set_track_process_slot_enabled(
+                                            track, instance_id, enabled,
+                                        )
+                                    }
+                                    "move-slot" => {
+                                        let before = match field("before-instance-id") {
+                                            Some(Value::Number(value)) if value >= 0.0 => {
+                                                Some(sequencer::process::ProcessInstanceId(value as u64))
+                                            }
+                                            Some(Value::Nil) | None => None,
+                                            _ => return Err("Process move target is invalid".to_string()),
+                                        };
+                                        app.state.move_track_process_slot_before(
+                                            track, instance_id, before,
+                                        )
+                                    }
+                                    "remove-slot" => app.state.remove_track_process_slot(
+                                        track, instance_id,
+                                    ),
+                                    "bind-port" => {
+                                        let port = field("port").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process port is missing".to_string())?;
+                                        let target = field("target")
+                                            .ok_or_else(|| "Process binding target is missing".to_string())?;
+                                        let target = natives::param_target_from_value(
+                                            &app.state, track, &target,
+                                        )?;
+                                        app.state.set_process_port_binding(
+                                            track, instance_id, &port, target,
+                                        )
+                                    }
+                                    "clear-port-binding" => {
+                                        let port = field("port").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process port is missing".to_string())?;
+                                        app.state.clear_process_port_binding(
+                                            track, instance_id, &port,
+                                        )
+                                    }
+                                    _ => return Err(format!("Unknown process history operation {op}")),
+                                };
+                                changed.then_some(()).ok_or_else(|| {
+                                    "Process edit target was missing or unchanged".to_string()
+                                })
+                            },
+                        );
+                        match result {
+                            Ok(()) => ui_invalidations.push(UiInvalidation::ProcessChain { track }),
+                            Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                "Process edit failed: {error}"
+                            ))),
+                        }
+                    }
                     "unsupported-authoring-history-barrier" => {
                         let label = match payload {
                             Value::String(label) => label,
@@ -12947,7 +13108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned()
                                 {
                                     let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                                    let (neural_selection, wrote_neural_plock) =
+                                    let (neural_selection, wrote_neural_plock, neural_history_before) =
                                         record_selected_neural_instrument_plock(
                                             &mut editor,
                                             &state,
@@ -12956,8 +13117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                             stored,
                                         );
-                                    if wrote_neural_plock {
-                                        tui::edit::commit_history_barrier(&mut app);
+                                    if let Some(before) = neural_history_before {
+                                        app.commit_applied_scene_structure_mutation(
+                                            before,
+                                            "Edit neural override",
+                                        );
                                     }
                                     if !wrote_neural_plock {
                                         tui::apply_command(
@@ -13281,6 +13445,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     })
                                     .unwrap_or(default);
                                     let next = desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                    let neural_history_before = (!neural_selection.is_empty())
+                                        .then(|| state.capture_project_scenes());
                                     let wrote_neural_plock = write_selected_neural_instrument_plock(
                                         &mut editor,
                                         &state,
@@ -13289,8 +13455,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         param_idx,
                                         next,
                                     );
-                                    if wrote_neural_plock {
-                                        tui::edit::commit_history_barrier(&mut app);
+                                    if let Some(before) =
+                                        neural_history_before.filter(|_| wrote_neural_plock)
+                                    {
+                                        app.commit_applied_scene_structure_mutation(
+                                            before,
+                                            "Edit neural override",
+                                        );
                                     }
                                     if wrote_neural_plock {
                                         sync_instrument_param_authoring_display(
@@ -13498,7 +13669,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .as_ref()
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
-                                let (neural_selection, wrote_neural_plock) =
+                                let (neural_selection, wrote_neural_plock, neural_history_before) =
                                     record_selected_neural_effect_plock(
                                         &mut editor,
                                         &state,
@@ -13508,8 +13679,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         param_idx,
                                     clamped,
                                 );
-                                if wrote_neural_plock {
-                                    tui::edit::commit_history_barrier(&mut app);
+                                if let Some(before) = neural_history_before {
+                                    app.commit_applied_scene_structure_mutation(
+                                        before,
+                                        "Edit neural override",
+                                    );
                                 }
                                 if !wrote_neural_plock {
                                     tui::apply_command(
@@ -13761,6 +13935,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .unwrap_or(desc.default);
                                         let next =
                                             desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                        let neural_history_before = (!neural_selection.is_empty())
+                                            .then(|| state.capture_project_scenes());
                                         let wrote_neural_plock = write_selected_neural_effect_plock(
                                             &mut editor,
                                             &state,
@@ -13770,8 +13946,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                             next,
                                         );
-                                        if wrote_neural_plock {
-                                            tui::edit::commit_history_barrier(&mut app);
+                                        if let Some(before) =
+                                            neural_history_before.filter(|_| wrote_neural_plock)
+                                        {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
+                                            );
                                         }
                                         if wrote_neural_plock {
                                             sync_effect_param_authoring_display(
@@ -13854,7 +14035,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         labels.iter().position(|item| item == &label)
                                     {
                                         let value = selected_idx as f32;
-                                        let (neural_selection, wrote_neural_plock) =
+                                        let (neural_selection, wrote_neural_plock, neural_history_before) =
                                             record_selected_neural_instrument_plock(
                                                 &mut editor,
                                                 &state,
@@ -13863,8 +14044,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 param_idx,
                                             value,
                                         );
-                                        if wrote_neural_plock {
-                                            tui::edit::commit_history_barrier(&mut app);
+                                        if let Some(before) = neural_history_before {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
+                                            );
                                         }
                                         if !wrote_neural_plock {
                                             tui::apply_command(
@@ -13919,7 +14103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned()
                                 {
                                     let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                                    let (neural_selection, wrote_neural_plock) =
+                                    let (neural_selection, wrote_neural_plock, neural_history_before) =
                                         record_selected_neural_instrument_plock(
                                             &mut editor,
                                             &state,
@@ -13928,8 +14112,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                         stored,
                                     );
-                                    if wrote_neural_plock {
-                                        tui::edit::commit_history_barrier(&mut app);
+                                    if let Some(before) = neural_history_before {
+                                        app.commit_applied_scene_structure_mutation(
+                                            before,
+                                            "Edit neural override",
+                                        );
                                     }
                                     if !wrote_neural_plock {
                                         let steps: Vec<usize> = selected_steps
@@ -14069,7 +14256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         labels.iter().position(|item| item == &label)
                                     {
                                         let value = selected_idx as f32;
-                                        let (neural_selection, wrote_neural_plock) =
+                                        let (neural_selection, wrote_neural_plock, neural_history_before) =
                                             record_selected_neural_instrument_plock(
                                                 &mut editor,
                                                 &state,
@@ -14078,8 +14265,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 param_idx,
                                             value,
                                         );
-                                        if wrote_neural_plock {
-                                            tui::edit::commit_history_barrier(&mut app);
+                                        if let Some(before) = neural_history_before {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
+                                            );
                                         }
                                         if !wrote_neural_plock {
                                             let steps: Vec<usize> = selected_steps
@@ -14194,7 +14384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                     } else {
                                         let value = selected_idx as f32;
-                                        let (neural_selection, wrote_neural_plock) =
+                                        let (neural_selection, wrote_neural_plock, neural_history_before) =
                                             record_selected_neural_effect_plock(
                                                 &mut editor,
                                                 &state,
@@ -14204,8 +14394,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 param_idx,
                                             value,
                                         );
-                                        if wrote_neural_plock {
-                                            tui::edit::commit_history_barrier(&mut app);
+                                        if let Some(before) = neural_history_before {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
+                                            );
                                         }
                                         if !wrote_neural_plock {
                                             tui::apply_command(
@@ -14420,10 +14613,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 })
                                 .unwrap_or(0);
                             if let (Some(source), Some(destination)) = (source, destination) {
-                                match app.graph_controller().set_mod_route_to_destination(
-                                    source,
-                                    destination,
-                                    input,
+                                match app.apply_recorded_scene_structure_mutation(
+                                    "Connect modulation route",
+                                    |app| app.graph_controller().set_mod_route_to_destination(
+                                        source,
+                                        destination,
+                                        input,
+                                    ),
                                 ) {
                                     Ok(()) => {
                                         let dest_label =
@@ -14485,10 +14681,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 })
                                 .unwrap_or(0);
                             if let (Some(source), Some(destination)) = (source, destination) {
-                                match app.graph_controller().delete_mod_route_to_destination(
-                                    source,
-                                    destination,
-                                    input,
+                                match app.apply_recorded_scene_structure_mutation(
+                                    "Delete modulation route",
+                                    |app| app.graph_controller().delete_mod_route_to_destination(
+                                        source,
+                                        destination,
+                                        input,
+                                    ),
                                 ) {
                                     Ok(()) => {
                                         let dest_label =
@@ -15526,7 +15725,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                     } else {
                                         let value = selected_idx as f32;
-                                        let (neural_selection, wrote_neural_plock) =
+                                        let (neural_selection, wrote_neural_plock, neural_history_before) =
                                             record_selected_neural_effect_plock(
                                                 &mut editor,
                                                 &state,
@@ -15536,8 +15735,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 param_idx,
                                             value,
                                         );
-                                        if wrote_neural_plock {
-                                            tui::edit::commit_history_barrier(&mut app);
+                                        if let Some(before) = neural_history_before {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
+                                            );
                                         }
                                         if !wrote_neural_plock {
                                             let steps: Vec<usize> = selected_steps
@@ -16483,7 +16685,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (network_id, neuron_idx, target_track, param_idx)
                                         {
-                                            tui::edit::commit_history_barrier(&mut app);
+                                            let history_before = state.capture_project_scenes();
                                             match sequencer::lisp_host::clear_neural_instrument_plock_by_network_id(
                                                 &state,
                                                 network_id,
@@ -16491,7 +16693,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 target_track,
                                                 param_idx,
                                             ) {
-                                                Ok(removed) => changed |= removed,
+                                                Ok(removed) => {
+                                                    changed |= removed;
+                                                    if removed {
+                                                        app.commit_applied_scene_structure_mutation(
+                                                            history_before,
+                                                            "Clear neural override",
+                                                        );
+                                                    }
+                                                }
                                                 Err(error) => editor.handle_host_event(
                                                     HostEvent::Status(format!(
                                                         "Error clearing neuron instrument p-lock: {error}"
@@ -16514,7 +16724,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             slot_idx,
                                             param_idx,
                                         ) {
-                                            tui::edit::commit_history_barrier(&mut app);
+                                            let history_before = state.capture_project_scenes();
                                             match sequencer::lisp_host::clear_neural_effect_plock_by_network_id(
                                                 &state,
                                                 network_id,
@@ -16523,7 +16733,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 slot_idx,
                                                 param_idx,
                                             ) {
-                                                Ok(removed) => changed |= removed,
+                                                Ok(removed) => {
+                                                    changed |= removed;
+                                                    if removed {
+                                                        app.commit_applied_scene_structure_mutation(
+                                                            history_before,
+                                                            "Clear neural override",
+                                                        );
+                                                    }
+                                                }
                                                 Err(error) => editor.handle_host_event(
                                                     HostEvent::Status(format!(
                                                         "Error clearing neuron effect p-lock: {error}"

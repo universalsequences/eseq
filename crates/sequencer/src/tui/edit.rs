@@ -1429,11 +1429,58 @@ impl App {
                 };
             }
         };
+        self.save_current_bus_pattern();
+        if !self.state.save_current_pattern_snapshot(
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        ) {
+            return match self.restore_scene_structure_state(&before) {
+                Ok(()) => Err(
+                    "Scene edit was rolled back because its after-state could not be synchronized"
+                        .to_string(),
+                ),
+                Err(rollback_error) => Err(format!(
+                    "Scene after-state synchronization failed; rollback also failed ({rollback_error})"
+                )),
+            };
+        }
         let after = self.state.capture_project_scenes();
         let patch = SceneStructurePatch { before, after };
         let retained_bytes = patch.retained_bytes();
         self.history.commit(label, None, EditPatch::SceneStructure(patch), retained_bytes);
         Ok(result)
+    }
+
+    pub fn commit_applied_scene_structure_mutation(
+        &mut self,
+        before: crate::sequencer::ProjectScenes,
+        label: &'static str,
+    ) {
+        finish_active_gesture(self);
+        self.save_current_bus_pattern();
+        if !self.state.save_current_pattern_snapshot(
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        ) {
+            let message = match self.restore_scene_structure_state(&before) {
+                Ok(()) => "Authoring edit was rolled back because its history snapshot could not be synchronized".to_string(),
+                Err(error) => format!(
+                    "Authoring history synchronization failed and rollback also failed: {error}"
+                ),
+            };
+            self.editor.status_message = Some((message, Instant::now()));
+            return;
+        }
+        let after = self.state.capture_project_scenes();
+        let patch = SceneStructurePatch { before, after };
+        let retained_bytes = patch.retained_bytes();
+        self.history.commit(label, None, EditPatch::SceneStructure(patch), retained_bytes);
     }
 
     pub fn apply_recorded_track_collapsed(

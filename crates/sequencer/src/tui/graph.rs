@@ -10095,6 +10095,60 @@ mod tests {
     }
 
     #[test]
+    fn recorded_process_configuration_restores_stable_instance_and_lane_state() {
+        let graph = TestLiveGraph::new("recorded-process-config-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_blank_sampler_track()
+            .expect("sampler track");
+        let instance_id = crate::process::ProcessInstanceId(77);
+        let chain = crate::process::TrackProcessChain {
+            slots: vec![crate::process::TrackProcessSlot {
+                instance_id,
+                instance_name: Some("history-process".to_string()),
+                class_name: "history-process".to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: std::collections::BTreeMap::new(),
+                lanes: std::collections::BTreeMap::from([(
+                    "amount".to_string(),
+                    crate::process::ProcessLane { values: vec![0.0, 1.0] },
+                )]),
+                bindings: std::collections::BTreeMap::new(),
+            }],
+        };
+        assert!(app.state.set_track_process_chain(0, chain));
+
+        app.apply_recorded_scene_structure_mutation("Edit process chain", |app| {
+            let enabled = app.state.set_track_process_slot_enabled(0, instance_id, false);
+            let lane = app.state.set_process_lane_value(0, instance_id, "amount", 1, 0.75);
+            (enabled && lane).then_some(())
+                .ok_or_else(|| "process edit failed".to_string())
+        }).expect("process edit should record");
+        let edited = app.state.track_process_chain(0).expect("edited process chain");
+        assert_eq!(edited.slots[0].instance_id, instance_id);
+        assert!(!edited.slots[0].enabled);
+        assert_eq!(edited.slots[0].lanes["amount"].values[1], 0.75);
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let restored = app.state.track_process_chain(0).expect("restored process chain");
+        assert_eq!(restored.slots[0].instance_id, instance_id);
+        assert!(restored.slots[0].enabled);
+        assert_eq!(restored.slots[0].lanes["amount"].values[1], 1.0);
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let redone = app.state.track_process_chain(0).expect("redone process chain");
+        assert_eq!(redone.slots[0].instance_id, instance_id);
+        assert!(!redone.slots[0].enabled);
+        assert_eq!(redone.slots[0].lanes["amount"].values[1], 0.75);
+        graph.process_block();
+    }
+
+    #[test]
     fn two_slot_rack_hosts_builtin_and_compiled_fx_independently() {
         let graph = TestLiveGraph::new("two-rack-slot-fx-test");
         let mut app = test_app_with_track_count(&graph, 0);

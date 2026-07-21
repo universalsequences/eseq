@@ -4546,7 +4546,8 @@ impl SequencerState {
             .collect()
     }
 
-    pub(crate) fn capture_project_scenes(&self) -> ProjectScenes {
+    #[doc(hidden)]
+    pub fn capture_project_scenes(&self) -> ProjectScenes {
         self.pattern.scenes.lock().unwrap().clone()
     }
 
