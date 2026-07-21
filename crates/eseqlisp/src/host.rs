@@ -12,6 +12,14 @@ pub enum CompileKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostCommand {
+    AuthoringTransactionBegin {
+        id: u64,
+        label: String,
+    },
+    AuthoringTransactionEnd {
+        id: u64,
+        success: bool,
+    },
     CompileInstrument {
         source: String,
         suggested_name: Option<String>,

@@ -38,6 +38,7 @@ pub enum HistoryPolicy {
 
 #[derive(Clone, Debug)]
 pub enum EditPatch {
+    Composite(Vec<EditPatch>),
     StepCells(StepCellsPatch),
     PatternGeometry(PatternGeometryPatch),
     TrackParams(TrackParamsPatch),
@@ -720,6 +721,7 @@ pub struct ActiveGesture {
     pub merge_key: MergeKey,
 }
 
+#[derive(Clone)]
 struct PendingGesture<P> {
     label: String,
     merge_key: MergeKey,
@@ -769,6 +771,7 @@ pub enum HistoryReplay<E> {
 ///
 /// Patch replay is supplied by the edit executor. An entry changes stacks only
 /// after that replay succeeds, which makes a failed undo or redo non-destructive.
+#[derive(Clone)]
 pub struct UndoManager<P> {
     undo: VecDeque<HistoryEntry<P>>,
     redo: Vec<HistoryEntry<P>>,
@@ -820,6 +823,51 @@ impl<P> UndoManager<P> {
 
     pub fn next_redo_patch(&self) -> Option<&P> {
         self.redo.last().map(|entry| &entry.patch)
+    }
+
+    pub fn recent_undo_patches(&self, count: usize) -> Option<Vec<&P>> {
+        if count == 0 || count > self.undo.len() {
+            return None;
+        }
+        Some(self.undo.iter().skip(self.undo.len() - count).map(|entry| &entry.patch).collect())
+    }
+
+    pub fn squash_recent(
+        &mut self,
+        count: usize,
+        label: impl Into<String>,
+        patch: P,
+        retained_bytes: usize,
+    ) -> Option<HistoryMove> {
+        if count < 2 || count > self.undo.len() {
+            return None;
+        }
+        let first = self.undo.len() - count;
+        let revision_before = self.undo.get(first)?.revision_before;
+        let revision_after = self.undo.back()?.revision_after;
+        let removed_bytes = self.undo.iter().skip(first)
+            .map(|entry| entry.retained_bytes).sum::<usize>();
+        if self.saved_revision.is_some_and(|revision| {
+            revision != revision_before
+                && revision != revision_after
+                && self.undo.iter().skip(first).any(|entry| entry.revision_after == revision)
+        }) {
+            self.saved_revision = None;
+        }
+        self.undo.truncate(first);
+        self.retained_bytes = self.retained_bytes.saturating_sub(removed_bytes);
+        let label = label.into();
+        self.undo.push_back(HistoryEntry {
+            revision_before,
+            revision_after,
+            label: label.clone(),
+            merge_key: None,
+            patch,
+            retained_bytes,
+        });
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.enforce_budget(Some(revision_after));
+        Some(HistoryMove { label, revision: revision_after })
     }
 
     pub fn current_revision(&self) -> u64 {

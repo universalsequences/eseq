@@ -8327,6 +8327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_effect_cancel_restore: Option<PendingEffectCancelRestore> = None;
     let mut script_draft_session: Option<ScriptDraftSession> = None;
     let mut pending_agentic_bubbles: HashMap<String, PendingAgenticBubble> = HashMap::new();
+    let mut pending_lisp_history_transactions = HashMap::new();
     let mut prev_editor_macro_action: (String, String) = (String::new(), String::new());
     let mut prev_playing = false;
     let mut prev_bpm: u32 = 0;
@@ -8337,6 +8338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_cpu_load_bits: u32 = u32::MAX;
     let mut prev_peak_l_level = -1.0f64;
     let mut prev_peak_r_level = -1.0f64;
+    let mut prev_recording = false;
     let mut prev_master_recording = false;
     let mut prev_selected_tracks: HashSet<usize> = HashSet::new();
     let mut prev_groups: Vec<sequencer::project::ProjectTrackGroup> = Vec::new();
@@ -8466,6 +8468,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Instant::now(),
         );
         pull_shared_bus_state(&mut app, &bus_state);
+        let recording_now = recording.load(Ordering::Relaxed);
+        if recording_now != prev_recording {
+            let result = if recording_now {
+                app.begin_recording_take_history().map(|_| None)
+            } else {
+                app.finish_recording_take_history()
+            };
+            if let Err(error) = result {
+                recording.store(false, Ordering::Relaxed);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Recording history failed: {error}"
+                )));
+                prev_recording = false;
+            } else {
+                prev_recording = recording_now;
+            }
+        }
         if !app.has_pending_project_load() {
             pull_named_scratch_buffer_into_project(&editor, &mut app);
         }
@@ -8702,6 +8721,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     if let Some(shortcut) = sequencer_history_shortcut(&editor, &raw_key) {
+                        if recording.load(Ordering::Relaxed) {
+                            recording.store(false, Ordering::Relaxed);
+                            prev_recording = false;
+                            app.ui.recording = false;
+                        }
                         let track_count_before_replay = app.tracks.len();
                         let replay = match shortcut {
                             SequencerHistoryShortcut::Undo => tui::edit::undo(&mut app),
@@ -8919,13 +8943,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let intercepted = recording_key_outcome.consumed();
                     if recording_key_outcome.recorded() {
-                        let cleared_history = app.history.undo_len() + app.history.redo_len();
-                        tui::edit::commit_history_barrier(&mut app);
-                        if cleared_history > 0 {
-                            editor.show_transient_message(
-                                "Undo history cleared: recorded takes are not undoable yet",
-                            );
-                        }
+                        app.mark_recording_take_changed();
                         let ct = current_track.load(Ordering::Relaxed);
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
@@ -9064,8 +9082,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 1b. Drain host commands (sample browser etc.)
         let host_commands_started = Instant::now();
-        for command in editor.drain_host_commands() {
-            if let HostCommand::Custom { name, payload } = command {
+        let drained_host_commands = editor.drain_host_commands();
+        for command in drained_host_commands {
+            match command {
+                HostCommand::AuthoringTransactionBegin { id, label } => {
+                    pending_lisp_history_transactions.insert(
+                        id,
+                        (label, app.history.clone(), app.history.undo_len()),
+                    );
+                    continue;
+                }
+                HostCommand::AuthoringTransactionEnd { id, success } => {
+                    if let Some((label, checkpoint, checkpoint_len)) =
+                        pending_lisp_history_transactions.remove(&id)
+                    {
+                        if success {
+                            tui::edit::squash_history_since(
+                                &mut app,
+                                checkpoint_len,
+                                label,
+                            );
+                        } else if let Err(error) =
+                            tui::edit::rollback_history_to(&mut app, checkpoint)
+                        {
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Lisp authoring rollback failed: {error:?}"
+                            )));
+                        }
+                    }
+                    continue;
+                }
+                HostCommand::Custom { name, payload } => {
                 let _ = current_track_for_app(&mut app, &current_track);
                 match handle_macro_host_command(
                     &name,
@@ -9082,6 +9129,126 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     MacroHostCommandOutcome::NotMacro => {}
                 }
                 match name.as_str() {
+                    "midi-fx-history-action" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "MIDI FX edit failed: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let field = |name: &str| map.get(name).map(|cell| cell.borrow().clone());
+                        let op = field("op").and_then(|value| match value {
+                            Value::Keyword(value) | Value::String(value) | Value::Symbol(value) => Some(value),
+                            _ => None,
+                        });
+                        let track = field("track").and_then(|value| match value {
+                            Value::Number(value) if value >= 0.0 => Some(value as usize),
+                            _ => None,
+                        });
+                        let (Some(op), Some(track)) = (op, track) else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "MIDI FX edit failed: missing target".to_string(),
+                            ));
+                            continue;
+                        };
+                        enum MidiFxHistoryMutation {
+                            Chain(Vec<String>),
+                            Position(sequencer::sequencer::MidiFxPosition),
+                        }
+                        let mutation = match op.as_str() {
+                            "set-chain" => match field("value") {
+                                Some(Value::List(values)) => {
+                                    let chain = values.into_iter().map(|value| {
+                                        match &*value.borrow() {
+                                            Value::String(name) => Ok(name.clone()),
+                                            _ => Err("MIDI FX chain contains a non-string name".to_string()),
+                                        }
+                                    }).collect::<Result<Vec<_>, _>>();
+                                    match chain {
+                                        Ok(chain) => MidiFxHistoryMutation::Chain(chain),
+                                        Err(error) => {
+                                            editor.handle_host_event(HostEvent::Error(error));
+                                            continue;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        "MIDI FX chain is missing".to_string(),
+                                    ));
+                                    continue;
+                                }
+                            },
+                            "set-position" => match field("value") {
+                                Some(Value::Keyword(value)) | Some(Value::String(value))
+                                    if value == "post-accumulator" =>
+                                {
+                                    MidiFxHistoryMutation::Position(
+                                        sequencer::sequencer::MidiFxPosition::PostAccumulator,
+                                    )
+                                }
+                                Some(Value::Keyword(value)) | Some(Value::String(value))
+                                    if value == "pre-accumulator" =>
+                                {
+                                    MidiFxHistoryMutation::Position(
+                                        sequencer::sequencer::MidiFxPosition::PreAccumulator,
+                                    )
+                                }
+                                _ => {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        "MIDI FX position is invalid".to_string(),
+                                    ));
+                                    continue;
+                                }
+                            },
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Unknown MIDI FX edit {op}"
+                                )));
+                                continue;
+                            }
+                        };
+                        let Some(params) = app.state.pattern.track_params.get(track) else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "MIDI FX track no longer exists".to_string(),
+                            ));
+                            continue;
+                        };
+                        let unchanged = match &mutation {
+                            MidiFxHistoryMutation::Chain(chain) => params.midi_fx_chain() == *chain,
+                            MidiFxHistoryMutation::Position(position) => {
+                                params.get_midi_fx_position() == *position
+                            }
+                        };
+                        if unchanged {
+                            continue;
+                        }
+                        let result = app.apply_recorded_scene_structure_mutation(
+                            "Edit MIDI FX routing",
+                            |app| {
+                                let params = app.state.pattern.track_params.get(track)
+                                    .ok_or_else(|| "MIDI FX track no longer exists".to_string())?;
+                                match mutation {
+                                    MidiFxHistoryMutation::Chain(chain) => {
+                                        params.set_midi_fx_chain(chain)
+                                    }
+                                    MidiFxHistoryMutation::Position(position) => {
+                                        params.set_midi_fx_position(position)
+                                    }
+                                }
+                                Ok(())
+                            },
+                        );
+                        match result {
+                            Ok(()) => {
+                                state.publish_scheduler_snapshot();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                                "MIDI FX edit failed: {error}"
+                            ))),
+                        }
+                    }
                     "process-history-action" => {
                         let Value::Map(ref map) = payload else {
                             editor.handle_host_event(HostEvent::Status(
@@ -9223,19 +9390,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ))),
                         }
                     }
-                    "unsupported-authoring-history-barrier" => {
-                        let label = match payload {
-                            Value::String(label) => label,
-                            _ => "This edit".to_string(),
-                        };
-                        let cleared = app.history.undo_len() + app.history.redo_len();
-                        tui::edit::commit_history_barrier(&mut app);
-                        if cleared > 0 {
-                            editor.show_transient_message(format!(
-                                "Undo history cleared: {label} are not undoable yet"
-                            ));
-                        }
-                    }
                     "piano-roll-gesture-update" => {
                         match apply_piano_roll_gesture_update(
                             &mut app,
@@ -9280,19 +9434,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ));
                             }
                             Err(error) => editor.handle_host_event(HostEvent::Error(error)),
-                        }
-                    }
-                    "history-barrier" => {
-                        let reason = match payload {
-                            Value::String(reason) => reason,
-                            _ => "edit not yet supported by undo".to_string(),
-                        };
-                        let cleared = app.history.undo_len() + app.history.redo_len();
-                        tui::edit::commit_history_barrier(&mut app);
-                        if cleared > 0 {
-                            editor.show_transient_message(format!(
-                                "Undo history cleared: {reason}"
-                            ));
                         }
                     }
                     "piano-roll-history-action" => {
@@ -10869,10 +11010,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap_or(path_str.as_str())
                                     .to_string();
                                 let result = if let Some(bus_idx) = bus {
-                                    app.set_conv_reverb_ir_bus(bus_idx, slot, path, &reference)
-                                        .map(|()| {
-                                            tui::edit::commit_history_barrier(&mut app);
-                                        })
+                                    app.apply_recorded_bus_effect_value_mutation(
+                                        bus_idx,
+                                        slot,
+                                        "Set bus convolution IR",
+                                        "convolution-ir",
+                                        |app| app.set_conv_reverb_ir_bus(
+                                            bus_idx,
+                                            slot,
+                                            path,
+                                            &reference,
+                                        ),
+                                    )
                                 } else if let Some(track) = track {
                                     tui::edit::apply_recorded_track_effect_ir_mutation(
                                         &mut app,
@@ -21330,6 +21479,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )));
                     }
                 }
+                }
+                HostCommand::CompileInstrument { .. } | HostCommand::CompileEffect { .. } => {}
             }
         }
 
@@ -21382,6 +21533,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *record_armed.lock().unwrap() = vec![false; track_names.len()];
+                        recording.store(false, Ordering::Relaxed);
+                        prev_recording = false;
                         // Keep the shared bus mirror in sync with the loaded buses,
                         // else pull_shared_bus_state clobbers app.buses (length
                         // mismatch) and drops the group's backing bus from the UI.

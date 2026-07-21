@@ -63,6 +63,64 @@ pub struct StepGestureTransaction {
 }
 
 impl App {
+    fn capture_synchronized_scene_structure_state(
+        &mut self,
+    ) -> Result<crate::sequencer::ProjectScenes, String> {
+        finish_active_gesture(self);
+        self.save_current_bus_pattern();
+        if !self.state.save_current_pattern_snapshot(
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        ) {
+            return Err("Could not synchronize the current scene for history".to_string());
+        }
+        Ok(self.state.capture_project_scenes())
+    }
+
+    pub fn begin_recording_take_history(&mut self) -> Result<(), String> {
+        if self.recording_history.is_some() {
+            return Ok(());
+        }
+        let before = self.capture_synchronized_scene_structure_state()?;
+        self.recording_history = Some(super::RecordingHistoryTransaction {
+            before,
+            changed: false,
+        });
+        Ok(())
+    }
+
+    pub fn mark_recording_take_changed(&mut self) {
+        if let Some(transaction) = self.recording_history.as_mut() {
+            transaction.changed = true;
+        }
+    }
+
+    pub fn finish_recording_take_history(&mut self) -> Result<Option<HistoryMove>, String> {
+        let Some(transaction) = self.recording_history.take() else {
+            return Ok(None);
+        };
+        if !transaction.changed {
+            return Ok(None);
+        }
+        self.commit_applied_scene_structure_mutation_checked(
+            transaction.before,
+            "Record take",
+        ).map(Some)
+    }
+
+    pub fn cancel_recording_take_history(&mut self) -> Result<bool, String> {
+        let Some(transaction) = self.recording_history.take() else {
+            return Ok(false);
+        };
+        if transaction.changed {
+            self.restore_scene_structure_state(&transaction.before)?;
+        }
+        Ok(transaction.changed)
+    }
+
     fn capture_rack_effect_chain_state(
         &mut self,
         track: usize,
@@ -1406,18 +1464,7 @@ impl App {
         label: &'static str,
         mutate: impl FnOnce(&mut App) -> Result<T, String>,
     ) -> Result<T, String> {
-        finish_active_gesture(self);
-        self.save_current_bus_pattern();
-        if !self.state.save_current_pattern_snapshot(
-            self.tracks.len(),
-            &self.graph.track_buffer_ids,
-            &self.graph.track_sample_rates,
-            &self.tracks,
-            &self.graph.track_instrument_types,
-        ) {
-            return Err("Could not snapshot the current scene before editing scenes".to_string());
-        }
-        let before = self.state.capture_project_scenes();
+        let before = self.capture_synchronized_scene_structure_state()?;
         let result = match mutate(self) {
             Ok(result) => result,
             Err(error) => {
@@ -1459,6 +1506,16 @@ impl App {
         before: crate::sequencer::ProjectScenes,
         label: &'static str,
     ) {
+        if let Err(error) = self.commit_applied_scene_structure_mutation_checked(before, label) {
+            self.editor.status_message = Some((error, Instant::now()));
+        }
+    }
+
+    pub fn commit_applied_scene_structure_mutation_checked(
+        &mut self,
+        before: crate::sequencer::ProjectScenes,
+        label: &'static str,
+    ) -> Result<HistoryMove, String> {
         finish_active_gesture(self);
         self.save_current_bus_pattern();
         if !self.state.save_current_pattern_snapshot(
@@ -1474,13 +1531,17 @@ impl App {
                     "Authoring history synchronization failed and rollback also failed: {error}"
                 ),
             };
-            self.editor.status_message = Some((message, Instant::now()));
-            return;
+            return Err(message);
         }
         let after = self.state.capture_project_scenes();
         let patch = SceneStructurePatch { before, after };
         let retained_bytes = patch.retained_bytes();
-        self.history.commit(label, None, EditPatch::SceneStructure(patch), retained_bytes);
+        Ok(self.history.commit(
+            label,
+            None,
+            EditPatch::SceneStructure(patch),
+            retained_bytes,
+        ))
     }
 
     pub fn apply_recorded_track_collapsed(
@@ -2172,7 +2233,7 @@ impl App {
             group.members.push(track);
             group.members.sort_unstable();
             group.members.dedup();
-            self.set_track_output_all_scenes(
+            self.set_track_output_all_scenes_unrecorded(
                 track,
                 crate::sequencer::TrackOutput::Bus(crate::sequencer::BusId(bus_id)),
             );
@@ -6251,6 +6312,7 @@ fn replay_transport_params_patch(
 
 fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(), EditError> {
     match patch {
+        EditPatch::Composite(patches) => replay_composite_patch(app, patches, mode),
         EditPatch::StepCells(patch) => replay_step_patch(app, patch, mode).map(|_| ()),
         EditPatch::PatternGeometry(patch) => {
             replay_pattern_geometry_patch(app, patch, mode).map(|_| ())
@@ -6485,8 +6547,45 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
     }
 }
 
+fn replay_composite_patch(
+    app: &mut App,
+    patches: &[EditPatch],
+    mode: ApplyMode,
+) -> Result<(), EditError> {
+    let indices: Vec<usize> = match mode {
+        ApplyMode::Undo => (0..patches.len()).rev().collect(),
+        ApplyMode::Redo => (0..patches.len()).collect(),
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "compound replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
+    let rollback_mode = match mode {
+        ApplyMode::Undo => ApplyMode::Redo,
+        ApplyMode::Redo => ApplyMode::Undo,
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => unreachable!(),
+    };
+    let mut applied = Vec::new();
+    for index in indices {
+        if let Err(error) = replay_patch(app, &patches[index], mode) {
+            for applied_index in applied.into_iter().rev() {
+                if let Err(rollback_error) = replay_patch(app, &patches[applied_index], rollback_mode) {
+                    return Err(EditError::ReplayFailed(format!(
+                        "compound replay failed ({error:?}); rollback also failed ({rollback_error:?})"
+                    )));
+                }
+            }
+            return Err(error);
+        }
+        applied.push(index);
+    }
+    Ok(())
+}
+
 fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
     match patch {
+        EditPatch::Composite(patches) => patches.iter().any(pending_gesture_publishes_scheduler),
         EditPatch::TrackParams(patch) => {
             scheduler_track_params_changed(&patch.before, &patch.after)
                 || patch.instrument_base_note_offset_before
@@ -6529,6 +6628,76 @@ pub fn finish_active_gesture(app: &mut App) -> bool {
     finished
 }
 
+pub fn squash_history_since(
+    app: &mut App,
+    checkpoint: usize,
+    label: impl Into<String>,
+) -> Option<HistoryMove> {
+    finish_active_gesture(app);
+    let count = app.history.undo_len().checked_sub(checkpoint)?;
+    if count < 2 {
+        return None;
+    }
+    let patches = app.history.recent_undo_patches(count)?
+        .into_iter().cloned().collect::<Vec<_>>();
+    let retained_bytes = std::mem::size_of::<Vec<EditPatch>>()
+        + patches.iter().map(edit_patch_retained_bytes).sum::<usize>();
+    app.history.squash_recent(
+        count,
+        label.into(),
+        EditPatch::Composite(patches),
+        retained_bytes,
+    )
+}
+
+pub fn rollback_history_to(
+    app: &mut App,
+    checkpoint: super::history::UndoManager<EditPatch>,
+) -> Result<(), EditError> {
+    finish_active_gesture(app);
+    let target_len = checkpoint.undo_len();
+    while app.history.undo_len() > target_len {
+        match undo(app) {
+            HistoryReplay::Applied(_) => {}
+            HistoryReplay::Unavailable => {
+                return Err(EditError::ReplayFailed(
+                    "authoring transaction history disappeared during rollback".to_string(),
+                ));
+            }
+            HistoryReplay::Failed(error) => return Err(error),
+        }
+    }
+    app.history = checkpoint;
+    Ok(())
+}
+
+fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
+    match patch {
+        EditPatch::Composite(patches) => std::mem::size_of::<Vec<EditPatch>>()
+            + patches.iter().map(edit_patch_retained_bytes).sum::<usize>(),
+        EditPatch::StepCells(patch) => patch.retained_bytes(),
+        EditPatch::PatternGeometry(patch) => patch.retained_bytes(),
+        EditPatch::TrackParams(patch) => patch.retained_bytes(),
+        EditPatch::TrackParamsBatch(patch) => patch.retained_bytes(),
+        EditPatch::BusMixer(patch) => patch.retained_bytes(),
+        EditPatch::DeviceValues(patch) => patch.retained_bytes(),
+        EditPatch::InstrumentBinding(patch) => patch.retained_bytes(),
+        EditPatch::EffectChain(patch) => patch.retained_bytes(),
+        EditPatch::BusEffectChain(patch) => patch.retained_bytes(),
+        EditPatch::BusEffectValues(patch) => patch.retained_bytes(),
+        EditPatch::RackEffectChain(patch) => patch.retained_bytes(),
+        EditPatch::MidiFxChain(patch) => patch.retained_bytes(),
+        EditPatch::RackSlotStructure(patch) => patch.retained_bytes(),
+        EditPatch::TrackCreation(patch) => patch.retained_bytes(),
+        EditPatch::TrackDeletion(patch) => patch.retained_bytes(),
+        EditPatch::TrackPresentation(patch) => patch.retained_bytes(),
+        EditPatch::SceneStructure(patch) => patch.retained_bytes(),
+        EditPatch::BusGroupStructure(patch) => patch.retained_bytes(),
+        EditPatch::MacroConfiguration(patch) => patch.retained_bytes(),
+        EditPatch::TransportParams(patch) => patch.retained_bytes(),
+    }
+}
+
 pub fn finish_active_gesture_if_idle(app: &mut App) -> bool {
     if !app
         .history
@@ -6540,6 +6709,12 @@ pub fn finish_active_gesture_if_idle(app: &mut App) -> bool {
 }
 
 pub fn undo(app: &mut App) -> HistoryReplay<EditError> {
+    if app.recording_history.is_some() {
+        app.ui.recording = false;
+        if let Err(error) = app.finish_recording_take_history() {
+            return HistoryReplay::Failed(EditError::ReplayFailed(error));
+        }
+    }
     finish_active_gesture(app);
     let topology_request = if app.history.next_undo_patch().is_some_and(structural_track_patch) {
         match wait_for_track_topology_boundary(app) {
@@ -6558,6 +6733,12 @@ pub fn undo(app: &mut App) -> HistoryReplay<EditError> {
 }
 
 pub fn redo(app: &mut App) -> HistoryReplay<EditError> {
+    if app.recording_history.is_some() {
+        app.ui.recording = false;
+        if let Err(error) = app.finish_recording_take_history() {
+            return HistoryReplay::Failed(EditError::ReplayFailed(error));
+        }
+    }
     finish_active_gesture(app);
     let topology_request = if app.history.next_redo_patch().is_some_and(structural_track_patch) {
         match wait_for_track_topology_boundary(app) {
@@ -6581,7 +6762,7 @@ fn structural_track_patch(patch: &EditPatch) -> bool {
         EditPatch::TrackCreation(_)
             | EditPatch::TrackDeletion(_)
             | EditPatch::BusGroupStructure(_)
-    )
+    ) || matches!(patch, EditPatch::Composite(patches) if patches.iter().any(structural_track_patch))
 }
 
 fn wait_for_track_topology_boundary(app: &mut App) -> Result<Option<u64>, EditError> {
@@ -6613,6 +6794,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         return Ok(false);
     };
     match &patch {
+        EditPatch::Composite(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
         EditPatch::TrackParams(patch) => {
             replay_track_params_patch(app, patch, ApplyMode::Undo, false)?;
         }
@@ -8673,6 +8857,70 @@ mod tests {
             &stamped,
             &app.state.capture_step_snapshot(0, 5),
         ));
+    }
+
+    #[test]
+    fn compound_authoring_request_undoes_as_one_entry() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let before_1 = app.state.capture_step_snapshot(0, 1);
+        let before_6 = app.state.capture_step_snapshot(0, 6);
+        let checkpoint = app.history.undo_len();
+        assert!(matches!(
+            try_apply_command(&mut app, AppCommand::ToggleStep { track: 0, step: 1 }),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert!(matches!(
+            try_apply_command(&mut app, AppCommand::ToggleStep { track: 0, step: 6 }),
+            Ok(EditOutcome::Applied(_))
+        ));
+        squash_history_since(&mut app, checkpoint, "Generated pattern")
+            .expect("two edits should become one compound entry");
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(step_snapshot_bit_exact_eq(
+            &before_1,
+            &app.state.capture_step_snapshot(0, 1),
+        ));
+        assert!(step_snapshot_bit_exact_eq(
+            &before_6,
+            &app.state.capture_step_snapshot(0, 6),
+        ));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app.state.pattern.patterns[0].is_active(1));
+        assert!(app.state.pattern.patterns[0].is_active(6));
+    }
+
+    #[test]
+    fn failed_authoring_request_rolls_back_and_preserves_prior_history() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        assert!(matches!(
+            try_apply_command(&mut app, AppCommand::ToggleStep { track: 0, step: 9 }),
+            Ok(EditOutcome::Applied(_))
+        ));
+        let checkpoint = app.history.clone();
+        let checkpoint_revision = checkpoint.current_revision();
+        assert!(matches!(
+            try_apply_command(&mut app, AppCommand::ToggleStep { track: 0, step: 2 }),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert!(matches!(
+            try_apply_command(&mut app, AppCommand::ToggleStep { track: 0, step: 5 }),
+            Ok(EditOutcome::Applied(_))
+        ));
+
+        rollback_history_to(&mut app, checkpoint).expect("rollback generated request");
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(app.history.current_revision(), checkpoint_revision);
+        assert!(app.state.pattern.patterns[0].is_active(9));
+        assert!(!app.state.pattern.patterns[0].is_active(2));
+        assert!(!app.state.pattern.patterns[0].is_active(5));
     }
 
     #[test]

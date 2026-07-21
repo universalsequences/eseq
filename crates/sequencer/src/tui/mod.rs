@@ -890,6 +890,12 @@ pub struct App {
     pub master_recorder: Arc<MasterRecorder>,
     pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
+    recording_history: Option<RecordingHistoryTransaction>,
+}
+
+struct RecordingHistoryTransaction {
+    before: crate::sequencer::ProjectScenes,
+    changed: bool,
 }
 
 #[derive(Default)]
@@ -2113,6 +2119,7 @@ impl App {
             master_recorder,
             sample_analysis: AnalysisService::new(),
             pending_recording_take: None,
+            recording_history: None,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),
@@ -2403,6 +2410,8 @@ impl App {
             Ok(Ok(result)) => {
                 self.agent_panel.pending_request = None;
                 let tool_count = result.tool_outcomes.len();
+                let history_checkpoint = self.history.clone();
+                let history_checkpoint_len = self.history.undo_len();
                 let routed_intent = result
                     .pending_actions
                     .iter()
@@ -2412,10 +2421,21 @@ impl App {
                     .into_iter()
                     .map(|action| self.apply_agent_action(action))
                     .collect::<Vec<_>>();
-                let action_errors = action_results
+                let mut action_errors = action_results
                     .iter()
                     .filter_map(|result| result.as_ref().err().cloned())
                     .collect::<Vec<_>>();
+                if action_errors.is_empty() {
+                    edit::squash_history_since(
+                        self,
+                        history_checkpoint_len,
+                        "Agent authoring edit",
+                    );
+                } else if let Err(error) = edit::rollback_history_to(self, history_checkpoint) {
+                    action_errors.push(format!(
+                        "Agent edit rollback failed: {error:?}"
+                    ));
+                }
                 self.record_agent_tool_outcomes(&result.tool_outcomes, Some(&action_results));
                 if !result.text.trim().is_empty() {
                     self.agent_panel.transcript.push(AgentTranscriptEntry {

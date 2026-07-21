@@ -1274,6 +1274,15 @@ fn hot_reload_preserves_existing_defstate_values() {
             .as_deref(),
         Some("changed")
     );
+    let commands = editor.drain_host_commands();
+    assert!(matches!(
+        commands.get(commands.len().saturating_sub(2)),
+        Some(crate::host::HostCommand::AuthoringTransactionBegin { .. })
+    ));
+    assert!(matches!(
+        commands.last(),
+        Some(crate::host::HostCommand::AuthoringTransactionEnd { success: true, .. })
+    ));
 }
 
 #[test]

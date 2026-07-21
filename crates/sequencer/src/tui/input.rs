@@ -476,7 +476,7 @@ impl App {
             // , → toggle recording (when any track armed)
             KeyCode::Char(',') => {
                 if self.any_track_armed() {
-                    self.ui.recording = !self.ui.recording;
+                    self.set_trigger_recording(!self.ui.recording);
                 }
                 return;
             }
@@ -493,7 +493,7 @@ impl App {
                 }
                 let all_tracks: Vec<usize> = (0..self.graph.record_armed.len()).collect();
                 self.release_held_notes_for_tracks(&all_tracks);
-                self.ui.recording = false;
+                self.set_trigger_recording(false);
                 self.focus_sidebar_sounds();
                 return;
             }
@@ -825,7 +825,7 @@ impl App {
 
         // REC button: click toggles recording
         if rect_contains(l.rec_button, col, row) {
-            self.ui.recording = !self.ui.recording;
+            self.set_trigger_recording(!self.ui.recording);
             return;
         }
 
@@ -863,31 +863,49 @@ impl App {
                         }
                         PatternBtn::Clone => {
                             let num_tracks = self.tracks.len();
-                            let new_idx = self.state.clone_pattern(
-                                num_tracks,
-                                &self.graph.track_buffer_ids,
-                                &self.graph.track_sample_rates,
-                                &self.tracks,
-                                &self.graph.track_instrument_types,
-                            );
-                            super::edit::commit_history_barrier(self);
-                            self.graph_controller().sync_current_pattern_mod_routes();
+                            let new_idx = self.apply_recorded_scene_structure_mutation(
+                                "Create scene",
+                                |app| {
+                                    let source = app.state.current_scene_index();
+                                    let new_idx = app.state.clone_pattern(
+                                        num_tracks,
+                                        &app.graph.track_buffer_ids,
+                                        &app.graph.track_sample_rates,
+                                        &app.tracks,
+                                        &app.graph.track_instrument_types,
+                                    );
+                                    app.clone_bus_pattern_from_to(source, new_idx);
+                                    app.graph_controller().sync_current_pattern_mod_routes();
+                                    Ok(new_idx)
+                                },
+                            ).unwrap_or_else(|error| {
+                                self.editor.status_message = Some((error, Instant::now()));
+                                self.state.current_scene_index()
+                            });
                             // Show the page containing the new pattern
                             self.ui.pattern_page = new_idx / 10;
                         }
                         PatternBtn::Delete => {
                             let num_tracks = self.tracks.len();
                             let deleted_scene = self.state.current_scene_index();
-                            if let Some(sample_ids) = self.state.delete_pattern(
-                                num_tracks,
-                                &self.graph.track_buffer_ids,
-                                &self.graph.track_sample_rates,
-                                &self.tracks,
-                                &self.graph.track_instrument_types,
-                            ) {
-                                super::edit::commit_history_barrier(self);
-                                self.handle_scene_deleted(deleted_scene);
-                                self.graph_controller().apply_sample_ids(&sample_ids);
+                            let deleted = self.apply_recorded_scene_structure_mutation(
+                                "Delete scene",
+                                |app| {
+                                    let sample_ids = app.state.delete_pattern(
+                                        num_tracks,
+                                        &app.graph.track_buffer_ids,
+                                        &app.graph.track_sample_rates,
+                                        &app.tracks,
+                                        &app.graph.track_instrument_types,
+                                    ).ok_or_else(|| "The last scene cannot be deleted".to_string())?;
+                                    app.handle_scene_deleted(deleted_scene);
+                                    app.graph_controller().apply_sample_ids(&sample_ids);
+                                    let current = app.state.current_scene_index();
+                                    app.delete_bus_pattern_at(deleted_scene, current);
+                                    Ok(())
+                                },
+                            );
+                            if deleted.is_ok() {
                                 if let Err(error) = self
                                     .graph_controller()
                                     .sync_track_instrument_run_modes_from_live_state()
@@ -1783,15 +1801,21 @@ impl App {
             }
             KeyCode::Char('x') => {
                 let num_tracks = self.tracks.len();
-                if let Some(sample_ids) = self.state.delete_pattern(
-                    num_tracks,
-                    &self.graph.track_buffer_ids,
-                    &self.graph.track_sample_rates,
-                    &self.tracks,
-                    &self.graph.track_instrument_types,
-                ) {
-                    super::edit::commit_history_barrier(self);
-                    self.graph_controller().apply_sample_ids(&sample_ids);
+                let deleted_scene = self.state.current_scene_index();
+                if self.apply_recorded_scene_structure_mutation("Delete scene", |app| {
+                    let sample_ids = app.state.delete_pattern(
+                        num_tracks,
+                        &app.graph.track_buffer_ids,
+                        &app.graph.track_sample_rates,
+                        &app.tracks,
+                        &app.graph.track_instrument_types,
+                    ).ok_or_else(|| "The last scene cannot be deleted".to_string())?;
+                    app.handle_scene_deleted(deleted_scene);
+                    app.graph_controller().apply_sample_ids(&sample_ids);
+                    let current = app.state.current_scene_index();
+                    app.delete_bus_pattern_at(deleted_scene, current);
+                    Ok(())
+                }).is_ok() {
                     self.graph_controller().sync_current_pattern_mod_routes();
                     self.push_all_restored_defaults();
                 }
@@ -1803,15 +1827,22 @@ impl App {
             KeyCode::Enter => {
                 if self.ui.pattern_clone_pending {
                     let num_tracks = self.tracks.len();
-                    self.state.clone_pattern(
-                        num_tracks,
-                        &self.graph.track_buffer_ids,
-                        &self.graph.track_sample_rates,
-                        &self.tracks,
-                        &self.graph.track_instrument_types,
+                    let _ = self.apply_recorded_scene_structure_mutation(
+                        "Create scene",
+                        |app| {
+                            let source = app.state.current_scene_index();
+                            let new_idx = app.state.clone_pattern(
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            );
+                            app.clone_bus_pattern_from_to(source, new_idx);
+                            app.graph_controller().sync_current_pattern_mod_routes();
+                            Ok(new_idx)
+                        },
                     );
-                    super::edit::commit_history_barrier(self);
-                    self.graph_controller().sync_current_pattern_mod_routes();
                 } else if let Ok(n) = self.ui.value_buffer.parse::<usize>() {
                     if n >= 1 {
                         let num_tracks = self.tracks.len();
@@ -1979,14 +2010,14 @@ impl App {
         match code {
             KeyCode::Char(',') => {
                 if self.any_track_armed() {
-                    self.ui.recording = !self.ui.recording;
+                    self.set_trigger_recording(!self.ui.recording);
                 }
             }
             KeyCode::Char('/') if !has_shift => {
                 for armed in self.graph.record_armed.iter_mut() {
                     *armed = false;
                 }
-                self.ui.recording = false;
+                self.set_trigger_recording(false);
                 self.ui.focused_region = Region::Sidebar;
                 self.ui.input_mode = InputMode::Normal;
             }
@@ -2093,14 +2124,14 @@ impl App {
         match code {
             KeyCode::Char(',') => {
                 if self.any_track_armed() {
-                    self.ui.recording = !self.ui.recording;
+                    self.set_trigger_recording(!self.ui.recording);
                 }
             }
             KeyCode::Char('/') => {
                 for armed in self.graph.record_armed.iter_mut() {
                     *armed = false;
                 }
-                self.ui.recording = false;
+                self.set_trigger_recording(false);
                 self.ui.focused_region = Region::Sidebar;
                 self.ui.input_mode = InputMode::Normal;
             }
@@ -2156,7 +2187,7 @@ impl App {
                 // , → toggle recording from arm mode too
                 if c == ',' {
                     if self.any_track_armed() {
-                        self.ui.recording = !self.ui.recording;
+                        self.set_trigger_recording(!self.ui.recording);
                     }
                     return;
                 }
@@ -2191,7 +2222,7 @@ impl App {
                             self.release_held_notes_for_tracks(&[t]);
                         }
                         if !self.any_track_armed() {
-                            self.ui.recording = false;
+                            self.set_trigger_recording(false);
                         }
                     }
                 }
@@ -2205,6 +2236,27 @@ impl App {
 
     pub(super) fn any_track_armed(&self) -> bool {
         self.graph.record_armed.iter().any(|a| *a)
+    }
+
+    fn set_trigger_recording(&mut self, enabled: bool) {
+        if self.ui.recording == enabled {
+            return;
+        }
+        let result = if enabled {
+            self.begin_recording_take_history().map(|_| None)
+        } else {
+            self.finish_recording_take_history()
+        };
+        match result {
+            Ok(_) => self.ui.recording = enabled,
+            Err(error) => {
+                self.ui.recording = false;
+                self.editor.status_message = Some((
+                    format!("Recording history failed: {error}"),
+                    Instant::now(),
+                ));
+            }
+        }
     }
 
     /// Map QWERTY key to semitone offset (standard DAW layout).
@@ -2292,7 +2344,7 @@ impl App {
 
         if changed {
             self.state.publish_scheduler_snapshot();
-            super::edit::commit_history_barrier(self);
+            self.mark_recording_take_changed();
         }
     }
 

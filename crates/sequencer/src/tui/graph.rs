@@ -10149,6 +10149,77 @@ mod tests {
     }
 
     #[test]
+    fn completed_recording_take_is_one_exact_history_entry() {
+        let graph = TestLiveGraph::new("recording-take-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_blank_sampler_track()
+            .expect("sampler track");
+        let before_step_2 = app.state.capture_step_snapshot(0, 2);
+        let before_step_7 = app.state.capture_step_snapshot(0, 7);
+
+        app.begin_recording_take_history().expect("begin take");
+        app.state.pattern.patterns[0].toggle_step(2);
+        app.state.pattern.chord_data[0].add_note_with_timing(2, 3.0, 0.5, 0.125);
+        app.mark_recording_take_changed();
+        app.state.pattern.patterns[0].toggle_step(7);
+        app.state.pattern.chord_data[0].add_note_with_timing(7, -4.0, 1.25, 0.0);
+        app.mark_recording_take_changed();
+        app.finish_recording_take_history().expect("finish take")
+            .expect("changed take should create history");
+
+        assert_eq!(app.history.undo_len(), 1, "the complete take must be atomic");
+        let after_step_2 = app.state.capture_step_snapshot(0, 2);
+        let after_step_7 = app.state.capture_step_snapshot(0, 7);
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+            &before_step_2,
+            &app.state.capture_step_snapshot(0, 2),
+        ));
+        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+            &before_step_7,
+            &app.state.capture_step_snapshot(0, 7),
+        ));
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+            &after_step_2,
+            &app.state.capture_step_snapshot(0, 2),
+        ));
+        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+            &after_step_7,
+            &app.state.capture_step_snapshot(0, 7),
+        ));
+        graph.process_block();
+    }
+
+    #[test]
+    fn cancelled_recording_take_restores_initial_state_without_history() {
+        let graph = TestLiveGraph::new("recording-take-cancel-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_blank_sampler_track()
+            .expect("sampler track");
+        let before = app.state.capture_step_snapshot(0, 4);
+
+        app.begin_recording_take_history().expect("begin take");
+        app.state.pattern.patterns[0].toggle_step(4);
+        app.state.pattern.chord_data[0].add_note(4, 7.0);
+        app.mark_recording_take_changed();
+        assert!(app.cancel_recording_take_history().expect("cancel take"));
+
+        assert_eq!(app.history.undo_len(), 0);
+        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+            &before,
+            &app.state.capture_step_snapshot(0, 4),
+        ));
+        graph.process_block();
+    }
+
+    #[test]
     fn two_slot_rack_hosts_builtin_and_compiled_fx_independently() {
         let graph = TestLiveGraph::new("two-rack-slot-fx-test");
         let mut app = test_app_with_track_count(&graph, 0);

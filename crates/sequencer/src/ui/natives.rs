@@ -145,13 +145,6 @@ fn bus_mixer_history_command(
     }
 }
 
-fn unsupported_authoring_barrier(label: &str) -> HostCommand {
-    HostCommand::Custom {
-        name: "unsupported-authoring-history-barrier".to_string(),
-        payload: Value::String(label.to_string()),
-    }
-}
-
 fn process_history_command(op: &str, fields: Vec<(&str, Value)>) -> HostCommand {
     let mut payload = HashMap::new();
     payload.insert(
@@ -163,6 +156,23 @@ fn process_history_command(op: &str, fields: Vec<(&str, Value)>) -> HostCommand 
     }
     HostCommand::Custom {
         name: "process-history-action".to_string(),
+        payload: Value::Map(payload),
+    }
+}
+
+fn midi_fx_history_command(op: &str, track: usize, value: Value) -> HostCommand {
+    let mut payload = HashMap::new();
+    payload.insert(
+        "op".to_string(),
+        Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
+    );
+    payload.insert(
+        "track".to_string(),
+        Rc::new(RefCell::new(Value::Number(track as f64))),
+    );
+    payload.insert("value".to_string(), Rc::new(RefCell::new(value)));
+    HostCommand::Custom {
+        name: "midi-fx-history-action".to_string(),
         payload: Value::Map(payload),
     }
 }
@@ -2493,7 +2503,6 @@ pub(crate) fn init_runtime(
     let piano_move = piano_roll_move_state.clone();
     let piano_clipboard = new_piano_roll_clipboard();
     let native_piano_clipboard = piano_clipboard.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-piano-roll-action", move |args, ctx| {
         let Some(action) = args.first() else {
@@ -2543,6 +2552,12 @@ pub(crate) fn init_runtime(
             ctx.set_status(status.clone());
             return Ok(Value::String(status));
         }
+        let mutates_pattern = piano_roll_action_mutates_pattern(action);
+        if mutates_pattern {
+            return Err(
+                "seq-piano-roll-action: mutating action has no history transaction plan".into(),
+            );
+        }
         let status = apply_piano_roll_action_with_clipboard(
             &st,
             track,
@@ -2551,15 +2566,6 @@ pub(crate) fn init_runtime(
             &native_piano_clipboard,
             action,
         )?;
-        let mutates_pattern = piano_roll_action_mutates_pattern(action);
-        if mutates_pattern {
-            st.publish_scheduler_snapshot();
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "history-barrier".to_string(),
-                payload: Value::String("piano-roll edit not yet supported by undo".to_string()),
-            });
-            *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        }
         ui_inv.push(UiInvalidation::PianoRoll {
             track,
             change: if mutates_pattern {
@@ -4357,12 +4363,13 @@ pub(crate) fn init_runtime(
                 names.push(label.clone());
             }
         }
-        let changed = st.pattern.track_params[track].midi_fx_chain() != chain;
-        st.pattern.track_params[track].set_midi_fx_chain(chain.clone());
-        if changed {
-            st.publish_scheduler_snapshot();
-            ctx.enqueue_command(unsupported_authoring_barrier("MIDI FX chain edits"));
-        }
+        ctx.enqueue_command(midi_fx_history_command(
+            "set-chain",
+            track,
+            Value::List(chain.iter().cloned().map(|name| {
+                Rc::new(RefCell::new(Value::String(name)))
+            }).collect()),
+        ));
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         if debug_midi_fx_use {
@@ -4388,11 +4395,11 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err("seq-clear-midi-fx: track out of range".into());
         }
-        if !st.pattern.track_params[track].midi_fx_chain().is_empty() {
-            st.pattern.track_params[track].set_midi_fx_chain(Vec::new());
-            st.publish_scheduler_snapshot();
-            ctx.enqueue_command(unsupported_authoring_barrier("MIDI FX chain edits"));
-        }
+        ctx.enqueue_command(midi_fx_history_command(
+            "set-chain",
+            track,
+            Value::List(Vec::new()),
+        ));
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(true))
     });
@@ -4431,11 +4438,14 @@ pub(crate) fn init_runtime(
                 );
             }
         };
-        if st.pattern.track_params[track].get_midi_fx_position() != position {
-            st.pattern.track_params[track].set_midi_fx_position(position);
-            st.publish_scheduler_snapshot();
-            ctx.enqueue_command(unsupported_authoring_barrier("MIDI FX position edits"));
-        }
+        ctx.enqueue_command(midi_fx_history_command(
+            "set-position",
+            track,
+            Value::Keyword(match position {
+                MidiFxPosition::PreAccumulator => "pre-accumulator",
+                MidiFxPosition::PostAccumulator => "post-accumulator",
+            }.to_string()),
+        ));
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(true))
     });

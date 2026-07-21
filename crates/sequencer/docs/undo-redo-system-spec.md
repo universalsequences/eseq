@@ -69,8 +69,21 @@ Implemented through Slice 7C for the current authoring command surface.
   records during load. Top-level legacy name vectors are migration projections;
   rack source names remain in the shared Sound/Rack preset payload, while
   project loading treats the instance records as authoritative.
-- Recorded takes remain an explicit history barrier until Slice 7F; arming and
-  other performance-only controls remain outside authoring history.
+- Slice 7D captures process chains and lanes, modulation routes, neural state,
+  and graph overrides as coherent scene-repository transactions. Interactive
+  process and modulation commands now enqueue history intents instead of
+  mutating before the host can capture their before-state.
+- Slice 7E records project-global macro definition and mapping changes while
+  preserving stable monotonic macro ids. Live macro value/release gestures
+  remain performance state.
+- Slice 7F groups a completed trigger-recording session into one exact scene
+  repository entry in both frontends. Lisp host-command batches and agent
+  authoring responses collapse their accepted command patches into one
+  compound entry; failed agent application replays those patches backward and
+  restores its original history checkpoint. Compound replay is itself
+  transactional if a stable target disappears. Neural edits and generated
+  command batches retain the accepted snapshots rather than regeneration
+  seeds. Arming and other performance-only controls remain outside history.
 
 Related: `docs/racks-spec.md` (Amendment A: `FxChainHost`, rack-slot chains,
 rack macro banks), `docs/MACRO_MAPPING_SPEC.md`, `docs/instrument-swap-spec.md`.

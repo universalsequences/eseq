@@ -1030,6 +1030,8 @@ impl App {
         self.ui.selection_anchor = None;
         self.ui.track_selection_anchor = None;
         self.ui.visual_steps.clear();
+        self.ui.recording = false;
+        self.recording_history = None;
 
         self.history.reset();
         self.device_registry.clear();
@@ -1129,12 +1131,6 @@ impl App {
     /// scene, then apply graph routing. Group membership is global, so its
     /// members must keep this routing across every scene — see
     /// `SequencerState::set_track_output_in_all_track_patterns`.
-    pub fn set_track_output_all_scenes(&mut self, track: usize, output: TrackOutput) {
-        if self.set_track_output_all_scenes_unrecorded(track, output) {
-            super::edit::commit_history_barrier(self);
-        }
-    }
-
     #[doc(hidden)]
     pub fn set_track_output_all_scenes_unrecorded(
         &mut self,
@@ -1507,21 +1503,13 @@ impl App {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("Sound");
-        if matches!(
-            self.graph.track_instrument_types.get(track),
-            Some(InstrumentType::Rack | InstrumentType::Sampler | InstrumentType::Custom)
-        ) {
-            let track_id = self.track_registry.id_at(track)
-                .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
-            self.apply_recorded_instrument_binding_mutation(track, "Load Sound", |app| {
-                app.load_container_preset_onto_track(track, sound, fallback_name)?;
-                app.device_registry.clear_rack_track(track_id);
-                Ok(())
-            })?;
-        } else {
-            self.load_container_preset_onto_track(track, sound, fallback_name)?;
-            super::edit::commit_history_barrier(self);
-        }
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        self.apply_recorded_instrument_binding_mutation(track, "Load Sound", |app| {
+            app.load_container_preset_onto_track(track, sound, fallback_name)?;
+            app.device_registry.clear_rack_track(track_id);
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -2931,7 +2919,7 @@ impl App {
         for group in self.groups.clone() {
             let output = TrackOutput::Bus(BusId(group.bus_id));
             for &member in &group.members {
-                self.set_track_output_all_scenes(member, output.clone());
+                self.set_track_output_all_scenes_unrecorded(member, output.clone());
             }
         }
         let saved_bus_effects: Vec<(usize, usize, String, crate::effects::EffectSlotSnapshot)> =
@@ -3118,6 +3106,8 @@ impl App {
             status
         };
         eprintln!("project-load: finish complete status={status}");
+        self.ui.recording = false;
+        self.recording_history = None;
         self.history.reset();
         self.device_registry.clear();
         self.history.mark_saved();

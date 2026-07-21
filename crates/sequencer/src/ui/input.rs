@@ -684,16 +684,19 @@ fn commit_soft_step_param_edit(
             instance_id,
             inlet_name,
         } => {
-            if !app.state.set_process_lane_value(
-                target.track,
-                *instance_id,
-                inlet_name.clone(),
-                target.step,
-                value as f32,
-            ) {
+            let result = app.apply_recorded_scene_structure_mutation(
+                "Edit process lane",
+                |app| app.state.set_process_lane_value(
+                    target.track,
+                    *instance_id,
+                    inlet_name.clone(),
+                    target.step,
+                    value as f32,
+                ).then_some(()).ok_or_else(|| "Process lane target is missing or unchanged".to_string()),
+            );
+            if result.is_err() {
                 return false;
             }
-            tui::edit::commit_history_barrier(app);
             sync_soft_process_lane_commit(
                 editor,
                 &app.state,

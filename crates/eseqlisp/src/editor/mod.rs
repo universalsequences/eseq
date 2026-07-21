@@ -6489,9 +6489,18 @@ impl Editor {
         let path = self.buffers[buffer_idx].path.clone();
         let source = self.buffers[buffer_idx].text();
         let overlays = self.snapshot_file_backed_sources();
+        let transaction_id = buffer_id as u64;
+        self.runtime.enqueue_host_command(HostCommand::AuthoringTransactionBegin {
+            id: transaction_id,
+            label: "Lisp authoring edit".to_string(),
+        });
         let report = self
             .runtime
             .eval_source_transactional(path, &source, overlays);
+        self.runtime.enqueue_host_command(HostCommand::AuthoringTransactionEnd {
+            id: transaction_id,
+            success: report.success,
+        });
         if std::env::var("ESEQ_INLINE_TRACE").is_ok_and(|value| value != "0") {
             eprintln!(
                 "[inline-widgets] evaluated buffer_id={buffer_id} name={:?} success={} requested_path={:?} evaluated_path={:?} diagnostics={:?}",
