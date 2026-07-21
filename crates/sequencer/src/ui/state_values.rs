@@ -29629,11 +29629,11 @@ mod tests {
         }
 
         let mut editor = full_grid_editor_for_scroll_tests();
-        set_full_grid_track_count(&mut editor, 2, 16);
+        set_full_grid_track_count(&mut editor, 3, 16);
         editor.runtime_mut().set_reactive(
             "SEQ",
             "track-instrument-types",
-            test_string_list(&["custom", "sampler"]),
+            test_string_list(&["custom", "sampler", "rack"]),
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -29684,7 +29684,18 @@ mod tests {
             "sampler rows should accept conversion to a saved instrument"
         );
 
-        editor.set_layout_viewport(180, 40);
+        let rack_row = find_widget_map_by_key(&tree, "sequencer-track-drop-2")
+            .expect("rack sequencer track row");
+        let rack_drop_types = rack_row
+            .get("drop-types")
+            .expect("rack row drop types")
+            .borrow();
+        assert!(
+            value_contains_string(&rack_drop_types, "instrument"),
+            "rack rows should accept replacement by a saved instrument"
+        );
+
+        editor.set_layout_viewport(180, 60);
         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
         let layout = editor
             .widget_layout()
@@ -29692,16 +29703,19 @@ mod tests {
         let custom_row =
             find_track_drop_target(&layout, 0.0).expect("custom track drop-target layout node");
         assert_finite_nonzero_rect(custom_row, "custom track instrument drop target");
+        let rack_row =
+            find_track_drop_target(&layout, 2.0).expect("rack track drop-target layout node");
+        assert_finite_nonzero_rect(rack_row, "rack track instrument drop target");
     }
 
     #[test]
     fn metal_seq_sequencer_drop_handlers_route_to_existing_host_commands() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        set_full_grid_track_count(&mut editor, 2, 16);
+        set_full_grid_track_count(&mut editor, 3, 16);
         editor.runtime_mut().set_reactive(
             "SEQ",
             "track-instrument-types",
-            test_string_list(&["custom", "custom"]),
+            test_string_list(&["custom", "custom", "rack"]),
         );
         let _ = editor.drain_host_commands();
         editor
@@ -29774,6 +29788,25 @@ mod tests {
                 .unwrap(),
             Some(Value::String("core/triton".to_string()))
         );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seqv-drop-on-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "instrument" :name "core/drift")
+                          :target (dict :kind "track" :track 2)))"#,
+            )
+            .expect("drop saved instrument on rack sequencer track");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "swap-track-instrument"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(2.0))
+                            && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/drift".to_string())))
+        ));
 
         editor
             .runtime_mut()
