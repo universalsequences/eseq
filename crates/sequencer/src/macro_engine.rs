@@ -90,6 +90,11 @@ pub struct TrackEffectMacroMappings {
     pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TrackMidiFxMacroMappings {
+    pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
+}
+
 impl MacroMapping {
     pub fn new(
         scope: impl Into<ParamScope>,
@@ -810,6 +815,78 @@ impl MacroEngine {
                     return true;
                 }
                 let ParamTarget::EffectParam { slot, .. } = &mut mapping.target else {
+                    return true;
+                };
+                let Some(new_slot) = old_to_new.get(*slot).copied().flatten() else {
+                    return false;
+                };
+                *slot = new_slot;
+                true
+            });
+        }
+        self.rebuild_ownership();
+    }
+
+    pub fn capture_midi_fx_mappings_for_track(&self, track: usize) -> TrackMidiFxMacroMappings {
+        TrackMidiFxMacroMappings {
+            mappings: self
+                .macros
+                .iter()
+                .filter_map(|macro_definition| {
+                    let mappings = macro_definition
+                        .mappings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mapping)| {
+                            mapping.scope == ParamScope::Track(track)
+                                && matches!(mapping.target, ParamTarget::MidiFxParam { .. })
+                        })
+                        .map(|(index, mapping)| (index, mapping.clone()))
+                        .collect::<Vec<_>>();
+                    (!mappings.is_empty()).then_some((macro_definition.id, mappings))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_midi_fx_mappings_for_track(
+        &mut self,
+        track: usize,
+        snapshot: &TrackMidiFxMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain(|mapping| {
+                mapping.scope != ParamScope::Track(track)
+                    || !matches!(mapping.target, ParamTarget::MidiFxParam { .. })
+            });
+        }
+        for (macro_id, mappings) in &snapshot.mappings {
+            let macro_definition = self
+                .macros
+                .iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                macro_definition
+                    .mappings
+                    .insert((*index).min(macro_definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
+    pub fn remap_midi_fx_mappings_for_track(
+        &mut self,
+        track: usize,
+        old_to_new: &[Option<usize>],
+    ) {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain_mut(|mapping| {
+                if mapping.scope != ParamScope::Track(track) {
+                    return true;
+                }
+                let ParamTarget::MidiFxParam { slot, .. } = &mut mapping.target else {
                     return true;
                 };
                 let Some(new_slot) = old_to_new.get(*slot).copied().flatten() else {

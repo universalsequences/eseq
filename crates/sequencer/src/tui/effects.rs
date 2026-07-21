@@ -884,12 +884,17 @@ impl App {
         let desc = lisp_host::load_midi_fx_descriptor(name)
             .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
 
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
+        let old_len = chain.len();
         chain.push(desc.name.clone());
         self.state.pattern.track_params[track].set_midi_fx_chain(chain);
         self.state.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(&desc, 0);
 
         self.state.save_current_track_midi_fx_snapshot(track);
+        self.device_registry
+            .insert_midi_effect_identity(track_id, slot_idx, old_len)?;
 
         self.state.publish_scheduler_snapshot();
         Ok(slot_idx)
@@ -903,6 +908,9 @@ impl App {
         if slot_idx >= chain.len() {
             return Err("Invalid MIDI FX slot".to_string());
         }
+        let old_len = chain.len();
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         chain.remove(slot_idx);
         self.state.pattern.track_params[track].set_midi_fx_chain(chain);
 
@@ -917,7 +925,30 @@ impl App {
 
         self.state
             .remove_midi_fx_slot_from_track_patterns(track, slot_idx);
+        self.device_registry
+            .remove_midi_effect_identity(track_id, slot_idx, old_len)?;
 
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    pub fn replace_midi_fx_slot_sync(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let descriptor = lisp_host::load_midi_fx_descriptor(name)
+            .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
+        self.state.replace_midi_fx_slot_in_all_track_patterns(
+            track,
+            slot_idx,
+            descriptor.name.clone(),
+            &descriptor,
+        )?;
         self.state.publish_scheduler_snapshot();
         Ok(())
     }
@@ -1159,7 +1190,10 @@ impl App {
         }
         let desc = lisp_host::load_midi_fx_descriptor(name)
             .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
+        let old_len = chain.len();
         if chain.len() >= MAX_MIDI_FX_SLOTS {
             return Err("No free MIDI FX slots available".to_string());
         }
@@ -1172,6 +1206,8 @@ impl App {
         }
         slots[slot_idx].apply_descriptor(&desc, 0);
         self.sync_other_pattern_midi_fx_insert(track, slot_idx, desc.name.clone(), &desc);
+        self.device_registry
+            .insert_midi_effect_identity(track_id, slot_idx, old_len)?;
         self.publish_effect_reorder();
         Ok(slot_idx)
     }
@@ -1189,6 +1225,9 @@ impl App {
         if source_slot >= chain.len() {
             return Err("Invalid source MIDI FX slot".to_string());
         }
+        let chain_len = chain.len();
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         let name = chain.remove(source_slot);
         let source_snapshot =
             EffectSlotSnapshot::capture(&self.state.pattern.midi_fx_slots[track][source_slot]);
@@ -1214,6 +1253,8 @@ impl App {
         source_snapshot.restore(&slots[target_idx]);
         self.state.pattern.track_params[track].set_midi_fx_chain(chain);
         self.sync_other_pattern_midi_fx_move(track, source_slot, target_idx);
+        self.device_registry
+            .move_midi_effect_identity(track_id, source_slot, target_idx, chain_len)?;
         self.publish_effect_reorder();
         Ok(target_idx)
     }
@@ -5295,5 +5336,80 @@ mod tests {
             .expect("adding MIDI FX should not block on pattern_bank");
         assert_eq!(result.unwrap(), 0);
         assert_eq!(published_chain, vec!["arp".to_string()]);
+    }
+
+    #[test]
+    fn recorded_midi_fx_chain_restores_order_values_and_stable_ids() {
+        let mut app = test_app_with_track();
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let arp_slot = app
+            .apply_recorded_track_midi_fx_chain_mutation(0, "Add MIDI FX", |app| {
+                app.add_midi_fx_to_track_sync(0, "arp")
+            })
+            .unwrap();
+        let arp_id = app.device_registry.midi_effect(track_id, arp_slot);
+        let trigger_slot = app
+            .apply_recorded_track_midi_fx_chain_mutation(0, "Add MIDI FX", |app| {
+                app.add_midi_fx_to_track_sync(0, "trigger-to-track")
+            })
+            .unwrap();
+        let trigger_id = app.device_registry.midi_effect(track_id, trigger_slot);
+        app.state.pattern.midi_fx_slots[0][arp_slot]
+            .defaults
+            .set(0, 0.42);
+
+        app.apply_recorded_track_midi_fx_chain_mutation(0, "Move MIDI FX", |app| {
+            app.move_midi_fx_slot_sync(0, trigger_slot, Some(arp_slot))
+        })
+        .unwrap();
+        assert_eq!(
+            app.device_registry.midi_effect_location(trigger_id),
+            Some((track_id, arp_slot))
+        );
+        assert_eq!(
+            app.device_registry.midi_effect_location(arp_id),
+            Some((track_id, trigger_slot))
+        );
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.device_registry.midi_effect_location(arp_id),
+            Some((track_id, arp_slot))
+        );
+        assert_eq!(app.state.pattern.midi_fx_slots[0][arp_slot].defaults.get(0), 0.42);
+
+        app.apply_recorded_track_midi_fx_chain_mutation(0, "Delete MIDI FX", |app| {
+            app.delete_midi_fx_slot(0, arp_slot)
+        })
+        .unwrap();
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.device_registry.midi_effect_location(arp_id),
+            Some((track_id, arp_slot))
+        );
+        assert_eq!(app.state.pattern.midi_fx_slots[0][arp_slot].defaults.get(0), 0.42);
+        app.apply_recorded_track_midi_fx_chain_mutation(0, "Replace MIDI FX", |app| {
+            app.replace_midi_fx_slot_sync(0, arp_slot, "trigger-to-track")
+        })
+        .unwrap();
+        assert_eq!(
+            app.device_registry.midi_effect_location(arp_id),
+            Some((track_id, arp_slot)),
+            "MIDI-FX source replacement preserves instance identity"
+        );
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.pattern.track_params[0].midi_fx_chain()[arp_slot],
+            "arp"
+        );
+        assert_eq!(app.state.pattern.midi_fx_slots[0][arp_slot].defaults.get(0), 0.42);
     }
 }

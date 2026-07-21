@@ -6302,6 +6302,43 @@ impl SequencerState {
         });
     }
 
+    pub fn replace_midi_fx_slot_in_all_track_patterns(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        name: String,
+        descriptor: &EffectDescriptor,
+    ) -> Result<(), String> {
+        if track >= self.pattern.track_params.len()
+            || slot_idx >= self.pattern.midi_fx_slots[track].len()
+        {
+            return Err("MIDI-FX replacement target is out of range".to_string());
+        }
+        let mut live_chain = self.pattern.track_params[track].midi_fx_chain();
+        if slot_idx >= live_chain.len() {
+            return Err("MIDI-FX replacement target is empty".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.values().any(|data| {
+            slot_idx >= data.track_params.midi_fx_chain.len()
+                || slot_idx >= data.midi_fx_slots.len()
+        }) {
+            return Err("stored MIDI-FX replacement target is missing".to_string());
+        }
+        live_chain[slot_idx] = name.clone();
+        self.pattern.track_params[track].set_midi_fx_chain(live_chain);
+        self.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(descriptor, 0);
+        for data in pool.patterns.values_mut() {
+            data.track_params.midi_fx_chain[slot_idx] = name.clone();
+            data.midi_fx_slots[slot_idx].sync_to_descriptor(descriptor, 0);
+        }
+        Ok(())
+    }
+
     pub fn move_midi_fx_slot_in_other_track_patterns(
         &self,
         track: usize,
@@ -10182,6 +10219,208 @@ impl SequencerState {
             .ok_or_else(|| "Track Pattern MIDI-FX target no longer exists".to_string())
     }
 
+    pub(crate) fn capture_track_midi_fx_chain_values(
+        &self,
+        track: usize,
+    ) -> Result<Vec<(PatternId, Vec<EffectSlotValuesSnapshot>)>, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        pool.patterns
+            .iter()
+            .map(|(pattern, data)| {
+                let slots = if *pattern == effective {
+                    self.pattern
+                        .midi_fx_slots
+                        .get(track)
+                        .ok_or_else(|| "live MIDI-FX chain is missing".to_string())?
+                        .iter()
+                        .map(EffectSlotSnapshot::capture_authoring_values)
+                        .collect()
+                } else {
+                    data.midi_fx_slots
+                        .iter()
+                        .map(EffectSlotSnapshot::authoring_values)
+                        .collect()
+                };
+                Ok((*pattern, slots))
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore_track_midi_fx_chain_values(
+        &self,
+        track: usize,
+        names: &[String],
+        descriptors: &[EffectDescriptor],
+        patterns: &[(PatternId, Vec<EffectSlotValuesSnapshot>)],
+    ) -> Result<(), String> {
+        if names.len() != descriptors.len() || descriptors.len() > crate::lisp_host::MAX_MIDI_FX_SLOTS {
+            return Err("MIDI-FX history layout is invalid".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != patterns.len()
+            || patterns.iter().any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before MIDI-FX history replay",
+                track + 1
+            ));
+        }
+        for (pattern, values) in patterns {
+            if values.len() != crate::lisp_host::MAX_MIDI_FX_SLOTS {
+                return Err("MIDI-FX pattern layout is invalid".to_string());
+            }
+            let data = pool.patterns.get_mut(pattern).expect("pattern set was validated");
+            data.track_params.midi_fx_chain = names.to_vec();
+            for slot_idx in 0..crate::lisp_host::MAX_MIDI_FX_SLOTS {
+                let descriptor = descriptors
+                    .get(slot_idx)
+                    .cloned()
+                    .unwrap_or_else(EffectDescriptor::empty_custom_slot);
+                let slot = data
+                    .midi_fx_slots
+                    .get_mut(slot_idx)
+                    .ok_or_else(|| "stored MIDI-FX slot is missing".to_string())?;
+                slot.sync_to_descriptor(&descriptor, 0);
+                slot.apply_authoring_values(&values[slot_idx])?;
+            }
+        }
+        let live_values = patterns
+            .iter()
+            .find(|(pattern, _)| *pattern == effective)
+            .map(|(_, values)| values)
+            .ok_or_else(|| "effective MIDI-FX pattern is missing from history".to_string())?;
+        self.pattern.track_params[track].set_midi_fx_chain(names.to_vec());
+        for slot_idx in 0..crate::lisp_host::MAX_MIDI_FX_SLOTS {
+            let descriptor = descriptors
+                .get(slot_idx)
+                .cloned()
+                .unwrap_or_else(EffectDescriptor::empty_custom_slot);
+            let slot = self.pattern.midi_fx_slots[track]
+                .get(slot_idx)
+                .ok_or_else(|| "live MIDI-FX slot is missing".to_string())?;
+            let mut snapshot = EffectSlotSnapshot::capture(slot);
+            snapshot.sync_to_descriptor(&descriptor, 0);
+            snapshot.apply_authoring_values(&live_values[slot_idx])?;
+            snapshot.restore(slot);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remap_track_midi_fx_references(
+        &self,
+        track: usize,
+        old_to_new: &[Option<usize>],
+    ) -> Result<(), String> {
+        fn remap_chain(
+            chain: &mut crate::process::TrackProcessChain,
+            old_to_new: &[Option<usize>],
+        ) {
+            for process_slot in &mut chain.slots {
+                for binding in process_slot.bindings.values_mut() {
+                    let Some(crate::process::ParamTarget::MidiFxParam { slot, .. }) = binding.as_mut() else {
+                        continue;
+                    };
+                    match old_to_new.get(*slot).copied().flatten() {
+                        Some(new_slot) => *slot = new_slot,
+                        None => *binding = None,
+                    }
+                }
+            }
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        for data in pool.patterns.values_mut() {
+            remap_chain(&mut data.process_chain, old_to_new);
+        }
+        drop(scenes);
+        let mut chains = self.pattern.process_chains.lock().unwrap();
+        let chain = chains
+            .get_mut(track)
+            .ok_or_else(|| "live process chain is missing".to_string())?;
+        remap_chain(chain, old_to_new);
+        Ok(())
+    }
+
+    pub(crate) fn capture_track_process_chains(
+        &self,
+        track: usize,
+    ) -> Result<Vec<(PatternId, crate::process::TrackProcessChain)>, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let live = self
+            .pattern
+            .process_chains
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .ok_or_else(|| "live process chain is missing".to_string())?;
+        Ok(pool
+            .patterns
+            .iter()
+            .map(|(id, data)| {
+                (*id, if *id == effective { live.clone() } else { data.process_chain.clone() })
+            })
+            .collect())
+    }
+
+    pub(crate) fn restore_track_process_chains(
+        &self,
+        track: usize,
+        saved: &[(PatternId, crate::process::TrackProcessChain)],
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != saved.len()
+            || saved.iter().any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err("process pattern set changed before history replay".to_string());
+        }
+        let mut live = None;
+        for (id, chain) in saved {
+            pool.patterns
+                .get_mut(id)
+                .expect("pattern set was validated")
+                .process_chain = chain.clone();
+            if *id == effective {
+                live = Some(chain.clone());
+            }
+        }
+        drop(scenes);
+        self.pattern.process_chains.lock().unwrap()[track] = live
+            .ok_or_else(|| "effective process chain is missing from history".to_string())?;
+        Ok(())
+    }
+
     pub(crate) fn restore_pattern_midi_fx_device_values_no_publish(
         &self,
         track: usize,
@@ -12399,6 +12638,50 @@ mod tests {
         let second_values = captured.iter().find(|(id, _)| *id == second).unwrap();
         assert_eq!(first_values.1[0].defaults[0], 0.21);
         assert_eq!(second_values.1[0].defaults[0], 0.79);
+    }
+
+    #[test]
+    fn track_midi_fx_chain_values_restore_each_pattern_by_stable_pattern_id() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let slot_descriptors = vec![EffectDescriptor::default_full_chain()];
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &slot_descriptors),
+                PatternSnapshot::new_default(1, &slot_descriptors),
+            ],
+            0,
+        );
+        let first = state.scene_track_pattern_id(0, 0).unwrap();
+        let second = state.scene_track_pattern_id(1, 0).unwrap();
+        let descriptor = crate::lisp_host::load_midi_fx_descriptor("arp").unwrap();
+        let mut first_slot = EffectSlotSnapshot::new_default(&descriptor, 0);
+        first_slot.defaults[0] = 0.18;
+        let mut second_slot = EffectSlotSnapshot::new_default(&descriptor, 0);
+        second_slot.defaults[0] = 0.83;
+        let empty = EffectSlotSnapshot::new_empty().authoring_values();
+        let pattern_values = [(first, first_slot.authoring_values()), (second, second_slot.authoring_values())]
+            .into_iter()
+            .map(|(pattern, first_value)| {
+                let mut values = vec![empty.clone(); crate::lisp_host::MAX_MIDI_FX_SLOTS];
+                values[0] = first_value;
+                (pattern, values)
+            })
+            .collect::<Vec<_>>();
+
+        state
+            .restore_track_midi_fx_chain_values(
+                0,
+                &["arp".to_string()],
+                &[descriptor],
+                &pattern_values,
+            )
+            .unwrap();
+
+        let captured = state.capture_track_midi_fx_chain_values(0).unwrap();
+        let first_values = captured.iter().find(|(id, _)| *id == first).unwrap();
+        let second_values = captured.iter().find(|(id, _)| *id == second).unwrap();
+        assert_eq!(first_values.1[0].defaults[0], 0.18);
+        assert_eq!(second_values.1[0].defaults[0], 0.83);
     }
 
     #[test]

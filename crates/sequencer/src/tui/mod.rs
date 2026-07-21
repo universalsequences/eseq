@@ -1009,6 +1009,100 @@ impl DeviceIdentityRegistry {
         self.midi_effect_locations.get(&id).copied()
     }
 
+    pub(crate) fn midi_effect_chain(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot_count: usize,
+    ) -> Vec<crate::sequencer::MidiFxInstanceId> {
+        (0..slot_count)
+            .map(|slot| self.midi_effect(track, slot))
+            .collect()
+    }
+
+    pub(crate) fn bind_midi_effect_chain(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        instances: &[crate::sequencer::MidiFxInstanceId],
+    ) -> Result<(), String> {
+        if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
+            return Err("MIDI-FX chain contains a duplicate stable identity".to_string());
+        }
+        let retained = self
+            .midi_effects
+            .iter()
+            .filter(|((owner, _), _)| *owner != track)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        for id in instances {
+            if self
+                .midi_effect_locations
+                .get(id)
+                .is_some_and(|(owner, _)| *owner != track)
+            {
+                return Err(format!(
+                    "MIDI-FX instance {} is already bound to another track",
+                    id.0
+                ));
+            }
+        }
+        self.midi_effects.clear();
+        self.midi_effect_locations.clear();
+        for (location, id) in retained {
+            self.midi_effects.insert(location, id);
+            self.midi_effect_locations.insert(id, location);
+        }
+        for (slot, id) in instances.iter().copied().enumerate() {
+            let location = (track, slot);
+            self.midi_effects.insert(location, id);
+            self.midi_effect_locations.insert(id, location);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn insert_midi_effect_identity(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+        old_len: usize,
+    ) -> Result<crate::sequencer::MidiFxInstanceId, String> {
+        let mut instances = self.midi_effect_chain(track, old_len);
+        let id = crate::sequencer::MidiFxInstanceId(self.allocate());
+        instances.insert(slot.min(instances.len()), id);
+        self.bind_midi_effect_chain(track, &instances)?;
+        Ok(id)
+    }
+
+    pub(crate) fn remove_midi_effect_identity(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+        old_len: usize,
+    ) -> Result<crate::sequencer::MidiFxInstanceId, String> {
+        let mut instances = self.midi_effect_chain(track, old_len);
+        if slot >= instances.len() {
+            return Err("MIDI-FX identity removal is out of range".to_string());
+        }
+        let removed = instances.remove(slot);
+        self.bind_midi_effect_chain(track, &instances)?;
+        Ok(removed)
+    }
+
+    pub(crate) fn move_midi_effect_identity(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        source: usize,
+        target: usize,
+        len: usize,
+    ) -> Result<(), String> {
+        let mut instances = self.midi_effect_chain(track, len);
+        if source >= instances.len() || target >= instances.len() {
+            return Err("MIDI-FX identity move is out of range".to_string());
+        }
+        let id = instances.remove(source);
+        instances.insert(target, id);
+        self.bind_midi_effect_chain(track, &instances)
+    }
+
     pub(crate) fn rack_slot(
         &mut self,
         track: crate::sequencer::TrackId,

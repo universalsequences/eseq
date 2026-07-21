@@ -16894,7 +16894,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Value::String(fx_name) = &*cell.borrow() {
                                     let fx_name = fx_name.clone();
                                     let track = current_track.load(Ordering::Relaxed);
-                                    match app.add_midi_fx_to_track_sync(track, &fx_name) {
+                                    match app.apply_recorded_track_midi_fx_chain_mutation(
+                                        track,
+                                        "Add MIDI FX",
+                                        |app| app.add_midi_fx_to_track_sync(track, &fx_name),
+                                    ) {
                                         Ok(slot_idx) => {
                                             let rt = editor.runtime_mut();
                                             rt.set_reactive(
@@ -16946,7 +16950,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.add_midi_fx_to_track_sync(track, &fx_name) {
+                            match app.apply_recorded_track_midi_fx_chain_mutation(
+                                track,
+                                "Add MIDI FX",
+                                |app| app.add_midi_fx_to_track_sync(track, &fx_name),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), track);
@@ -17107,7 +17115,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(track), Some(slot), Some(fx_name)) = (track, slot, fx_name) {
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.insert_midi_fx_before_slot_sync(track, slot, &fx_name) {
+                            match app.apply_recorded_track_midi_fx_chain_mutation(
+                                track,
+                                "Insert MIDI FX",
+                                |app| app.insert_midi_fx_before_slot_sync(track, slot, &fx_name),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), track);
@@ -17271,8 +17283,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             current_track.store(target_track, Ordering::Relaxed);
                             app.ui.cursor_track = target_track;
-                            match app.move_midi_fx_slot_sync(target_track, source_slot, target_slot)
-                            {
+                            match app.apply_recorded_track_midi_fx_chain_mutation(
+                                target_track,
+                                "Move MIDI FX",
+                                |app| app.move_midi_fx_slot_sync(
+                                    target_track,
+                                    source_slot,
+                                    target_slot,
+                                ),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), target_track);
@@ -17460,7 +17479,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let track = current_track.load(Ordering::Relaxed);
-                        match app.delete_midi_fx_slot(track, slot_idx) {
+                        match app.apply_recorded_track_midi_fx_chain_mutation(
+                            track,
+                            "Delete MIDI FX",
+                            |app| app.delete_midi_fx_slot(track, slot_idx),
+                        ) {
                             Ok(()) => {
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(

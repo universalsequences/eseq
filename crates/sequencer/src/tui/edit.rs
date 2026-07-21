@@ -13,7 +13,8 @@ use super::history::{
     step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusMixerPatch, BusMixerSnapshot,
     DeviceId, DeviceValueSnapshot, DeviceValuesPatch, EditPatch, EffectChainPatch,
     EffectChainState, EffectInstanceState, EffectPatternSlots, GestureId, HistoryMove,
-    HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, PatternGeometryPatch,
+    HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, MidiFxChainPatch,
+    MidiFxChainState, MidiFxInstanceState, PatternGeometryPatch,
     RackSlotStructureEdit, RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
     TrackInstrumentSource, TrackInstrumentState,
     TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
@@ -56,6 +57,132 @@ pub struct StepGestureTransaction {
 }
 
 impl App {
+    fn capture_track_midi_fx_chain_state(
+        &mut self,
+        track: usize,
+    ) -> Result<MidiFxChainState, String> {
+        let track_id = self
+            .track_registry
+            .id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let names = self.state.pattern.track_params[track].midi_fx_chain();
+        let ids = self.device_registry.midi_effect_chain(track_id, names.len());
+        let instances = names
+            .into_iter()
+            .zip(ids)
+            .map(|(name, id)| {
+                let descriptor = crate::lisp_host::load_midi_fx_descriptor(&name)
+                    .ok_or_else(|| format!("Unknown retained MIDI FX '{name}'"))?;
+                Ok(MidiFxInstanceState { id, name, descriptor })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let pattern_slots = self
+            .state
+            .capture_track_midi_fx_chain_values(track)?
+            .into_iter()
+            .map(|(pattern, values)| EffectPatternSlots { pattern, values })
+            .collect();
+        Ok(MidiFxChainState {
+            instances,
+            pattern_slots,
+            macro_mappings: self.macro_engine.capture_midi_fx_mappings_for_track(track),
+            process_chains: self.state.capture_track_process_chains(track)?,
+        })
+    }
+
+    pub fn apply_recorded_track_midi_fx_chain_mutation<T>(
+        &mut self,
+        track: usize,
+        label: &'static str,
+        mutate: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
+        finish_active_gesture(self);
+        let track_id = self
+            .track_registry
+            .id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let before = self.capture_track_midi_fx_chain_state(track)?;
+        let result = match mutate(self) {
+            Ok(result) => result,
+            Err(error) => {
+                return match self.restore_track_midi_fx_chain_state(track, &before) {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(format!(
+                        "MIDI-FX edit failed ({error}); restoring the original chain also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let mut after = self.capture_track_midi_fx_chain_state(track)?;
+        let mut old_to_new = vec![None; crate::lisp_host::MAX_MIDI_FX_SLOTS];
+        for (old_slot, old) in before.instances.iter().enumerate() {
+            old_to_new[old_slot] = after
+                .instances
+                .iter()
+                .position(|candidate| candidate.id == old.id && candidate.name == old.name);
+        }
+        self.macro_engine
+            .remap_midi_fx_mappings_for_track(track, &old_to_new);
+        self.state
+            .remap_track_midi_fx_references(track, &old_to_new)?;
+        after = self.capture_track_midi_fx_chain_state(track)?;
+        let unchanged = before.instances.len() == after.instances.len()
+            && before.instances.iter().zip(&after.instances).all(|(left, right)| {
+                left.id == right.id && left.name == right.name
+            })
+            && before.pattern_slots.iter().zip(&after.pattern_slots).all(|(left, right)| {
+                left.pattern == right.pattern
+                    && left.values.len() == right.values.len()
+                    && left.values.iter().zip(&right.values).all(|(left, right)| {
+                        left.bit_exact_eq(right)
+                    })
+            });
+        if unchanged {
+            return Ok(result);
+        }
+        let patch = MidiFxChainPatch { track: track_id, before, after };
+        let retained_bytes = patch.retained_bytes();
+        self.history
+            .commit(label, None, EditPatch::MidiFxChain(patch), retained_bytes);
+        Ok(result)
+    }
+
+    fn restore_track_midi_fx_chain_state(
+        &mut self,
+        track: usize,
+        target: &MidiFxChainState,
+    ) -> Result<(), String> {
+        let names = target.instances.iter().map(|instance| instance.name.clone()).collect::<Vec<_>>();
+        let descriptors = target
+            .instances
+            .iter()
+            .map(|instance| instance.descriptor.clone())
+            .collect::<Vec<_>>();
+        let patterns = target
+            .pattern_slots
+            .iter()
+            .map(|pattern| (pattern.pattern, pattern.values.clone()))
+            .collect::<Vec<_>>();
+        self.state.restore_track_midi_fx_chain_values(
+            track,
+            &names,
+            &descriptors,
+            &patterns,
+        )?;
+        self.state
+            .restore_track_process_chains(track, &target.process_chains)?;
+        self.macro_engine
+            .restore_midi_fx_mappings_for_track(track, &target.macro_mappings)
+            .map_err(|error| format!("{error:?}"))?;
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let ids = target.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+        self.device_registry.bind_midi_effect_chain(track_id, &ids)?;
+        self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
+        self.sync_scratch_runtime_descriptors();
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
     fn capture_track_effect_chain_state(
         &mut self,
         track: usize,
@@ -4585,6 +4712,23 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_track_effect_chain_state(track, current, target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::MidiFxChain(patch) => {
+            let track = app
+                .track_registry
+                .index_of(patch.track)
+                .ok_or(EditError::MissingStableTrack { track: patch.track })?;
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "MIDI-FX chain replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_track_midi_fx_chain_state(track, target)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::RackSlotStructure(patch) => {
             let track = app
                 .track_registry
@@ -4649,6 +4793,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::InstrumentBinding(_) => true,
         EditPatch::RackSlotStructure(_) => true,
         EditPatch::EffectChain(_) => true,
+        EditPatch::MidiFxChain(_) => true,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
     }
 }
@@ -4721,6 +4866,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::EffectChain(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::MidiFxChain(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => {

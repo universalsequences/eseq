@@ -11,6 +11,7 @@ use crate::sequencer::{
 use crate::effects::EffectSlotValuesSnapshot;
 use crate::macro_engine::TrackInstrumentMacroMappings;
 use crate::macro_engine::TrackEffectMacroMappings;
+use crate::macro_engine::TrackMidiFxMacroMappings;
 use crate::sequencer::TrackInstrumentPatternStateSnapshot;
 use crate::sequencer::RackSlotPatternStateSnapshot;
 
@@ -45,8 +46,47 @@ pub enum EditPatch {
     DeviceValues(DeviceValuesPatch),
     InstrumentBinding(InstrumentBindingPatch),
     EffectChain(EffectChainPatch),
+    MidiFxChain(MidiFxChainPatch),
     RackSlotStructure(RackSlotStructurePatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub struct MidiFxInstanceState {
+    pub id: MidiFxInstanceId,
+    pub name: String,
+    pub descriptor: crate::effects::EffectDescriptor,
+}
+
+#[derive(Clone, Debug)]
+pub struct MidiFxChainState {
+    pub instances: Vec<MidiFxInstanceState>,
+    pub pattern_slots: Vec<EffectPatternSlots>,
+    pub macro_mappings: TrackMidiFxMacroMappings,
+    pub process_chains: Vec<(PatternId, crate::process::TrackProcessChain)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MidiFxChainPatch {
+    pub track: TrackId,
+    pub before: MidiFxChainState,
+    pub after: MidiFxChainState,
+}
+
+impl MidiFxChainPatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &MidiFxChainState) -> usize {
+            state.instances.capacity() * std::mem::size_of::<MidiFxInstanceState>()
+                + state.instances.iter().map(|instance| instance.name.capacity()).sum::<usize>()
+                + state.pattern_slots.iter().map(|pattern| {
+                    pattern.values.capacity() * std::mem::size_of::<EffectSlotValuesSnapshot>()
+                        + pattern.values.iter().map(EffectSlotValuesSnapshot::retained_bytes).sum::<usize>()
+                }).sum::<usize>()
+                + state.process_chains.capacity()
+                    * std::mem::size_of::<(PatternId, crate::process::TrackProcessChain)>()
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
 }
 
 #[derive(Clone, Debug)]

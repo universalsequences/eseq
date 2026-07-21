@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Slice 6A.
+Implemented through Slice 6B.
 
 - Slice 0 provides stable track identity, bounded linear history, barriers,
   revision tracking, and global undo/redo shortcuts.
@@ -27,9 +27,12 @@ Implemented through Slice 6A.
   and reordering. History retains exact compiled source text and asset roots,
   restores scalar/tensor/IR values across every Track Pattern, rebinds process,
   macro, and neural targets, preserves logical effect-instance identity, and
-  rejects stale async compile targets. The shared project-schema migration to
-  serialized effect-instance records lands before Slice 6 is closed; MIDI,
-  bus, and rack-slot structural edits remain barriers through 6B/6C/6D.
+  rejects stale async compile targets.
+- Slice 6B covers MIDI-FX insertion, deletion, and reordering with explicit
+  stable-instance ordering, per-Track-Pattern defaults and p-locks, process and
+  macro target remapping, and scheduler republishing. The shared project-schema
+  migration to serialized effect-instance records lands before Slice 6 is
+  closed; bus and rack-slot structural edits remain barriers through 6C/6D.
 - Bus-effect value edits remain explicit barriers; bus device identity and
   scene-pattern addressing land with the generalized effect-chain work in
   Slice 6.
