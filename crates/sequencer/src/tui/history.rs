@@ -47,6 +47,7 @@ pub enum EditPatch {
     InstrumentBinding(InstrumentBindingPatch),
     EffectChain(EffectChainPatch),
     BusEffectChain(BusEffectChainPatch),
+    RackEffectChain(RackEffectChainPatch),
     MidiFxChain(MidiFxChainPatch),
     RackSlotStructure(RackSlotStructurePatch),
     TransportParams(TransportParamsPatch),
@@ -150,6 +151,43 @@ impl BusEffectChainPatch {
                 + state.live_values.iter().map(EffectSlotValuesSnapshot::retained_bytes).sum::<usize>()
                 + state.scenes.capacity()
                     * std::mem::size_of::<crate::sequencer::BusPatternSnapshot>()
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RackEffectChainState {
+    pub instances: Vec<EffectInstanceState>,
+    pub patterns: crate::sequencer::RackSlotPatternStateSnapshot,
+    pub macros: crate::sequencer::RackMacroPatternStateSnapshot,
+}
+
+#[derive(Clone, Debug)]
+pub struct RackEffectChainPatch {
+    pub track: TrackId,
+    pub rack_slot: RackSlotId,
+    pub before: RackEffectChainState,
+    pub after: RackEffectChainState,
+}
+
+impl RackEffectChainPatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &RackEffectChainState) -> usize {
+            let source_bytes = state.instances.iter().map(|instance| match &instance.source {
+                super::fx_chain::RetainedEffectSource::NativeBuiltin { name } => name.capacity(),
+                super::fx_chain::RetainedEffectSource::Compiled { name, source, asset_base, .. } => {
+                    name.capacity()
+                        + source.capacity()
+                        + asset_base.as_ref().map(|path| path.as_os_str().len()).unwrap_or(0)
+                }
+            }).sum::<usize>();
+            source_bytes
+                + state.instances.capacity() * std::mem::size_of::<EffectInstanceState>()
+                + state.patterns.patterns.capacity()
+                    * std::mem::size_of::<(PatternId, crate::sequencer::RackSlotSnapshot)>()
+                + state.macros.patterns.capacity()
+                    * std::mem::size_of::<(PatternId, Vec<crate::sequencer::RackMacro>)>()
         }
         std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
     }

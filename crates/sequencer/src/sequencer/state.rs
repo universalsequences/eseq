@@ -1358,6 +1358,12 @@ pub struct RackSlotPatternStateSnapshot {
     pub patterns: Vec<(PatternId, RackSlotSnapshot)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RackMacroPatternStateSnapshot {
+    pub live: Vec<RackMacro>,
+    pub patterns: Vec<(PatternId, Vec<RackMacro>)>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InstrumentSlotResetSummary {
     pub patterns_reset: usize,
@@ -6128,6 +6134,85 @@ impl SequencerState {
             live,
             patterns,
         })
+    }
+
+    pub fn capture_rack_macro_pattern_state(
+        &self,
+        track: usize,
+    ) -> Result<RackMacroPatternStateSnapshot, String> {
+        let live = self.pattern.rack_tracks.lock().unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .map(|rack| rack.macros.clone())
+            .ok_or_else(|| format!("Track {} has no live rack", track + 1))?;
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let patterns = pool.patterns.iter().map(|(pattern, data)| {
+            data.rack_track.as_ref()
+                .map(|rack| (*pattern, rack.macros.clone()))
+                .ok_or_else(|| format!("Track {} pattern {:?} has no rack", track + 1, pattern))
+        }).collect::<Result<Vec<_>, String>>()?;
+        Ok(RackMacroPatternStateSnapshot { live, patterns })
+    }
+
+    pub fn restore_rack_macro_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackMacroPatternStateSnapshot,
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot.patterns.iter().any(|(pattern, _)| !pool.patterns.contains_key(pattern))
+        {
+            return Err(format!("Track {} rack macro pattern topology changed", track + 1));
+        }
+        for (pattern, macros) in &snapshot.patterns {
+            let rack = pool.patterns.get_mut(pattern)
+                .and_then(|data| data.rack_track.as_mut())
+                .ok_or_else(|| format!("Track {} pattern {:?} has no rack", track + 1, pattern))?;
+            rack.macros.clone_from(macros);
+        }
+        drop(scenes);
+        let mut racks = self.pattern.rack_tracks.lock().unwrap();
+        let rack = racks.get_mut(track).and_then(Option::as_mut)
+            .ok_or_else(|| format!("Track {} has no live rack", track + 1))?;
+        rack.macros.clone_from(&snapshot.live);
+        self.sync_rack_macro_runtime_track(track, Some(rack));
+        Ok(())
+    }
+
+    pub fn restore_rack_slot_effect_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackSlotPatternStateSnapshot,
+    ) -> Result<(), String> {
+        self.validate_rack_slot_pattern_state(track, snapshot)?;
+        let copy_effects = |slot: &mut RackSlotSnapshot, saved: &RackSlotSnapshot| {
+            slot.effect_slots.clone_from(&saved.effect_slots);
+            slot.effect_descriptors.clone_from(&saved.effect_descriptors);
+            slot.custom_effect_names.clone_from(&saved.custom_effect_names);
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        for (pattern, saved) in &snapshot.patterns {
+            let slot = pool.patterns.get_mut(pattern)
+                .and_then(|data| data.rack_track.as_mut())
+                .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
+                .ok_or_else(|| format!("Track {} pattern {:?} lost rack slot {}", track + 1, pattern, snapshot.slot_index + 1))?;
+            copy_effects(slot, saved);
+        }
+        drop(scenes);
+        let mut racks = self.pattern.rack_tracks.lock().unwrap();
+        let slot = racks.get_mut(track)
+            .and_then(Option::as_mut)
+            .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
+            .ok_or_else(|| format!("Track {} lost rack slot {}", track + 1, snapshot.slot_index + 1))?;
+        copy_effects(slot, &snapshot.live);
+        Ok(())
     }
 
     pub fn restore_rack_slot_pattern_state(

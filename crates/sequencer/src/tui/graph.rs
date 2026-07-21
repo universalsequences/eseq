@@ -9464,6 +9464,70 @@ mod tests {
     }
 
     #[test]
+    fn recorded_rack_slot_effect_delete_restores_identity_values_and_macro_mapping() {
+        let graph = TestLiveGraph::new("rack-slot-fx-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("rack sample should load");
+        let effect_slot = app.apply_recorded_rack_effect_chain_mutation(
+            0,
+            0,
+            "Add rack-slot effect",
+            |app| app.add_builtin_rack_slot_effect_sync(0, 0, "filter"),
+        ).expect("recorded rack filter add should succeed");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let rack_slot_id = app.device_registry.rack_slot(track_id, 0);
+        let effect_id = app.device_registry.rack_audio_effect(rack_slot_id, effect_slot);
+        app.state.update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+            slot.effect_slots[effect_slot].defaults[0] = 0.37;
+        });
+        app.state.update_rack_macros_for_all_pattern_snapshots(0, |macros| {
+            macros[0].mappings.push(crate::sequencer::RackMacroMapping {
+                target: crate::sequencer::RackMacroTarget::SlotEffectParam {
+                    slot: 0,
+                    effect_slot,
+                    param: "cutoff".to_string(),
+                    param_index: 0,
+                },
+                range_min: 0.0,
+                range_max: 1.0,
+                curve: crate::sequencer::RackMacroCurve::Linear,
+            });
+        });
+
+        app.apply_recorded_rack_effect_chain_mutation(
+            0,
+            0,
+            "Delete rack-slot effect",
+            |app| app.delete_rack_slot_effect_slot(0, 0, effect_slot),
+        ).expect("recorded rack filter delete should succeed");
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone().expect("rack should remain live");
+        assert_eq!(restored.slots[0].effect_descriptors[effect_slot].name, "Filter");
+        assert_eq!(restored.slots[0].effect_slots[effect_slot].defaults[0].to_bits(), 0.37_f32.to_bits());
+        assert_eq!(restored.macros[0].mappings.len(), 1);
+        assert_eq!(
+            app.device_registry.rack_audio_effect_location(effect_id),
+            Some((rack_slot_id, effect_slot))
+        );
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let redone = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone().expect("rack should remain live");
+        assert_eq!(redone.slots[0].effect_slots[effect_slot].node_id, 0);
+        assert!(redone.macros[0].mappings.is_empty());
+        graph.process_block();
+    }
+
+    #[test]
     fn inserting_rack_slot_effect_before_existing_effect_shifts_state_and_leases() {
         let graph = TestLiveGraph::new("rack-slot-fx-insert-test");
         let mut app = test_app_with_track_count(&graph, 0);

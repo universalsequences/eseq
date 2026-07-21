@@ -3268,14 +3268,14 @@ impl App {
         }
     }
 
-    fn rack_slot_fx_locator(track: usize, rack_slot: usize) -> FxChainLocator {
+    pub(super) fn rack_slot_fx_locator(track: usize, rack_slot: usize) -> FxChainLocator {
         FxChainLocator::RackSlot {
             track,
             slot: rack_slot,
         }
     }
 
-    fn rack_slot_effect_snapshot(
+    pub(super) fn rack_slot_effect_snapshot(
         &self,
         track: usize,
         rack_slot: usize,
@@ -3543,7 +3543,7 @@ impl App {
         )
     }
 
-    fn apply_compiled_rack_slot_effect_to_slot_sync(
+    pub(super) fn apply_compiled_rack_slot_effect_to_slot_sync(
         &mut self,
         track: usize,
         rack_slot: usize,

@@ -9929,11 +9929,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     || sequencer::effects::EffectDescriptor::builtin_insert(&name)
                                         .is_some()
                                     || sequencer::effects::conv_reverb::is_dgen_builtin(&name);
-                                let result = if is_builtin {
-                                    app.add_builtin_rack_slot_effect_sync(track, rack_slot, &name)
-                                } else {
-                                    app.add_rack_slot_effect_sync(track, rack_slot, &name)
-                                };
+                                let result = app.apply_recorded_rack_effect_chain_mutation(
+                                    track,
+                                    rack_slot,
+                                    "Add rack-slot effect",
+                                    |app| if is_builtin {
+                                        app.add_builtin_rack_slot_effect_sync(track, rack_slot, &name)
+                                    } else {
+                                        app.add_rack_slot_effect_sync(track, rack_slot, &name)
+                                    },
+                                );
                                 match result {
                                     Ok(_) => {
                                         refresh_instrument_panel_reactive(
@@ -9963,21 +9968,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let builtin = extract_bool_from_payload(&payload, "builtin");
                         match (track, rack_slot, target_slot, name) {
                             (Some(track), Some(rack_slot), Some(target_slot), Some(name)) => {
-                                let result = if builtin {
-                                    app.insert_builtin_rack_slot_effect_before_slot_sync(
-                                        track,
-                                        rack_slot,
-                                        target_slot,
-                                        &name,
-                                    )
-                                } else {
-                                    app.insert_rack_slot_effect_before_slot_sync(
-                                        track,
-                                        rack_slot,
-                                        target_slot,
-                                        &name,
-                                    )
-                                };
+                                let result = app.apply_recorded_rack_effect_chain_mutation(
+                                    track,
+                                    rack_slot,
+                                    "Insert rack-slot effect",
+                                    |app| if builtin {
+                                        app.insert_builtin_rack_slot_effect_before_slot_sync(
+                                            track,
+                                            rack_slot,
+                                            target_slot,
+                                            &name,
+                                        )
+                                    } else {
+                                        app.insert_rack_slot_effect_before_slot_sync(
+                                            track,
+                                            rack_slot,
+                                            target_slot,
+                                            &name,
+                                        )
+                                    },
+                                );
                                 match result {
                                     Ok(_) => {
                                         refresh_instrument_panel_reactive(
@@ -10005,7 +10015,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
                         match (track, rack_slot, effect_slot) {
                             (Some(track), Some(rack_slot), Some(effect_slot)) => match app
-                                .delete_rack_slot_effect_slot(track, rack_slot, effect_slot)
+                                .apply_recorded_rack_effect_chain_mutation(
+                                    track,
+                                    rack_slot,
+                                    "Delete rack-slot effect",
+                                    |app| app.delete_rack_slot_effect_slot(
+                                        track, rack_slot, effect_slot,
+                                    ),
+                                )
                             {
                                 Ok(()) => {
                                     refresh_instrument_panel_reactive(
@@ -10052,11 +10069,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     })
                                 };
                                 if let Some(target_slot) = target_slot {
-                                    match app.move_rack_slot_effect_slot_sync(
+                                    match app.apply_recorded_rack_effect_chain_mutation(
                                         track,
                                         rack_slot,
-                                        source_slot,
-                                        target_slot,
+                                        "Move rack-slot effect",
+                                        |app| app.move_rack_slot_effect_slot_sync(
+                                            track,
+                                            rack_slot,
+                                            source_slot,
+                                            target_slot,
+                                        ),
                                     ) {
                                         Ok(()) => {
                                             refresh_instrument_panel_reactive(

@@ -16,7 +16,8 @@ use super::history::{
     EffectChainState, EffectInstanceState, EffectPatternSlots, GestureId, HistoryMove,
     HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, MidiFxChainPatch,
     MidiFxChainState, MidiFxInstanceState, PatternGeometryPatch,
-    RackSlotStructureEdit, RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
+    RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
+    RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
     TrackInstrumentSource, TrackInstrumentState,
     TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
 };
@@ -58,6 +59,258 @@ pub struct StepGestureTransaction {
 }
 
 impl App {
+    fn capture_rack_effect_chain_state(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        retained_ids_by_node: Option<&std::collections::HashMap<u32, crate::sequencer::EffectInstanceId>>,
+    ) -> Result<RackEffectChainState, String> {
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let rack_slot_id = self.device_registry.rack_slot(track_id, rack_slot);
+        let snapshot = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let active_slots = snapshot.effect_slots.iter().enumerate()
+            .take_while(|(_, slot)| slot.node_id != 0)
+            .map(|(slot, _)| slot)
+            .collect::<Vec<_>>();
+        if snapshot.effect_slots[active_slots.len()..].iter().any(|slot| slot.node_id != 0) {
+            return Err("Rack-slot effect chain contains a sparse logical layout".to_string());
+        }
+        let mut ids = Vec::with_capacity(active_slots.len());
+        for slot in &active_slots {
+            let node_id = snapshot.effect_slots[*slot].node_id;
+            ids.push(retained_ids_by_node.and_then(|ids| ids.get(&node_id).copied())
+                .unwrap_or_else(|| self.device_registry.rack_audio_effect(rack_slot_id, *slot)));
+        }
+        self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let instances = active_slots.iter().zip(ids).map(|(slot, id)| {
+            let descriptor = snapshot.effect_descriptors[*slot].clone();
+            let name = descriptor.name.trim().to_string();
+            let source = self.editor.effect_chain_leases.source(locator, *slot).cloned()
+                .map(Ok)
+                .unwrap_or_else(|| self.retained_effect_source_for_name(&name))?;
+            Ok(EffectInstanceState { id, source, descriptor })
+        }).collect::<Result<Vec<_>, String>>()?;
+        for (slot, instance) in active_slots.iter().zip(&instances) {
+            self.retain_effect_source(locator, *slot, instance.source.clone())?;
+        }
+        Ok(RackEffectChainState {
+            instances,
+            patterns: self.state.capture_rack_slot_pattern_state(track, rack_slot)?,
+            macros: self.state.capture_rack_macro_pattern_state(track)?,
+        })
+    }
+
+    pub fn apply_recorded_rack_effect_chain_mutation<T>(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        label: &'static str,
+        mutate: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
+        finish_active_gesture(self);
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let rack_slot_id = self.device_registry.rack_slot(track_id, rack_slot);
+        let before = self.capture_rack_effect_chain_state(track, rack_slot, None)?;
+        let retained_ids_by_node = before.instances.iter().enumerate()
+            .map(|(slot, instance)| (before.patterns.live.effect_slots[slot].node_id, instance.id))
+            .collect::<std::collections::HashMap<_, _>>();
+        let result = match mutate(self) {
+            Ok(result) => result,
+            Err(error) => {
+                let rollback = self.capture_rack_effect_chain_state(
+                    track,
+                    rack_slot,
+                    Some(&retained_ids_by_node),
+                ).and_then(|partial| {
+                    self.restore_rack_effect_chain_state(track, rack_slot, &partial, &before)
+                });
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(format!(
+                        "Rack-slot effect edit failed ({error}); restoring the original chain also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let mut after = self.capture_rack_effect_chain_state(
+            track,
+            rack_slot,
+            Some(&retained_ids_by_node),
+        )?;
+        if before.instances.len() == after.instances.len() {
+            let before_ids = before.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+            let after_ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+            let missing_before = before_ids.iter().filter(|id| !after_ids.contains(id)).copied().collect::<Vec<_>>();
+            let new_after = after_ids.iter().filter(|id| !before_ids.contains(id)).copied().collect::<Vec<_>>();
+            if missing_before.len() == 1 && new_after.len() == 1 {
+                if let Some(instance) = after.instances.iter_mut().find(|instance| instance.id == new_after[0]) {
+                    instance.id = missing_before[0];
+                }
+                let ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+                self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+            }
+        }
+        let unchanged = before.instances.len() == after.instances.len()
+            && before.instances.iter().zip(&after.instances).all(|(left, right)| {
+                left.id == right.id && left.source == right.source
+            });
+        if !unchanged {
+            let patch = RackEffectChainPatch {
+                track: track_id,
+                rack_slot: rack_slot_id,
+                before,
+                after,
+            };
+            let retained_bytes = patch.retained_bytes();
+            self.history.commit(label, None, EditPatch::RackEffectChain(patch), retained_bytes);
+        }
+        Ok(result)
+    }
+
+    fn restore_rack_effect_chain_state(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        current: &RackEffectChainState,
+        target: &RackEffectChainState,
+    ) -> Result<(), String> {
+        if target.instances.len() > crate::lisp_host::MAX_CUSTOM_FX {
+            return Err("Retained rack-slot effect chain exceeds host capacity".to_string());
+        }
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let rack_slot_id = self.device_registry.rack_slot(track_id, rack_slot);
+        let locator = Self::rack_slot_fx_locator(track, rack_slot);
+        let mut occupied = vec![false; crate::lisp_host::MAX_CUSTOM_FX];
+        for instance in &current.instances {
+            if let Some((owner, slot)) = self.device_registry.rack_audio_effect_location(instance.id) {
+                if owner == rack_slot_id && slot < occupied.len() {
+                    occupied[slot] = true;
+                }
+            }
+        }
+        let mut source_slots = Vec::with_capacity(target.instances.len());
+        for desired in &target.instances {
+            let current_instance = current.instances.iter().find(|item| item.id == desired.id);
+            let existing_slot = self.device_registry.rack_audio_effect_location(desired.id)
+                .and_then(|(owner, slot)| (owner == rack_slot_id).then_some(slot));
+            let slot = match existing_slot {
+                Some(slot) => slot,
+                None => {
+                    let slot = occupied.iter().position(|occupied| !*occupied)
+                        .ok_or_else(|| "No temporary rack-slot effect slot is available for restore".to_string())?;
+                    occupied[slot] = true;
+                    slot
+                }
+            };
+            if current_instance.map(|item| &item.source) != Some(&desired.source) {
+                match &desired.source {
+                    RetainedEffectSource::NativeBuiltin { name } => {
+                        self.load_builtin_rack_slot_effect_to_slot_sync(
+                            track, rack_slot, slot, name,
+                        )?;
+                    }
+                    RetainedEffectSource::Compiled { name, source, asset_base, origin } => {
+                        let result = self.editor.dylib_cache.acquire(
+                            crate::lisp_host::DGenCompileKind::Effect,
+                            *origin,
+                            source,
+                            self.graph.sample_rate,
+                            asset_base.as_deref(),
+                        )?;
+                        let ir_slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+                        self.apply_compiled_rack_slot_effect_to_slot_sync(
+                            track, rack_slot, slot, name, result,
+                        )?;
+                        self.retain_effect_source(locator, slot, desired.source.clone())?;
+                        if let Some(ir_slots) = ir_slots {
+                            let node_id = self.rack_slot_effect_snapshot(track, rack_slot)?
+                                .effect_slots[slot].node_id as i32;
+                            crate::effects::conv_reverb::record_ir_slots(node_id, ir_slots);
+                        }
+                    }
+                }
+            }
+            source_slots.push(slot);
+        }
+        let old_host = self.fx_chain_host(locator)?;
+        let live = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let desired_snapshots = source_slots.iter()
+            .map(|slot| live.effect_slots[*slot].clone())
+            .collect::<Vec<_>>();
+        let desired_nodes = desired_snapshots.iter().map(|slot| slot.node_id)
+            .collect::<std::collections::HashSet<_>>();
+        let removed_nodes = old_host.slots.iter()
+            .filter(|slot| slot.node_id > 0 && !desired_nodes.contains(&(slot.node_id as u32)))
+            .copied()
+            .collect::<Vec<_>>();
+        let mut restored = target.patterns.clone();
+        let rebind = |saved: &mut crate::sequencer::RackSlotSnapshot| -> Result<(), String> {
+            for slot in 0..crate::lisp_host::MAX_CUSTOM_FX {
+                if let Some((instance, mut runtime)) = target.instances.get(slot)
+                    .zip(desired_snapshots.get(slot).cloned())
+                {
+                    let values = saved.effect_slots[slot].authoring_values();
+                    runtime.apply_authoring_values(&values)?;
+                    saved.effect_descriptors[slot] = instance.descriptor.clone();
+                    saved.effect_slots[slot] = runtime;
+                    saved.custom_effect_names[slot] = Some(match &instance.source {
+                        RetainedEffectSource::NativeBuiltin { name } => name.clone(),
+                        RetainedEffectSource::Compiled { name, .. } => name.clone(),
+                    });
+                } else {
+                    saved.effect_descriptors[slot] = EffectDescriptor::empty_custom_slot();
+                    saved.effect_slots[slot] = EffectSlotSnapshot::new_empty();
+                    saved.custom_effect_names[slot] = None;
+                }
+            }
+            Ok(())
+        };
+        rebind(&mut restored.live)?;
+        for (_, saved) in &mut restored.patterns {
+            rebind(saved)?;
+        }
+        self.state.restore_rack_slot_effect_pattern_state(track, &restored)?;
+        self.state.restore_rack_macro_pattern_state(track, &target.macros)?;
+        self.graph_controller().refresh_rack_signature_from_live_state(track);
+        let new_host = self.fx_chain_host(locator)?;
+        let batch = FxGraphEditBatch::new(self.graph.lg.0);
+        rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
+        for slot in removed_nodes {
+            unsafe {
+                crate::audiograph::delete_node(self.graph.lg.0, slot.node_id);
+                if slot.modulator_node_id > 0 {
+                    crate::audiograph::delete_node(self.graph.lg.0, slot.modulator_node_id);
+                }
+            }
+            crate::effects::conv_reverb::clear_instance(slot.node_id);
+        }
+        self.editor.effect_chain_leases.remap_slots(locator, &source_slots, batch.serial)?;
+        drop(batch);
+        for (slot, values) in restored.live.effect_slots.iter()
+            .take(target.instances.len())
+            .map(|slot| slot.authoring_values())
+            .enumerate()
+        {
+            if let (Some(reference), Some(ir)) = (&values.ir, &values.prepared_ir) {
+                self.restore_prepared_rack_effect_ir(
+                    track, rack_slot, slot, reference, ir.clone(),
+                )?;
+            }
+        }
+        let ids = target.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+        self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+        for slot in 0..target.instances.len() {
+            self.push_rack_slot_effect_defaults(track, rack_slot, slot);
+        }
+        self.push_all_delay_bpm();
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
     fn capture_bus_effect_chain_state(
         &mut self,
         bus_idx: usize,
@@ -5022,6 +5275,30 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_bus_effect_chain_state(bus_idx, current, target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::RackEffectChain(patch) => {
+            let track = app.track_registry.index_of(patch.track)
+                .ok_or(EditError::MissingStableTrack { track: patch.track })?;
+            let (slot_track, rack_slot) = app.device_registry.rack_slot_location(patch.rack_slot)
+                .ok_or_else(|| EditError::ReplayFailed(
+                    "rack-slot instance no longer exists".to_string(),
+                ))?;
+            if slot_track != patch.track {
+                return Err(EditError::ReplayFailed(
+                    "rack-slot instance moved to another track".to_string(),
+                ));
+            }
+            let (current, target) = match mode {
+                ApplyMode::Undo => (&patch.after, &patch.before),
+                ApplyMode::Redo => (&patch.before, &patch.after),
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "rack-effect-chain replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_rack_effect_chain_state(track, rack_slot, current, target)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::MidiFxChain(patch) => {
             let track = app
                 .track_registry
@@ -5104,6 +5381,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::RackSlotStructure(_) => true,
         EditPatch::EffectChain(_) => true,
         EditPatch::BusEffectChain(_) => true,
+        EditPatch::RackEffectChain(_) => true,
         EditPatch::MidiFxChain(_) => true,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
     }
@@ -5180,6 +5458,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::BusEffectChain(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::RackEffectChain(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::MidiFxChain(_) => {

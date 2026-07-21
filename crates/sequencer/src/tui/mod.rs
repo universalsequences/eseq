@@ -902,6 +902,10 @@ pub struct DeviceIdentityRegistry {
         HashMap<(crate::sequencer::BusId, usize), crate::sequencer::EffectInstanceId>,
     bus_audio_effect_locations:
         HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::BusId, usize)>,
+    rack_audio_effects:
+        HashMap<(crate::sequencer::RackSlotId, usize), crate::sequencer::EffectInstanceId>,
+    rack_audio_effect_locations:
+        HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::RackSlotId, usize)>,
     midi_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::MidiFxInstanceId>,
     midi_effect_locations:
         HashMap<crate::sequencer::MidiFxInstanceId, (crate::sequencer::TrackId, usize)>,
@@ -969,7 +973,9 @@ impl DeviceIdentityRegistry {
             return Err("audio-effect chain contains a duplicate stable identity".to_string());
         }
         for id in instances {
-            if self.bus_audio_effect_locations.contains_key(id) {
+            if self.bus_audio_effect_locations.contains_key(id)
+                || self.rack_audio_effect_locations.contains_key(id)
+            {
                 return Err(format!(
                     "effect instance {} is already bound to a bus device",
                     id.0
@@ -1028,7 +1034,9 @@ impl DeviceIdentityRegistry {
             return Err("bus effect chain contains a duplicate stable identity".to_string());
         }
         for id in instances {
-            if self.audio_effect_locations.contains_key(id) {
+            if self.audio_effect_locations.contains_key(id)
+                || self.rack_audio_effect_locations.contains_key(id)
+            {
                 return Err(format!(
                     "effect instance {} is already bound to a track device",
                     id.0
@@ -1058,6 +1066,70 @@ impl DeviceIdentityRegistry {
         for (slot, id) in instances.iter().copied().enumerate() {
             self.bus_audio_effects.insert((bus, slot), id);
             self.bus_audio_effect_locations.insert(id, (bus, slot));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rack_audio_effect(
+        &mut self,
+        rack_slot: crate::sequencer::RackSlotId,
+        slot: usize,
+    ) -> crate::sequencer::EffectInstanceId {
+        if let Some(id) = self.rack_audio_effects.get(&(rack_slot, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        self.rack_audio_effects.insert((rack_slot, slot), id);
+        self.rack_audio_effect_locations.insert(id, (rack_slot, slot));
+        id
+    }
+
+    pub(crate) fn rack_audio_effect_location(
+        &self,
+        id: crate::sequencer::EffectInstanceId,
+    ) -> Option<(crate::sequencer::RackSlotId, usize)> {
+        self.rack_audio_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn bind_rack_audio_effect_chain(
+        &mut self,
+        rack_slot: crate::sequencer::RackSlotId,
+        instances: &[crate::sequencer::EffectInstanceId],
+    ) -> Result<(), String> {
+        if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
+            return Err("rack-slot effect chain contains a duplicate stable identity".to_string());
+        }
+        for id in instances {
+            if self.audio_effect_locations.contains_key(id)
+                || self.bus_audio_effect_locations.contains_key(id)
+            {
+                return Err(format!(
+                    "effect instance {} is already bound to another device domain",
+                    id.0
+                ));
+            }
+            if let Some((owner, _)) = self.rack_audio_effect_locations.get(id).copied() {
+                if owner != rack_slot {
+                    return Err(format!(
+                        "effect instance {} is already bound to another rack slot",
+                        id.0
+                    ));
+                }
+            }
+        }
+        let retained = self.rack_audio_effects.iter()
+            .filter(|((owner, _), _)| *owner != rack_slot)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        self.rack_audio_effects.clear();
+        self.rack_audio_effect_locations.clear();
+        for (location, id) in retained {
+            self.rack_audio_effects.insert(location, id);
+            self.rack_audio_effect_locations.insert(id, location);
+        }
+        for (slot, id) in instances.iter().copied().enumerate() {
+            self.rack_audio_effects.insert((rack_slot, slot), id);
+            self.rack_audio_effect_locations.insert(id, (rack_slot, slot));
         }
         Ok(())
     }
