@@ -319,150 +319,6 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
     }
 }
 
-fn legacy_builtin_slot_has_edits(
-    slot: &project::ProjectEffectSlot,
-    desc: &EffectDescriptor,
-) -> bool {
-    if slot.num_params == 0 {
-        return false;
-    }
-    let num_params = (slot.num_params as usize).min(desc.params.len());
-    for param_idx in 0..num_params {
-        let saved = slot.defaults.get(param_idx).copied().unwrap_or(0.0);
-        if (saved - desc.params[param_idx].default).abs() > 0.0001 {
-            return true;
-        }
-    }
-    slot.plocks
-        .iter()
-        .any(|row| row.iter().take(num_params).any(Option::is_some))
-}
-
-fn project_slot_matches_descriptor_prefix(
-    slot: &project::ProjectEffectSlot,
-    desc: &EffectDescriptor,
-) -> bool {
-    let num_params = slot.num_params as usize;
-    num_params > 0
-        && num_params <= desc.params.len()
-        && slot.param_node_indices.len() >= num_params
-        && slot.param_node_indices[..num_params]
-            .iter()
-            .copied()
-            .eq(desc.params[..num_params].iter().map(|param| param.node_param_idx))
-}
-
-fn pattern_has_legacy_default_track_effects(
-    pattern: &ProjectPattern,
-    track_idx: usize,
-    legacy_descs: &[&EffectDescriptor; 2],
-) -> bool {
-    let Some(slots) = pattern.effect_slots.get(track_idx) else {
-        return false;
-    };
-    slots.len() >= 2
-        && project_slot_matches_descriptor_prefix(&slots[0], legacy_descs[0])
-        && project_slot_matches_descriptor_prefix(&slots[1], legacy_descs[1])
-}
-
-fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
-    if project.version >= 4 {
-        return;
-    }
-    let mut filter_desc = EffectDescriptor::builtin_filter();
-    let mut delay_desc = EffectDescriptor::builtin_delay();
-    if let Some(enabled) = filter_desc
-        .params
-        .iter_mut()
-        .find(|param| param.name == "enabled")
-    {
-        enabled.default = 0.0;
-    }
-    if let Some(enabled) = delay_desc
-        .params
-        .iter_mut()
-        .find(|param| param.name == "enabled")
-    {
-        enabled.default = 0.0;
-    }
-    let legacy_descs = [&filter_desc, &delay_desc];
-    let legacy_names = ["Filter", "Delay"];
-    let max_slots = crate::lisp_host::MAX_CUSTOM_FX;
-
-    for track_idx in 0..project.tracks.len() {
-        // Device normalization compacts the historical padded name vector to
-        // active instances. Comparing that count with the dense value-slot
-        // count therefore misclassifies modern projects with one effect as the
-        // old [Filter, Delay, custom...] layout. Recognize the old layout by
-        // the parameter topology of its two fixed slots instead.
-        let has_legacy_layout = project.patterns.iter().any(|pattern| {
-            pattern_has_legacy_default_track_effects(pattern, track_idx, &legacy_descs)
-        });
-        if !has_legacy_layout {
-            continue;
-        }
-
-        let mut preserve_legacy = [false; 2];
-        for pattern in &project.patterns {
-            let Some(slots) = pattern.effect_slots.get(track_idx) else {
-                continue;
-            };
-            for legacy_idx in 0..2 {
-                if let Some(slot) = slots.get(legacy_idx) {
-                    preserve_legacy[legacy_idx] |=
-                        legacy_builtin_slot_has_edits(slot, legacy_descs[legacy_idx]);
-                }
-            }
-        }
-
-        let old_names = project
-            .custom_effects
-            .get(track_idx)
-            .cloned()
-            .unwrap_or_default();
-        let mut migrated_names = Vec::new();
-        for legacy_idx in 0..2 {
-            if preserve_legacy[legacy_idx] {
-                migrated_names.push(EffectDescriptor::builtin_insert_project_name(
-                    legacy_names[legacy_idx],
-                ));
-            }
-        }
-        migrated_names.extend(old_names);
-        migrated_names.truncate(max_slots);
-        while project.custom_effects.len() <= track_idx {
-            project.custom_effects.push(Vec::new());
-        }
-        project.custom_effects[track_idx] = migrated_names;
-
-        for pattern in &mut project.patterns {
-            let old_slots = pattern
-                .effect_slots
-                .get(track_idx)
-                .cloned()
-                .unwrap_or_default();
-            let mut migrated_slots = Vec::new();
-            for legacy_idx in 0..2 {
-                if preserve_legacy[legacy_idx] {
-                    migrated_slots.push(
-                        old_slots.get(legacy_idx).cloned().unwrap_or_else(|| {
-                            default_project_effect_slot(legacy_descs[legacy_idx])
-                        }),
-                    );
-                }
-            }
-            if old_slots.len() > 2 {
-                migrated_slots.extend(old_slots.into_iter().skip(2));
-            }
-            migrated_slots.truncate(max_slots);
-            while pattern.effect_slots.len() <= track_idx {
-                pattern.effect_slots.push(Vec::new());
-            }
-            pattern.effect_slots[track_idx] = migrated_slots;
-        }
-    }
-}
-
 fn project_builtin_effect_name_for_save(name: &str) -> Option<String> {
     let trimmed = name.trim();
     crate::effects::EffectDescriptor::builtin_insert_project_name(trimmed).or_else(|| {
@@ -1321,7 +1177,6 @@ impl App {
         if project.version > project::project_file_version() {
             return Err(format!("Unsupported project version {}", project.version));
         }
-        migrate_legacy_default_track_effects(&mut project);
         migrate_dgen_builtin_effect_names(&mut project);
         if project.version < 2 {
             migrate_legacy_dgen_param_node_indices(&mut project);
@@ -4298,15 +4153,6 @@ mod tests {
         }
     }
 
-    fn legacy_default_project_effect_slot(
-        mut desc: EffectDescriptor,
-    ) -> project::ProjectEffectSlot {
-        if let Some(enabled) = desc.params.iter_mut().find(|param| param.name == "enabled") {
-            enabled.default = 0.0;
-        }
-        default_project_effect_slot(&desc)
-    }
-
     #[test]
     fn bus_effect_project_restore_preserves_live_modulator_node_id() {
         let desc = EffectDescriptor::builtin_insert("Filter").expect("filter descriptor");
@@ -4410,44 +4256,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_default_filter_delay_migration_drops_untouched_slots() {
-        let custom_slot = project::ProjectEffectSlot {
-            num_params: 1,
-            defaults: vec![0.42],
-            plocks: vec![vec![None]; MAX_STEPS],
-            plock_param_ids: vec![vec![None]; MAX_STEPS],
-            key_locks: std::collections::BTreeMap::new(),
-            key_lock_param_ids: std::collections::BTreeMap::new(),
-            param_node_indices: vec![9],
-            param_node_spans: vec![1],
-            tensor_params: Vec::new(),
-            ir: None,
-        };
-        let mut project = minimal_project_with_effect_slots(
-            vec![Some("custom-fx".to_string())],
-            vec![
-                legacy_default_project_effect_slot(EffectDescriptor::builtin_filter()),
-                legacy_default_project_effect_slot(EffectDescriptor::builtin_delay()),
-                custom_slot.clone(),
-            ],
-        );
-        project.version = 1;
-
-        migrate_legacy_default_track_effects(&mut project);
-
-        assert_eq!(
-            project.custom_effects[0],
-            vec![Some("custom-fx".to_string())]
-        );
-        assert_eq!(project.patterns[0].effect_slots[0].len(), 1);
-        assert_eq!(
-            project.patterns[0].effect_slots[0][0].defaults,
-            custom_slot.defaults
-        );
-    }
-
-    #[test]
-    fn legacy_default_filter_delay_migration_keeps_modern_dense_custom_slots() {
+    fn device_normalization_keeps_modern_dense_custom_slots() {
         let shimmer_values = vec![
             1.6437798, 7.0884132, 53.366623, 230.13315, 0.82464963, 5579.7046, 0.85,
             0.7110942, 0.38275215, 1.0, 1.0,
@@ -4472,7 +4281,7 @@ mod tests {
         );
         project.version = 1;
 
-        migrate_legacy_default_track_effects(&mut project);
+        project.normalize_device_instances().unwrap();
 
         assert_eq!(
             project.custom_effects[0],
@@ -4485,52 +4294,6 @@ mod tests {
         assert_eq!(
             project.patterns[0].effect_slots[0].len(),
             crate::lisp_host::MAX_CUSTOM_FX
-        );
-    }
-
-    #[test]
-    fn legacy_default_filter_delay_migration_preserves_edited_slots() {
-        let mut filter_slot =
-            legacy_default_project_effect_slot(EffectDescriptor::builtin_filter());
-        filter_slot.defaults[2] = 880.0;
-        let mut delay_slot = legacy_default_project_effect_slot(EffectDescriptor::builtin_delay());
-        delay_slot.plocks[3][0] = Some(0.0);
-        let custom_slot = project::ProjectEffectSlot {
-            num_params: 1,
-            defaults: vec![0.24],
-            plocks: vec![vec![None]; MAX_STEPS],
-            plock_param_ids: vec![vec![None]; MAX_STEPS],
-            key_locks: std::collections::BTreeMap::new(),
-            key_lock_param_ids: std::collections::BTreeMap::new(),
-            param_node_indices: vec![11],
-            param_node_spans: vec![1],
-            tensor_params: Vec::new(),
-            ir: None,
-        };
-        let mut project = minimal_project_with_effect_slots(
-            vec![Some("custom-fx".to_string())],
-            vec![filter_slot, delay_slot, custom_slot.clone()],
-        );
-        project.version = 1;
-
-        migrate_legacy_default_track_effects(&mut project);
-
-        assert_eq!(
-            project.custom_effects[0],
-            vec![
-                EffectDescriptor::builtin_insert_project_name("Filter"),
-                EffectDescriptor::builtin_insert_project_name("Delay"),
-                Some("custom-fx".to_string()),
-            ]
-        );
-        assert_eq!(project.patterns[0].effect_slots[0][0].defaults[2], 880.0);
-        assert_eq!(
-            project.patterns[0].effect_slots[0][1].plocks[3][0],
-            Some(0.0)
-        );
-        assert_eq!(
-            project.patterns[0].effect_slots[0][2].defaults,
-            custom_slot.defaults
         );
     }
 
