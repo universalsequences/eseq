@@ -915,6 +915,9 @@ pub struct DeviceIdentityRegistry {
 }
 
 impl DeviceIdentityRegistry {
+    fn observe(&mut self, id: u64) {
+        self.next_id = self.next_id.max(id);
+    }
     fn allocate(&mut self) -> u64 {
         self.next_id = self.next_id.checked_add(1).expect("device instance id exhausted");
         self.next_id
@@ -958,6 +961,9 @@ impl DeviceIdentityRegistry {
         first_slot: usize,
         instances: &[crate::sequencer::EffectInstanceId],
     ) -> Result<(), String> {
+        for id in instances {
+            self.observe(id.0);
+        }
         let end_slot = first_slot
             .checked_add(crate::lisp_host::MAX_CUSTOM_FX)
             .ok_or_else(|| "audio-effect chain range overflow".to_string())?;
@@ -1030,6 +1036,9 @@ impl DeviceIdentityRegistry {
         bus: crate::sequencer::BusId,
         instances: &[crate::sequencer::EffectInstanceId],
     ) -> Result<(), String> {
+        for id in instances {
+            self.observe(id.0);
+        }
         if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
             return Err("bus effect chain contains a duplicate stable identity".to_string());
         }
@@ -1096,6 +1105,9 @@ impl DeviceIdentityRegistry {
         rack_slot: crate::sequencer::RackSlotId,
         instances: &[crate::sequencer::EffectInstanceId],
     ) -> Result<(), String> {
+        for id in instances {
+            self.observe(id.0);
+        }
         if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
             return Err("rack-slot effect chain contains a duplicate stable identity".to_string());
         }
@@ -1170,6 +1182,9 @@ impl DeviceIdentityRegistry {
         track: crate::sequencer::TrackId,
         instances: &[crate::sequencer::MidiFxInstanceId],
     ) -> Result<(), String> {
+        for id in instances {
+            self.observe(id.0);
+        }
         if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
             return Err("MIDI-FX chain contains a duplicate stable identity".to_string());
         }
@@ -1270,13 +1285,57 @@ impl DeviceIdentityRegistry {
         self.rack_slot_locations.get(&id).copied()
     }
 
+    pub(crate) fn bind_rack_slot(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+        id: crate::sequencer::RackSlotId,
+    ) -> Result<(), String> {
+        self.observe(id.0);
+        if let Some((owner, owner_slot)) = self.rack_slot_locations.get(&id).copied() {
+            if owner != track || owner_slot != slot {
+                return Err(format!("rack-slot instance {} is already bound", id.0));
+            }
+        }
+        if let Some(previous) = self.rack_slots.insert((track, slot), id) {
+            self.rack_slot_locations.remove(&previous);
+        }
+        self.rack_slot_locations.insert(id, (track, slot));
+        Ok(())
+    }
+
     pub(crate) fn clear(&mut self) {
         self.audio_effects.clear();
         self.audio_effect_locations.clear();
+        self.bus_audio_effects.clear();
+        self.bus_audio_effect_locations.clear();
+        self.rack_audio_effects.clear();
+        self.rack_audio_effect_locations.clear();
         self.midi_effects.clear();
         self.midi_effect_locations.clear();
         self.rack_slots.clear();
         self.rack_slot_locations.clear();
+    }
+}
+
+#[cfg(test)]
+mod device_identity_registry_tests {
+    use super::DeviceIdentityRegistry;
+    use crate::effects::BUILTIN_SLOT_COUNT;
+    use crate::sequencer::{BusId, EffectInstanceId, TrackId};
+
+    #[test]
+    fn persisted_device_identities_advance_future_allocation() {
+        let mut registry = DeviceIdentityRegistry::default();
+        registry.bind_audio_effect_chain(
+            TrackId(1),
+            BUILTIN_SLOT_COUNT,
+            &[EffectInstanceId(100)],
+        ).unwrap();
+
+        let allocated = registry.bus_audio_effect(BusId::DEFAULT_A, 0);
+
+        assert_eq!(allocated, EffectInstanceId(101));
     }
 }
 

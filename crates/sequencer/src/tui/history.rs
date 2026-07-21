@@ -47,6 +47,7 @@ pub enum EditPatch {
     InstrumentBinding(InstrumentBindingPatch),
     EffectChain(EffectChainPatch),
     BusEffectChain(BusEffectChainPatch),
+    BusEffectValues(BusEffectValuesPatch),
     RackEffectChain(RackEffectChainPatch),
     MidiFxChain(MidiFxChainPatch),
     RackSlotStructure(RackSlotStructurePatch),
@@ -153,6 +154,23 @@ impl BusEffectChainPatch {
                     * std::mem::size_of::<crate::sequencer::BusPatternSnapshot>()
         }
         std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BusEffectValuesPatch {
+    pub bus: BusId,
+    pub instance: EffectInstanceId,
+    pub scene: usize,
+    pub before: EffectSlotValuesSnapshot,
+    pub after: EffectSlotValuesSnapshot,
+}
+
+impl BusEffectValuesPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.before.retained_bytes()
+            + self.after.retained_bytes()
     }
 }
 

@@ -13487,8 +13487,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let next =
                                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                             if selected.is_empty() {
-                                                match app.set_bus_effect_param(
-                                                    bus_idx, slot_idx, param_idx, next,
+                                                match app.apply_recorded_bus_effect_value_mutation(
+                                                    bus_idx,
+                                                    slot_idx,
+                                                    "Set bus effect parameter",
+                                                    format!("param:{param_idx}"),
+                                                    |app| app.set_bus_effect_param(
+                                                        bus_idx, slot_idx, param_idx, next,
+                                                    ),
                                                 ) {
                                                     Ok(()) => {
                                                         app.publish_bus_gate_runtime();
@@ -13514,27 +13520,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
                                                 }
                                             } else {
-                                                let mut succeeded = true;
-                                                for step in selected {
-                                                    if let Err(error) = app.set_bus_effect_plock(
-                                                        bus_idx,
-                                                        slot_idx,
-                                                        step,
-                                                        param_idx,
-                                                        next,
-                                                    ) {
-                                                        succeeded = false;
-                                                        editor.handle_host_event(
-                                                            HostEvent::Status(format!(
-                                                                "Error toggling bus effect p-lock: {error}"
-                                                            )),
-                                                        );
-                                                        break;
-                                                    }
-                                                }
-                                                if succeeded {
+                                                let result = app.apply_recorded_bus_effect_value_mutation(
+                                                    bus_idx,
+                                                    slot_idx,
+                                                    "Set bus effect p-lock",
+                                                    format!("plock:param:{param_idx}"),
+                                                    |app| {
+                                                        for step in selected {
+                                                            app.set_bus_effect_plock(
+                                                                bus_idx, slot_idx, step, param_idx, next,
+                                                            )?;
+                                                        }
+                                                        Ok(())
+                                                    },
+                                                );
+                                                if result.is_ok() {
                                                     app.publish_bus_gate_runtime();
                                                     *bus_state.lock().unwrap() = app.buses.clone();
+                                                } else if let Err(error) = result {
+                                                    editor.handle_host_event(HostEvent::Status(format!(
+                                                        "Error toggling bus effect p-lock: {error}"
+                                                    )));
                                                 }
                                             }
                                             fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -15176,8 +15182,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .and_then(|bus| bus.effect_descriptors.get(slot_idx))
                                     .and_then(|desc| desc.params.get(param_idx))
                                     .cloned();
-                                match app.set_bus_effect_param(bus_idx, slot_idx, param_idx, value)
-                                {
+                                match app.apply_recorded_bus_effect_value_mutation(
+                                    bus_idx,
+                                    slot_idx,
+                                    "Set bus effect parameter",
+                                    format!("param:{param_idx}"),
+                                    |app| app.set_bus_effect_param(
+                                        bus_idx, slot_idx, param_idx, value,
+                                    ),
+                                ) {
                                     Ok(()) => {
                                         app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
@@ -15226,15 +15239,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                let mut result = Ok(());
-                                for step in steps {
-                                    if let Err(error) = app.set_bus_effect_plock(
-                                        bus_idx, slot_idx, step, param_idx, value,
-                                    ) {
-                                        result = Err(error);
-                                        break;
-                                    }
-                                }
+                                let result = app.apply_recorded_bus_effect_value_mutation(
+                                    bus_idx,
+                                    slot_idx,
+                                    "Set bus effect p-lock",
+                                    format!("plock:param:{param_idx}"),
+                                    |app| {
+                                        for step in steps {
+                                            app.set_bus_effect_plock(
+                                                bus_idx, slot_idx, step, param_idx, value,
+                                            )?;
+                                        }
+                                        Ok(())
+                                    },
+                                );
                                 match result {
                                     Ok(()) => {
                                         app.publish_bus_gate_runtime();
@@ -15287,19 +15305,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .and_then(|param| param.host_control.as_ref()),
                                         Some(sequencer::effects::HostControl::FxSidechain { .. })
                                     );
-                                    if is_host_sidechain {
-                                        app.apply_bus_effect_sidechain_selection(
-                                            bus_idx,
-                                            slot_idx,
-                                            param_idx,
-                                            selected_idx,
-                                        );
-                                    }
-                                    match app.set_bus_effect_param(
+                                    match app.apply_recorded_bus_effect_value_mutation(
                                         bus_idx,
                                         slot_idx,
-                                        param_idx,
-                                        selected_idx as f32,
+                                        "Set bus effect option",
+                                        format!("param:{param_idx}"),
+                                        |app| {
+                                            if is_host_sidechain {
+                                                app.apply_bus_effect_sidechain_selection(
+                                                    bus_idx, slot_idx, param_idx, selected_idx,
+                                                );
+                                            }
+                                            app.set_bus_effect_param(
+                                                bus_idx, slot_idx, param_idx, selected_idx as f32,
+                                            )
+                                        },
                                     ) {
                                         Ok(()) => {
                                             app.publish_bus_gate_runtime();
@@ -15355,19 +15375,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ) {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
-                                    let mut result = Ok(());
-                                    for step in steps {
-                                        if let Err(error) = app.set_bus_effect_plock(
-                                            bus_idx,
-                                            slot_idx,
-                                            step,
-                                            param_idx,
-                                            selected_idx as f32,
-                                        ) {
-                                            result = Err(error);
-                                            break;
-                                        }
-                                    }
+                                    let result = app.apply_recorded_bus_effect_value_mutation(
+                                        bus_idx,
+                                        slot_idx,
+                                        "Set bus effect p-lock option",
+                                        format!("plock:param:{param_idx}"),
+                                        |app| {
+                                            for step in steps {
+                                                app.set_bus_effect_plock(
+                                                    bus_idx,
+                                                    slot_idx,
+                                                    step,
+                                                    param_idx,
+                                                    selected_idx as f32,
+                                                )?;
+                                            }
+                                            Ok(())
+                                        },
+                                    );
                                     match result {
                                         Ok(()) => {
                                             app.publish_bus_gate_runtime();

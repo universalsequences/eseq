@@ -1300,6 +1300,7 @@ impl App {
         if project.version < 2 {
             migrate_legacy_dgen_param_node_indices(&mut project);
         }
+        project.normalize_device_instances()?;
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
             name: name.to_string(),
@@ -1888,6 +1889,7 @@ impl App {
             .export_bus_pattern_repository(&default_bus_snapshot);
         let tracks = self.capture_project_tracks()?;
         let custom_effects = self.capture_custom_effects();
+        let device_instances = self.capture_project_device_instances(&tracks, &custom_effects)?;
         let patterns = bank
             .iter()
             .enumerate()
@@ -1958,6 +1960,7 @@ impl App {
                 .collect(),
             tracks,
             custom_effects,
+            device_instances,
             scratch: ProjectScratchState {
                 buffer: self.editor.scratch_buffer.clone(),
                 cursor_row: self.editor.scratch_cursor.0,
@@ -2151,6 +2154,242 @@ impl App {
                     .collect()
             })
             .collect()
+    }
+
+    fn capture_project_device_instances(
+        &mut self,
+        tracks: &[ProjectTrack],
+        custom_effects: &[Vec<Option<String>>],
+    ) -> Result<crate::project::ProjectDeviceInstances, String> {
+        let mut result = crate::project::ProjectDeviceInstances::default();
+        for (track, project_track) in tracks.iter().enumerate() {
+            let sources = custom_effects.get(track).cloned().unwrap_or_default();
+            let active_sources = sources.into_iter().take_while(Option::is_some)
+                .flatten().collect::<Vec<_>>();
+            let ids = self.device_registry.audio_effect_chain(
+                project_track.id,
+                (0..active_sources.len()).map(|offset| BUILTIN_SLOT_COUNT + offset),
+            );
+            self.device_registry.bind_audio_effect_chain(
+                project_track.id,
+                BUILTIN_SLOT_COUNT,
+                &ids,
+            )?;
+            result.track_effects.push(crate::project::ProjectTrackEffectChain {
+                track_id: project_track.id.0,
+                instances: ids.into_iter().zip(active_sources).map(|(id, name)| {
+                    crate::project::ProjectEffectInstance {
+                        id: id.0,
+                        source: crate::project::ProjectEffectSource::from_project_name(&name),
+                    }
+                }).collect(),
+            });
+
+            let midi_names = self.state.pattern.track_params.get(track)
+                .map(|params| params.midi_fx_chain())
+                .unwrap_or_default();
+            let midi_ids = self.device_registry.midi_effect_chain(project_track.id, midi_names.len());
+            self.device_registry.bind_midi_effect_chain(project_track.id, &midi_ids)?;
+            result.midi_effects.push(crate::project::ProjectMidiEffectChain {
+                track_id: project_track.id.0,
+                instances: midi_ids.into_iter().zip(midi_names).map(|(id, name)| {
+                    crate::project::ProjectMidiEffectInstance { id: id.0, name }
+                }).collect(),
+            });
+        }
+        for bus in &self.buses {
+            let names = bus.custom_effect_names.iter().take_while(|name| name.is_some())
+                .filter_map(|name| name.clone()).collect::<Vec<_>>();
+            let ids = (0..names.len()).map(|slot| {
+                self.device_registry.bus_audio_effect(bus.id, slot)
+            }).collect::<Vec<_>>();
+            self.device_registry.bind_bus_audio_effect_chain(bus.id, &ids)?;
+            result.bus_effects.push(crate::project::ProjectBusEffectChain {
+                bus_id: bus.id.0,
+                instances: ids.into_iter().zip(names).map(|(id, name)| {
+                    crate::project::ProjectEffectInstance {
+                        id: id.0,
+                        source: crate::project::ProjectEffectSource::from_project_name(&name),
+                    }
+                }).collect(),
+            });
+        }
+        let racks = self.state.pattern.rack_tracks.lock().unwrap().clone();
+        for (track, rack) in racks.into_iter().enumerate() {
+            let (Some(project_track), Some(rack)) = (tracks.get(track), rack) else { continue };
+            for (slot_index, slot) in rack.slots.into_iter().enumerate() {
+                let rack_slot_id = self.device_registry.rack_slot(project_track.id, slot_index);
+                let names = slot.custom_effect_names.into_iter().take_while(Option::is_some)
+                    .flatten().collect::<Vec<_>>();
+                let ids = (0..names.len()).map(|effect_slot| {
+                    self.device_registry.rack_audio_effect(rack_slot_id, effect_slot)
+                }).collect::<Vec<_>>();
+                self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+                result.rack_effects.push(crate::project::ProjectRackEffectChain {
+                    track_id: project_track.id.0,
+                    slot_index,
+                    rack_slot_id: rack_slot_id.0,
+                    instances: ids.into_iter().zip(names).map(|(id, name)| {
+                        crate::project::ProjectEffectInstance {
+                            id: id.0,
+                            source: crate::project::ProjectEffectSource::from_project_name(&name),
+                        }
+                    }).collect(),
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    fn restore_project_device_instances(
+        &mut self,
+        instances: &crate::project::ProjectDeviceInstances,
+    ) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut observe = |id: u64, label: &str| -> Result<(), String> {
+            if id == 0 {
+                return Err(format!("{label} has an invalid zero identity"));
+            }
+            if !seen.insert(id) {
+                return Err(format!("project device identity {id} is duplicated"));
+            }
+            Ok(())
+        };
+        for chain in &instances.track_effects {
+            for instance in &chain.instances { observe(instance.id, "track effect")?; }
+        }
+        for chain in &instances.midi_effects {
+            for instance in &chain.instances { observe(instance.id, "MIDI effect")?; }
+        }
+        for chain in &instances.bus_effects {
+            for instance in &chain.instances { observe(instance.id, "bus effect")?; }
+        }
+        for chain in &instances.rack_effects {
+            observe(chain.rack_slot_id, "rack slot")?;
+            for instance in &chain.instances { observe(instance.id, "rack-slot effect")?; }
+        }
+
+        let expected_tracks = self.track_registry.ids().iter()
+            .map(|id| id.0).collect::<std::collections::HashSet<_>>();
+        let track_effect_owners = instances.track_effects.iter()
+            .map(|chain| chain.track_id).collect::<std::collections::HashSet<_>>();
+        if track_effect_owners.len() != instances.track_effects.len()
+            || track_effect_owners != expected_tracks
+        {
+            return Err("project track-effect records do not cover every track exactly once".to_string());
+        }
+        let midi_effect_owners = instances.midi_effects.iter()
+            .map(|chain| chain.track_id).collect::<std::collections::HashSet<_>>();
+        if midi_effect_owners.len() != instances.midi_effects.len()
+            || midi_effect_owners != expected_tracks
+        {
+            return Err("project MIDI-effect records do not cover every track exactly once".to_string());
+        }
+        let expected_buses = self.buses.iter()
+            .map(|bus| bus.id.0).collect::<std::collections::HashSet<_>>();
+        let bus_effect_owners = instances.bus_effects.iter()
+            .map(|chain| chain.bus_id).collect::<std::collections::HashSet<_>>();
+        if bus_effect_owners.len() != instances.bus_effects.len()
+            || bus_effect_owners != expected_buses
+        {
+            return Err("project bus-effect records do not cover every bus exactly once".to_string());
+        }
+        let racks = self.state.pattern.rack_tracks.lock().unwrap().clone();
+        let mut expected_rack_slots = std::collections::HashSet::new();
+        for (track, rack) in racks.iter().enumerate() {
+            let Some(rack) = rack else { continue };
+            let track_id = self.track_registry.id_at(track)
+                .ok_or_else(|| format!("rack at track {} has no stable track identity", track + 1))?;
+            expected_rack_slots.extend(
+                (0..rack.slots.len()).map(|slot_index| (track_id.0, slot_index)),
+            );
+        }
+        let rack_effect_owners = instances.rack_effects.iter()
+            .map(|chain| (chain.track_id, chain.slot_index))
+            .collect::<std::collections::HashSet<_>>();
+        if rack_effect_owners.len() != instances.rack_effects.len()
+            || rack_effect_owners != expected_rack_slots
+        {
+            return Err("project rack-effect records do not cover every rack slot exactly once".to_string());
+        }
+
+        for chain in &instances.track_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let track = self.track_registry.index_of(track_id)
+                .ok_or_else(|| format!("effect chain references missing track {}", chain.track_id))?;
+            let live_count = self.state.pattern.effect_chains[track]
+                .iter().skip(BUILTIN_SLOT_COUNT)
+                .take_while(|slot| slot.node_id.load(Ordering::Relaxed) != 0)
+                .count();
+            if live_count != chain.instances.len() {
+                return Err(format!("track {} effect-instance count does not match the live chain", track + 1));
+            }
+        }
+        for chain in &instances.midi_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let track = self.track_registry.index_of(track_id)
+                .ok_or_else(|| format!("MIDI chain references missing track {}", chain.track_id))?;
+            if self.state.pattern.track_params[track].midi_fx_chain().len() != chain.instances.len() {
+                return Err(format!("track {} MIDI-instance count does not match the live chain", track + 1));
+            }
+        }
+        for chain in &instances.bus_effects {
+            let bus_id = BusId(chain.bus_id);
+            let bus = self.buses.iter().position(|bus| bus.id == bus_id)
+                .ok_or_else(|| format!("effect chain references missing bus {}", chain.bus_id))?;
+            let live_count = self.buses[bus].effect_slots.iter()
+                .take_while(|slot| slot.node_id != 0).count();
+            if live_count != chain.instances.len() {
+                return Err(format!("bus {} effect-instance count does not match the live chain", chain.bus_id));
+            }
+        }
+        for chain in &instances.rack_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let track = self.track_registry.index_of(track_id)
+                .ok_or_else(|| format!("rack chain references missing track {}", chain.track_id))?;
+            let rack_slot_id = crate::sequencer::RackSlotId(chain.rack_slot_id);
+            let slot = self.state.pattern.rack_tracks.lock().unwrap()
+                .get(track).and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(chain.slot_index)).cloned()
+                .ok_or_else(|| format!("rack chain references missing track {} slot {}", track + 1, chain.slot_index + 1))?;
+            let live_count = slot.effect_slots.iter().take_while(|slot| slot.node_id != 0).count();
+            if live_count != chain.instances.len() {
+                return Err(format!("rack-slot effect-instance count does not match the live chain"));
+            }
+        }
+
+        self.device_registry.clear();
+        for chain in &instances.track_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let ids = chain.instances.iter()
+                .map(|instance| crate::sequencer::EffectInstanceId(instance.id))
+                .collect::<Vec<_>>();
+            self.device_registry.bind_audio_effect_chain(track_id, BUILTIN_SLOT_COUNT, &ids)?;
+        }
+        for chain in &instances.midi_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let ids = chain.instances.iter()
+                .map(|instance| crate::sequencer::MidiFxInstanceId(instance.id))
+                .collect::<Vec<_>>();
+            self.device_registry.bind_midi_effect_chain(track_id, &ids)?;
+        }
+        for chain in &instances.bus_effects {
+            let bus_id = BusId(chain.bus_id);
+            let ids = chain.instances.iter()
+                .map(|instance| crate::sequencer::EffectInstanceId(instance.id))
+                .collect::<Vec<_>>();
+            self.device_registry.bind_bus_audio_effect_chain(bus_id, &ids)?;
+        }
+        for chain in &instances.rack_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let rack_slot_id = crate::sequencer::RackSlotId(chain.rack_slot_id);
+            self.device_registry.bind_rack_slot(track_id, chain.slot_index, rack_slot_id)?;
+            let ids = chain.instances.iter()
+                .map(|instance| crate::sequencer::EffectInstanceId(instance.id))
+                .collect::<Vec<_>>();
+            self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+        }
+        Ok(())
     }
 
     fn resolve_sample_path_for_snapshot(
@@ -2695,6 +2934,7 @@ impl App {
             scratch,
             tracks: _,
             custom_effects: _,
+            device_instances,
             patterns: _,
             groups,
             macros,
@@ -2904,6 +3144,7 @@ impl App {
             macro_engine.set_value(id, value);
         }
         self.macro_engine = macro_engine;
+        self.restore_project_device_instances(&device_instances)?;
         self.push_all_restored_defaults();
         self.push_all_delay_bpm();
 
@@ -3971,6 +4212,7 @@ mod tests {
                 },
             }],
             custom_effects: vec![custom_effects],
+            device_instances: crate::project::ProjectDeviceInstances::default(),
             scratch: ProjectScratchState::default(),
             patterns: vec![ProjectPattern {
                 track_bits: Vec::new(),
@@ -4054,12 +4296,69 @@ mod tests {
         project.buses = project::default_project_buses();
         project.buses[1].custom_effects = vec![Some(project_name)];
         project.buses[1].effect_slots = vec![bus_slot];
+        project.normalize_device_instances().unwrap();
 
         let before = serde_json::to_string_pretty(&project).expect("serialize project");
         let restored: ProjectFile = serde_json::from_str(&before).expect("deserialize project");
         let after = serde_json::to_string_pretty(&restored).expect("reserialize project");
 
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn project_device_instance_records_roundtrip_stable_ids_and_sources() {
+        let mut project = minimal_project_with_effect_slots(Vec::new(), Vec::new());
+        project.buses = project::default_project_buses();
+        project.device_instances = crate::project::ProjectDeviceInstances {
+            track_effects: vec![crate::project::ProjectTrackEffectChain {
+                track_id: 1,
+                instances: vec![crate::project::ProjectEffectInstance {
+                    id: 10,
+                    source: crate::project::ProjectEffectSource::Builtin {
+                        name: "Filter".to_string(),
+                    },
+                }],
+            }],
+            midi_effects: vec![crate::project::ProjectMidiEffectChain {
+                track_id: 1,
+                instances: vec![crate::project::ProjectMidiEffectInstance {
+                    id: 11,
+                    name: "arp".to_string(),
+                }],
+            }],
+            bus_effects: vec![crate::project::ProjectBusEffectChain {
+                bus_id: BusId::DEFAULT_A.0,
+                instances: vec![crate::project::ProjectEffectInstance {
+                    id: 12,
+                    source: crate::project::ProjectEffectSource::Saved {
+                        name: "stereo-tremolo".to_string(),
+                    },
+                }],
+            }],
+            rack_effects: vec![crate::project::ProjectRackEffectChain {
+                track_id: 1,
+                slot_index: 0,
+                rack_slot_id: 13,
+                instances: vec![crate::project::ProjectEffectInstance {
+                    id: 14,
+                    source: crate::project::ProjectEffectSource::Builtin {
+                        name: "OTT".to_string(),
+                    },
+                }],
+            }],
+        };
+
+        let json = serde_json::to_string_pretty(&project).expect("serialize instance records");
+        assert!(json.contains("\"device_instances\""));
+        assert!(!json.contains("\"midi_fx_chain\""));
+        let restored: ProjectFile = serde_json::from_str(&json).expect("restore instance records");
+        assert_eq!(restored.device_instances, project.device_instances);
+        assert_eq!(restored.custom_effects[0][0].as_deref(), Some("builtin:Filter"));
+        assert_eq!(
+            restored.buses.iter().find(|bus| bus.id == BusId::DEFAULT_A.0)
+                .unwrap().custom_effects[0].as_deref(),
+            Some("stereo-tremolo")
+        );
     }
 
     #[test]

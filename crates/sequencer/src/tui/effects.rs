@@ -3019,7 +3019,6 @@ impl App {
             stored_value,
         );
         self.sync_bus_effect_mod_active_defaults(bus_idx, slot_idx);
-        super::edit::commit_history_barrier(self);
         Ok(())
     }
 
@@ -3056,7 +3055,6 @@ impl App {
             slot.plocks[step][param_idx] = Some(value.clamp(param.min, param.max));
         }
         self.sync_bus_effect_mod_active_plocks(bus_idx, step, slot_idx);
-        super::edit::commit_history_barrier(self);
         Ok(())
     }
 
@@ -5140,6 +5138,45 @@ mod tests {
         ));
         assert_eq!(app.buses[bus_idx].effect_slots[slot].node_id, 0);
         assert!(app.device_registry.bus_audio_effect_location(instance).is_none());
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_bus_effect_parameter_drag_coalesces_and_replays() {
+        let graph = TestLiveGraph::new("bus-fx-value-history-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("Value Bus");
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+        let slot = app.apply_recorded_bus_effect_chain_mutation(
+            bus_idx,
+            "Add bus effect",
+            |app| app.add_builtin_bus_effect_sync(bus_idx, "Filter"),
+        ).unwrap();
+        let param = 2;
+        let before = app.buses[bus_idx].effect_slots[slot].defaults[param];
+
+        for value in [500.0, 1_000.0, 2_000.0] {
+            app.apply_recorded_bus_effect_value_mutation(
+                bus_idx,
+                slot,
+                "Set bus effect parameter",
+                format!("param:{param}"),
+                |app| app.set_bus_effect_param(bus_idx, slot, param, value),
+            ).unwrap();
+        }
+        crate::tui::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 2, "the drag should add one history entry");
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), 2_000.0_f32.to_bits());
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), before.to_bits());
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), 2_000.0_f32.to_bits());
         graph.process_block();
     }
 

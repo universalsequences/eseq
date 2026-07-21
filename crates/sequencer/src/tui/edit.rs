@@ -11,7 +11,7 @@ use std::time::Instant;
 use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
     step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusEffectChainPatch,
-    BusEffectChainState, BusMixerPatch, BusMixerSnapshot,
+    BusEffectChainState, BusEffectValuesPatch, BusMixerPatch, BusMixerSnapshot,
     DeviceId, DeviceValueSnapshot, DeviceValuesPatch, EditPatch, EffectChainPatch,
     EffectChainState, EffectInstanceState, EffectPatternSlots, GestureId, HistoryMove,
     HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, MidiFxChainPatch,
@@ -471,6 +471,76 @@ impl App {
                 app.retain_effect_source(FxChainLocator::Bus(bus_id), slot, source)
             },
         )
+    }
+
+    pub fn apply_recorded_bus_effect_value_mutation<T>(
+        &mut self,
+        bus_idx: usize,
+        slot: usize,
+        label: &'static str,
+        merge_suffix: impl AsRef<str>,
+        mutate: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let bus_id = self.buses.get(bus_idx)
+            .map(|bus| bus.id)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        let instance = self.device_registry.bus_audio_effect(bus_id, slot);
+        let scene = self.state.current_scene_index();
+        self.save_current_bus_pattern();
+        let current_before = self.buses.get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(slot))
+            .map(EffectSlotSnapshot::authoring_values)
+            .ok_or_else(|| format!("Bus effect slot {} is out of range", slot + 1))?;
+        let merge_key = MergeKey::new(format!(
+            "bus-effect:{}:scene:{}:{}",
+            instance.0,
+            scene,
+            merge_suffix.as_ref(),
+        ));
+        let entry_before = app_bus_effect_gesture_before(self, &merge_key, bus_id, instance, scene)
+            .unwrap_or_else(|| current_before.clone());
+        let result = match mutate(self) {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(slot_state) = self.buses.get_mut(bus_idx)
+                    .and_then(|bus| bus.effect_slots.get_mut(slot))
+                {
+                    if let Err(rollback_error) = slot_state.apply_authoring_values(&current_before) {
+                        return Err(format!(
+                            "Bus effect edit failed ({error}); rollback also failed ({rollback_error})"
+                        ));
+                    }
+                }
+                self.push_bus_effect_slot_defaults(bus_idx, slot);
+                self.publish_bus_gate_runtime();
+                return Err(error);
+            }
+        };
+        let after = self.buses[bus_idx].effect_slots[slot].authoring_values();
+        if current_before.bit_exact_eq(&after) {
+            return Ok(result);
+        }
+        let patch = BusEffectValuesPatch {
+            bus: bus_id,
+            instance,
+            scene,
+            before: entry_before,
+            after,
+        };
+        if patch.before.bit_exact_eq(&patch.after)
+            && self.history.discard_active_gesture_entry(&merge_key)
+        {
+            return Ok(result);
+        }
+        ensure_coalescing_gesture(self, &merge_key);
+        let retained_bytes = patch.retained_bytes();
+        self.history.stage_active_gesture(
+            label,
+            &merge_key,
+            EditPatch::BusEffectValues(patch),
+            retained_bytes,
+        ).ok_or_else(|| "Could not stage bus-effect history gesture".to_string())?;
+        Ok(result)
     }
 
     fn restore_bus_effect_chain_state(
@@ -4168,6 +4238,23 @@ fn apply_recorded_bus_mixer_command(
     Ok(EditOutcome::Applied(history_move))
 }
 
+fn app_bus_effect_gesture_before(
+    app: &App,
+    key: &MergeKey,
+    bus: BusId,
+    instance: crate::sequencer::EffectInstanceId,
+    scene: usize,
+) -> Option<crate::effects::EffectSlotValuesSnapshot> {
+    app.history.active_gesture_patch(key).and_then(|patch| match patch {
+        EditPatch::BusEffectValues(patch)
+            if patch.bus == bus && patch.instance == instance && patch.scene == scene =>
+        {
+            Some(patch.before.clone())
+        }
+        _ => None,
+    })
+}
+
 static NEXT_HISTORY_GESTURE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
@@ -5015,6 +5102,65 @@ fn replay_bus_mixer_patch(
     Ok(())
 }
 
+fn replay_bus_effect_values_patch(
+    app: &mut App,
+    patch: &BusEffectValuesPatch,
+    mode: ApplyMode,
+) -> Result<(), EditError> {
+    let values = match mode {
+        ApplyMode::Undo => &patch.before,
+        ApplyMode::Redo => &patch.after,
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "bus-effect value replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
+    let bus_idx = app.buses.iter().position(|bus| bus.id == patch.bus)
+        .ok_or(EditError::MissingStableBus { bus: patch.bus })?;
+    let (owner, slot) = app.device_registry.bus_audio_effect_location(patch.instance)
+        .ok_or_else(|| EditError::ReplayFailed(
+            "bus-effect instance no longer exists".to_string(),
+        ))?;
+    if owner != patch.bus {
+        return Err(EditError::ReplayFailed(
+            "bus-effect instance moved to another bus".to_string(),
+        ));
+    }
+    let live_all = app.capture_bus_pattern_snapshot();
+    let mut repository = app.state.export_bus_pattern_repository(&live_all);
+    let scene = repository.get_mut(patch.scene)
+        .ok_or_else(|| EditError::ReplayFailed(
+            "bus-effect scene no longer exists".to_string(),
+        ))?;
+    let scene_bus = scene.iter_mut().find(|bus| bus.id == patch.bus)
+        .ok_or_else(|| EditError::ReplayFailed(
+            "bus-effect scene state no longer exists".to_string(),
+        ))?;
+    scene_bus.effect_defaults.resize_with(slot + 1, Vec::new);
+    scene_bus.effect_plocks.resize_with(slot + 1, Vec::new);
+    scene_bus.effect_defaults[slot] = values.defaults.clone();
+    scene_bus.effect_plocks[slot] = values.plocks.clone();
+    app.state.replace_bus_pattern_repository(repository, &live_all);
+
+    if app.state.current_scene_index() == patch.scene {
+        let live_slot = app.buses.get_mut(bus_idx)
+            .and_then(|bus| bus.effect_slots.get_mut(slot))
+            .ok_or_else(|| EditError::ReplayFailed(
+                "bus-effect slot no longer exists".to_string(),
+            ))?;
+        live_slot.apply_authoring_values(values).map_err(EditError::ReplayFailed)?;
+        if let (Some(reference), Some(ir)) = (&values.ir, &values.prepared_ir) {
+            app.restore_prepared_bus_effect_ir(bus_idx, slot, reference, ir.clone())
+                .map_err(EditError::ReplayFailed)?;
+        }
+        app.push_bus_effect_slot_defaults(bus_idx, slot);
+        app.publish_bus_gate_runtime();
+    }
+    app.state.publish_scheduler_snapshot();
+    Ok(())
+}
+
 fn resolve_stored_device_target(
     app: &App,
     patch: &DeviceValuesPatch,
@@ -5223,6 +5369,7 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             replay_track_params_batch_patch(app, patch, mode, true).map(|_| ())
         }
         EditPatch::BusMixer(patch) => replay_bus_mixer_patch(app, patch, mode),
+        EditPatch::BusEffectValues(patch) => replay_bus_effect_values_patch(app, patch, mode),
         EditPatch::DeviceValues(patch) => {
             replay_device_values_patch(app, patch, mode, true).map(|_| ())
         }
@@ -5381,6 +5528,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::RackSlotStructure(_) => true,
         EditPatch::EffectChain(_) => true,
         EditPatch::BusEffectChain(_) => true,
+        EditPatch::BusEffectValues(_) => true,
         EditPatch::RackEffectChain(_) => true,
         EditPatch::MidiFxChain(_) => true,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
@@ -5445,6 +5593,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_transport_params_patch(app, patch, ApplyMode::Undo, false)?;
         }
         EditPatch::BusMixer(patch) => replay_bus_mixer_patch(app, patch, ApplyMode::Undo)?,
+        EditPatch::BusEffectValues(patch) => {
+            replay_bus_effect_values_patch(app, patch, ApplyMode::Undo)?;
+        }
         EditPatch::DeviceValues(patch) => {
             replay_device_values_patch(app, patch, ApplyMode::Undo, false)?;
         }

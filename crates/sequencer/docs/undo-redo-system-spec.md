@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Slice 6B.
+Implemented through Slice 6.
 
 - Slice 0 provides stable track identity, bounded linear history, barriers,
   revision tracking, and global undo/redo shortcuts.
@@ -20,9 +20,8 @@ Implemented through Slice 6B.
   restoration of every track pattern's instrument state, process bindings,
   project macro mappings, and scene neural instrument overrides. The Slice 5
   rack extension covers appending layer-rack slots and replacing layer-rack
-  instrument/sample sources while preserving slot FX and per-pattern state.
-  Sound-driven flat-track-to-rack conversion remains a barrier pending the
-  Slice 6 chain-state machinery described below.
+  instrument/sample sources while preserving slot FX and per-pattern state,
+  including Sound-driven flat-track-to-rack conversion.
 - Slice 6A covers track audio-effect insertion, deletion, source replacement,
   and reordering. History retains exact compiled source text and asset roots,
   restores scalar/tensor/IR values across every Track Pattern, rebinds process,
@@ -30,12 +29,21 @@ Implemented through Slice 6B.
   rejects stale async compile targets.
 - Slice 6B covers MIDI-FX insertion, deletion, and reordering with explicit
   stable-instance ordering, per-Track-Pattern defaults and p-locks, process and
-  macro target remapping, and scheduler republishing. The shared project-schema
-  migration to serialized effect-instance records lands before Slice 6 is
-  closed; bus and rack-slot structural edits remain barriers through 6C/6D.
-- Bus-effect value edits remain explicit barriers; bus device identity and
-  scene-pattern addressing land with the generalized effect-chain work in
-  Slice 6.
+  macro target remapping, and scheduler republishing.
+- Slice 6C covers bus-effect insertion, deletion, replacement, reordering, and
+  coalesced value/p-lock edits. Replay resolves stable bus/effect identities,
+  restores the edited scene's values and gate-linked snapshot, retained source
+  metadata, sidechain selection, IR data, and bus macro mappings.
+- Slice 6D covers rack-slot effect insertion, deletion, replacement, and
+  reordering through the shared `FxChainHost`/`MonoPair` path. Per-pattern
+  values and rack macro tables are restored transactionally, including mappings
+  dropped by deletion.
+- Project schema version 4 serializes authoritative stable instance records for
+  track audio effects, MIDI effects, bus effects, rack slots, and rack-slot
+  effects. Dense pattern slots remain value snapshots and are rebound to those
+  records during load. Top-level legacy name vectors are migration projections;
+  rack source names remain in the shared Sound/Rack preset payload, while
+  project loading treats the instance records as authoritative.
 - Recorded takes remain an explicit history barrier until Slice 7F; arming and
   other performance-only controls remain outside authoring history.
 

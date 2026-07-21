@@ -31,7 +31,9 @@ const RACK_PRESETS_DIR: &str = "presets/racks";
 //       dgen `param_node_indices` are `10 + cell_id`. Version-1 files are
 //       migrated on load (see `migrate_legacy_dgen_param_node_indices`).
 //   3 — tracks gained stable ids and shared metadata around a kind enum.
-const PROJECT_FILE_VERSION: u32 = 3;
+//   4 — effect, MIDI-FX, bus-FX, and rack-slot-FX chains gained authoritative
+//       stable instance records; dense pattern slots remain value snapshots.
+const PROJECT_FILE_VERSION: u32 = 4;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -64,7 +66,10 @@ pub struct ProjectFile {
     #[serde(default = "default_project_buses")]
     pub buses: Vec<ProjectBusChannel>,
     pub tracks: Vec<ProjectTrack>,
+    #[serde(skip_serializing)]
     pub custom_effects: Vec<Vec<Option<String>>>,
+    #[serde(default)]
+    pub device_instances: ProjectDeviceInstances,
     #[serde(default)]
     pub scratch: ProjectScratchState,
     pub patterns: Vec<ProjectPattern>,
@@ -90,7 +95,10 @@ struct ProjectFileWire {
     #[serde(default = "default_project_buses")]
     buses: Vec<ProjectBusChannel>,
     tracks: Vec<ProjectTrackWire>,
+    #[serde(default)]
     custom_effects: Vec<Vec<Option<String>>>,
+    #[serde(default)]
+    device_instances: ProjectDeviceInstances,
     #[serde(default)]
     scratch: ProjectScratchState,
     patterns: Vec<ProjectPattern>,
@@ -109,7 +117,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
     {
         let wire = ProjectFileWire::deserialize(deserializer)?;
         let tracks = migrate_project_tracks(wire.version, wire.tracks).map_err(D::Error::custom)?;
-        Ok(Self {
+        let mut project = Self {
             version: wire.version,
             name: wire.name,
             bpm: wire.bpm,
@@ -120,12 +128,268 @@ impl<'de> Deserialize<'de> for ProjectFile {
             buses: wire.buses,
             tracks,
             custom_effects: wire.custom_effects,
+            device_instances: wire.device_instances,
             scratch: wire.scratch,
             patterns: wire.patterns,
             groups: wire.groups,
             macros: wire.macros,
             next_macro_id: wire.next_macro_id,
-        })
+        };
+        project.normalize_device_instances().map_err(D::Error::custom)?;
+        Ok(project)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectDeviceInstances {
+    #[serde(default)]
+    pub track_effects: Vec<ProjectTrackEffectChain>,
+    #[serde(default)]
+    pub midi_effects: Vec<ProjectMidiEffectChain>,
+    #[serde(default)]
+    pub bus_effects: Vec<ProjectBusEffectChain>,
+    #[serde(default)]
+    pub rack_effects: Vec<ProjectRackEffectChain>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectEffectInstance {
+    pub id: u64,
+    pub source: ProjectEffectSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectEffectSource {
+    Builtin { name: String },
+    Saved { name: String },
+}
+
+impl ProjectEffectSource {
+    pub fn project_name(&self) -> String {
+        match self {
+            Self::Builtin { name } => format!("builtin:{name}"),
+            Self::Saved { name } => name.clone(),
+        }
+    }
+
+    pub fn from_project_name(name: &str) -> Self {
+        if let Some(name) = crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name) {
+            return Self::Builtin { name: name.to_string() };
+        }
+        if crate::effects::EffectDescriptor::builtin_insert(name).is_some()
+            || crate::effects::conv_reverb::is_dgen_builtin(name)
+        {
+            return Self::Builtin { name: name.to_string() };
+        }
+        Self::Saved { name: name.to_string() }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectTrackEffectChain {
+    pub track_id: u64,
+    pub instances: Vec<ProjectEffectInstance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMidiEffectInstance {
+    pub id: u64,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMidiEffectChain {
+    pub track_id: u64,
+    pub instances: Vec<ProjectMidiEffectInstance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectBusEffectChain {
+    pub bus_id: u64,
+    pub instances: Vec<ProjectEffectInstance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRackEffectChain {
+    pub track_id: u64,
+    pub slot_index: usize,
+    pub rack_slot_id: u64,
+    pub instances: Vec<ProjectEffectInstance>,
+}
+
+impl ProjectFile {
+    pub(crate) fn normalize_device_instances(&mut self) -> Result<(), String> {
+        let mut next_id = self.device_instances.track_effects.iter()
+            .flat_map(|chain| chain.instances.iter().map(|instance| instance.id))
+            .chain(self.device_instances.midi_effects.iter()
+                .flat_map(|chain| chain.instances.iter().map(|instance| instance.id)))
+            .chain(self.device_instances.bus_effects.iter()
+                .flat_map(|chain| chain.instances.iter().map(|instance| instance.id)))
+            .chain(self.device_instances.rack_effects.iter().flat_map(|chain| {
+                std::iter::once(chain.rack_slot_id)
+                    .chain(chain.instances.iter().map(|instance| instance.id))
+            }))
+            .max()
+            .unwrap_or(0);
+        let rebuild_tracks = self.version < 4 || self.device_instances.track_effects.is_empty();
+        let rebuild_midi = self.version < 4 || self.device_instances.midi_effects.is_empty();
+        let rebuild_buses = self.version < 4 || self.device_instances.bus_effects.is_empty();
+        let rebuild_racks = self.version < 4 || self.device_instances.rack_effects.is_empty();
+        let required_ids = (if rebuild_tracks {
+            self.custom_effects.iter().flatten().filter_map(|name| name.as_deref())
+                .filter(|name| !name.trim().is_empty()).count()
+        } else { 0 })
+            + (if rebuild_midi {
+                self.patterns.first().map(|pattern| pattern.track_params.iter()
+                    .map(|params| params.midi_fx_chain.len()).sum()).unwrap_or(0)
+            } else { 0 })
+            + (if rebuild_buses {
+                self.buses.iter().flat_map(|bus| &bus.custom_effects)
+                    .filter_map(|name| name.as_deref())
+                    .filter(|name| !name.trim().is_empty()).count()
+            } else { 0 })
+            + (if rebuild_racks {
+                self.patterns.first().map(|pattern| pattern.rack_tracks.iter().flatten()
+                    .flat_map(|rack| &rack.slots)
+                    .map(|slot| 1 + slot.custom_effects.iter()
+                        .filter_map(|name| name.as_deref())
+                        .filter(|name| !name.trim().is_empty()).count())
+                    .sum()).unwrap_or(0)
+            } else { 0 });
+        next_id.checked_add(required_ids as u64)
+            .ok_or_else(|| "project device identity space is exhausted".to_string())?;
+        let mut allocate = || {
+            next_id += 1;
+            next_id
+        };
+
+        if rebuild_tracks {
+            self.device_instances.track_effects = self.tracks.iter().enumerate()
+                .map(|(track, project_track)| ProjectTrackEffectChain {
+                    track_id: project_track.id.0,
+                    instances: self.custom_effects.get(track).into_iter().flatten()
+                        .filter_map(|name| name.as_deref())
+                        .filter(|name| !name.trim().is_empty())
+                        .map(|name| ProjectEffectInstance {
+                            id: allocate(),
+                            source: ProjectEffectSource::from_project_name(name),
+                        })
+                        .collect(),
+                })
+                .collect();
+        }
+        if rebuild_midi {
+            let first_pattern = self.patterns.first();
+            self.device_instances.midi_effects = self.tracks.iter().enumerate()
+                .map(|(track, project_track)| ProjectMidiEffectChain {
+                    track_id: project_track.id.0,
+                    instances: first_pattern
+                        .and_then(|pattern| pattern.track_params.get(track))
+                        .map(|params| params.midi_fx_chain.iter().map(|name| {
+                            ProjectMidiEffectInstance { id: allocate(), name: name.clone() }
+                        }).collect())
+                        .unwrap_or_default(),
+                })
+                .collect();
+        }
+        if rebuild_buses {
+            self.device_instances.bus_effects = self.buses.iter().map(|bus| {
+                ProjectBusEffectChain {
+                    bus_id: bus.id,
+                    instances: bus.custom_effects.iter().filter_map(|name| name.as_deref())
+                        .filter(|name| !name.trim().is_empty())
+                        .map(|name| ProjectEffectInstance {
+                            id: allocate(),
+                            source: ProjectEffectSource::from_project_name(name),
+                        })
+                        .collect(),
+                }
+            }).collect();
+        }
+        if rebuild_racks {
+            self.device_instances.rack_effects.clear();
+            if let Some(pattern) = self.patterns.first() {
+                for (track, rack) in pattern.rack_tracks.iter().enumerate() {
+                    let Some(rack) = rack else { continue };
+                    let Some(project_track) = self.tracks.get(track) else { continue };
+                    for (slot_index, slot) in rack.slots.iter().enumerate() {
+                        self.device_instances.rack_effects.push(ProjectRackEffectChain {
+                            track_id: project_track.id.0,
+                            slot_index,
+                            rack_slot_id: allocate(),
+                            instances: slot.custom_effects.iter()
+                                .filter_map(|name| name.as_deref())
+                                .filter(|name| !name.trim().is_empty())
+                                .map(|name| ProjectEffectInstance {
+                                    id: allocate(),
+                                    source: ProjectEffectSource::from_project_name(name),
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+
+        self.custom_effects = self.tracks.iter().map(|track| {
+            self.device_instances.track_effects.iter()
+                .find(|chain| chain.track_id == track.id.0)
+                .map(|chain| chain.instances.iter()
+                    .map(|instance| Some(instance.source.project_name()))
+                    .collect())
+                .unwrap_or_default()
+        }).collect();
+        for pattern in &mut self.patterns {
+            for (track, params) in pattern.track_params.iter_mut().enumerate() {
+                let Some(project_track) = self.tracks.get(track) else { continue };
+                params.midi_fx_chain = self.device_instances.midi_effects.iter()
+                    .find(|chain| chain.track_id == project_track.id.0)
+                    .map(|chain| chain.instances.iter().map(|instance| instance.name.clone()).collect())
+                    .unwrap_or_default();
+            }
+            for (track, rack) in pattern.rack_tracks.iter_mut().enumerate() {
+                let (Some(project_track), Some(rack)) = (self.tracks.get(track), rack.as_mut()) else {
+                    continue;
+                };
+                for (slot_index, slot) in rack.slots.iter_mut().enumerate() {
+                    slot.custom_effects = self.device_instances.rack_effects.iter()
+                        .find(|chain| chain.track_id == project_track.id.0 && chain.slot_index == slot_index)
+                        .map(|chain| chain.instances.iter()
+                            .map(|instance| Some(instance.source.project_name()))
+                            .collect())
+                        .unwrap_or_default();
+                }
+            }
+        }
+        for bus in &mut self.buses {
+            bus.custom_effects = self.device_instances.bus_effects.iter()
+                .find(|chain| chain.bus_id == bus.id)
+                .map(|chain| chain.instances.iter()
+                    .map(|instance| Some(instance.source.project_name()))
+                    .collect())
+                .unwrap_or_default();
+        }
+        let mut ids = HashSet::new();
+        for (id, label) in self.device_instances.track_effects.iter()
+            .flat_map(|chain| chain.instances.iter().map(|instance| (instance.id, "track effect")))
+            .chain(self.device_instances.midi_effects.iter()
+                .flat_map(|chain| chain.instances.iter().map(|instance| (instance.id, "MIDI effect"))))
+            .chain(self.device_instances.bus_effects.iter()
+                .flat_map(|chain| chain.instances.iter().map(|instance| (instance.id, "bus effect"))))
+            .chain(self.device_instances.rack_effects.iter().flat_map(|chain| {
+                std::iter::once((chain.rack_slot_id, "rack slot"))
+                    .chain(chain.instances.iter().map(|instance| (instance.id, "rack effect")))
+            }))
+        {
+            if id == 0 {
+                return Err(format!("{label} has reserved identity 0"));
+            }
+            if !ids.insert(id) {
+                return Err(format!("duplicate project device identity {id}"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -392,7 +656,7 @@ pub struct ProjectBusChannel {
     pub solo: bool,
     #[serde(default)]
     pub gate_sequence: ProjectBusGateSequence,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub custom_effects: Vec<Option<String>>,
     #[serde(default)]
     pub effect_slots: Vec<ProjectEffectSlot>,
@@ -760,7 +1024,7 @@ pub struct ProjectTrackParams {
     pub accumulator_idx: usize,
     #[serde(default)]
     pub script_accumulator_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub midi_fx_chain: Vec<String>,
     #[serde(default = "default_midi_fx_position")]
     pub midi_fx_position: ProjectMidiFxPosition,
@@ -2401,6 +2665,7 @@ mod tests {
                 },
             ],
             custom_effects: vec![vec![Some("widener".to_string()), None], vec![None, None]],
+            device_instances: ProjectDeviceInstances::default(),
             scratch: ProjectScratchState {
                 buffer: "(+ 1 2)".to_string(),
                 cursor_row: 3,
