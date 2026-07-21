@@ -1479,6 +1479,217 @@ fn apply_recorded_device_plock_command(
     })
 }
 
+fn device_plock_merge_suffix(cmd: &AppCommand) -> Option<String> {
+    match cmd {
+        AppCommand::SetEffectPlock { slot_idx, param_idx, .. }
+        | AppCommand::SetEffectPlockMulti { slot_idx, param_idx, .. } => {
+            Some(format!("effect:{slot_idx}:param:{param_idx}"))
+        }
+        AppCommand::SetEffectTensorPlockCellMulti {
+            slot_idx, tensor_idx, cell_idx, ..
+        } => Some(format!("effect:{slot_idx}:tensor:{tensor_idx}:cell:{cell_idx}")),
+        AppCommand::SetMidiFxPlockMulti { slot_idx, param_idx, .. } => {
+            Some(format!("midi-fx:{slot_idx}:param:{param_idx}"))
+        }
+        AppCommand::SetMidiFxTensorPlockCellMulti {
+            slot_idx, tensor_idx, cell_idx, ..
+        } => Some(format!("midi-fx:{slot_idx}:tensor:{tensor_idx}:cell:{cell_idx}")),
+        AppCommand::SetInstrumentPlock { param_idx, .. }
+        | AppCommand::SetInstrumentPlockMulti { param_idx, .. } => {
+            Some(format!("instrument:param:{param_idx}"))
+        }
+        AppCommand::SetInstrumentTensorPlockCellMulti {
+            tensor_idx, cell_idx, ..
+        } => Some(format!("instrument:tensor:{tensor_idx}:cell:{cell_idx}")),
+        AppCommand::SetRackSlotParamPlock { slot_idx, param, .. }
+        | AppCommand::SetRackSlotParamPlockMulti { slot_idx, param, .. } => {
+            Some(format!("rack:{slot_idx}:strip:{param:?}"))
+        }
+        AppCommand::SetRackSlotInstrumentPlock { slot_idx, param_idx, .. }
+        | AppCommand::SetRackSlotInstrumentPlockMulti { slot_idx, param_idx, .. } => {
+            Some(format!("rack:{slot_idx}:instrument:param:{param_idx}"))
+        }
+        AppCommand::SetRackMacroPlockMulti { macro_idx, .. } => {
+            Some(format!("rack-macro:{macro_idx}"))
+        }
+        AppCommand::SetRackSlotEffectPlockMulti {
+            rack_slot_idx, effect_slot_idx, param_idx, ..
+        } => Some(format!(
+            "rack:{rack_slot_idx}:effect:{effect_slot_idx}:param:{param_idx}"
+        )),
+        _ => None,
+    }
+}
+
+fn apply_coalesced_device_plock_command(
+    app: &mut App,
+    cmd: &AppCommand,
+) -> Result<EditOutcome, EditError> {
+    let (track, affected) =
+        device_plock_command_target(cmd).ok_or(EditError::UnsupportedCommand)?;
+    if affected.is_empty() {
+        return Ok(EditOutcome::NoOp);
+    }
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern_id = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let target = TrackPatternId {
+        track: track_id,
+        pattern: pattern_id,
+    };
+    let merge_key = MergeKey::new(format!(
+        "device-plock:{target:?}:{}:steps:{affected:?}",
+        device_plock_merge_suffix(cmd).ok_or(EditError::UnsupportedCommand)?,
+    ));
+    if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(&merge_key) {
+        finish_active_gesture(app);
+    }
+    let (current_before, current_registry_before) = app
+        .state
+        .capture_pattern_step_cells(track, pattern_id, &affected)
+        .map_err(EditError::ReplayFailed)?;
+    let original = app
+        .history
+        .active_gesture_patch(&merge_key)
+        .and_then(|patch| match patch {
+            EditPatch::StepCells(patch) if patch.target == target => Some(patch.clone()),
+            _ => None,
+        });
+
+    super::command::execute_command(app, cmd.clone());
+    app.state.reconcile_plock_variant_registry_for_track(track);
+    let (after, registry_after) = match app
+        .state
+        .capture_pattern_step_cells(track, pattern_id, &affected)
+    {
+        Ok(after) => after,
+        Err(error) => {
+            let rollback = affected
+                .iter()
+                .copied()
+                .zip(current_before.iter().cloned())
+                .collect::<Vec<_>>();
+            return match app.state.restore_pattern_step_cells_no_publish(
+                track,
+                pattern_id,
+                &rollback,
+                &current_registry_before,
+            ) {
+                Ok(publish) => {
+                    if publish {
+                        app.state.publish_scheduler_snapshot();
+                    }
+                    Err(EditError::ReplayFailed(error))
+                }
+                Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                    "{error}; rollback also failed: {rollback_error}"
+                ))),
+            };
+        }
+    };
+    let changed = current_before
+        .iter()
+        .zip(&after)
+        .any(|(before, after)| !step_snapshot_bit_exact_eq(before, after))
+        || current_registry_before != registry_after;
+    if !changed {
+        return Ok(EditOutcome::NoOp);
+    }
+
+    let synchronized = affected
+        .iter()
+        .copied()
+        .zip(after.iter().cloned())
+        .collect::<Vec<_>>();
+    let publish = match app.state.restore_pattern_step_cells_no_publish(
+        track,
+        pattern_id,
+        &synchronized,
+        &registry_after,
+    ) {
+        Ok(publish) => publish,
+        Err(error) => {
+            let rollback = affected
+                .iter()
+                .copied()
+                .zip(current_before.iter().cloned())
+                .collect::<Vec<_>>();
+            return match app.state.restore_pattern_step_cells_no_publish(
+                track,
+                pattern_id,
+                &rollback,
+                &current_registry_before,
+            ) {
+                Ok(publish) => {
+                    if publish {
+                        app.state.publish_scheduler_snapshot();
+                    }
+                    Err(EditError::ReplayFailed(error))
+                }
+                Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                    "{error}; rollback also failed: {rollback_error}"
+                ))),
+            };
+        }
+    };
+    if publish {
+        app.state.publish_scheduler_snapshot();
+    }
+
+    let original_before = |step: usize, current: &StepCellSnapshot| {
+        original
+            .as_ref()
+            .and_then(|patch| patch.cells.iter().find(|cell| cell.step == step))
+            .map(|cell| cell.before.clone())
+            .unwrap_or_else(|| current.clone())
+    };
+    let cells = affected
+        .iter()
+        .copied()
+        .zip(current_before.iter())
+        .zip(after)
+        .filter_map(|((step, current), after)| {
+            let before = original_before(step, current);
+            (!step_snapshot_bit_exact_eq(&before, &after)).then_some(StepCellDelta {
+                step,
+                before,
+                after,
+            })
+        })
+        .collect::<Vec<_>>();
+    let variant_registry_before = original
+        .as_ref()
+        .map(|patch| patch.variant_registry_before.clone())
+        .unwrap_or(current_registry_before);
+    if cells.is_empty() && variant_registry_before == registry_after {
+        app.history.discard_active_gesture_entry(&merge_key);
+        return Ok(EditOutcome::NoOp);
+    }
+    let patch = StepCellsPatch {
+        target,
+        cells,
+        variant_registry_before,
+        variant_registry_after: registry_after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    ensure_coalescing_gesture(app, &merge_key);
+    let history_move = app
+        .history
+        .stage_active_gesture(
+            device_plock_label(cmd),
+            &merge_key,
+            EditPatch::StepCells(patch),
+            retained_bytes,
+        )
+        .ok_or(EditError::UnsupportedCommand)?;
+    Ok(EditOutcome::Applied(history_move))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ResolvedDeviceTarget {
     id: DeviceId,
@@ -2788,6 +2999,9 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
         HistoryPolicy::Coalesce(key) if bus_mixer_command_bus(&cmd).is_some() => {
             apply_recorded_bus_mixer_command(app, &cmd, Some(key))
         }
+        HistoryPolicy::Coalesce(_) if device_plock_command_target(&cmd).is_some() => {
+            apply_coalesced_device_plock_command(app, &cmd)
+        }
         HistoryPolicy::Coalesce(key) if device_value_command_track(&cmd).is_some() => {
             apply_recorded_device_value_command(app, &cmd, Some(key))
         }
@@ -3457,7 +3671,58 @@ mod tests {
             .iter()
             .map(|step| app.state.capture_step_snapshot(0, *step))
             .collect::<Vec<_>>();
+        finish_active_gesture(&mut app);
         assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        for (step, expected) in steps.iter().zip(&before) {
+            assert!(step_snapshot_bit_exact_eq(
+                &app.state.capture_step_snapshot(0, *step),
+                expected,
+            ));
+        }
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        for (step, expected) in steps.iter().zip(&after) {
+            assert!(step_snapshot_bit_exact_eq(
+                &app.state.capture_step_snapshot(0, *step),
+                expected,
+            ));
+        }
+    }
+
+    #[test]
+    fn instrument_plock_drag_coalesces_into_one_history_entry() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 1);
+        let mut app = test_app(state);
+        let steps = [2, 5, 9];
+        let before = steps
+            .iter()
+            .map(|step| app.state.capture_step_snapshot(0, *step))
+            .collect::<Vec<_>>();
+
+        for value in [0.1, 0.25, 0.5, 0.75, 0.9] {
+            assert!(matches!(
+                try_apply_command(
+                    &mut app,
+                    AppCommand::SetInstrumentPlockMulti {
+                        track: 0,
+                        steps: steps.to_vec(),
+                        param_idx: 0,
+                        value,
+                    },
+                ),
+                Ok(EditOutcome::Applied(_))
+            ));
+        }
+        assert_eq!(app.history.undo_len(), 0);
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+        let after = steps
+            .iter()
+            .map(|step| app.state.capture_step_snapshot(0, *step))
+            .collect::<Vec<_>>();
 
         assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
         for (step, expected) in steps.iter().zip(&before) {
@@ -3853,6 +4118,7 @@ mod tests {
                 Ok(EditOutcome::Applied(_))
             ));
         }
+        finish_active_gesture(&mut app);
         assert_eq!(app.history.undo_len(), 3);
         let locked = steps
             .iter()

@@ -985,27 +985,13 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackSwingResolutionPlock { .. }
         | AppCommand::SetTrackSwingResolutionPlockMulti { .. }
         | AppCommand::ClearTrackSwingResolutionPlockMulti { .. }
-        | AppCommand::SetEffectPlock { .. }
-        | AppCommand::SetEffectPlockMulti { .. }
         | AppCommand::ClearEffectPlockMulti { .. }
-        | AppCommand::SetEffectTensorPlockCellMulti { .. }
         | AppCommand::ClearEffectTensorPlockMulti { .. }
-        | AppCommand::SetMidiFxPlockMulti { .. }
         | AppCommand::ClearMidiFxPlockMulti { .. }
-        | AppCommand::SetMidiFxTensorPlockCellMulti { .. }
         | AppCommand::ClearMidiFxTensorPlockMulti { .. }
-        | AppCommand::SetInstrumentPlock { .. }
-        | AppCommand::SetInstrumentPlockMulti { .. }
         | AppCommand::ClearInstrumentPlockMulti { .. }
-        | AppCommand::SetInstrumentTensorPlockCellMulti { .. }
         | AppCommand::ClearInstrumentTensorPlockMulti { .. }
-        | AppCommand::SetRackSlotParamPlock { .. }
-        | AppCommand::SetRackSlotParamPlockMulti { .. }
-        | AppCommand::SetRackSlotInstrumentPlock { .. }
-        | AppCommand::SetRackSlotInstrumentPlockMulti { .. }
-        | AppCommand::SetRackMacroPlockMulti { .. }
         | AppCommand::ClearRackMacroPlockMulti { .. }
-        | AppCommand::SetRackSlotEffectPlockMulti { .. }
         | AppCommand::ClearRackSlotEffectPlockMulti { .. } => HistoryPolicy::Record,
         AppCommand::DuplicateTrackPattern { .. }
         | AppCommand::HalveTrackPattern { .. }
@@ -1081,6 +1067,67 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         AppCommand::SetBusVolume { bus, .. } => HistoryPolicy::Coalesce(
             super::history::MergeKey::new(format!("bus:{}:volume", bus.0)),
         ),
+        AppCommand::SetEffectPlock { track, step, slot_idx, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:effect:{slot_idx}:param:{param_idx}:step:{step}"
+            ))),
+        AppCommand::SetEffectPlockMulti { track, slot_idx, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:effect:{slot_idx}:param:{param_idx}:plock"
+            ))),
+        AppCommand::SetEffectTensorPlockCellMulti {
+            track, slot_idx, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:effect:{slot_idx}:tensor:{tensor_idx}:cell:{cell_idx}:plock"
+        ))),
+        AppCommand::SetMidiFxPlockMulti { track, slot_idx, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:midi-fx:{slot_idx}:param:{param_idx}:plock"
+            ))),
+        AppCommand::SetMidiFxTensorPlockCellMulti {
+            track, slot_idx, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:midi-fx:{slot_idx}:tensor:{tensor_idx}:cell:{cell_idx}:plock"
+        ))),
+        AppCommand::SetInstrumentPlock { track, step, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:instrument:param:{param_idx}:step:{step}"
+            ))),
+        AppCommand::SetInstrumentPlockMulti { track, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:instrument:param:{param_idx}:plock"
+            ))),
+        AppCommand::SetInstrumentTensorPlockCellMulti {
+            track, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:instrument:tensor:{tensor_idx}:cell:{cell_idx}:plock"
+        ))),
+        AppCommand::SetRackSlotParamPlock { track, slot_idx, step, param, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack:{slot_idx}:{param:?}:step:{step}"
+            ))),
+        AppCommand::SetRackSlotParamPlockMulti { track, slot_idx, param, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack:{slot_idx}:{param:?}:plock"
+            ))),
+        AppCommand::SetRackSlotInstrumentPlock {
+            track, slot_idx, step, param_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:rack:{slot_idx}:instrument:{param_idx}:step:{step}"
+        ))),
+        AppCommand::SetRackSlotInstrumentPlockMulti { track, slot_idx, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack:{slot_idx}:instrument:{param_idx}:plock"
+            ))),
+        AppCommand::SetRackMacroPlockMulti { track, macro_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack-macro:{macro_idx}:plock"
+            ))),
+        AppCommand::SetRackSlotEffectPlockMulti {
+            track, rack_slot_idx, effect_slot_idx, param_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:rack:{rack_slot_idx}:effect:{effect_slot_idx}:param:{param_idx}:plock"
+        ))),
         AppCommand::SetEffectParam {
             track, slot_idx, param_idx, ..
         } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
