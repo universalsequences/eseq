@@ -338,7 +338,37 @@ fn legacy_builtin_slot_has_edits(
         .any(|row| row.iter().take(num_params).any(Option::is_some))
 }
 
+fn project_slot_matches_descriptor_prefix(
+    slot: &project::ProjectEffectSlot,
+    desc: &EffectDescriptor,
+) -> bool {
+    let num_params = slot.num_params as usize;
+    num_params > 0
+        && num_params <= desc.params.len()
+        && slot.param_node_indices.len() >= num_params
+        && slot.param_node_indices[..num_params]
+            .iter()
+            .copied()
+            .eq(desc.params[..num_params].iter().map(|param| param.node_param_idx))
+}
+
+fn pattern_has_legacy_default_track_effects(
+    pattern: &ProjectPattern,
+    track_idx: usize,
+    legacy_descs: &[&EffectDescriptor; 2],
+) -> bool {
+    let Some(slots) = pattern.effect_slots.get(track_idx) else {
+        return false;
+    };
+    slots.len() >= 2
+        && project_slot_matches_descriptor_prefix(&slots[0], legacy_descs[0])
+        && project_slot_matches_descriptor_prefix(&slots[1], legacy_descs[1])
+}
+
 fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
+    if project.version >= 4 {
+        return;
+    }
     let mut filter_desc = EffectDescriptor::builtin_filter();
     let mut delay_desc = EffectDescriptor::builtin_delay();
     if let Some(enabled) = filter_desc
@@ -360,17 +390,13 @@ fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
     let max_slots = crate::lisp_host::MAX_CUSTOM_FX;
 
     for track_idx in 0..project.tracks.len() {
-        let old_custom_len = project
-            .custom_effects
-            .get(track_idx)
-            .map(Vec::len)
-            .unwrap_or_default();
+        // Device normalization compacts the historical padded name vector to
+        // active instances. Comparing that count with the dense value-slot
+        // count therefore misclassifies modern projects with one effect as the
+        // old [Filter, Delay, custom...] layout. Recognize the old layout by
+        // the parameter topology of its two fixed slots instead.
         let has_legacy_layout = project.patterns.iter().any(|pattern| {
-            pattern
-                .effect_slots
-                .get(track_idx)
-                .map(|slots| slots.len() >= 2 && slots.len() > old_custom_len)
-                .unwrap_or(false)
+            pattern_has_legacy_default_track_effects(pattern, track_idx, &legacy_descs)
         });
         if !has_legacy_layout {
             continue;
@@ -4405,6 +4431,7 @@ mod tests {
                 custom_slot.clone(),
             ],
         );
+        project.version = 1;
 
         migrate_legacy_default_track_effects(&mut project);
 
@@ -4416,6 +4443,48 @@ mod tests {
         assert_eq!(
             project.patterns[0].effect_slots[0][0].defaults,
             custom_slot.defaults
+        );
+    }
+
+    #[test]
+    fn legacy_default_filter_delay_migration_keeps_modern_dense_custom_slots() {
+        let shimmer_values = vec![
+            1.6437798, 7.0884132, 53.366623, 230.13315, 0.82464963, 5579.7046, 0.85,
+            0.7110942, 0.38275215, 1.0, 1.0,
+        ];
+        let shimmer_slot = project::ProjectEffectSlot {
+            num_params: shimmer_values.len() as u32,
+            defaults: shimmer_values.clone(),
+            plocks: vec![vec![None; shimmer_values.len()]; MAX_STEPS],
+            plock_param_ids: vec![vec![None; shimmer_values.len()]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::new(),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
+            param_node_indices: vec![6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 4],
+            param_node_spans: vec![1; shimmer_values.len()],
+            tensor_params: Vec::new(),
+            ir: None,
+        };
+        let mut slots = vec![shimmer_slot];
+        slots.resize_with(crate::lisp_host::MAX_CUSTOM_FX, Default::default);
+        let mut project = minimal_project_with_effect_slots(
+            vec![Some("shimmerpitch".to_string())],
+            slots,
+        );
+        project.version = 1;
+
+        migrate_legacy_default_track_effects(&mut project);
+
+        assert_eq!(
+            project.custom_effects[0],
+            vec![Some("shimmerpitch".to_string())]
+        );
+        assert_eq!(
+            project.patterns[0].effect_slots[0][0].defaults,
+            shimmer_values
+        );
+        assert_eq!(
+            project.patterns[0].effect_slots[0].len(),
+            crate::lisp_host::MAX_CUSTOM_FX
         );
     }
 
@@ -4442,6 +4511,7 @@ mod tests {
             vec![Some("custom-fx".to_string())],
             vec![filter_slot, delay_slot, custom_slot.clone()],
         );
+        project.version = 1;
 
         migrate_legacy_default_track_effects(&mut project);
 
