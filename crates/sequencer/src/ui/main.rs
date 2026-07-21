@@ -3370,6 +3370,64 @@ fn sync_effect_param_authoring_display(editor: &mut Editor, sync: EffectParamDis
     flush_reactive_display_edit(editor, ui_dirty);
 }
 
+fn sync_instrument_param_batch_display(
+    editor: &mut Editor,
+    app: &tui::App,
+    state: &Arc<SequencerState>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    track: usize,
+    param_indices: &[usize],
+    display_step: Option<usize>,
+    plocks_changed: bool,
+) {
+    let mut ui_dirty = false;
+    if plocks_changed {
+        ui_dirty |= sync_instrument_plock_presence_fields(
+            editor.runtime_mut(),
+            state,
+            &app.graph.effect_descriptors,
+            track,
+            selected_steps,
+        );
+    }
+    for &param_idx in param_indices {
+        ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
+            editor.runtime_mut(),
+            app,
+            track,
+            param_idx,
+            display_step,
+            Some(selection),
+        );
+    }
+    flush_reactive_display_edit(editor, ui_dirty);
+}
+
+fn sync_effect_param_batch_display(
+    editor: &mut Editor,
+    app: &tui::App,
+    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    track: usize,
+    slot_idx: usize,
+    param_indices: &[usize],
+    display_step: Option<usize>,
+) {
+    let mut ui_dirty = false;
+    for &param_idx in param_indices {
+        ui_dirty |= sync_track_effect_param_value_field_with_neural_selection(
+            editor.runtime_mut(),
+            app,
+            track,
+            slot_idx,
+            param_idx,
+            display_step,
+            Some(selection),
+        );
+    }
+    flush_reactive_display_edit(editor, ui_dirty);
+}
+
 fn flush_reactive_display_edit(editor: &mut Editor, dirty: bool) {
     if dirty {
         editor.runtime_mut().run_reactive_cycle();
@@ -12679,6 +12737,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "Set instrument envelope",
                                     )
                                 };
+                                if result.is_ok() {
+                                    let plocks_changed = name == "set-instrument-plock-batch";
+                                    let display_step = if plocks_changed {
+                                        displayed_plock_step(
+                                            &state,
+                                            track,
+                                            selected_plock_step(&selected_steps),
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    let param_indices = commands
+                                        .iter()
+                                        .filter_map(|command| match command {
+                                            tui::AppCommand::SetInstrumentParam { param_idx, .. }
+                                            | tui::AppCommand::SetInstrumentPlockMulti {
+                                                param_idx, ..
+                                            } => Some(*param_idx),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let neural_selection =
+                                        selected_neural_neurons.lock().unwrap().clone();
+                                    sync_instrument_param_batch_display(
+                                        &mut editor,
+                                        &app,
+                                        &state,
+                                        &selected_steps,
+                                        &neural_selection,
+                                        track,
+                                        &param_indices,
+                                        display_step,
+                                        plocks_changed,
+                                    );
+                                }
                                 match result {
                                     Ok(_) if map_bool(map, "commit") => {
                                         tui::edit::finish_active_gesture(&mut app);
@@ -13187,6 +13280,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "Set effect curve",
                                     )
                                 };
+                                if result.is_ok() {
+                                    let plocks_changed = name == "set-effect-plock-batch";
+                                    let display_step = if plocks_changed {
+                                        displayed_plock_step(
+                                            &state,
+                                            track,
+                                            selected_plock_step(&selected_steps),
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    let param_indices = commands
+                                        .iter()
+                                        .filter_map(|command| match command {
+                                            tui::AppCommand::SetEffectParam { param_idx, .. }
+                                            | tui::AppCommand::SetEffectPlockMulti {
+                                                param_idx, ..
+                                            } => Some(*param_idx),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let neural_selection =
+                                        selected_neural_neurons.lock().unwrap().clone();
+                                    sync_effect_param_batch_display(
+                                        &mut editor,
+                                        &app,
+                                        &neural_selection,
+                                        track,
+                                        slot_idx,
+                                        &param_indices,
+                                        display_step,
+                                    );
+                                }
                                 match result {
                                     Ok(_) if map_bool(map, "commit") => {
                                         tui::edit::finish_active_gesture(&mut app);
