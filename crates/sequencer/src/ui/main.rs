@@ -8686,8 +8686,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let message = match replay {
                             tui::history::HistoryReplay::Applied(result) => {
-                                track_names.clone_from(&app.tracks);
                                 let topology_changed = app.tracks.len() != track_count_before_replay;
+                                if !topology_changed {
+                                    track_names.clone_from(&app.tracks);
+                                }
                                 let replay_track = if topology_changed {
                                     app.ui.cursor_track
                                 } else {

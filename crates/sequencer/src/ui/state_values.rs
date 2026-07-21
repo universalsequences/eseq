@@ -3992,10 +3992,9 @@ pub(crate) fn sync_track_name_state(
         "track-instrument-run-modes",
         build_track_instrument_run_modes(app),
     );
-    if *track_names == app.tracks {
-        return;
+    if *track_names != app.tracks {
+        *track_names = app.tracks.clone();
     }
-    *track_names = app.tracks.clone();
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
@@ -19800,6 +19799,41 @@ mod tests {
         )
         .unwrap();
         app
+    }
+
+    #[test]
+    fn track_name_sync_republishes_restored_topology_when_mirror_already_matches() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        let app = test_app_for_track_visual_state(state);
+        let mut mirror = app.tracks.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("track-ids", Value::List(vec![])),
+                ("track-instrument-types", Value::List(vec![])),
+                ("track-drum-racks", Value::List(vec![])),
+                ("track-drum-sounds", Value::List(vec![])),
+                ("track-mod-output-available", Value::List(vec![])),
+                ("track-instrument-run-modes", Value::List(vec![])),
+                ("num-tracks", Value::Number(1.0)),
+                ("track-names", build_track_names(&["Track 1".to_string()])),
+                ("track-colors", Value::List(vec![])),
+                ("track-collapsed", Value::List(vec![])),
+            ],
+            false,
+        );
+
+        sync_track_name_state(&mut runtime, &mut mirror, &app);
+
+        assert_eq!(
+            runtime.eval_str("SEQ.num-tracks").unwrap(),
+            Some(Value::Number(2.0)),
+        );
+        assert_eq!(
+            runtime.eval_str("(len SEQ.track-names)").unwrap(),
+            Some(Value::Number(2.0)),
+        );
     }
 
     fn value_list_maps(value: &Value) -> Vec<HashMap<String, Rc<RefCell<Value>>>> {
