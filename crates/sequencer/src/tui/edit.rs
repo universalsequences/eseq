@@ -19,7 +19,8 @@ use super::history::{
     RackContainerSlotState, RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
     RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
     TrackInstrumentSource, TrackInstrumentState,
-    TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
+    TrackCreationPatch, TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot,
+    TransportParamsPatch,
 };
 use super::App;
 use super::fx_chain::{
@@ -1295,11 +1296,8 @@ impl App {
                 }
                 TrackInstrumentSource::Rack { slots }
             }
-            Some(other) => {
-                return Err(format!(
-                    "Track {} has instrument type {other:?}, which is not replaceable",
-                    track + 1
-                ));
+            Some(crate::sequencer::InstrumentType::Modulator) => {
+                TrackInstrumentSource::Modulator
             }
             None => return Err(format!("Track {} does not exist", track + 1)),
         };
@@ -1311,6 +1309,42 @@ impl App {
                 .macro_engine
                 .capture_instrument_mappings_for_track(track),
         })
+    }
+
+    pub fn commit_created_track(
+        &mut self,
+        track: usize,
+        label: &'static str,
+    ) -> Result<(), String> {
+        finish_active_gesture(self);
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let state = match self.capture_track_instrument_state(track) {
+            Ok(state) => state,
+            Err(error) => {
+                let rollback = self.graph_controller().delete_track(track);
+                return match rollback {
+                    Ok(_) => Err(format!(
+                        "New track was rolled back because history capture failed: {error}"
+                    )),
+                    Err(rollback_error) => Err(format!(
+                        "New-track history capture failed ({error}); rollback also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let patch = TrackCreationPatch {
+            track: track_id,
+            state,
+            color: self.track_colors.get(track).copied(),
+            collapsed: self.track_collapsed.get(track).copied().unwrap_or(false),
+            group: self.groups.iter()
+                .find(|group| group.members.contains(&track))
+                .map(|group| (group.id, group.bus_id)),
+        };
+        let retained_bytes = patch.retained_bytes();
+        self.history.commit(label, None, EditPatch::TrackCreation(patch), retained_bytes);
+        Ok(())
     }
 
     pub fn apply_recorded_instrument_binding_mutation<T>(
@@ -1397,6 +1431,7 @@ impl App {
                 crate::effects::EffectDescriptor::builtin_sampler()
             }
             TrackInstrumentSource::Rack { .. } => unreachable!(),
+            TrackInstrumentSource::Modulator => crate::track_modulator::descriptor(),
         };
         self.state.validate_track_instrument_pattern_state(
             track,
@@ -1516,6 +1551,13 @@ impl App {
                 }
             }
             TrackInstrumentSource::Rack { .. } => unreachable!(),
+            TrackInstrumentSource::Modulator => {
+                if self.graph.track_instrument_types.get(track)
+                    != Some(&crate::sequencer::InstrumentType::Modulator)
+                {
+                    return Err(format!("Track {} is not a modulator", track + 1));
+                }
+            }
         }
         self.tracks[track] = target.display_name.clone();
         let descriptor = self.graph.instrument_descriptors[track].clone();
@@ -1537,6 +1579,10 @@ impl App {
                     nodes.sampler_ids.first().copied(),
                     nodes.sampler_modulator_ids.first().copied(),
                 )
+            }
+            crate::sequencer::InstrumentType::Modulator => {
+                let nodes = &self.graph.track_node_ids[track];
+                (Some(nodes.mod_env_id), None)
             }
             other => {
                 return Err(format!(
@@ -1576,6 +1622,50 @@ impl App {
         self.state
             .publish_macro_overrides(self.macro_engine.override_snapshot());
         self.push_instrument_defaults_for_track(track);
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    fn restore_created_track(&mut self, patch: &TrackCreationPatch) -> Result<(), String> {
+        if self.track_registry.index_of(patch.track).is_some() {
+            return Err(format!("Track {:?} already exists", patch.track));
+        }
+        let track = match patch.state.source {
+            TrackInstrumentSource::Modulator => self.graph_controller().add_modulator_track()?,
+            _ => self.graph_controller().add_blank_sampler_track()?,
+        };
+        let allocated = self.track_registry.replace_at(track, patch.track)
+            .map_err(|error| format!("Failed to restore stable track id: {error:?}"))?;
+        self.device_registry.clear_track(allocated);
+        if !matches!(patch.state.source, TrackInstrumentSource::Modulator) {
+            self.restore_track_instrument_state(track, &patch.state)?;
+        } else {
+            self.tracks[track] = patch.state.display_name.clone();
+            let descriptor = self.graph.instrument_descriptors[track].clone();
+            let node_id = self.graph.track_node_ids[track].mod_env_id as u32;
+            self.state.restore_track_instrument_pattern_state(
+                track,
+                &patch.state.patterns,
+                &descriptor,
+                node_id,
+                0,
+            )?;
+        }
+        if let Some(color) = patch.color {
+            self.track_colors[track] = color;
+        }
+        self.track_collapsed[track] = patch.collapsed;
+        if let Some((group_id, bus_id)) = patch.group {
+            let group = self.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track history group {group_id} no longer exists"))?;
+            group.members.push(track);
+            group.members.sort_unstable();
+            group.members.dedup();
+            self.set_track_output_all_scenes(
+                track,
+                crate::sequencer::TrackOutput::Bus(crate::sequencer::BusId(bus_id)),
+            );
+        }
         self.state.publish_scheduler_snapshot();
         Ok(())
     }
@@ -5643,6 +5733,26 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
                 ),
             }
         }
+        EditPatch::TrackCreation(patch) => match mode {
+            ApplyMode::Undo => {
+                let track = app.track_registry.index_of(patch.track)
+                    .ok_or(EditError::MissingStableTrack { track: patch.track })?;
+                if let Some((group_id, _)) = patch.group {
+                    if let Some(group) = app.groups.iter_mut().find(|group| group.id == group_id) {
+                        group.members.retain(|member| *member != track);
+                    }
+                }
+                app.device_registry.clear_track(patch.track);
+                app.graph_controller().delete_track(track)
+                    .map(|_| ())
+                    .map_err(EditError::ReplayFailed)
+            }
+            ApplyMode::Redo => app.restore_created_track(patch)
+                .map_err(EditError::ReplayFailed),
+            ApplyMode::UserEdit | ApplyMode::ProjectLoad => Err(EditError::ReplayFailed(
+                "track-creation replay requires undo or redo mode".to_string(),
+            )),
+        },
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -5665,6 +5775,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::DeviceValues(_) => true,
         EditPatch::InstrumentBinding(_) => true,
         EditPatch::RackSlotStructure(_) => true,
+        EditPatch::TrackCreation(_) => true,
         EditPatch::EffectChain(_) => true,
         EditPatch::BusEffectChain(_) => true,
         EditPatch::BusEffectValues(_) => true,
@@ -5742,6 +5853,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::RackSlotStructure(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::TrackCreation(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::EffectChain(_) => {

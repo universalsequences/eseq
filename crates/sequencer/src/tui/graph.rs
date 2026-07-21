@@ -8521,6 +8521,40 @@ mod tests {
     }
 
     #[test]
+    fn recorded_sampler_track_creation_undoes_and_redoes_with_stable_identity() {
+        let graph = TestLiveGraph::new("track-creation-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("seed sampler track");
+        let created = app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("create sampler track");
+        let created_id = app.track_registry.id_at(created).expect("created stable id");
+        app.commit_created_track(created, "Add sampler track")
+            .expect("record creation");
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks.len(), 1);
+        assert_eq!(app.track_registry.index_of(created_id), None);
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks.len(), 2);
+        assert_eq!(app.track_registry.index_of(created_id), Some(1));
+        assert_eq!(
+            app.graph.track_instrument_types[1],
+            InstrumentType::Sampler
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn free_patch_idle_route_stays_closed_while_transport_is_stopped() {
         assert_eq!(free_patch_idle_route_value(2, 2, false), 0.0);
         assert_eq!(free_patch_idle_route_value(1, 2, false), 0.0);

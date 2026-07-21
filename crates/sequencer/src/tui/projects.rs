@@ -1503,9 +1503,13 @@ impl App {
     pub fn add_track_from_sound(&mut self, path: &Path) -> Result<usize, String> {
         // Parse and validate before changing topology. Loading samples and engines
         // still happens after the shell exists, so roll that shell back on error.
-        crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Sound");
         let track = self.graph_controller().add_blank_sampler_track()?;
-        if let Err(error) = self.load_sound_onto_track(track, path) {
+        if let Err(error) = self.load_container_preset_onto_track(track, sound, fallback_name) {
             let rollback = self.graph_controller().delete_track(track);
             return match rollback {
                 Ok(_) => Err(error),

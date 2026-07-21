@@ -8679,6 +8679,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     if let Some(shortcut) = sequencer_history_shortcut(&editor, &raw_key) {
+                        let track_count_before_replay = app.tracks.len();
                         let replay = match shortcut {
                             SequencerHistoryShortcut::Undo => tui::edit::undo(&mut app),
                             SequencerHistoryShortcut::Redo => tui::edit::redo(&mut app),
@@ -8689,6 +8690,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let replay_track = current_track
                                     .load(Ordering::Relaxed)
                                     .min(app.tracks.len().saturating_sub(1));
+                                current_track.store(replay_track, Ordering::Relaxed);
+                                if app.tracks.len() != track_count_before_replay {
+                                    {
+                                        let mut pan_ids = track_pan_ids.lock().unwrap();
+                                        *pan_ids = app.graph.track_node_ids.iter()
+                                            .map(|ids| ids.pan_id)
+                                            .collect();
+                                        push_solo_mutes(lg_raw, &state, &pan_ids);
+                                    }
+                                    *record_armed.lock().unwrap() = app.graph.record_armed.clone();
+                                    *track_groups.lock().unwrap() = app.groups.clone();
+                                    sync_track_topology_state(
+                                        editor.runtime_mut(),
+                                        &app,
+                                        &state,
+                                        &mut track_names,
+                                        replay_track,
+                                        &selected_steps,
+                                        &piano_roll_selection,
+                                        &accumulator_names,
+                                        &record_armed,
+                                        &cached_track_peak_levels,
+                                    );
+                                    refresh_visible_track_topology_layouts(&mut editor);
+                                    prev_track_playheads = track_playheads_snapshot(&state, &app);
+                                    prev_track_button_states = track_button_state_snapshot(&state);
+                                }
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(
                                     "SEQ",
@@ -9501,7 +9529,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    "add-track-sampler" => match app.graph_controller().add_blank_sampler_track() {
+                    "add-track-sampler" => match app.graph_controller().add_blank_sampler_track()
+                        .and_then(|idx| {
+                            app.commit_created_track(idx, "Add sampler track")?;
+                            Ok(idx)
+                        }) {
                         Ok(idx) => {
                             current_track.store(idx, Ordering::Relaxed);
                             let new_name = app.tracks[idx].clone();
@@ -9598,6 +9630,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             app.graph_controller().add_empty_rack_track()
                         };
+                        let result = result.and_then(|idx| {
+                            app.commit_created_track(idx, "Add drum rack track")?;
+                            Ok(idx)
+                        });
                         match result {
                             Ok(idx) => {
                                 sync_after_instrument_track_apply(
@@ -9638,6 +9674,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             app.graph_controller().add_empty_layer_rack_track()
                         };
+                        let result = result.and_then(|idx| {
+                            app.commit_created_track(idx, "Add layer rack track")?;
+                            Ok(idx)
+                        });
                         match result {
                             Ok(idx) => {
                                 sync_after_instrument_track_apply(
@@ -9677,7 +9717,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match app.graph_controller().add_sampler_drum_rack_track(
                                     &path,
                                     sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE,
-                                ) {
+                                ).and_then(|idx| {
+                                    app.commit_created_track(idx, "Add drum rack track")?;
+                                    Ok(idx)
+                                }) {
                                     Ok(idx) => {
                                         sync_after_instrument_track_apply(
                                             &mut app,
@@ -10527,7 +10570,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    "add-track-modulator" => match app.graph_controller().add_modulator_track() {
+                    "add-track-modulator" => match app.graph_controller().add_modulator_track()
+                        .and_then(|idx| {
+                            app.commit_created_track(idx, "Add modulator track")?;
+                            Ok(idx)
+                        }) {
                         Ok(idx) => {
                             sync_after_instrument_track_apply(
                                 &mut app,
@@ -10815,9 +10862,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
                             let path = Path::new(&path_str);
+                            let groups_before = app.groups.clone();
                             match app.graph_controller().add_track(path) {
                                 Ok(idx) => {
                                     host_commands::add_new_track_to_group(&mut app, idx, group_id);
+                                    if let Err(error) = app.commit_created_track(idx, "Add sample track") {
+                                        app.groups = groups_before;
+                                        *track_groups.lock().unwrap() = app.groups.clone();
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error adding track: {error}"
+                                        )));
+                                        continue;
+                                    }
                                     *track_groups.lock().unwrap() = app.groups.clone();
                                     register_waveform_sample(path);
                                     current_track.store(idx, Ordering::Relaxed);
@@ -11558,7 +11614,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "add-track-from-sound" => {
                         let path = extract_path_from_payload(&payload);
                         match path {
-                            Some(path) => match app.add_track_from_sound(Path::new(&path)) {
+                            Some(path) => match app.add_track_from_sound(Path::new(&path))
+                                .and_then(|track| {
+                                    app.commit_created_track(track, "Add Sound track")?;
+                                    Ok(track)
+                                }) {
                                 Ok(track) => {
                                     sync_after_instrument_track_apply(
                                         &mut app,

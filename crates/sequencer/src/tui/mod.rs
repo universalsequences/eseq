@@ -1323,6 +1323,26 @@ impl DeviceIdentityRegistry {
         }
     }
 
+    pub(crate) fn clear_track(&mut self, track: crate::sequencer::TrackId) {
+        let audio_effects = self.audio_effects.iter()
+            .filter(|((owner, _), _)| *owner == track)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        for (location, id) in audio_effects {
+            self.audio_effects.remove(&location);
+            self.audio_effect_locations.remove(&id);
+        }
+        let midi_effects = self.midi_effects.iter()
+            .filter(|((owner, _), _)| *owner == track)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        for (location, id) in midi_effects {
+            self.midi_effects.remove(&location);
+            self.midi_effect_locations.remove(&id);
+        }
+        self.clear_rack_track(track);
+    }
+
     pub(crate) fn clear(&mut self) {
         self.audio_effects.clear();
         self.audio_effect_locations.clear();

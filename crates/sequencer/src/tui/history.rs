@@ -51,6 +51,7 @@ pub enum EditPatch {
     RackEffectChain(RackEffectChainPatch),
     MidiFxChain(MidiFxChainPatch),
     RackSlotStructure(RackSlotStructurePatch),
+    TrackCreation(TrackCreationPatch),
     TransportParams(TransportParamsPatch),
 }
 
@@ -283,6 +284,7 @@ pub enum TrackInstrumentSource {
     Rack {
         slots: Vec<RackContainerSlotState>,
     },
+    Modulator,
 }
 
 #[derive(Clone, Debug)]
@@ -306,11 +308,43 @@ pub struct InstrumentBindingPatch {
     pub after: TrackInstrumentState,
 }
 
+#[derive(Clone, Debug)]
+pub struct TrackCreationPatch {
+    pub track: TrackId,
+    pub state: TrackInstrumentState,
+    pub color: Option<crate::track_color::TrackColor>,
+    pub collapsed: bool,
+    pub group: Option<(u64, u64)>,
+}
+
+impl TrackCreationPatch {
+    pub fn retained_bytes(&self) -> usize {
+        let source_bytes = match &self.state.source {
+            TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator => 0,
+            TrackInstrumentSource::Sampler { path, .. } => path
+                .as_ref()
+                .map(|path| path.as_os_str().len())
+                .unwrap_or(0),
+            TrackInstrumentSource::Rack { slots } => slots.iter()
+                .map(|slot| RackEffectChainPatch::state_bytes(&slot.effects))
+                .sum(),
+        };
+        std::mem::size_of::<Self>()
+            + source_bytes
+            + self.state.display_name.capacity()
+            + self.state.patterns.patterns.capacity()
+                * std::mem::size_of::<(
+                    PatternId,
+                    crate::sequencer::TrackInstrumentPatternState,
+                )>()
+    }
+}
+
 impl InstrumentBindingPatch {
     pub fn retained_bytes(&self) -> usize {
         fn state_bytes(state: &TrackInstrumentState) -> usize {
             let source_bytes = match &state.source {
-                TrackInstrumentSource::Custom { .. } => 0,
+                TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator => 0,
                 TrackInstrumentSource::Sampler { path, .. } => path
                     .as_ref()
                     .map(|path| path.as_os_str().len())
