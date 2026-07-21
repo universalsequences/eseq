@@ -72,6 +72,12 @@ fn update_interaction_state(widget_id: u64, update: impl FnOnce(&mut AdsrInterac
     });
 }
 
+fn visual_envelope(node: &LayoutNode) -> AdsrEnvelope {
+    interaction_state(node.widget_id)
+        .last_drag_envelope
+        .unwrap_or_else(|| AdsrEnvelope::from_node(node))
+}
+
 fn clamp_measured_axis(requested: f32, min: f32, max: f32) -> f32 {
     if max.is_finite() {
         let upper = max.max(0.0);
@@ -417,10 +423,11 @@ impl WidgetDefinition for AdsrEditorWidget {
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        let attack = prop_ms(&node.props, "attack", 4.0);
-        let decay = prop_ms(&node.props, "decay", 400.0);
-        let sustain = prop_unit(&node.props, "sustain", 0.5);
-        let release = prop_ms(&node.props, "release", 300.0);
+        let envelope = visual_envelope(node);
+        let attack = envelope.attack;
+        let decay = envelope.decay;
+        let sustain = envelope.sustain;
+        let release = envelope.release;
         let hold = super::get_f32_prop(&node.props, "hold", 0.35).clamp(0.05, 2.0);
         let attack_max =
             super::get_f32_prop(&node.props, "attack-max", ATTACK_MAX_DEFAULT).max(1.0);
@@ -781,6 +788,11 @@ mod tests {
         };
         let dragged_attack = map_value(&drag_env, "attack");
         assert_ne!(dragged_attack, Value::Number(10.0));
+        assert_eq!(
+            Value::Number(visual_envelope(&node).attack as f64),
+            dragged_attack,
+            "the renderer must use live drag state before the reactive props commit",
+        );
 
         // The layout props intentionally remain at the pre-drag value, matching
         // rack-slot parameters that do not have a live reactive value field.
