@@ -1800,10 +1800,19 @@ impl App {
     }
 
     pub fn load_rack_preset_onto_track(&mut self, track: usize, name: &str) -> Result<(), String> {
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Rack) {
+            return Err("Rack presets can only be loaded onto an instrument rack".to_string());
+        }
         let preset = crate::project::load_rack_preset(name).map_err(|error| error.to_string())?;
-        self.load_container_preset_onto_track(track, preset, name)?;
-        self.set_track_sound_state(track, None, Some(name.to_string()), false);
-        Ok(())
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let preset_name = name.to_string();
+        self.apply_recorded_instrument_binding_mutation(track, "Load rack preset", |app| {
+            app.load_container_preset_onto_track(track, preset, &preset_name)?;
+            app.set_track_sound_state(track, None, Some(preset_name), false);
+            app.device_registry.clear_rack_track(track_id);
+            Ok(())
+        })
     }
 
     pub fn promote_preset_to_sound(

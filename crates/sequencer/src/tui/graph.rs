@@ -9393,6 +9393,24 @@ mod tests {
         assert_eq!(restored.slots[0].effect_descriptors[0].name, "OTT");
         assert_ne!(restored.slots[0].effect_slots[0].node_id, 0);
 
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let undone = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone().expect("pre-preset rack state should be restored");
+        assert_eq!(undone.slots[0].effect_slots[0].node_id, 0);
+        assert_eq!(undone.slots[0].custom_effect_names[0], None);
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let redone = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone().expect("rack preset should be restored on redo");
+        assert_eq!(redone.slots[0].effect_descriptors[0].name, "OTT");
+        assert_ne!(redone.slots[0].effect_slots[0].node_id, 0);
+
         let sound_path = app
             .promote_preset_to_sound(0, &preset_name)
             .expect("rack preset should promote to Sound");

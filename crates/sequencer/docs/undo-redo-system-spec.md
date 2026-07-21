@@ -22,7 +22,8 @@ Implemented through Slice 6.
   rack extension covers appending layer-rack slots and replacing layer-rack
   instrument/sample sources while preserving slot FX and per-pattern state.
   Slice 6 extends the binding transaction to whole rack-container replacement
-  from the Sounds browser, including rack-slot/effect identities and values;
+  from the Sounds and Presets browsers, including rack-slot/effect identities
+  and values;
   sampler-to-rack Sound conversion uses the same transaction and restores the
   original flat sampler graph on undo. Custom-instrument-to-rack conversion
   remains a barrier until the graph has the corresponding rack-to-custom inverse.
