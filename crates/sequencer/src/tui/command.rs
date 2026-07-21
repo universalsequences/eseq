@@ -17,7 +17,7 @@ use crate::macro_engine::{MacroCurve, MacroId};
 use crate::plock_variants::{PlockVariantDomain, PlockVariantKey};
 use crate::process::ParamTarget;
 use crate::sequencer::{
-    RackSlotParam, StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput,
+    BusId, RackSlotParam, StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput,
     TrackSendSnapshot,
 };
 
@@ -476,6 +476,17 @@ pub enum AppCommand {
         sends: Vec<TrackSendSnapshot>,
     },
 
+    SetBusVolume {
+        bus: BusId,
+        value: f32,
+    },
+    ToggleBusMute {
+        bus: BusId,
+    },
+    ToggleBusSolo {
+        bus: BusId,
+    },
+
     /// Set master volume; also pushes to the live audio graph.
     SetMasterVolume {
         value: f32,
@@ -849,7 +860,6 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::NextTrackSwingResolution { .. }
         | AppCommand::PrevTrackSwingResolution { .. }
         | AppCommand::SetTrackOutput { .. }
-        | AppCommand::SetTrackSends { .. }
         | AppCommand::SetTrackTimebase { .. }
         | AppCommand::NextTrackTimebase { .. }
         | AppCommand::PrevTrackTimebase { .. }
@@ -858,6 +868,10 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackAccumMode { .. }
         | AppCommand::SetTrackMuteGroup { .. }
         | AppCommand::SetTrackGlobalTranspose { .. } => HistoryPolicy::Record,
+
+        AppCommand::ToggleBusMute { .. } | AppCommand::ToggleBusSolo { .. } => {
+            HistoryPolicy::Record
+        }
 
         AppCommand::AdjustTrackMaxPolyphony { track, .. }
         | AppCommand::SetTrackMaxPolyphony { track, .. } => HistoryPolicy::Coalesce(
@@ -892,6 +906,12 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
                 "track:{track}:send"
             )))
         }
+        AppCommand::SetTrackSends { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:sends")),
+        ),
+        AppCommand::SetBusVolume { bus, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("bus:{}:volume", bus.0)),
+        ),
         AppCommand::SetTrackAccumLimit { track, .. }
         | AppCommand::AdjustTrackAccumLimit { track, .. } => HistoryPolicy::Coalesce(
             super::history::MergeKey::new(format!("track:{track}:accum-limit")),
@@ -2417,6 +2437,9 @@ pub(crate) fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
             | AppCommand::SetTrackSend { .. }
             | AppCommand::AdjustTrackSend { .. }
             | AppCommand::SetTrackSends { .. }
+            | AppCommand::SetBusVolume { .. }
+            | AppCommand::ToggleBusMute { .. }
+            | AppCommand::ToggleBusSolo { .. }
             | AppCommand::SetMasterVolume { .. }
             | AppCommand::AdjustMasterVolume { .. }
             | AppCommand::MacroCreate { .. }
@@ -2719,6 +2742,27 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
         AppCommand::SetTrackSends { track, sends } => {
             app.state.pattern.track_params[track].set_sends(sends);
             app.graph_controller().apply_track_bus_sends(track);
+        }
+
+        AppCommand::SetBusVolume { bus, value } => {
+            if let Some(channel) = app.buses.iter_mut().find(|channel| channel.id == bus) {
+                channel.volume = value.clamp(0.0, 1.0);
+                app.push_bus_volume(bus);
+            }
+        }
+
+        AppCommand::ToggleBusMute { bus } => {
+            if let Some(channel) = app.buses.iter_mut().find(|channel| channel.id == bus) {
+                channel.mute = !channel.mute;
+                app.push_bus_mute(bus);
+            }
+        }
+
+        AppCommand::ToggleBusSolo { bus } => {
+            if let Some(channel) = app.buses.iter_mut().find(|channel| channel.id == bus) {
+                channel.solo = !channel.solo;
+                app.push_bus_solo_mutes();
+            }
         }
 
         AppCommand::SetMasterVolume { value } => {

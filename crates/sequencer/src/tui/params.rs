@@ -597,6 +597,69 @@ impl App {
         }
     }
 
+    pub(super) fn push_bus_volume(&self, bus: crate::sequencer::BusId) {
+        let Some(channel) = self.buses.iter().find(|channel| channel.id == bus) else {
+            return;
+        };
+        let Some(nodes) = self.graph.bus_node_ids.iter().find(|nodes| nodes.id == bus) else {
+            return;
+        };
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                self.graph.lg.0,
+                crate::audiograph::ParamMsg {
+                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                    logical_id: nodes.volume_id as u64,
+                    fvalue: crate::mixer_volume::fader_to_gain(channel.volume),
+                },
+            );
+        }
+    }
+
+    pub(super) fn push_bus_mute(&self, bus: crate::sequencer::BusId) {
+        let Some(channel) = self.buses.iter().find(|channel| channel.id == bus) else {
+            return;
+        };
+        let Some(nodes) = self.graph.bus_node_ids.iter().find(|nodes| nodes.id == bus) else {
+            return;
+        };
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                self.graph.lg.0,
+                crate::audiograph::ParamMsg {
+                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                    logical_id: nodes.volume_id as u64,
+                    fvalue: if channel.mute { 1.0 } else { 0.0 },
+                },
+            );
+        }
+    }
+
+    pub(super) fn push_bus_solo_mutes(&self) {
+        let has_solo = self.buses.iter().any(|bus| bus.solo);
+        for channel in &self.buses {
+            let Some(nodes) = self
+                .graph
+                .bus_node_ids
+                .iter()
+                .find(|nodes| nodes.id == channel.id)
+            else {
+                continue;
+            };
+            let muted_by_solo = has_solo && !channel.solo;
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: if muted_by_solo { 1.0 } else { 0.0 },
+                    },
+                );
+            }
+        }
+    }
+
     pub(super) fn push_master_volume(&self) {
         let volume = f32::from_bits(self.state.transport.master_volume.load(Ordering::Relaxed));
         if let Some(nodes) = self

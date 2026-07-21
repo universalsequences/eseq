@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::plock_variants::PlockVariantRegistry;
-use crate::sequencer::{StepCellSnapshot, StepSlotPlocks, TrackParamsSnapshot, TrackPatternId};
+use crate::sequencer::{
+    BusId, StepCellSnapshot, StepSlotPlocks, TrackParamsSnapshot, TrackPatternId,
+};
 
 pub const DEFAULT_HISTORY_ENTRY_LIMIT: usize = 256;
 pub const DEFAULT_HISTORY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
@@ -31,7 +33,28 @@ pub enum EditPatch {
     PatternGeometry(PatternGeometryPatch),
     TrackParams(TrackParamsPatch),
     TrackParamsBatch(TrackParamsBatchPatch),
+    BusMixer(BusMixerPatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BusMixerSnapshot {
+    pub volume_bits: u32,
+    pub mute: bool,
+    pub solo: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct BusMixerPatch {
+    pub target: BusId,
+    pub before: BusMixerSnapshot,
+    pub after: BusMixerSnapshot,
+}
+
+impl BusMixerPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -1651,6 +1651,48 @@ fn apply_slice3_history_host_command(
         .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
 }
 
+fn apply_bus_mixer_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("Bus mixer edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "Bus mixer edit operation was missing".to_string())?;
+    let requested_bus_idx = map_usize(map, "bus")
+        .ok_or_else(|| "Bus mixer edit bus was invalid".to_string())?;
+    let bus = map_string(map, "bus-id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(sequencer::sequencer::BusId)
+        .ok_or_else(|| "Bus mixer edit stable bus ID was invalid".to_string())?;
+    let bus_idx = app
+        .buses
+        .iter()
+        .position(|channel| channel.id == bus)
+        .ok_or_else(|| {
+            format!(
+                "Bus mixer edit bus {requested_bus_idx} ({}) no longer exists",
+                bus.0,
+            )
+        })?;
+    let command = match op.as_str() {
+        "volume" => tui::AppCommand::SetBusVolume {
+            bus,
+            value: map_number(map, "value")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| "Bus mixer volume was invalid".to_string())?
+                as f32,
+        },
+        "toggle-mute" => tui::AppCommand::ToggleBusMute { bus },
+        "toggle-solo" => tui::AppCommand::ToggleBusSolo { bus },
+        _ => return Err(format!("Unsupported bus mixer edit operation: {op}")),
+    };
+    tui::try_apply_command(app, command)
+        .map(|outcome| (outcome, bus_idx))
+        .map_err(|error| format!("could not apply bus mixer edit: {error:?}"))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum DrumLaneHistoryAction {
     Toggle {
@@ -4866,7 +4908,8 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_drum_lane_history_host_command, apply_piano_roll_gesture_update,
+        apply_bus_mixer_history_host_command, apply_drum_lane_history_host_command,
+        apply_piano_roll_gesture_update,
         apply_piano_roll_history_host_command,
         apply_selected_steps_delete, apply_slice3_history_host_command,
         apply_toggle_step_host_command,
@@ -4951,6 +4994,30 @@ mod tests {
             sequencer::tui::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), before.to_bits());
+    }
+
+    #[test]
+    fn bus_mixer_host_action_enters_replayable_history() {
+        let (_state, mut app) = history_test_app();
+        let before = app.buses[1].volume;
+        let payload = history_value_map([
+            ("op", Value::Keyword("volume".to_string())),
+            ("bus", Value::Number(1.0)),
+            ("bus-id", Value::String(app.buses[1].id.0.to_string())),
+            ("value", Value::Number(0.25)),
+        ]);
+
+        let (outcome, bus) = apply_bus_mixer_history_host_command(&mut app, &payload)
+            .expect("apply bus mixer host action");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(bus, 1);
+        sequencer::tui::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.buses[1].volume.to_bits(), 0.25f32.to_bits());
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[1].volume.to_bits(), before.to_bits());
     }
 
     #[test]
@@ -8538,6 +8605,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let message = match replay {
                             tui::history::HistoryReplay::Applied(result) => {
+                                *bus_state.lock().unwrap() = app.buses.clone();
+                                if !app.buses.is_empty() {
+                                    ui_invalidations.push(UiInvalidation::BusMixer {
+                                        bus: 0,
+                                        change: BusMixerInvalidation::Volume,
+                                    });
+                                }
                                 ui_invalidations.push(UiInvalidation::Pattern(
                                     PatternInvalidation::AllTracks,
                                 ));
@@ -9146,6 +9220,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Slice 3 edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "bus-mixer-history-action" => {
+                        match apply_bus_mixer_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), bus)) => {
+                                *bus_state.lock().unwrap() = app.buses.clone();
+                                ui_invalidations.push(UiInvalidation::BusMixer {
+                                    bus,
+                                    change: BusMixerInvalidation::Volume,
+                                });
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Bus mixer edit was applied without history".to_string(),
                                 ));
                             }
                             Err(error) => editor.handle_host_event(HostEvent::Error(error)),

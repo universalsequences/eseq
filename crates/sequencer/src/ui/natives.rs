@@ -114,6 +114,37 @@ fn slice3_numeric_history_command(op: &str, track: Option<usize>, value: f64) ->
     }
 }
 
+fn bus_mixer_history_command(
+    op: &str,
+    bus: usize,
+    bus_id: sequencer::sequencer::BusId,
+    value: Option<f64>,
+) -> HostCommand {
+    let mut payload = HashMap::new();
+    payload.insert(
+        "op".to_string(),
+        Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
+    );
+    payload.insert(
+        "bus".to_string(),
+        Rc::new(RefCell::new(Value::Number(bus as f64))),
+    );
+    payload.insert(
+        "bus-id".to_string(),
+        Rc::new(RefCell::new(Value::String(bus_id.0.to_string()))),
+    );
+    if let Some(value) = value {
+        payload.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(value))),
+        );
+    }
+    HostCommand::Custom {
+        name: "bus-mixer-history-action".to_string(),
+        payload: Value::Map(payload),
+    }
+}
+
 fn unsupported_authoring_barrier(label: &str) -> HostCommand {
     HostCommand::Custom {
         name: "unsupported-authoring-history-barrier".to_string(),
@@ -778,7 +809,7 @@ pub(crate) fn init_runtime(
     _track_pan_ids: Arc<Mutex<Vec<i32>>>,
     track_collapsed: Arc<Mutex<Vec<bool>>>,
     buses: Arc<Mutex<Vec<tui::BusChannelState>>>,
-    bus_node_ids: Arc<Mutex<Vec<tui::BusNodeIds>>>,
+    _bus_node_ids: Arc<Mutex<Vec<tui::BusNodeIds>>>,
     current_track: Arc<AtomicUsize>,
     selected_tracks: Arc<Mutex<HashSet<usize>>>,
     track_groups: Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,
@@ -2810,103 +2841,70 @@ pub(crate) fn init_runtime(
     });
 
     let bus_state = buses.clone();
-    let bus_nodes = bus_node_ids.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-bus-volume", move |args, _ctx| {
+    runtime.register_native("seq-set-bus-volume", move |args, ctx| {
         let (Some(Value::Number(bus_idx)), Some(Value::Number(vol))) = (args.first(), args.get(1))
         else {
             return Err("seq-set-bus-volume: expected (bus volume)".into());
         };
         let bus_idx = *bus_idx as usize;
         let vol = (*vol as f32).clamp(0.0, 1.0);
-        {
-            let mut buses = bus_state.lock().unwrap();
-            let Some(bus) = buses.get_mut(bus_idx) else {
+        let bus_id = {
+            let buses = bus_state.lock().unwrap();
+            let Some(bus) = buses.get(bus_idx) else {
                 return Err(format!("seq-set-bus-volume: bus {bus_idx} out of range").into());
             };
-            bus.volume = vol;
-        }
-        if let Some(nodes) = bus_nodes.lock().unwrap().get(bus_idx).cloned() {
-            unsafe {
-                sequencer::audiograph::params_push_wrapper(
-                    lg_raw,
-                    sequencer::audiograph::ParamMsg {
-                        idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
-                        logical_id: nodes.volume_id as u64,
-                        fvalue: sequencer::mixer_volume::fader_to_gain(vol),
-                    },
-                );
-            }
-        }
-        ui_inv.push(UiInvalidation::BusMixer {
-            bus: bus_idx,
-            change: BusMixerInvalidation::Volume,
-        });
+            bus.id
+        };
+        ctx.enqueue_command(bus_mixer_history_command(
+            "volume",
+            bus_idx,
+            bus_id,
+            Some(vol as f64),
+        ));
         Ok(Value::Number(vol as f64))
     });
 
     let bus_state = buses.clone();
-    let bus_nodes = bus_node_ids.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-toggle-bus-mute", move |args, _ctx| {
+    runtime.register_native("seq-toggle-bus-mute", move |args, ctx| {
         let Some(Value::Number(bus_idx)) = args.first() else {
             return Err("seq-toggle-bus-mute: expected bus".into());
         };
         let bus_idx = *bus_idx as usize;
-        let (muted, volume) = {
-            let mut buses = bus_state.lock().unwrap();
-            let Some(bus) = buses.get_mut(bus_idx) else {
+        let (bus_id, muted) = {
+            let buses = bus_state.lock().unwrap();
+            let Some(bus) = buses.get(bus_idx) else {
                 return Err(format!("seq-toggle-bus-mute: bus {bus_idx} out of range").into());
             };
-            bus.mute = !bus.mute;
-            (bus.mute, bus.volume)
+            (bus.id, !bus.mute)
         };
-        if let Some(nodes) = bus_nodes.lock().unwrap().get(bus_idx).cloned() {
-            unsafe {
-                sequencer::audiograph::params_push_wrapper(
-                    lg_raw,
-                    sequencer::audiograph::ParamMsg {
-                        idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
-                        logical_id: nodes.volume_id as u64,
-                        fvalue: sequencer::mixer_volume::fader_to_gain(volume),
-                    },
-                );
-                sequencer::audiograph::params_push_wrapper(
-                    lg_raw,
-                    sequencer::audiograph::ParamMsg {
-                        idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE,
-                        logical_id: nodes.volume_id as u64,
-                        fvalue: if muted { 1.0 } else { 0.0 },
-                    },
-                );
-            }
-        }
-        ui_inv.push(UiInvalidation::BusMixer {
-            bus: bus_idx,
-            change: BusMixerInvalidation::Mute,
-        });
+        ctx.enqueue_command(bus_mixer_history_command(
+            "toggle-mute",
+            bus_idx,
+            bus_id,
+            None,
+        ));
         Ok(Value::Bool(muted))
     });
 
     let bus_state = buses.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-toggle-bus-solo", move |args, _ctx| {
+    runtime.register_native("seq-toggle-bus-solo", move |args, ctx| {
         let Some(Value::Number(bus_idx)) = args.first() else {
             return Err("seq-toggle-bus-solo: expected bus".into());
         };
         let bus_idx = *bus_idx as usize;
-        let solo = {
-            let mut buses = bus_state.lock().unwrap();
-            let Some(bus) = buses.get_mut(bus_idx) else {
+        let (bus_id, solo) = {
+            let buses = bus_state.lock().unwrap();
+            let Some(bus) = buses.get(bus_idx) else {
                 return Err(format!("seq-toggle-bus-solo: bus {bus_idx} out of range").into());
             };
-            bus.solo = !bus.solo;
-            bus.solo
+            (bus.id, !bus.solo)
         };
-        ui_inv.push(UiInvalidation::BusMixer {
-            bus: bus_idx,
-            change: BusMixerInvalidation::Solo,
-        });
+        ctx.enqueue_command(bus_mixer_history_command(
+            "toggle-solo",
+            bus_idx,
+            bus_id,
+            None,
+        ));
         Ok(Value::Bool(solo))
     });
 

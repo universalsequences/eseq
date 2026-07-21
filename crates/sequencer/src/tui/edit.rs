@@ -2,7 +2,7 @@ use crate::macro_engine::{Macro, MacroMapping};
 use crate::effects::EffectSlotSnapshot;
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
+    BusId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,9 +10,10 @@ use std::time::Instant;
 
 use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
-    step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, EditPatch, GestureId, HistoryMove,
-    HistoryPolicy, HistoryReplay, MergeKey, PatternGeometryPatch, StepCellDelta, StepCellsPatch,
-    TrackParamsBatchPatch, TrackParamsPatch, TransportAuthoringSnapshot, TransportParamsPatch,
+    step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusMixerPatch, BusMixerSnapshot,
+    EditPatch, GestureId, HistoryMove, HistoryPolicy, HistoryReplay, MergeKey,
+    PatternGeometryPatch, StepCellDelta, StepCellsPatch, TrackParamsBatchPatch, TrackParamsPatch,
+    TransportAuthoringSnapshot, TransportParamsPatch,
 };
 use super::App;
 
@@ -21,6 +22,7 @@ pub enum EditError {
     UnsupportedCommand,
     TrackOutOfRange { track: usize },
     MissingStableTrack { track: TrackId },
+    MissingStableBus { bus: BusId },
     StepOutOfRange { step: usize },
     InvalidStepRange,
     MissingTrackPattern,
@@ -855,6 +857,9 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::ScenePushBegin { .. }
         | AppCommand::ScenePushSetValue { .. }
         | AppCommand::ScenePushEnd
+        | AppCommand::SetBusVolume { .. }
+        | AppCommand::ToggleBusMute { .. }
+        | AppCommand::ToggleBusSolo { .. }
         | AppCommand::TogglePlay => Err(EditError::UnsupportedCommand),
     }
 }
@@ -1427,6 +1432,99 @@ fn capture_transport_authoring(app: &App) -> TransportAuthoringSnapshot {
     }
 }
 
+fn bus_mixer_command_bus(cmd: &AppCommand) -> Option<BusId> {
+    match cmd {
+        AppCommand::SetBusVolume { bus, .. }
+        | AppCommand::ToggleBusMute { bus }
+        | AppCommand::ToggleBusSolo { bus } => Some(*bus),
+        _ => None,
+    }
+}
+
+fn bus_mixer_label(cmd: &AppCommand) -> &'static str {
+    match cmd {
+        AppCommand::SetBusVolume { .. } => "Set bus volume",
+        AppCommand::ToggleBusMute { .. } => "Toggle bus mute",
+        AppCommand::ToggleBusSolo { .. } => "Toggle bus solo",
+        _ => "Edit bus mixer",
+    }
+}
+
+fn capture_bus_mixer(app: &App, bus: BusId) -> Result<BusMixerSnapshot, EditError> {
+    let channel = app
+        .buses
+        .iter()
+        .find(|channel| channel.id == bus)
+        .ok_or(EditError::MissingStableBus { bus })?;
+    Ok(BusMixerSnapshot {
+        volume_bits: channel.volume.to_bits(),
+        mute: channel.mute,
+        solo: channel.solo,
+    })
+}
+
+fn apply_recorded_bus_mixer_command(
+    app: &mut App,
+    cmd: &AppCommand,
+    merge_key: Option<MergeKey>,
+) -> Result<EditOutcome, EditError> {
+    let bus = bus_mixer_command_bus(cmd).ok_or(EditError::UnsupportedCommand)?;
+    let merge_key = merge_key.map(|_| {
+        MergeKey::new(format!("bus:{}:{}", bus.0, bus_mixer_label(cmd)))
+    });
+    if let Some(key) = merge_key.as_ref() {
+        if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(key) {
+            finish_active_gesture(app);
+        }
+    }
+    let current_before = capture_bus_mixer(app, bus)?;
+    let entry_before = merge_key
+        .as_ref()
+        .and_then(|key| app.history.active_gesture_patch(key))
+        .and_then(|patch| match patch {
+            EditPatch::BusMixer(patch) if patch.target == bus => Some(patch.before),
+            _ => None,
+        })
+        .unwrap_or(current_before);
+
+    super::command::execute_command(app, cmd.clone());
+    let after = capture_bus_mixer(app, bus)?;
+    if current_before == after {
+        return Ok(EditOutcome::NoOp);
+    }
+
+    let patch = BusMixerPatch {
+        target: bus,
+        before: entry_before,
+        after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    if let Some(key) = merge_key {
+        if patch.before == patch.after && app.history.discard_active_gesture_entry(&key) {
+            return Ok(EditOutcome::NoOp);
+        }
+        ensure_coalescing_gesture(app, &key);
+        let history_move = app
+            .history
+            .stage_active_gesture(
+                bus_mixer_label(cmd),
+                &key,
+                EditPatch::BusMixer(patch),
+                retained_bytes,
+            )
+            .ok_or(EditError::UnsupportedCommand)?;
+        return Ok(EditOutcome::Applied(history_move));
+    }
+    finish_active_gesture(app);
+    let history_move = app.history.commit(
+        bus_mixer_label(cmd),
+        None,
+        EditPatch::BusMixer(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(history_move))
+}
+
 static NEXT_HISTORY_GESTURE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
@@ -1990,6 +2088,9 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
         HistoryPolicy::Record if track_params_command_track(&cmd).is_some() => {
             apply_recorded_track_params_command(app, &cmd, None)
         }
+        HistoryPolicy::Record if bus_mixer_command_bus(&cmd).is_some() => {
+            apply_recorded_bus_mixer_command(app, &cmd, None)
+        }
         HistoryPolicy::Record
             if matches!(
                 cmd,
@@ -2034,6 +2135,9 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
         }
         HistoryPolicy::Coalesce(key) if track_params_command_track(&cmd).is_some() => {
             apply_recorded_track_params_command(app, &cmd, Some(key))
+        }
+        HistoryPolicy::Coalesce(key) if bus_mixer_command_bus(&cmd).is_some() => {
+            apply_recorded_bus_mixer_command(app, &cmd, Some(key))
         }
         HistoryPolicy::Coalesce(key)
             if matches!(
@@ -2216,6 +2320,45 @@ fn replay_track_params_batch_patch(
     Ok(MutationEffects { publish_scheduler })
 }
 
+fn replay_bus_mixer_patch(
+    app: &mut App,
+    patch: &BusMixerPatch,
+    mode: ApplyMode,
+) -> Result<(), EditError> {
+    let target = match mode {
+        ApplyMode::Undo => patch.before,
+        ApplyMode::Redo => patch.after,
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "bus-mixer replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
+    let channel = app
+        .buses
+        .iter_mut()
+        .find(|channel| channel.id == patch.target)
+        .ok_or(EditError::MissingStableBus { bus: patch.target })?;
+    let before = BusMixerSnapshot {
+        volume_bits: channel.volume.to_bits(),
+        mute: channel.mute,
+        solo: channel.solo,
+    };
+    channel.volume = f32::from_bits(target.volume_bits);
+    channel.mute = target.mute;
+    channel.solo = target.solo;
+    if before.volume_bits != target.volume_bits {
+        app.push_bus_volume(patch.target);
+    }
+    if before.mute != target.mute {
+        app.push_bus_mute(patch.target);
+    }
+    if before.solo != target.solo {
+        app.push_bus_solo_mutes();
+    }
+    Ok(())
+}
+
 fn replay_transport_params_patch(
     app: &mut App,
     patch: &TransportParamsPatch,
@@ -2262,6 +2405,7 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
         EditPatch::TrackParamsBatch(patch) => {
             replay_track_params_batch_patch(app, patch, mode, true).map(|_| ())
         }
+        EditPatch::BusMixer(patch) => replay_bus_mixer_patch(app, patch, mode),
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -2281,7 +2425,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
                     != patch.instrument_base_note_offset_after
         }),
         EditPatch::TransportParams(patch) => patch.before.bpm != patch.after.bpm,
-        EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => false,
+        EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
     }
 }
 
@@ -2342,6 +2486,7 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, ApplyMode::Undo, false)?;
         }
+        EditPatch::BusMixer(patch) => replay_bus_mixer_patch(app, patch, ApplyMode::Undo)?,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
@@ -3144,6 +3289,99 @@ mod tests {
                 expected,
             ));
         }
+    }
+
+    #[test]
+    fn track_bus_send_drag_is_one_coalesced_entry() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app
+            .state
+            .capture_pattern_track_params(0, pattern)
+            .unwrap();
+
+        for update in 1..=200 {
+            try_apply_command(
+                &mut app,
+                AppCommand::SetTrackSends {
+                    track: 0,
+                    sends: vec![crate::sequencer::TrackSendSnapshot {
+                        destination: BusId::DEFAULT_A,
+                        amount: update as f32 / 200.0,
+                    }],
+                },
+            )
+            .expect("apply track bus send update");
+        }
+        finish_active_gesture(&mut app);
+        let after = app
+            .state
+            .capture_pattern_track_params(0, pattern)
+            .unwrap();
+
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(track_params_bit_exact_eq(
+            &app
+                .state
+                .capture_pattern_track_params(0, pattern)
+                .unwrap(),
+            &before,
+        ));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(track_params_bit_exact_eq(
+            &app
+                .state
+                .capture_pattern_track_params(0, pattern)
+                .unwrap(),
+            &after,
+        ));
+    }
+
+    #[test]
+    fn bus_mixer_volume_mute_and_solo_round_trip() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let bus = BusId::DEFAULT_A;
+        let before = capture_bus_mixer(&app, bus).unwrap();
+
+        for update in 1..=200 {
+            try_apply_command(
+                &mut app,
+                AppCommand::SetBusVolume {
+                    bus,
+                    value: update as f32 / 400.0,
+                },
+            )
+            .expect("apply bus volume update");
+        }
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+
+        try_apply_command(&mut app, AppCommand::ToggleBusMute { bus })
+            .expect("toggle bus mute");
+        try_apply_command(&mut app, AppCommand::ToggleBusSolo { bus })
+            .expect("toggle bus solo");
+        let after = capture_bus_mixer(&app, bus).unwrap();
+        assert_eq!(app.history.undo_len(), 3);
+        app.buses.swap(1, 2);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(!capture_bus_mixer(&app, bus).unwrap().solo);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(!capture_bus_mixer(&app, bus).unwrap().mute);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(capture_bus_mixer(&app, bus).unwrap(), before);
+
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(capture_bus_mixer(&app, bus).unwrap(), after);
     }
 
     #[test]
