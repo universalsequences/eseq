@@ -20,7 +20,7 @@
     (< track SEQ.num-tracks)
     (< track (len SEQ.track-instrument-types))
     (let ((kind (nth SEQ.track-instrument-types track)))
-      (or (= kind "custom") (= kind "sampler")))))
+      (or (= kind "custom") (= kind "sampler") (= kind "rack")))))
 
 (def seq-track-sound-replaceable? (track)
   (and (>= track 0)

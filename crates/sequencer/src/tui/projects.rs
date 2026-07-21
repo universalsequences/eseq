@@ -1484,7 +1484,7 @@ impl App {
             .unwrap_or("Sound");
         if matches!(
             self.graph.track_instrument_types.get(track),
-            Some(InstrumentType::Rack | InstrumentType::Sampler)
+            Some(InstrumentType::Rack | InstrumentType::Sampler | InstrumentType::Custom)
         ) {
             let track_id = self.track_registry.id_at(track)
                 .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;

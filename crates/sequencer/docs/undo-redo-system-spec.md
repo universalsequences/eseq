@@ -1256,6 +1256,10 @@ membership, track color, and mod-in routes must remain untouched.
   redo within retained history.
 - Free-patch and ordinary instrument run modes restore correctly.
 - Sampler/custom conversion restores the correct runtime voice implementation.
+- Loading a Sound rack over a sampler or custom instrument restores the exact
+  flat source on undo and the complete rack on redo.
+- Dropping a saved instrument or sampler onto a rack replaces the container as
+  one transaction; undo restores the rack and redo restores the flat source.
 - No partially applied graph state is observable after a failed restore.
 
 ### Required tests
@@ -1265,6 +1269,7 @@ membership, track color, and mod-in routes must remain untouched.
 - Shared engine isolation.
 - Free-patch dedicated resource handling.
 - Sampler/custom round trip including sample metadata.
+- Flat-instrument/rack round trips from both Sound loads and mixer drops.
 - Async target deletion/reordering before compile completion.
 - Graph-capacity failure before commit.
 - Repeated undo/redo loop to detect leaked routes or duplicated nodes.

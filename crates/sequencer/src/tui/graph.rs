@@ -1922,6 +1922,14 @@ impl GraphController<'_> {
                 lib,
                 run_mode,
             ),
+            Some(InstrumentType::Rack) => self.convert_rack_track_to_custom_instrument(
+                track,
+                instrument_name,
+                new_engine_id,
+                manifest,
+                lib,
+                run_mode,
+            ),
             Some(other) => Err(format!(
                 "Track {} has instrument type {other:?}, which cannot be replaced with a custom instrument",
                 track + 1
@@ -2070,6 +2078,136 @@ impl GraphController<'_> {
         }
         self.app.tracks[track] = instrument_display_name(instrument_name);
         self.app.publish_sampler_analysis_runtime(track);
+        self.finish_track_instrument_source_change(track);
+        Ok(reset_summary)
+    }
+
+    fn convert_rack_track_to_custom_instrument(
+        &mut self,
+        track: usize,
+        instrument_name: &str,
+        new_engine_id: usize,
+        manifest: &DGenManifest,
+        lib: &LoadedDGenLib,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Result<InstrumentSlotResetSummary, String> {
+        if track >= self.app.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        if self.app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Rack) {
+            return Err(format!("Track {} is not an instrument rack", track + 1));
+        }
+        if self.app.graph.track_engine_ids.get(track) != Some(&None) {
+            return Err(format!(
+                "Rack track {} has an unexpected flat engine binding",
+                track + 1
+            ));
+        }
+        let track_id = self.app.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let track_nodes = self.app.graph.track_node_ids.get(track).cloned()
+            .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
+        self.app.state.validate_instrument_slot_reset_target(track, new_engine_id)?;
+        if new_engine_id >= self.app.state.runtime.engine_voice_lids.len() {
+            return Err(format!(
+                "Instrument engine runtime slot {new_engine_id} is unavailable; maximum runtime engines is {}",
+                self.app.state.runtime.engine_voice_lids.len()
+            ));
+        }
+
+        let descriptor = lisp_host::instrument_descriptor_from_manifest(instrument_name, manifest);
+        let old_track_name = self.app.tracks[track].clone();
+        let old_engine_ids = self.rack_engine_ids_for_track(track);
+        let batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        self.ensure_custom_engine_runtime(new_engine_id, instrument_name, manifest, lib)?;
+        let new_engine = self.app.graph.engine_node_ids[new_engine_id]
+            .as_ref()
+            .ok_or_else(|| format!("Missing runtime for instrument engine {new_engine_id}"))?;
+        let existing_routes = new_engine.route_gain_ids.get(track).ok_or_else(|| {
+            format!(
+                "Track {} is outside engine {new_engine_id}'s route table",
+                track + 1
+            )
+        })?;
+        let existing_ext_routes = new_engine.ext_route_gain_ids.get(track).ok_or_else(|| {
+            format!(
+                "Track {} is outside engine {new_engine_id}'s external route table",
+                track + 1
+            )
+        })?;
+        if !existing_routes.is_empty() || !existing_ext_routes.is_empty() {
+            return Err(format!(
+                "Instrument engine {new_engine_id} already has a route for track {}",
+                track + 1
+            ));
+        }
+        if run_mode == CustomInstrumentRunMode::FreePatch
+            && (new_engine.synth_ids.is_empty() || new_engine.gatepitch_ids.is_empty())
+        {
+            return Err(format!(
+                "Instrument engine {new_engine_id} has no voice 0 runtime for free-patch mode"
+            ));
+        }
+        let (route_nodes, route_connections) = engine_route_build_capacities(new_engine);
+        let required_commands = (route_nodes + route_connections)
+            .checked_mul(2)
+            .ok_or_else(|| "Instrument route capacity overflow".to_string())?;
+        require_graph_edit_queue_capacity(
+            self.app.graph.lg.0,
+            required_commands,
+            "Rack-to-instrument conversion",
+        )?;
+
+        let new_synth_ids = new_engine.synth_ids.clone();
+        let new_gatepitch_ids = new_engine.gatepitch_ids.clone();
+        let node_id = first_graph_node_identity(&new_engine.synth_ids);
+        let modulator_node_id = first_graph_node_identity(&new_engine.modulator_ids);
+        self.connect_engine_to_track(
+            new_engine_id,
+            track,
+            track,
+            &old_track_name,
+            track_nodes.voice_sum_id,
+            track_nodes.voice_sum_r_id,
+            track_nodes.mod_out_id,
+            track_nodes.mod_in_clip_ids,
+        )?;
+        self.delete_rack_effect_chains(track, batch.serial)?;
+        self.retire_rack_slot_graph_generation(track);
+
+        let live_nodes = &mut self.app.graph.track_node_ids[track];
+        live_nodes.rack_slots.clear();
+        live_nodes.rack_signature = None;
+        self.app.graph.track_instrument_types[track] = InstrumentType::Custom;
+        self.app.graph.track_instrument_run_modes[track] = run_mode;
+        self.app.graph.track_engine_ids[track] = Some(new_engine_id);
+        self.app.graph.track_synth_node_ids[track] = new_synth_ids;
+        self.app.graph.track_gatepitch_node_ids[track] = new_gatepitch_ids;
+        self.app.graph.track_buffer_ids[track] = -1;
+        self.app.graph.track_sample_rates[track] = self.app.graph.sample_rate;
+        self.app.graph.instrument_descriptors[track] = descriptor.clone();
+        let reset_summary = self.app.state.reset_instrument_slot_all_patterns(
+            track,
+            &descriptor,
+            node_id,
+            modulator_node_id,
+            new_engine_id,
+            run_mode,
+        ).expect("instrument reset target was validated before graph mutation");
+        if run_mode == CustomInstrumentRunMode::FreePatch {
+            self.apply_free_patch_idle_voice(track)
+                .expect("free-patch engine runtime was validated before graph mutation");
+        }
+        drop(batch);
+
+        self.reap_excess_rack_teardowns();
+        for engine_id in old_engine_ids {
+            if engine_id != new_engine_id && !self.engine_is_still_referenced(engine_id) {
+                lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
+            }
+        }
+        self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.app.device_registry.clear_rack_track(track_id);
         self.finish_track_instrument_source_change(track);
         Ok(reset_summary)
     }
@@ -2784,6 +2922,8 @@ impl GraphController<'_> {
         if buffer_id < 0 {
             return Err("Retained sampler buffer is invalid".to_string());
         }
+        let track_id = self.app.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         self.app.state.validate_sampler_slot_reset_target(track)?;
         let track_nodes = self.app.graph.track_node_ids.get(track).cloned()
             .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
@@ -2855,6 +2995,7 @@ impl GraphController<'_> {
         self.app.tracks[track] = sample_name.to_string();
         self.app.reset_sampler_bpm_for_analysis(track);
         self.app.publish_sampler_analysis_runtime(track);
+        self.app.device_registry.clear_rack_track(track_id);
         self.finish_track_instrument_source_change(track);
         Ok(reset_summary)
     }
@@ -9965,6 +10106,173 @@ mod tests {
             app.device_registry.rack_slot_location(replacement_rack_slot_id),
             Some((track_id, 0)),
         );
+        graph.process_block();
+    }
+
+    #[test]
+    fn loading_sound_rack_over_custom_instrument_undoes_and_redoes() {
+        let graph = TestLiveGraph::new("sound-rack-over-custom-history-test");
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let mut app = test_app_with_track_count(&graph, 1);
+        let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+            name: "old".to_string(),
+            source: "old.lisp".to_string(),
+            manifest: manifest.clone(),
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        assert_eq!(engine_id, 0);
+        app.editor.instrument_libs.push(lisp_host::test_loaded_dgen_lib());
+        install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
+        let track_id = app.track_registry.id_at(0).expect("track id");
+        let original_name = app.tracks[0].clone();
+
+        let sample_path = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sound = crate::project::ProjectSoundPreset {
+            version: crate::project::project_file_version(),
+            metadata: crate::project::ProjectSoundMetadata {
+                name: "Sampler Rack".to_string(),
+                tags: Vec::new(),
+                author: "test".to_string(),
+            },
+            track: crate::project::ProjectTrack {
+                id: track_id,
+                color: None,
+                collapsed: false,
+                kind: crate::project::ProjectTrackKind::Rack {
+                    routing: crate::project::ProjectRackRouting::Broadcast,
+                    slots: vec![crate::project::ProjectRackTrackSlot {
+                        instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                        sample_path: Some(sample_path.to_string_lossy().into_owned()),
+                        sample_name: Some("rack sample".to_string()),
+                        instrument_name: None,
+                    }],
+                },
+            },
+            rack: crate::project::ProjectRackTrackPattern {
+                macros: crate::project::default_project_rack_macros(),
+                routing: crate::project::ProjectRackRouting::Broadcast,
+                slots: vec![crate::project::ProjectRackSlotPattern {
+                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
+                    instrument_run_mode:
+                        crate::project::ProjectCustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    pad_note: None,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 4,
+                    param_plocks: Vec::new(),
+                    instrument_slot: crate::project::ProjectEffectSlot::default(),
+                    effect_slots: Vec::new(),
+                    custom_effects: Vec::new(),
+                    track_sound_state: crate::project::ProjectTrackSoundState::default(),
+                    sample_path: Some(sample_path.to_string_lossy().into_owned()),
+                    sample_name: Some("rack sample".to_string()),
+                }],
+            },
+        };
+        let sound_path = std::env::temp_dir().join(format!(
+            "eseq-sound-rack-over-custom-history-{}.sound",
+            std::process::id(),
+        ));
+        std::fs::write(
+            &sound_path,
+            serde_json::to_string(&sound).expect("serialize Sound"),
+        ).expect("write Sound");
+        let _sound_guard = TestProjectFile(sound_path.clone());
+
+        app.load_sound_onto_track(0, &sound_path)
+            .expect("Sound rack should replace the custom instrument");
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
+        assert_eq!(app.graph.track_engine_ids[0], Some(engine_id));
+        assert_eq!(app.tracks[0], original_name);
+        assert!(app.state.pattern.rack_tracks.lock().unwrap()[0].is_none());
+        assert_eq!(
+            app.graph.engine_node_ids[engine_id]
+                .as_ref()
+                .expect("retained custom engine should be rebuilt")
+                .route_gain_ids[0]
+                .len(),
+            MAX_VOICES,
+        );
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
+        assert_eq!(
+            app.state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref()
+                .expect("Sound rack should be restored")
+                .slots
+                .len(),
+            1,
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn replacing_rack_with_saved_instrument_undoes_and_redoes() {
+        let graph = TestLiveGraph::new("rack-to-saved-instrument-history-test");
+        let manifest = test_instrument_manifest();
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample_path = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample_path.to_path_buf()])
+            .expect("rack should be created");
+        let original_rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack state");
+        let source = "target.lisp";
+        let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+            name: "target".to_string(),
+            source: source.to_string(),
+            manifest,
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        app.editor.instrument_libs.push(lisp_host::test_loaded_dgen_lib());
+
+        app.try_swap_track_to_cached_saved_instrument_sync(
+            0,
+            "target",
+            source,
+            CustomInstrumentRunMode::Instrument,
+        )
+        .expect("cached instrument should be found")
+        .expect("rack should accept a saved instrument");
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
+        assert_eq!(app.graph.track_engine_ids[0], Some(engine_id));
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
+        let restored_rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("undo should restore the rack");
+        assert_eq!(restored_rack.slots.len(), original_rack.slots.len());
+        assert_eq!(restored_rack.slots[0].sample_id, original_rack.slots[0].sample_id);
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
+        assert_eq!(app.graph.track_engine_ids[0], Some(engine_id));
+        assert!(app.state.pattern.rack_tracks.lock().unwrap()[0].is_none());
         graph.process_block();
     }
 

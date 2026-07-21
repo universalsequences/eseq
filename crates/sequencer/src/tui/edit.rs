@@ -1455,9 +1455,6 @@ impl App {
                             *sample_rate,
                             &target.display_name,
                         )?;
-                        let track_id = self.track_registry.id_at(track)
-                            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
-                        self.device_registry.clear_rack_track(track_id);
                     }
                     Some(crate::sequencer::InstrumentType::Custom) => {
                         self.graph_controller().convert_custom_track_to_sampler(
@@ -1603,9 +1600,16 @@ impl App {
         }
         if !matches!(
             self.graph.track_instrument_types.get(track),
-            Some(crate::sequencer::InstrumentType::Rack | crate::sequencer::InstrumentType::Sampler)
+            Some(
+                crate::sequencer::InstrumentType::Rack
+                    | crate::sequencer::InstrumentType::Sampler
+                    | crate::sequencer::InstrumentType::Custom
+            )
         ) {
-            return Err("Rack-container history can replay only onto a rack or sampler track".to_string());
+            return Err(
+                "Rack-container history can replay only onto a replaceable instrument track"
+                    .to_string(),
+            );
         }
 
         let mut restored_patterns = target.patterns.clone();

@@ -245,6 +245,7 @@ fn capture_instrument_swap_target(
             }
         }
         Some(InstrumentType::Sampler) => {}
+        Some(InstrumentType::Rack) => {}
         Some(other) => {
             return Err(format!(
                 "Track {} has instrument type {other:?}, which cannot be replaced",
@@ -4130,9 +4131,11 @@ fn load_or_convert_sampler_track(
     let instrument_type = app.graph.track_instrument_types[track];
     if !matches!(
         instrument_type,
-        InstrumentType::Sampler | InstrumentType::Custom
+        InstrumentType::Sampler | InstrumentType::Custom | InstrumentType::Rack
     ) {
-        return Err("Samples can only replace sampler or custom instrument tracks".to_string());
+        return Err(
+            "Samples can only replace sampler, custom instrument, or rack tracks".to_string(),
+        );
     }
     if instrument_type == InstrumentType::Sampler && path.is_none() {
         return Ok(SamplerTrackLoadResult {
@@ -4164,20 +4167,38 @@ fn load_or_convert_sampler_track(
         track,
         "Replace instrument",
         |app| {
-            let reset_summary = if instrument_type == InstrumentType::Sampler {
-                app.graph_controller()
-                    .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
-                app.graph.track_buffer_ids[track] = new_buffer_id;
-                app.graph.track_sample_rates[track] = sample_rate;
-                app.tracks[track] = new_name.clone();
-                None
-            } else {
-                Some(app.graph_controller().convert_custom_track_to_sampler(
-                    track,
-                    new_buffer_id,
-                    sample_rate,
-                    &new_name,
-                )?)
+            let reset_summary = match instrument_type {
+                InstrumentType::Sampler => {
+                    app.graph_controller()
+                        .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
+                    app.graph.track_buffer_ids[track] = new_buffer_id;
+                    app.graph.track_sample_rates[track] = sample_rate;
+                    app.tracks[track] = new_name.clone();
+                    None
+                }
+                InstrumentType::Custom => Some(
+                    app.graph_controller().convert_custom_track_to_sampler(
+                        track,
+                        new_buffer_id,
+                        sample_rate,
+                        &new_name,
+                    )?,
+                ),
+                InstrumentType::Rack => {
+                    let summary = app.graph_controller().replace_rack_track_with_sampler(
+                        track,
+                        new_buffer_id,
+                        sample_rate,
+                        &new_name,
+                    )?;
+                    Some(summary)
+                }
+                other => {
+                    return Err(format!(
+                        "Track {} has instrument type {other:?}, which cannot load a sample",
+                        track + 1
+                    ));
+                }
             };
             if let Some(path) = history_path.as_ref() {
                 app.register_loaded_sample_path(&new_name, new_buffer_id, path.clone());

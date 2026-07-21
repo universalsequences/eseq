@@ -16605,7 +16605,7 @@ mod tests {
 
     #[test]
     fn metal_seq_browser_instrument_activation_adds_for_non_swappable_tracks() {
-        for track_type in ["rack", "modulator"] {
+        for track_type in ["modulator"] {
             let mut editor = browser_editor_on_instrument_tab();
             editor
                 .runtime_mut()
@@ -16641,38 +16641,42 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_saved_instrument_activation_replaces_a_sampler_track() {
-        let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["sampler"]),
-        );
+    fn metal_seq_browser_saved_instrument_activation_replaces_flat_or_rack_track() {
+        for track_type in ["sampler", "rack"] {
+            let mut editor = browser_editor_on_instrument_tab();
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "track-instrument-types",
+                test_string_list(&[track_type]),
+            );
 
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(sbrowser-select-create-item
-                    (dict :kind "instrument" :name "core/drift" :label "Drift"))"#,
-            )
-            .expect("activate saved instrument from a sampler track");
+            editor
+                .runtime_mut()
+                .eval_str(
+                    r#"(sbrowser-select-create-item
+                        (dict :kind "instrument" :name "core/drift" :label "Drift"))"#,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("activate saved instrument from {track_type} track: {error:?}")
+                });
 
-        let commands = editor.drain_host_commands();
-        assert!(matches!(
-            commands.as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, payload }]
-                if name == "swap-track-instrument"
-                    && matches!(payload, Value::Map(map)
-                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
-                            && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/drift".to_string())))
-        ));
-        assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-            Some(Value::String("instruments".to_string()))
-        );
+            let commands = editor.drain_host_commands();
+            assert!(matches!(
+                commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == "swap-track-instrument"
+                        && matches!(payload, Value::Map(map)
+                            if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                                && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/drift".to_string())))
+            ));
+            assert_eq!(
+                editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+                Some(Value::String("instruments".to_string()))
+            );
+        }
     }
 
     #[test]
@@ -33374,6 +33378,19 @@ mod tests {
         let sampler_strip =
             find_track_drop_target(&layout, 0.0).expect("sampler mixer track drop target");
         assert_accepts_instrument(sampler_strip, "sampler mixer instrument drop target");
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["rack"]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+        let layout = editor.widget_layout().expect("rack mixer layout");
+        let rack_strip =
+            find_track_drop_target(&layout, 0.0).expect("rack mixer track drop target");
+        assert_accepts_instrument(rack_strip, "rack mixer instrument drop target");
     }
 
     #[test]
