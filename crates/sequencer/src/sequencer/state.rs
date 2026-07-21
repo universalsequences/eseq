@@ -9229,6 +9229,22 @@ impl SequencerState {
         Some(current_scene)
     }
 
+    pub fn rename_scene(&self, scene: usize, name: String) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(target) = scenes.scenes.get_mut(scene) else {
+            return false;
+        };
+        if target.name == name {
+            return false;
+        }
+        target.name = name.to_string();
+        true
+    }
+
     pub fn delete_pattern(
         &self,
         num_tracks: usize,

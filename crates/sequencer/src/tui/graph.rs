@@ -10055,6 +10055,46 @@ mod tests {
     }
 
     #[test]
+    fn recorded_scene_creation_redo_restores_the_same_track_pattern_identity() {
+        let graph = TestLiveGraph::new("recorded-scene-create-test");
+        let mut app = test_app_with_track_count(&graph, 1);
+        let created_scene = app.apply_recorded_scene_structure_mutation(
+            "Create scene",
+            |app| {
+                let source_scene = app.state.current_scene_index();
+                let new_scene = app.state.clone_pattern(
+                    app.tracks.len(),
+                    &app.graph.track_buffer_ids,
+                    &app.graph.track_sample_rates,
+                    &app.tracks,
+                    &app.graph.track_instrument_types,
+                );
+                app.clone_bus_pattern_from_to(source_scene, new_scene);
+                Ok(new_scene)
+            },
+        ).expect("scene creation should record");
+        let created_pattern = app.state.scene_track_pattern_id(created_scene, 0)
+            .expect("created scene track pattern id");
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.state.scene_count(), 1);
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.state.scene_count(), 2);
+        assert_eq!(
+            app.state.scene_track_pattern_id(created_scene, 0),
+            Some(created_pattern),
+            "redo must restore the captured PatternId instead of allocating another"
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn two_slot_rack_hosts_builtin_and_compiled_fx_independently() {
         let graph = TestLiveGraph::new("two-rack-slot-fx-test");
         let mut app = test_app_with_track_count(&graph, 0);

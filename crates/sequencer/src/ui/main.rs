@@ -17716,14 +17716,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let Some(pattern_id) = app.state.fork_current_track_pattern(
-                            track,
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) else {
+                        let forked = app.apply_recorded_scene_structure_mutation(
+                            "Fork track pattern",
+                            |app| app.state.fork_current_track_pattern(
+                                track,
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            ).ok_or_else(|| format!("Could not fork track {} pattern", track + 1)),
+                        );
+                        let Ok(pattern_id) = forked else {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Track pattern fork failed for track {}",
                                 track + 1
@@ -17763,27 +17767,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let cloned = if let Some(source_id) = source_pattern_id {
-                            app.state.clone_track_pattern_id_into_current_scene(
-                                track,
-                                source_id,
-                                num_tracks,
-                                &app.graph.track_buffer_ids,
-                                &app.graph.track_sample_rates,
-                                &app.tracks,
-                                &app.graph.track_instrument_types,
-                            )
-                        } else {
-                            app.state.clone_current_scene_track_pattern(
-                                track,
-                                num_tracks,
-                                &app.graph.track_buffer_ids,
-                                &app.graph.track_sample_rates,
-                                &app.tracks,
-                                &app.graph.track_instrument_types,
-                            )
-                        };
-                        let Some(pattern_id) = cloned else {
+                        let cloned = app.apply_recorded_scene_structure_mutation(
+                            "Clone track pattern",
+                            |app| {
+                                let cloned = if let Some(source_id) = source_pattern_id {
+                                    app.state.clone_track_pattern_id_into_current_scene(
+                                        track,
+                                        source_id,
+                                        num_tracks,
+                                        &app.graph.track_buffer_ids,
+                                        &app.graph.track_sample_rates,
+                                        &app.tracks,
+                                        &app.graph.track_instrument_types,
+                                    )
+                                } else {
+                                    app.state.clone_current_scene_track_pattern(
+                                        track,
+                                        num_tracks,
+                                        &app.graph.track_buffer_ids,
+                                        &app.graph.track_sample_rates,
+                                        &app.tracks,
+                                        &app.graph.track_instrument_types,
+                                    )
+                                };
+                                cloned.ok_or_else(|| format!(
+                                    "Could not clone track {} pattern", track + 1
+                                ))
+                            },
+                        );
+                        let Ok(pattern_id) = cloned else {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Track pattern clone failed for track {}",
                                 track + 1
@@ -17840,15 +17852,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let num_tracks = app.tracks.len();
-                        if !app.state.delete_track_pattern(
-                            track,
-                            PatternId(pattern_id),
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) {
+                        let deleted = app.apply_recorded_scene_structure_mutation(
+                            "Delete track pattern",
+                            |app| app.state.delete_track_pattern(
+                                track,
+                                PatternId(pattern_id),
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            ).then_some(()).ok_or_else(|| format!(
+                                "Could not delete track {} pattern {}", track + 1, pattern_id
+                            )),
+                        );
+                        if deleted.is_err() {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Track pattern delete failed: track {}, pattern {}",
                                 track + 1,
@@ -17906,16 +17924,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let num_tracks = app.tracks.len();
-                        if !app.state.set_scene_cell(
-                            scene,
-                            track,
-                            PatternId(pattern_id),
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) {
+                        let shared = app.apply_recorded_scene_structure_mutation(
+                            "Assign scene cell",
+                            |app| app.state.set_scene_cell(
+                                scene,
+                                track,
+                                PatternId(pattern_id),
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            ).then_some(()).ok_or_else(|| format!(
+                                "Could not assign scene {} track {}", scene + 1, track + 1
+                            )),
+                        );
+                        if shared.is_err() {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Scene cell share failed: scene {}, track {}, pattern {}",
                                 scene + 1,
@@ -17963,15 +17987,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let num_tracks = app.tracks.len();
-                        let Some(pattern_id) = app.state.clear_scene_cell(
-                            scene,
-                            track,
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) else {
+                        let cleared = app.apply_recorded_scene_structure_mutation(
+                            "Clear scene cell",
+                            |app| app.state.clear_scene_cell(
+                                scene,
+                                track,
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            ).ok_or_else(|| format!(
+                                "Could not clear scene {} track {}", scene + 1, track + 1
+                            )),
+                        );
+                        let Ok(pattern_id) = cleared else {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Scene cell clear failed: scene {}, track {}",
                                 scene + 1,
@@ -18372,12 +18402,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "rename-scene" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Could not rename scene: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let scene = map.get("scene").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+                            _ => None,
+                        });
+                        let name = map.get("name").and_then(|cell| match &*cell.borrow() {
+                            Value::String(name) => Some(name.clone()),
+                            _ => None,
+                        });
+                        let renamed = match (scene, name) {
+                            (Some(scene), Some(name)) => app.apply_recorded_scene_structure_mutation(
+                                "Rename scene",
+                                |app| app.state.rename_scene(scene, name)
+                                    .then_some(())
+                                    .ok_or_else(|| "Scene name or index is invalid".to_string()),
+                            ),
+                            _ => Err("Scene or name is missing".to_string()),
+                        };
+                        match renamed {
+                            Ok(()) => {
+                                let rt = editor.runtime_mut();
+                                sync_pattern_state(rt, &state);
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                "Could not rename scene: {error}"
+                            ))),
+                        }
+                    }
                     "reorder-scene" => {
                         let source = extract_usize_from_payload(&payload, "source");
                         let target = extract_usize_from_payload(&payload, "target");
                         match (source, target) {
                             (Some(source), Some(target)) => {
-                                if app.state.reorder_scene(source, target).is_some() {
+                                let reordered = app.apply_recorded_scene_structure_mutation(
+                                    "Reorder scene",
+                                    |app| app.state.reorder_scene(source, target)
+                                        .ok_or_else(|| "Scene index is out of range".to_string()),
+                                );
+                                if reordered.is_ok() {
                                     let rt = editor.runtime_mut();
                                     sync_pattern_state(rt, &state);
                                     rt.run_reactive_cycle();
@@ -18415,14 +18487,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             editor.handle_host_event(HostEvent::Status(
                                 "Nothing to propagate: only one pattern exists".to_string(),
                             ));
-                        } else if app.state.propagate_track_to_all_patterns(
-                            track,
-                            app.tracks.len(),
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) {
+                        } else if app.apply_recorded_scene_structure_mutation(
+                            "Propagate track pattern",
+                            |app| app.state.propagate_track_to_all_patterns(
+                                track,
+                                app.tracks.len(),
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            ).then_some(()).ok_or_else(|| format!(
+                                "Could not propagate track {}", track + 1
+                            )),
+                        ).is_ok() {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Propagated track {} to {} patterns",
                                 track + 1,
@@ -18437,17 +18514,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "clone-pattern" => {
                         let num_tracks = app.tracks.len();
-                        app.save_current_bus_pattern();
-                        let source_pattern = app.state.current_scene_index();
-                        let new_idx = app.state.clone_pattern(
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
+                        let created = app.apply_recorded_scene_structure_mutation(
+                            "Create scene",
+                            |app| {
+                                let source_pattern = app.state.current_scene_index();
+                                let new_idx = app.state.clone_pattern(
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                );
+                                app.graph_controller().sync_current_pattern_mod_routes();
+                                app.clone_bus_pattern_from_to(source_pattern, new_idx);
+                                Ok(new_idx)
+                            },
                         );
-                        app.graph_controller().sync_current_pattern_mod_routes();
-                        app.clone_bus_pattern_from_to(source_pattern, new_idx);
+                        let Ok(new_idx) = created else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Could not create scene".to_string(),
+                            ));
+                            continue;
+                        };
                         let rt = editor.runtime_mut();
                         sync_pattern_state(rt, &state);
                         sync_bus_mixer_state(rt, &app);
@@ -18461,21 +18549,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "delete-pattern" => {
                         let num_tracks = app.tracks.len();
-                        app.save_current_bus_pattern();
                         let deleted_pattern = app.state.current_scene_index();
-                        if let Some(sample_ids) = app.state.delete_pattern(
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) {
-                            app.handle_scene_deleted(deleted_pattern);
-                            app.graph_controller().apply_sample_ids(&sample_ids);
-                            app.graph_controller().sync_current_pattern_mod_routes();
-                            app.push_all_restored_defaults();
-                            let new_pattern = app.state.current_scene_index();
-                            app.delete_bus_pattern_at(deleted_pattern, new_pattern);
+                        let deleted = app.apply_recorded_scene_structure_mutation(
+                            "Delete scene",
+                            |app| {
+                                let sample_ids = app.state.delete_pattern(
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                ).ok_or_else(|| "The last scene cannot be deleted".to_string())?;
+                                app.handle_scene_deleted(deleted_pattern);
+                                app.graph_controller().apply_sample_ids(&sample_ids);
+                                app.graph_controller().sync_current_pattern_mod_routes();
+                                app.push_all_restored_defaults();
+                                let new_pattern = app.state.current_scene_index();
+                                app.delete_bus_pattern_at(deleted_pattern, new_pattern);
+                                Ok(())
+                            },
+                        );
+                        if deleted.is_ok() {
                             let ct = current_track.load(Ordering::Relaxed);
                             let rt = editor.runtime_mut();
                             sync_shared_track_collapsed(&track_collapsed, &app);
