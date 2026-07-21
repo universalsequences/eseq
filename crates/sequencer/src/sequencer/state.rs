@@ -1329,6 +1329,22 @@ pub struct NeuralInstrumentOverrideState {
 }
 
 #[derive(Clone, Debug)]
+pub struct NeuralEffectOverrideState {
+    pub scene: usize,
+    pub network: usize,
+    pub neuron: usize,
+    pub entries: Vec<(usize, crate::neural::ProjectEffectParamOverride)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackEffectBindingStateSnapshot {
+    pub process_chains: Vec<(PatternId, crate::process::TrackProcessChain)>,
+    pub project_process_lane_overrides:
+        Vec<(PatternId, crate::process::ProjectLaneOverrides)>,
+    pub neural_overrides: Vec<NeuralEffectOverrideState>,
+}
+
+#[derive(Clone, Debug)]
 pub struct TrackInstrumentPatternStateSnapshot {
     pub live: TrackInstrumentPatternState,
     pub patterns: Vec<(PatternId, TrackInstrumentPatternState)>,
@@ -9706,6 +9722,425 @@ impl SequencerState {
             .ok_or_else(|| "Track Pattern effect target no longer exists".to_string())
     }
 
+    pub(crate) fn capture_track_effect_chain_values(
+        &self,
+        track: usize,
+        first_slot: usize,
+        slot_count: usize,
+    ) -> Result<Vec<(PatternId, Vec<EffectSlotValuesSnapshot>)>, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        pool.patterns
+            .iter()
+            .map(|(pattern, data)| {
+                let slots = if *pattern == effective {
+                    self.pattern
+                        .effect_chains
+                        .get(track)
+                        .ok_or_else(|| "live effect chain is missing".to_string())?
+                        .iter()
+                        .skip(first_slot)
+                        .take(slot_count)
+                        .map(EffectSlotSnapshot::capture_authoring_values)
+                        .collect()
+                } else {
+                    data.effect_slots
+                        .iter()
+                        .skip(first_slot)
+                        .take(slot_count)
+                        .map(EffectSlotSnapshot::authoring_values)
+                        .collect()
+                };
+                Ok((*pattern, slots))
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore_track_effect_chain_values(
+        &self,
+        track: usize,
+        first_slot: usize,
+        descriptors: &[EffectDescriptor],
+        node_ids: &[(u32, u32)],
+        patterns: &[(PatternId, Vec<EffectSlotValuesSnapshot>)],
+    ) -> Result<(), String> {
+        if descriptors.len() != node_ids.len() {
+            return Err("effect-chain descriptor/node layout mismatch".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != patterns.len()
+            || patterns.iter().any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before effect history replay",
+                track + 1
+            ));
+        }
+        for (pattern, values) in patterns {
+            if values.len() != descriptors.len() {
+                return Err("effect-chain pattern layout mismatch".to_string());
+            }
+            let data = pool.patterns.get_mut(pattern).expect("pattern set was validated");
+            for (offset, ((descriptor, (node_id, modulator_node_id)), values)) in descriptors
+                .iter()
+                .zip(node_ids)
+                .zip(values)
+                .enumerate()
+            {
+                let slot = data
+                    .effect_slots
+                    .get_mut(first_slot + offset)
+                    .ok_or_else(|| "stored effect slot is missing".to_string())?;
+                slot.sync_to_descriptor_with_modulator(
+                    descriptor,
+                    *node_id,
+                    *modulator_node_id,
+                );
+                slot.apply_authoring_values(values)?;
+            }
+        }
+        let live_values = patterns
+            .iter()
+            .find(|(pattern, _)| *pattern == effective)
+            .map(|(_, values)| values)
+            .ok_or_else(|| "effective effect pattern is missing from history".to_string())?;
+        let live_chain = self
+            .pattern
+            .effect_chains
+            .get(track)
+            .ok_or_else(|| "live effect chain is missing".to_string())?;
+        for (offset, ((descriptor, (node_id, modulator_node_id)), values)) in descriptors
+            .iter()
+            .zip(node_ids)
+            .zip(live_values)
+            .enumerate()
+        {
+            let slot = live_chain
+                .get(first_slot + offset)
+                .ok_or_else(|| "live effect slot is missing".to_string())?;
+            let mut snapshot = EffectSlotSnapshot::capture(slot);
+            snapshot.sync_to_descriptor_with_modulator(
+                descriptor,
+                *node_id,
+                *modulator_node_id,
+            );
+            snapshot.apply_authoring_values(values)?;
+            snapshot.restore(slot);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn capture_track_effect_binding_state(
+        &self,
+        track: usize,
+    ) -> Result<TrackEffectBindingStateSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let live_chain = self
+            .pattern
+            .process_chains
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .ok_or_else(|| "live process chain is missing".to_string())?;
+        let live_lane_overrides = self
+            .pattern
+            .project_process_lane_overrides
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .ok_or_else(|| "live project process lane overrides are missing".to_string())?;
+        let process_chains = pool
+            .patterns
+            .iter()
+            .map(|(id, data)| {
+                (*id, if *id == effective { live_chain.clone() } else { data.process_chain.clone() })
+            })
+            .collect();
+        let project_process_lane_overrides = pool
+            .patterns
+            .iter()
+            .map(|(id, data)| {
+                (
+                    *id,
+                    if *id == effective {
+                        live_lane_overrides.clone()
+                    } else {
+                        data.project_process_lane_overrides.clone()
+                    },
+                )
+            })
+            .collect();
+        let mut neural_overrides = Vec::new();
+        for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
+            for (network_idx, network) in scene.neural_networks.iter().enumerate() {
+                for (neuron_idx, neuron) in network.neurons.iter().enumerate() {
+                    let entries = neuron
+                        .output_overrides
+                        .effects
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, value)| value.target_track == track)
+                        .map(|(index, value)| (index, value.clone()))
+                        .collect::<Vec<_>>();
+                    if !entries.is_empty() {
+                        neural_overrides.push(NeuralEffectOverrideState {
+                            scene: scene_idx,
+                            network: network_idx,
+                            neuron: neuron_idx,
+                            entries,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(TrackEffectBindingStateSnapshot {
+            process_chains,
+            project_process_lane_overrides,
+            neural_overrides,
+        })
+    }
+
+    pub(crate) fn remap_track_effect_references(
+        &self,
+        track: usize,
+        old_to_new: &[Option<usize>],
+        drop_neural_slots: &[bool],
+        effect_descriptors: &[EffectDescriptor],
+    ) -> Result<(), String> {
+        fn remap_chain(
+            chain: &mut crate::process::TrackProcessChain,
+            old_to_new: &[Option<usize>],
+        ) {
+            for process_slot in &mut chain.slots {
+                for binding in process_slot.bindings.values_mut() {
+                    let Some(crate::process::ParamTarget::EffectParam { slot, .. }) = binding.as_mut() else {
+                        continue;
+                    };
+                    match old_to_new.get(*slot).copied().flatten() {
+                        Some(new_slot) => *slot = new_slot,
+                        None => *binding = None,
+                    }
+                }
+            }
+        }
+
+        let live_effect_slots = self
+            .pattern
+            .effect_chains
+            .get(track)
+            .ok_or_else(|| "live effect chain is missing".to_string())?;
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        for data in pool.patterns.values_mut() {
+            remap_chain(&mut data.process_chain, old_to_new);
+            crate::process::rebind_track_process_chain_effect_param_ids(
+                &mut data.process_chain,
+                effect_descriptors,
+                &data.effect_slots,
+            );
+        }
+        for scene in &mut scenes.scenes {
+            for network in &mut scene.neural_networks {
+                for neuron in &mut network.neurons {
+                    neuron.output_overrides.effects.retain_mut(|value| {
+                        if value.target_track != track {
+                            return true;
+                        }
+                        if drop_neural_slots
+                            .get(value.slot_index)
+                            .copied()
+                            .unwrap_or(true)
+                        {
+                            return false;
+                        }
+                        let Some(new_slot) = old_to_new
+                            .get(value.slot_index)
+                            .copied()
+                            .flatten()
+                        else {
+                            return false;
+                        };
+                        value.slot_index = new_slot;
+                        let Some(slot) = live_effect_slots.get(new_slot) else {
+                            return false;
+                        };
+                        let Some(raw_idx) = slot
+                            .param_node_indices
+                            .get(value.param_index)
+                            .map(|value| value.load(Ordering::Relaxed))
+                        else {
+                            return false;
+                        };
+                        let Some(param_id) = crate::neural::ParamNodeId::from_slot_param(
+                            slot.node_id.load(Ordering::Relaxed),
+                            slot.modulator_node_id.load(Ordering::Relaxed),
+                            raw_idx,
+                        ) else {
+                            return false;
+                        };
+                        value.param_id = param_id;
+                        true
+                    });
+                }
+            }
+        }
+        drop(scenes);
+
+        let mut live_chains = self.pattern.process_chains.lock().unwrap();
+        let live_chain = live_chains
+            .get_mut(track)
+            .ok_or_else(|| "live process chain is missing".to_string())?;
+        remap_chain(live_chain, old_to_new);
+        let live_slots = live_effect_slots
+            .iter()
+            .map(EffectSlotSnapshot::capture)
+            .collect::<Vec<_>>();
+        crate::process::rebind_track_process_chain_effect_param_ids(
+            live_chain,
+            effect_descriptors,
+            &live_slots,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn restore_track_effect_binding_state(
+        &self,
+        track: usize,
+        snapshot: &TrackEffectBindingStateSnapshot,
+        effect_descriptors: &[EffectDescriptor],
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.process_chains.len()
+            || snapshot.process_chains.iter().any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before effect binding replay",
+                track + 1
+            ));
+        }
+        if snapshot.project_process_lane_overrides.len() != snapshot.process_chains.len()
+            || snapshot
+                .project_process_lane_overrides
+                .iter()
+                .any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err("effect history project-lane pattern set changed".to_string());
+        }
+        let mut live_chain = None;
+        let mut live_lane_overrides = None;
+        for (id, saved_chain) in &snapshot.process_chains {
+            let data = pool.patterns.get_mut(id).expect("pattern set was validated");
+            let mut chain = saved_chain.clone();
+            crate::process::refresh_track_process_chain_binding_param_ids(
+                &mut chain,
+                None,
+                None,
+                effect_descriptors,
+                &data.effect_slots,
+            );
+            data.process_chain = chain.clone();
+            if *id == effective {
+                live_chain = Some(chain);
+            }
+        }
+        for (id, saved) in &snapshot.project_process_lane_overrides {
+            pool.patterns
+                .get_mut(id)
+                .expect("pattern set was validated")
+                .project_process_lane_overrides = saved.clone();
+            if *id == effective {
+                live_lane_overrides = Some(saved.clone());
+            }
+        }
+        for scene in &mut scenes.scenes {
+            for network in &mut scene.neural_networks {
+                for neuron in &mut network.neurons {
+                    neuron
+                        .output_overrides
+                        .effects
+                        .retain(|value| value.target_track != track);
+                }
+            }
+        }
+        let live_slots = self
+            .pattern
+            .effect_chains
+            .get(track)
+            .ok_or_else(|| "live effect chain is missing".to_string())?;
+        for saved in &snapshot.neural_overrides {
+            let neuron = scenes
+                .scenes
+                .get_mut(saved.scene)
+                .and_then(|scene| scene.neural_networks.get_mut(saved.network))
+                .and_then(|network| network.neurons.get_mut(saved.neuron))
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} neural topology changed before effect history replay",
+                        track + 1
+                    )
+                })?;
+            for (index, value) in &saved.entries {
+                let mut value = value.clone();
+                let slot = live_slots
+                    .get(value.slot_index)
+                    .ok_or_else(|| "neural effect slot is out of range".to_string())?;
+                let raw_idx = slot
+                    .param_node_indices
+                    .get(value.param_index)
+                    .map(|value| value.load(Ordering::Relaxed))
+                    .ok_or_else(|| "neural effect parameter is out of range".to_string())?;
+                value.param_id = crate::neural::ParamNodeId::from_slot_param(
+                    slot.node_id.load(Ordering::Relaxed),
+                    slot.modulator_node_id.load(Ordering::Relaxed),
+                    raw_idx,
+                )
+                .ok_or_else(|| "neural effect parameter has no live identity".to_string())?;
+                neuron
+                    .output_overrides
+                    .effects
+                    .insert((*index).min(neuron.output_overrides.effects.len()), value);
+            }
+        }
+        drop(scenes);
+        self.pattern.process_chains.lock().unwrap()[track] = live_chain
+            .ok_or_else(|| "effective process chain is missing from history".to_string())?;
+        self.pattern.project_process_lane_overrides.lock().unwrap()[track] = live_lane_overrides
+            .ok_or_else(|| "effective project process lanes are missing from history".to_string())?;
+        Ok(())
+    }
+
     pub(crate) fn restore_pattern_effect_device_values_no_publish(
         &self,
         track: usize,
@@ -11906,6 +12341,64 @@ mod tests {
         let scenes = state.pattern.scenes.lock().unwrap();
         assert_eq!(scenes.scenes[0].cells[0], Some(shared));
         assert_eq!(scenes.scenes[1].cells[0], Some(shared));
+    }
+
+    #[test]
+    fn track_effect_chain_values_restore_each_pattern_by_stable_pattern_id() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let slot_descriptors = vec![EffectDescriptor::default_full_chain()];
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &slot_descriptors),
+                PatternSnapshot::new_default(1, &slot_descriptors),
+            ],
+            0,
+        );
+        let first = state.scene_track_pattern_id(0, 0).unwrap();
+        let second = state.scene_track_pattern_id(1, 0).unwrap();
+        let descriptor = EffectDescriptor::builtin_filter();
+        let mut first_slot = EffectSlotSnapshot::new_default(&descriptor, 901);
+        first_slot.defaults[0] = 0.21;
+        let mut second_slot = EffectSlotSnapshot::new_default(&descriptor, 901);
+        second_slot.defaults[0] = 0.79;
+        let empty = EffectSlotSnapshot::new_empty().authoring_values();
+        let pattern_values = [(first, first_slot.authoring_values()), (second, second_slot.authoring_values())]
+            .into_iter()
+            .map(|(pattern, first_value)| {
+                let mut values = vec![empty.clone(); crate::lisp_host::MAX_CUSTOM_FX];
+                values[0] = first_value;
+                (pattern, values)
+            })
+            .collect::<Vec<_>>();
+        let mut descriptors = vec![descriptor; 1];
+        descriptors.resize_with(
+            crate::lisp_host::MAX_CUSTOM_FX,
+            EffectDescriptor::empty_custom_slot,
+        );
+        let mut nodes = vec![(901, 0)];
+        nodes.resize(crate::lisp_host::MAX_CUSTOM_FX, (0, 0));
+
+        state
+            .restore_track_effect_chain_values(
+                0,
+                BUILTIN_SLOT_COUNT,
+                &descriptors,
+                &nodes,
+                &pattern_values,
+            )
+            .unwrap();
+
+        let captured = state
+            .capture_track_effect_chain_values(
+                0,
+                BUILTIN_SLOT_COUNT,
+                crate::lisp_host::MAX_CUSTOM_FX,
+            )
+            .unwrap();
+        let first_values = captured.iter().find(|(id, _)| *id == first).unwrap();
+        let second_values = captured.iter().find(|(id, _)| *id == second).unwrap();
+        assert_eq!(first_values.1[0].defaults[0], 0.21);
+        assert_eq!(second_values.1[0].defaults[0], 0.79);
     }
 
     #[test]

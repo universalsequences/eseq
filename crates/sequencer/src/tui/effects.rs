@@ -16,6 +16,7 @@ use eseqlisp::Editor as LispEditor;
 
 use super::fx_chain::{
     push_fx_param, rewire_fx_chain, FxChainLocator, FxGraphEditBatch, FxLeaseSlotRemoval,
+    RetainedEffectSource,
 };
 use super::{
     App, CompileTarget, EffectTab, HookCallback, HookUnit, InputMode, PendingCompile,
@@ -158,6 +159,41 @@ impl App {
             self.graph.sample_rate,
             source_path.parent(),
         )
+    }
+
+    pub(super) fn retained_effect_source_for_name(
+        &self,
+        name: &str,
+    ) -> Result<RetainedEffectSource, String> {
+        if EffectDescriptor::builtin_insert(name).is_some() {
+            return Ok(RetainedEffectSource::NativeBuiltin {
+                name: name.to_string(),
+            });
+        }
+        if crate::effects::conv_reverb::is_dgen_builtin(name) {
+            return Ok(RetainedEffectSource::Compiled {
+                name: name.to_string(),
+                source: crate::effects::conv_reverb::dsp_source().to_string(),
+                asset_base: None,
+                origin: lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+            });
+        }
+        let source_path = lisp_host::effect_source_path(name);
+        Ok(RetainedEffectSource::Compiled {
+            name: name.to_string(),
+            source: std::fs::read_to_string(&source_path).map_err(|error| error.to_string())?,
+            asset_base: source_path.parent().map(std::path::Path::to_path_buf),
+            origin: lisp_host::DGenSourceOrigin::Custom,
+        })
+    }
+
+    pub(super) fn retain_effect_source(
+        &mut self,
+        locator: FxChainLocator,
+        slot: usize,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
+        self.editor.effect_chain_leases.set_source(locator, slot, Some(source))
     }
 
     pub(super) fn sync_scratch_runtime_descriptors(&self) {
@@ -1055,9 +1091,11 @@ impl App {
         target_slot: usize,
         name: &str,
     ) -> Result<usize, String> {
+        let source = self.retained_effect_source_for_name(name)?;
         let result = self.compile_saved_effect(name)?;
         let slot_idx = self.prepare_custom_effect_insert_slot(track, target_slot)?;
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
+        self.retain_effect_source(FxChainLocator::Track(track), slot_idx, source)?;
         Ok(slot_idx)
     }
 
@@ -1546,6 +1584,11 @@ impl App {
             modulator_node_id,
             desc,
         );
+        self.retain_effect_source(
+            FxChainLocator::Track(track),
+            slot_idx,
+            RetainedEffectSource::NativeBuiltin { name: name.to_string() },
+        )?;
         self.push_track_effect_slot_defaults(track, slot_idx);
         self.push_all_delay_bpm();
         self.ui.effect_tab = EffectTab::Slot(slot_idx);
@@ -1578,6 +1621,16 @@ impl App {
         // Capture IR tensor offsets before `result` is consumed by apply.
         let slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
+        self.retain_effect_source(
+            FxChainLocator::Track(track),
+            slot_idx,
+            RetainedEffectSource::Compiled {
+                name: name.to_string(),
+                source: source.to_string(),
+                asset_base: None,
+                origin: lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+            },
+        )?;
         let node_id = self.state.pattern.effect_chains[track][slot_idx]
             .node_id
             .load(Ordering::Relaxed) as i32;
@@ -2281,6 +2334,21 @@ impl App {
     }
 
     pub fn start_effect_compile(&mut self, name: &str, slot_idx: usize) {
+        let track = match self.track_registry.id_at(self.ui.cursor_track) {
+            Some(track) => track,
+            None => {
+                self.editor.status_message = Some(("Error: effect target track is missing".to_string(), Instant::now()));
+                return;
+            }
+        };
+        let expected_node_id = self
+            .state
+            .pattern
+            .effect_chains
+            .get(self.ui.cursor_track)
+            .and_then(|chain| chain.get(slot_idx))
+            .map(|slot| slot.node_id.load(Ordering::Relaxed))
+            .unwrap_or(0);
         let source_path = lisp_host::effect_source_path(name);
         let source = match std::fs::read_to_string(&source_path) {
             Ok(source) => source,
@@ -2308,7 +2376,8 @@ impl App {
             target: CompileTarget::Effect {
                 name: name.to_string(),
                 slot_idx,
-                track: self.ui.cursor_track,
+                track,
+                expected_node_id,
             },
             tick: 0,
         });
@@ -2325,10 +2394,12 @@ impl App {
                         name,
                         slot_idx,
                         track,
+                        expected_node_id,
                     } => CompileTarget::Effect {
                         name: name.clone(),
                         slot_idx: *slot_idx,
                         track: *track,
+                        expected_node_id: *expected_node_id,
                     },
                     CompileTarget::Instrument { name } => {
                         CompileTarget::Instrument { name: name.clone() }
@@ -2340,9 +2411,30 @@ impl App {
                         name,
                         slot_idx,
                         track,
+                        expected_node_id,
                     } => {
-                        self.apply_compiled_effect(compile_result, &name, slot_idx, track);
-                        Some(format!("Loaded effect: {name}"))
+                        let Some(track) = self.track_registry.index_of(track) else {
+                            return Some(format!("Effect load canceled: target track no longer exists"));
+                        };
+                        let current_node_id = self
+                            .state
+                            .pattern
+                            .effect_chains
+                            .get(track)
+                            .and_then(|chain| chain.get(slot_idx))
+                            .map(|slot| slot.node_id.load(Ordering::Relaxed));
+                        if current_node_id != Some(expected_node_id) {
+                            return Some("Effect load canceled: target slot changed while compiling".to_string());
+                        }
+                        match self.apply_compiled_effect_to_slot_recorded(
+                            compile_result,
+                            &name,
+                            slot_idx,
+                            track,
+                        ) {
+                            Ok(()) => Some(format!("Loaded effect: {name}")),
+                            Err(error) => Some(format!("Effect load failed: {error}")),
+                        }
                     }
                     CompileTarget::Instrument { name } => {
                         self.apply_compiled_instrument(compile_result, &name);
@@ -2412,8 +2504,10 @@ impl App {
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
+        let source = self.retained_effect_source_for_name(name)?;
         let result = self.compile_saved_effect(name)?;
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
+        self.retain_effect_source(FxChainLocator::Track(track), slot_idx, source)?;
         Ok(())
     }
 
@@ -3844,7 +3938,7 @@ impl App {
             return Err("The selected effect slot is not a custom effect slot.".to_string());
         }
         crate::lisp_host::save_effect(name, source).map_err(|e| e.to_string())?;
-        self.load_saved_effect_to_slot_sync(track, slot_idx, name)?;
+        self.load_saved_effect_to_slot_recorded(track, slot_idx, name)?;
         self.ui.effect_tab = EffectTab::Slot(slot_idx);
         Ok(())
     }
@@ -5012,6 +5106,148 @@ mod tests {
             "deleting the moved first slot should shift the remaining filter into it",
         );
         assert_eq!(app.graph.effect_descriptors[0][moved_slot].name, "Filter");
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_track_effect_add_undo_redo_restores_stable_instance() {
+        let graph = TestLiveGraph::new("track-fx-history-add-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 1);
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        let pan_id = graph.add_gain(1.0, "track_fx_history_pan");
+        let delay_name = CString::new("track_fx_history_delay").unwrap();
+        let delay_id = unsafe {
+            crate::audiograph::add_node(
+                graph.ptr.0,
+                crate::effects::delay::delay_vtable(),
+                crate::effects::delay::DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
+                delay_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        app.graph.track_node_ids = vec![crate::tui::TrackNodeIds {
+            sampler_ids: Vec::new(),
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: 0,
+            voice_sum_r_id: 0,
+            pan_id,
+            filter_id: 0,
+            delay_id,
+            send_id: 0,
+            mod_out_id: 0,
+            mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            mod_env_id: 0,
+            bus_send_ids: Vec::new(),
+            rack_slots: Vec::new(),
+            rack_signature: None,
+        }];
+        app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+        app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
+
+        let slot = app
+            .apply_recorded_track_effect_chain_mutation(0, "Add audio effect", |app| {
+                app.add_builtin_effect_sync(0, "Filter")
+            })
+            .expect("recorded filter add should succeed");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let instance = app.device_registry.audio_effect(track_id, slot);
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.pattern.effect_chains[0][slot]
+                .node_id
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert!(app.device_registry.audio_effect_location(instance).is_none());
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "Filter");
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, slot))
+        );
+
+        let ott_slot = app
+            .apply_recorded_track_effect_chain_mutation(0, "Add audio effect", |app| {
+                app.add_builtin_effect_sync(0, "OTT")
+            })
+            .expect("recorded OTT add should succeed");
+        let ott_instance = app.device_registry.audio_effect(track_id, ott_slot);
+        app.apply_recorded_track_effect_chain_mutation(0, "Move audio effect", |app| {
+            app.move_effect_slot_sync(0, ott_slot, Some(slot))
+        })
+        .expect("recorded effect move should succeed");
+        assert_eq!(
+            app.device_registry.audio_effect_location(ott_instance),
+            Some((track_id, slot)),
+            "the moved logical effect keeps its identity"
+        );
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, ott_slot)),
+            "the displaced effect identity follows its new slot"
+        );
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, slot))
+        );
+        assert_eq!(
+            app.device_registry.audio_effect_location(ott_instance),
+            Some((track_id, ott_slot))
+        );
+
+        let retained_value = 0.37_f32;
+        app.state.pattern.effect_chains[0][slot]
+            .defaults
+            .set(0, retained_value);
+        app.delete_custom_effect_slot_recorded(0, slot)
+            .expect("recorded effect delete should succeed");
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.pattern.effect_chains[0][slot].defaults.get(0),
+            retained_value,
+            "undoing delete restores the effect's authoring values"
+        );
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, slot))
+        );
+        app.apply_recorded_track_effect_chain_mutation(0, "Replace audio effect", |app| {
+            app.load_builtin_effect_to_slot_sync(0, slot, "OTT")
+        })
+        .expect("recorded source replacement should succeed");
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "OTT");
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, slot)),
+            "source replacement keeps the logical instance identity"
+        );
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "Filter");
+        assert_eq!(app.state.pattern.effect_chains[0][slot].defaults.get(0), retained_value);
         graph.process_block();
     }
 

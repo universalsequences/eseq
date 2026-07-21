@@ -599,6 +599,43 @@ pub fn rebind_track_process_chain_instrument_param_ids(
     dropped
 }
 
+pub fn rebind_track_process_chain_effect_param_ids(
+    chain: &mut TrackProcessChain,
+    effect_descriptors: &[EffectDescriptor],
+    effect_slots: &[EffectSlotSnapshot],
+) -> usize {
+    let mut dropped = 0;
+    for process_slot in &mut chain.slots {
+        for binding in process_slot.bindings.values_mut() {
+            let Some(ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                ..
+            }) = binding.as_ref()
+            else {
+                continue;
+            };
+            let resolved = effect_descriptors
+                .get(*slot)
+                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))
+                .and_then(|descriptor| process_param_index_by_tag_or_name(descriptor, param))
+                .and_then(|param_idx| effect_slots.get(*slot).and_then(|slot| {
+                    slot_param_node_id(slot, param_idx)
+                }));
+            if let Some(param_id_value) = resolved {
+                if let Some(ParamTarget::EffectParam { param_id, .. }) = binding.as_mut() {
+                    *param_id = Some(param_id_value);
+                }
+            } else {
+                *binding = None;
+                dropped += 1;
+            }
+        }
+    }
+    dropped
+}
+
 pub fn refresh_track_process_chain_effect_binding_param_ids_for_slot(
     chain: &mut TrackProcessChain,
     slot_idx: usize,

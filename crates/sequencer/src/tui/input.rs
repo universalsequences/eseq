@@ -16,7 +16,7 @@ use super::draw::rect_contains;
 use super::edit::{redo, undo};
 use super::history::HistoryReplay;
 use super::{
-    App, BrowserState, CompileTarget, EffectPaneEntry, EffectTab, InputMode, ParamMouseDrag,
+    App, BrowserState, EffectPaneEntry, EffectTab, InputMode, ParamMouseDrag,
     ParamMouseDragTarget, PendingEditor, Region, SidebarMode, SidebarTab, BAR_HEIGHT, COL_WIDTH,
 };
 
@@ -80,52 +80,11 @@ impl App {
             return Ok(());
         }
 
-        // Poll for async compilation result
-        if let Some(ref pending) = self.editor.pending_compile {
-            match pending.receiver.try_recv() {
-                Ok(Ok(compile_result)) => {
-                    let target = match &pending.target {
-                        CompileTarget::Effect {
-                            name,
-                            slot_idx,
-                            track,
-                        } => CompileTarget::Effect {
-                            name: name.clone(),
-                            slot_idx: *slot_idx,
-                            track: *track,
-                        },
-                        CompileTarget::Instrument { name } => {
-                            CompileTarget::Instrument { name: name.clone() }
-                        }
-                    };
-                    self.editor.pending_compile = None;
-                    match target {
-                        CompileTarget::Effect {
-                            name,
-                            slot_idx,
-                            track,
-                        } => {
-                            self.apply_compiled_effect(compile_result, &name, slot_idx, track);
-                        }
-                        CompileTarget::Instrument { name } => {
-                            self.apply_compiled_instrument(compile_result, &name);
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    self.editor.status_message =
-                        Some((format!("Compile error: {}", e), Instant::now()));
-                    self.editor.pending_compile = None;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // Still compiling — increment tick for spinner animation
-                    self.editor.pending_compile.as_mut().unwrap().tick += 1;
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.editor.status_message =
-                        Some(("Compile thread crashed".to_string(), Instant::now()));
-                    self.editor.pending_compile = None;
-                }
+        // Poll through the shared completion path so TUI and Metal enforce
+        // identical stable-target and history semantics.
+        if self.editor.pending_compile.is_some() {
+            if let Some(message) = self.poll_pending_compile() {
+                self.editor.status_message = Some((message, Instant::now()));
             }
         }
 

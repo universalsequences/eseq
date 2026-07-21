@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Slice 5.
+Implemented through Slice 6A.
 
 - Slice 0 provides stable track identity, bounded linear history, barriers,
   revision tracking, and global undo/redo shortcuts.
@@ -23,6 +23,13 @@ Implemented through Slice 5.
   instrument/sample sources while preserving slot FX and per-pattern state.
   Sound-driven flat-track-to-rack conversion remains a barrier pending the
   Slice 6 chain-state machinery described below.
+- Slice 6A covers track audio-effect insertion, deletion, source replacement,
+  and reordering. History retains exact compiled source text and asset roots,
+  restores scalar/tensor/IR values across every Track Pattern, rebinds process,
+  macro, and neural targets, preserves logical effect-instance identity, and
+  rejects stale async compile targets. The shared project-schema migration to
+  serialized effect-instance records lands before Slice 6 is closed; MIDI,
+  bus, and rack-slot structural edits remain barriers through 6B/6C/6D.
 - Bus-effect value edits remain explicit barriers; bus device identity and
   scene-pattern addressing land with the generalized effect-chain work in
   Slice 6.

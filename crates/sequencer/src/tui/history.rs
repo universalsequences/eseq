@@ -10,6 +10,7 @@ use crate::sequencer::{
 };
 use crate::effects::EffectSlotValuesSnapshot;
 use crate::macro_engine::TrackInstrumentMacroMappings;
+use crate::macro_engine::TrackEffectMacroMappings;
 use crate::sequencer::TrackInstrumentPatternStateSnapshot;
 use crate::sequencer::RackSlotPatternStateSnapshot;
 
@@ -43,8 +44,63 @@ pub enum EditPatch {
     BusMixer(BusMixerPatch),
     DeviceValues(DeviceValuesPatch),
     InstrumentBinding(InstrumentBindingPatch),
+    EffectChain(EffectChainPatch),
     RackSlotStructure(RackSlotStructurePatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectInstanceState {
+    pub id: EffectInstanceId,
+    pub source: super::fx_chain::RetainedEffectSource,
+    pub descriptor: crate::effects::EffectDescriptor,
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectPatternSlots {
+    pub pattern: PatternId,
+    pub values: Vec<EffectSlotValuesSnapshot>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectChainState {
+    pub instances: Vec<EffectInstanceState>,
+    pub pattern_slots: Vec<EffectPatternSlots>,
+    pub macro_mappings: TrackEffectMacroMappings,
+    pub bindings: crate::sequencer::TrackEffectBindingStateSnapshot,
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectChainPatch {
+    pub track: TrackId,
+    pub before: EffectChainState,
+    pub after: EffectChainState,
+}
+
+impl EffectChainPatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &EffectChainState) -> usize {
+            let source_bytes = state.instances.iter().map(|instance| match &instance.source {
+                super::fx_chain::RetainedEffectSource::NativeBuiltin { name } => name.capacity(),
+                super::fx_chain::RetainedEffectSource::Compiled { name, source, asset_base, .. } => {
+                    name.capacity()
+                        + source.capacity()
+                        + asset_base.as_ref().map(|path| path.as_os_str().len()).unwrap_or(0)
+                }
+            }).sum::<usize>();
+            source_bytes
+                + state.instances.capacity() * std::mem::size_of::<EffectInstanceState>()
+                + state.pattern_slots.iter().map(|pattern| {
+                    pattern.values.capacity() * std::mem::size_of::<EffectSlotValuesSnapshot>()
+                        + pattern.values.iter().map(EffectSlotValuesSnapshot::retained_bytes).sum::<usize>()
+                }).sum::<usize>()
+                + state.bindings.process_chains.capacity()
+                    * std::mem::size_of::<(PatternId, crate::process::TrackProcessChain)>()
+                + state.bindings.project_process_lane_overrides.capacity()
+                    * std::mem::size_of::<(PatternId, crate::process::ProjectLaneOverrides)>()
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
 }
 
 #[derive(Clone, Debug)]

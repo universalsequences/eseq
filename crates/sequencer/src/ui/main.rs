@@ -4523,7 +4523,7 @@ fn apply_compiled_effect_edit_session(
 ) -> Result<(), String> {
     match session.target {
         EffectEditTarget::Track { track, slot } => {
-            app.apply_compiled_effect_to_slot_sync(result, name, slot, track)
+            app.apply_compiled_effect_to_slot_recorded(result, name, slot, track)
         }
         EffectEditTarget::Bus { bus, slot } => {
             app.apply_compiled_bus_effect_to_slot_sync(bus, slot, name, result)
@@ -4683,7 +4683,11 @@ fn apply_agent_draft_to_effect_slot(
     let previous_source = sequencer::lisp_host::load_effect_source(&effect_name).ok();
     let previous_ui = sequencer::lisp_host::load_effect_ui_source(&effect_name).ok();
     save_effect_with_ui_rollback(&effect_name, &draft.dsp_source, &draft.ui_source)?;
-    if let Err(error) = app.load_saved_effect_to_slot_sync(track_index, slot_index, &effect_name) {
+    if let Err(error) = app.load_saved_effect_to_slot_recorded(
+        track_index,
+        slot_index,
+        &effect_name,
+    ) {
         restore_effect_files(
             &effect_name,
             previous_source.as_deref(),
@@ -4908,7 +4912,11 @@ fn finalize_agent_effect(
             return Err("The applied effect artifact target track no longer exists.".to_string());
         }
         if let Err(error) =
-            app.load_saved_effect_to_slot_sync(target.track_index, target.slot_index, &final_name)
+            app.load_saved_effect_to_slot_recorded(
+                target.track_index,
+                target.slot_index,
+                &final_name,
+            )
         {
             let _ = std::fs::remove_dir_all(&final_dir);
             return Err(format!("Failed to load finalized effect: {error}"));
@@ -16775,7 +16783,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let effect_name = effect_name.clone();
                                     let track = current_track.load(Ordering::Relaxed);
                                     app.ui.cursor_track = track;
-                                    match app.add_builtin_effect_sync(track, &effect_name) {
+                                    match app.apply_recorded_track_effect_chain_mutation(
+                                        track,
+                                        "Add audio effect",
+                                        |app| app.add_builtin_effect_sync(track, &effect_name),
+                                    ) {
                                         Ok(slot_idx) => {
                                             let rt = editor.runtime_mut();
                                             rt.set_reactive(
@@ -16829,7 +16841,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.add_builtin_effect_sync(track, &effect_name) {
+                            match app.apply_recorded_track_effect_chain_mutation(
+                                track,
+                                "Add audio effect",
+                                |app| app.add_builtin_effect_sync(track, &effect_name),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), track);
@@ -16977,10 +16993,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.insert_builtin_effect_before_slot_sync(
+                            match app.apply_recorded_track_effect_chain_mutation(
                                 track,
-                                slot,
-                                &effect_name,
+                                "Insert audio effect",
+                                |app| app.insert_builtin_effect_before_slot_sync(
+                                    track,
+                                    slot,
+                                    &effect_name,
+                                ),
                             ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
@@ -17031,10 +17051,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.insert_saved_effect_before_slot_sync(
+                            match app.apply_recorded_track_effect_chain_mutation(
                                 track,
-                                slot,
-                                &effect_name,
+                                "Insert audio effect",
+                                |app| app.insert_saved_effect_before_slot_sync(
+                                    track,
+                                    slot,
+                                    &effect_name,
+                                ),
                             ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
@@ -17135,8 +17159,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             current_track.store(target_track, Ordering::Relaxed);
                             app.ui.cursor_track = target_track;
-                            match app.move_effect_slot_sync(target_track, source_slot, target_slot)
-                            {
+                            match app.apply_recorded_track_effect_chain_mutation(
+                                target_track,
+                                "Move audio effect",
+                                |app| app.move_effect_slot_sync(
+                                    target_track,
+                                    source_slot,
+                                    target_slot,
+                                ),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), target_track);
@@ -17364,10 +17395,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let track = current_track.load(Ordering::Relaxed);
-                        match app
-                            .graph_controller()
-                            .delete_custom_effect_slot(track, slot_idx)
-                        {
+                        match app.apply_recorded_track_effect_chain_mutation(
+                            track,
+                            "Delete audio effect",
+                            |app| app.graph_controller().delete_custom_effect_slot(track, slot_idx),
+                        ) {
                             Ok(()) => {
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(

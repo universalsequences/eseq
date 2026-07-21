@@ -36,5 +36,6 @@ pub use state::{
     StepSlotPlocks, StepSnapshot, TrackId,
     TrackInstrumentPatternState, TrackInstrumentPatternStateSnapshot, TrackOutputEvent,
     TrackPatternCellView, TrackPatternData, TrackPatternId, TrackRegistry, TrackRegistryError,
-    NeuralInstrumentOverrideState, RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
+    NeuralInstrumentOverrideState, TrackEffectBindingStateSnapshot,
+    RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
 };

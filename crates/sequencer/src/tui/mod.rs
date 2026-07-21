@@ -183,7 +183,8 @@ enum CompileTarget {
     Effect {
         name: String,
         slot_idx: usize,
-        track: usize,
+        track: crate::sequencer::TrackId,
+        expected_node_id: u32,
     },
     Instrument {
         name: String,
@@ -930,6 +931,61 @@ impl DeviceIdentityRegistry {
         id: crate::sequencer::EffectInstanceId,
     ) -> Option<(crate::sequencer::TrackId, usize)> {
         self.audio_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn audio_effect_chain(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slots: impl IntoIterator<Item = usize>,
+    ) -> Vec<crate::sequencer::EffectInstanceId> {
+        slots
+            .into_iter()
+            .map(|slot| self.audio_effect(track, slot))
+            .collect()
+    }
+
+    pub(crate) fn bind_audio_effect_chain(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        first_slot: usize,
+        instances: &[crate::sequencer::EffectInstanceId],
+    ) -> Result<(), String> {
+        let end_slot = first_slot
+            .checked_add(crate::lisp_host::MAX_CUSTOM_FX)
+            .ok_or_else(|| "audio-effect chain range overflow".to_string())?;
+        let retained = self
+            .audio_effects
+            .iter()
+            .filter(|((owner, slot), _)| {
+                *owner != track || *slot < first_slot || *slot >= end_slot
+            })
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
+            return Err("audio-effect chain contains a duplicate stable identity".to_string());
+        }
+        for id in instances {
+            if let Some((owner, slot)) = self.audio_effect_locations.get(id).copied() {
+                if owner != track || slot < first_slot || slot >= end_slot {
+                    return Err(format!(
+                        "audio-effect instance {} is already bound to another device",
+                        id.0
+                    ));
+                }
+            }
+        }
+        self.audio_effects.clear();
+        self.audio_effect_locations.clear();
+        for (location, id) in retained {
+            self.audio_effects.insert(location, id);
+            self.audio_effect_locations.insert(id, location);
+        }
+        for (offset, id) in instances.iter().copied().enumerate() {
+            let location = (track, first_slot + offset);
+            self.audio_effects.insert(location, id);
+            self.audio_effect_locations.insert(id, location);
+        }
+        Ok(())
     }
 
     pub(crate) fn midi_effect(
@@ -2385,7 +2441,7 @@ impl App {
                 let previous_source = crate::lisp_host::load_effect_source(&name).ok();
                 crate::lisp_host::save_effect(&name, &source)
                     .map_err(|error| format!("Failed to save effect '{}': {error}", name))?;
-                if let Err(error) = self.load_saved_effect_to_slot_sync(track, slot_idx, &name) {
+                if let Err(error) = self.load_saved_effect_to_slot_recorded(track, slot_idx, &name) {
                     self.restore_effect_source(&name, previous_source.as_deref())?;
                     return Err(error);
                 }

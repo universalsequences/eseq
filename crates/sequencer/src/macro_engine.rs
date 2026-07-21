@@ -85,6 +85,11 @@ pub struct TrackInstrumentMacroMappings {
     pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TrackEffectMacroMappings {
+    pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
+}
+
 impl MacroMapping {
     pub fn new(
         scope: impl Into<ParamScope>,
@@ -743,6 +748,78 @@ impl MacroEngine {
         }
         self.rebuild_ownership();
         Ok(())
+    }
+
+    pub fn capture_effect_mappings_for_track(&self, track: usize) -> TrackEffectMacroMappings {
+        TrackEffectMacroMappings {
+            mappings: self
+                .macros
+                .iter()
+                .filter_map(|macro_definition| {
+                    let mappings = macro_definition
+                        .mappings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mapping)| {
+                            mapping.scope == ParamScope::Track(track)
+                                && matches!(mapping.target, ParamTarget::EffectParam { .. })
+                        })
+                        .map(|(index, mapping)| (index, mapping.clone()))
+                        .collect::<Vec<_>>();
+                    (!mappings.is_empty()).then_some((macro_definition.id, mappings))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_effect_mappings_for_track(
+        &mut self,
+        track: usize,
+        snapshot: &TrackEffectMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain(|mapping| {
+                mapping.scope != ParamScope::Track(track)
+                    || !matches!(mapping.target, ParamTarget::EffectParam { .. })
+            });
+        }
+        for (macro_id, mappings) in &snapshot.mappings {
+            let macro_definition = self
+                .macros
+                .iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                macro_definition
+                    .mappings
+                    .insert((*index).min(macro_definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
+    pub fn remap_effect_mappings_for_track(
+        &mut self,
+        track: usize,
+        old_to_new: &[Option<usize>],
+    ) {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain_mut(|mapping| {
+                if mapping.scope != ParamScope::Track(track) {
+                    return true;
+                }
+                let ParamTarget::EffectParam { slot, .. } = &mut mapping.target else {
+                    return true;
+                };
+                let Some(new_slot) = old_to_new.get(*slot).copied().flatten() else {
+                    return false;
+                };
+                *slot = new_slot;
+                true
+            });
+        }
+        self.rebuild_ownership();
     }
 
     fn mapping_mut(
@@ -1465,6 +1542,44 @@ mod tests {
         assert!(engine
             .override_value(&MacroParamKey::Instrument { track: 1, param: 0 })
             .is_some_and(|value| (value - 0.5).abs() < 1.0e-6));
+    }
+
+    #[test]
+    fn effect_chain_remap_moves_targets_and_drops_deleted_instances() {
+        let mut engine = MacroEngine::default();
+        let id = engine.create_macro("fx", MacroKind::Mapped).unwrap();
+        let mut moved = effect_target(11);
+        if let ParamTarget::EffectParam { slot, .. } = &mut moved {
+            *slot = 4;
+        }
+        let mut deleted = effect_target(12);
+        if let ParamTarget::EffectParam { slot, .. } = &mut deleted {
+            *slot = 5;
+        }
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new(0, moved, 0.0, 1.0, MacroCurve::Linear).unwrap(),
+            )
+            .unwrap();
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new(0, deleted, 0.0, 1.0, MacroCurve::Linear).unwrap(),
+            )
+            .unwrap();
+        let mut old_to_new = (0..8).map(Some).collect::<Vec<_>>();
+        old_to_new[4] = Some(6);
+        old_to_new[5] = None;
+
+        engine.remap_effect_mappings_for_track(0, &old_to_new);
+
+        let mappings = &engine.macro_definition(id).unwrap().mappings;
+        assert_eq!(mappings.len(), 1);
+        assert!(matches!(
+            mappings[0].target,
+            ParamTarget::EffectParam { slot: 6, .. }
+        ));
     }
 
     #[test]

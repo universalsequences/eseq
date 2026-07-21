@@ -39,6 +39,17 @@ pub(super) enum FxLeaseSlotRemoval {
     Shift,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RetainedEffectSource {
+    NativeBuiltin { name: String },
+    Compiled {
+        name: String,
+        source: String,
+        asset_base: Option<std::path::PathBuf>,
+        origin: crate::lisp_host::DGenSourceOrigin,
+    },
+}
+
 struct RetiredFxLease {
     applied_after: u64,
     _lease: DylibLease,
@@ -82,6 +93,7 @@ fn move_slot<T>(row: &mut [Option<T>], source_slot: usize, target_slot: usize) {
 #[derive(Default)]
 pub(super) struct FxChainLeaseStore {
     rows: HashMap<FxChainLocator, Vec<Option<DylibLease>>>,
+    sources: HashMap<FxChainLocator, Vec<Option<RetainedEffectSource>>>,
     retired: Vec<RetiredFxLease>,
 }
 
@@ -101,6 +113,41 @@ impl FxChainLeaseStore {
                 .take(lisp_host::MAX_CUSTOM_FX)
                 .collect()
         })
+    }
+
+    fn source_row_mut(
+        &mut self,
+        locator: FxChainLocator,
+    ) -> &mut Vec<Option<RetainedEffectSource>> {
+        self.sources.entry(locator).or_insert_with(|| {
+            std::iter::repeat_with(|| None)
+                .take(lisp_host::MAX_CUSTOM_FX)
+                .collect()
+        })
+    }
+
+    pub fn source(
+        &self,
+        locator: FxChainLocator,
+        slot_idx: usize,
+    ) -> Option<&RetainedEffectSource> {
+        let slot_idx = Self::row_slot(locator, slot_idx).ok()?;
+        self.sources.get(&locator)?.get(slot_idx)?.as_ref()
+    }
+
+    pub fn set_source(
+        &mut self,
+        locator: FxChainLocator,
+        slot_idx: usize,
+        source: Option<RetainedEffectSource>,
+    ) -> Result<(), String> {
+        let slot_idx = Self::row_slot(locator, slot_idx)?;
+        let row = self.source_row_mut(locator);
+        let target = row
+            .get_mut(slot_idx)
+            .ok_or_else(|| format!("FX source slot {} is out of range", slot_idx + 1))?;
+        *target = source;
+        Ok(())
     }
 
     pub fn reclaim_applied(&mut self, applied_batch_serial: u64) {
@@ -148,6 +195,7 @@ impl FxChainLeaseStore {
             return Err(format!("FX lease slot {} is out of range", slot_idx + 1));
         }
         insert_empty_slot(row, slot_idx);
+        insert_empty_slot(self.source_row_mut(locator), slot_idx);
         Ok(())
     }
 
@@ -166,6 +214,7 @@ impl FxChainLeaseStore {
             return Err("Removing an FX lease requires an edit-batch retirement serial".into());
         }
         let retired = remove_slot(row, slot_idx);
+        remove_slot(self.source_row_mut(locator), slot_idx);
         if let Some(retired) = retired {
             self.retired.push(RetiredFxLease {
                 applied_after: retire_after,
@@ -188,6 +237,64 @@ impl FxChainLeaseStore {
             return Err("FX lease move is out of range".to_string());
         }
         move_slot(row, source_slot, target_slot);
+        move_slot(self.source_row_mut(locator), source_slot, target_slot);
+        Ok(())
+    }
+
+    pub fn remap_slots(
+        &mut self,
+        locator: FxChainLocator,
+        desired_source_slots: &[usize],
+        retire_after: u64,
+    ) -> Result<(), String> {
+        let source_offsets = desired_source_slots
+            .iter()
+            .map(|slot| Self::row_slot(locator, *slot))
+            .collect::<Result<Vec<_>, _>>()?;
+        if source_offsets.len() > lisp_host::MAX_CUSTOM_FX
+            || source_offsets.iter().any(|slot| *slot >= lisp_host::MAX_CUSTOM_FX)
+            || source_offsets.iter().enumerate().any(|(index, slot)| {
+                source_offsets[..index].contains(slot)
+            })
+        {
+            return Err("FX lease remap is out of range".to_string());
+        }
+        let mut old = self.rows.remove(&locator).unwrap_or_else(|| {
+            std::iter::repeat_with(|| None)
+                .take(lisp_host::MAX_CUSTOM_FX)
+                .collect()
+        });
+        let mut old_sources = self.sources.remove(&locator).unwrap_or_else(|| {
+            std::iter::repeat_with(|| None)
+                .take(lisp_host::MAX_CUSTOM_FX)
+                .collect()
+        });
+        if retire_after == 0
+            && old.iter().enumerate().any(|(slot, lease)| {
+                lease.is_some() && !source_offsets.contains(&slot)
+            })
+        {
+            self.rows.insert(locator, old);
+            self.sources.insert(locator, old_sources);
+            return Err("Retiring FX leases requires an edit-batch serial".to_string());
+        }
+        let mut remapped = std::iter::repeat_with(|| None)
+            .take(lisp_host::MAX_CUSTOM_FX)
+            .collect::<Vec<_>>();
+        let mut remapped_sources = std::iter::repeat_with(|| None)
+            .take(lisp_host::MAX_CUSTOM_FX)
+            .collect::<Vec<_>>();
+        for (target, source) in source_offsets.into_iter().enumerate() {
+            remapped[target] = old[source].take();
+            remapped_sources[target] = old_sources[source].take();
+        }
+        self.retired
+            .extend(old.into_iter().flatten().map(|lease| RetiredFxLease {
+                applied_after: retire_after,
+                _lease: lease,
+            }));
+        self.rows.insert(locator, remapped);
+        self.sources.insert(locator, remapped_sources);
         Ok(())
     }
 
@@ -197,10 +304,15 @@ impl FxChainLeaseStore {
         retire_after: u64,
     ) -> Result<(), String> {
         let Some(row) = self.rows.remove(&locator) else {
+            self.sources.remove(&locator);
             return Ok(());
         };
+        let sources = self.sources.remove(&locator);
         if row.iter().any(Option::is_some) && retire_after == 0 {
             self.rows.insert(locator, row);
+            if let Some(sources) = sources {
+                self.sources.insert(locator, sources);
+            }
             return Err("Retiring an FX host requires an edit-batch retirement serial".into());
         }
         self.retired
@@ -262,11 +374,48 @@ impl FxChainLeaseStore {
                 (locator, row)
             })
             .collect();
+        let sources = std::mem::take(&mut self.sources);
+        self.sources = sources
+            .into_iter()
+            .map(|(locator, row)| {
+                let locator = match locator {
+                    FxChainLocator::Track(track) if track > deleted_track => {
+                        FxChainLocator::Track(track - 1)
+                    }
+                    FxChainLocator::RackSlot { track, slot } if track > deleted_track => {
+                        FxChainLocator::RackSlot {
+                            track: track - 1,
+                            slot,
+                        }
+                    }
+                    other => other,
+                };
+                (locator, row)
+            })
+            .collect();
     }
 
     pub fn reindex_rack_slots_after_delete(&mut self, track: usize, deleted_slot: usize) {
         let rows = std::mem::take(&mut self.rows);
         self.rows = rows
+            .into_iter()
+            .map(|(locator, row)| {
+                let locator = match locator {
+                    FxChainLocator::RackSlot { track: owner, slot }
+                        if owner == track && slot > deleted_slot =>
+                    {
+                        FxChainLocator::RackSlot {
+                            track: owner,
+                            slot: slot - 1,
+                        }
+                    }
+                    other => other,
+                };
+                (locator, row)
+            })
+            .collect();
+        let sources = std::mem::take(&mut self.sources);
+        self.sources = sources
             .into_iter()
             .map(|(locator, row)| {
                 let locator = match locator {
@@ -315,6 +464,32 @@ impl FxChainLeaseStore {
                 (locator, row)
             })
             .collect();
+        let sources = std::mem::take(&mut self.sources);
+        self.sources = sources
+            .into_iter()
+            .map(|(locator, row)| {
+                let locator = match locator {
+                    FxChainLocator::RackSlot { track: owner, slot } if owner == track => {
+                        let slot = if slot == source_slot {
+                            target_slot
+                        } else if source_slot < target_slot
+                            && (source_slot + 1..=target_slot).contains(&slot)
+                        {
+                            slot - 1
+                        } else if target_slot < source_slot
+                            && (target_slot..source_slot).contains(&slot)
+                        {
+                            slot + 1
+                        } else {
+                            slot
+                        };
+                        FxChainLocator::RackSlot { track: owner, slot }
+                    }
+                    other => other,
+                };
+                (locator, row)
+            })
+            .collect();
     }
 
     pub fn move_host(
@@ -330,6 +505,9 @@ impl FxChainLeaseStore {
         }
         if let Some(row) = self.rows.remove(&source) {
             self.rows.insert(target, row);
+        }
+        if let Some(row) = self.sources.remove(&source) {
+            self.sources.insert(target, row);
         }
         Ok(())
     }
