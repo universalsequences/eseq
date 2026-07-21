@@ -470,7 +470,7 @@ pub(crate) fn add_new_track_to_group(
         return false;
     }
 
-    app.set_track_output_all_scenes(
+    app.set_track_output_all_scenes_unrecorded(
         track,
         sequencer::sequencer::TrackOutput::Bus(sequencer::sequencer::BusId(bus_id)),
     );

@@ -1054,6 +1054,22 @@ impl App {
         id
     }
 
+    pub(crate) fn add_bus_channel_with_id(
+        &mut self,
+        id: BusId,
+        name: impl Into<String>,
+    ) -> Result<usize, String> {
+        if self.buses.iter().any(|bus| bus.id == id) {
+            return Err(format!("Bus {:?} already exists", id));
+        }
+        self.buses.push(BusChannelState::new(id, name));
+        let index = self.buses.len() - 1;
+        let bus = self.buses[index].clone();
+        self.graph_controller().ensure_bus_graph_node(bus.id, &bus.name);
+        self.publish_bus_gate_runtime();
+        Ok(index)
+    }
+
     pub fn delete_bus_channel(&mut self, id: BusId) -> bool {
         if id == BusId::MIX {
             return false;
@@ -1114,17 +1130,26 @@ impl App {
     /// members must keep this routing across every scene — see
     /// `SequencerState::set_track_output_in_all_track_patterns`.
     pub fn set_track_output_all_scenes(&mut self, track: usize, output: TrackOutput) {
+        if self.set_track_output_all_scenes_unrecorded(track, output) {
+            super::edit::commit_history_barrier(self);
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn set_track_output_all_scenes_unrecorded(
+        &mut self,
+        track: usize,
+        output: TrackOutput,
+    ) -> bool {
         if track >= self.state.pattern.track_params.len() {
-            return;
+            return false;
         }
         let live_changed = self.state.pattern.track_params[track].output() != output;
         self.state.pattern.track_params[track].set_output(output.clone());
         let stored_changed = self.state
             .set_track_output_in_all_track_patterns(track, output);
         self.graph_controller().apply_track_output_routing(track);
-        if live_changed || stored_changed {
-            super::edit::commit_history_barrier(self);
-        }
+        live_changed || stored_changed
     }
 
     fn remove_bus_references_from_live_pattern(&self, id: BusId) {

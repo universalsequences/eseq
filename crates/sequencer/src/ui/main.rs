@@ -8699,6 +8699,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     current_track.load(Ordering::Relaxed)
                                 }.min(app.tracks.len().saturating_sub(1));
                                 current_track.store(replay_track, Ordering::Relaxed);
+                                *bus_state.lock().unwrap() = app.buses.clone();
+                                *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                                *track_groups.lock().unwrap() = app.groups.clone();
                                 if topology_changed {
                                     {
                                         let mut pan_ids = track_pan_ids.lock().unwrap();
@@ -8738,6 +8741,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_modulator_level_fields(rt, &cached_modulator_levels);
                                     rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
+                                sync_bus_mixer_state(rt, &app);
+                                sync_groups_bindings(rt, &app.groups);
                                 rt.set_reactive(
                                     "SEQ",
                                     "track-names",
@@ -8761,7 +8766,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     prev_track_playheads = track_playheads_snapshot(&state, &app);
                                     prev_track_button_states = track_button_state_snapshot(&state);
                                 }
-                                *bus_state.lock().unwrap() = app.buses.clone();
                                 if !app.buses.is_empty() {
                                     ui_invalidations.push(UiInvalidation::BusMixer {
                                         bus: 0,
@@ -14254,26 +14258,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .iter()
                             .any(|m| app.groups.iter().any(|g| g.members.contains(m)));
                         if members.len() >= 2 && !already_grouped {
-                            let group_index = app.groups.len() + 1;
-                            let bus = app.add_bus_channel(format!("Group {group_index}"));
-                            for &track in &members {
-                                // Route across every scene — group routing is global.
-                                app.set_track_output_all_scenes(track, TrackOutput::Bus(bus));
-                            }
-                            let color = app
-                                .track_colors
-                                .get(members[0])
-                                .map(|c| [c.r, c.g, c.b])
-                                .unwrap_or([0.5, 0.5, 0.5]);
-                            let group_id = app.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
-                            app.groups.push(sequencer::project::ProjectTrackGroup {
-                                id: group_id,
-                                name: format!("Group {group_index}"),
-                                color,
-                                collapsed: false,
-                                members: members.clone(),
-                                bus_id: bus.0,
-                            });
+                            let Ok(bus) = app.group_tracks_recorded(members.clone()) else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Could not group the selected tracks".to_string(),
+                                ));
+                                continue;
+                            };
                             let selected_bus_index = app
                                 .buses
                                 .iter()
@@ -14308,54 +14298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let track = extract_usize_from_payload(&payload, "track");
                         let gidx = extract_usize_from_payload(&payload, "gidx");
                         if let (Some(track), Some(gidx)) = (track, gidx) {
-                            let target = app.groups.get(gidx).map(|g| (g.id, g.bus_id));
-                            if let Some((target_id, target_bus_id)) = target {
-                                let already = app
-                                    .groups
-                                    .get(gidx)
-                                    .map(|g| g.members.contains(&track))
-                                    .unwrap_or(false);
-                                if track < app.tracks.len() && !already {
-                                    // Source group (other than the target) holding the track.
-                                    let source_id = app
-                                        .groups
-                                        .iter()
-                                        .find(|g| g.id != target_id && g.members.contains(&track))
-                                        .map(|g| g.id);
-                                    // Route the track into the target group's backing bus,
-                                    // across every scene (group routing is global).
-                                    app.set_track_output_all_scenes(
-                                        track,
-                                        TrackOutput::Bus(sequencer::sequencer::BusId(
-                                            target_bus_id,
-                                        )),
-                                    );
-                                    if let Some(g) =
-                                        app.groups.iter_mut().find(|g| g.id == target_id)
-                                    {
-                                        g.members.push(track);
-                                        g.members.sort_unstable();
-                                        g.members.dedup();
-                                    }
-                                    // Remove from the source group; dissolve it (freeing its
-                                    // backing bus) if it would fall below 2 members.
-                                    if let Some(sid) = source_id {
-                                        if let Some(g) = app.groups.iter_mut().find(|g| g.id == sid)
-                                        {
-                                            g.members.retain(|&m| m != track);
-                                        }
-                                        if let Some(idx) =
-                                            app.groups.iter().position(|g| g.id == sid)
-                                        {
-                                            if app.groups[idx].members.len() < 2 {
-                                                let bus = sequencer::sequencer::BusId(
-                                                    app.groups[idx].bus_id,
-                                                );
-                                                app.delete_bus_channel(bus);
-                                                app.groups.remove(idx);
-                                            }
-                                        }
-                                    }
+                            if app.move_track_to_group_recorded(track, gidx).is_ok() {
                                     *bus_state.lock().unwrap() = app.buses.clone();
                                     *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                                     *track_groups.lock().unwrap() = app.groups.clone();
@@ -14366,7 +14309,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                }
                             }
                         }
                     }
@@ -14375,17 +14317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // group, routing it back to the master mix. Dissolve the
                         // group if it would fall below 2 members.
                         if let Some(track) = extract_usize_from_payload(&payload, "track") {
-                            if let Some(g_idx) =
-                                app.groups.iter().position(|g| g.members.contains(&track))
-                            {
-                                // Route back to the master mix across every scene.
-                                app.set_track_output_all_scenes(track, TrackOutput::Mix);
-                                app.groups[g_idx].members.retain(|&m| m != track);
-                                if app.groups[g_idx].members.len() < 2 {
-                                    let bus = sequencer::sequencer::BusId(app.groups[g_idx].bus_id);
-                                    app.delete_bus_channel(bus);
-                                    app.groups.remove(g_idx);
-                                }
+                            if app.remove_track_from_group_recorded(track).is_ok() {
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                                 *track_groups.lock().unwrap() = app.groups.clone();

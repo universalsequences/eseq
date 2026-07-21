@@ -55,7 +55,56 @@ pub enum EditPatch {
     TrackDeletion(TrackDeletionPatch),
     TrackPresentation(TrackPresentationPatch),
     SceneStructure(SceneStructurePatch),
+    BusGroupStructure(BusGroupStructurePatch),
     TransportParams(TransportParamsPatch),
+}
+
+#[derive(Clone, Debug)]
+pub struct BusStructureState {
+    pub id: BusId,
+    pub name: String,
+    pub volume: f32,
+    pub mute: bool,
+    pub solo: bool,
+    pub gate_sequence: crate::sequencer::BusGateSequence,
+    pub effects: BusEffectChainState,
+}
+
+#[derive(Clone, Debug)]
+pub struct BusGroupStructureState {
+    pub buses: Vec<BusStructureState>,
+    pub groups: Vec<GroupStructureState>,
+    pub scenes: crate::sequencer::ProjectScenes,
+}
+
+#[derive(Clone, Debug)]
+pub struct GroupStructureState {
+    pub id: u64,
+    pub name: String,
+    pub color: [f32; 3],
+    pub collapsed: bool,
+    pub members: Vec<TrackId>,
+    pub bus_id: BusId,
+}
+
+#[derive(Clone, Debug)]
+pub struct BusGroupStructurePatch {
+    pub before: BusGroupStructureState,
+    pub after: BusGroupStructureState,
+}
+
+impl BusGroupStructurePatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &BusGroupStructureState) -> usize {
+            state.buses.iter().map(|bus| {
+                bus.name.capacity() + BusEffectChainPatch::state_bytes(&bus.effects)
+            }).sum::<usize>()
+                + state.groups.capacity()
+                    * std::mem::size_of::<GroupStructureState>()
+                + SceneStructurePatch::state_bytes(&state.scenes)
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -90,8 +139,7 @@ pub struct SceneStructurePatch {
 }
 
 impl SceneStructurePatch {
-    pub fn retained_bytes(&self) -> usize {
-        fn state_bytes(state: &crate::sequencer::ProjectScenes) -> usize {
+    fn state_bytes(state: &crate::sequencer::ProjectScenes) -> usize {
             state.track_pools.iter().map(|pool| {
                 pool.patterns.capacity()
                     * std::mem::size_of::<(
@@ -102,8 +150,12 @@ impl SceneStructurePatch {
                 + state.scenes.capacity() * std::mem::size_of::<crate::sequencer::Scene>()
                 + state.track_overrides.capacity()
                     * std::mem::size_of::<Option<crate::sequencer::PatternId>>()
-        }
-        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + Self::state_bytes(&self.before)
+            + Self::state_bytes(&self.after)
     }
 }
 
@@ -190,8 +242,7 @@ pub struct BusEffectChainPatch {
 }
 
 impl BusEffectChainPatch {
-    pub fn retained_bytes(&self) -> usize {
-        fn state_bytes(state: &BusEffectChainState) -> usize {
+    fn state_bytes(state: &BusEffectChainState) -> usize {
             let source_bytes = state.instances.iter().map(|instance| match &instance.source {
                 super::fx_chain::RetainedEffectSource::NativeBuiltin { name } => name.capacity(),
                 super::fx_chain::RetainedEffectSource::Compiled { name, source, asset_base, .. } => {
@@ -205,8 +256,12 @@ impl BusEffectChainPatch {
                 + state.live_values.iter().map(EffectSlotValuesSnapshot::retained_bytes).sum::<usize>()
                 + state.scenes.capacity()
                     * std::mem::size_of::<crate::sequencer::BusPatternSnapshot>()
-        }
-        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + Self::state_bytes(&self.before)
+            + Self::state_bytes(&self.after)
     }
 }
 

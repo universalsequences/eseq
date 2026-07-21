@@ -5102,6 +5102,57 @@ mod tests {
     }
 
     #[test]
+    fn recorded_group_delete_restores_backing_bus_fx_and_all_scene_routing() {
+        let graph = TestLiveGraph::new("recorded-group-delete-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track()
+            .expect("first sampler track");
+        app.graph_controller().add_blank_sampler_track()
+            .expect("second sampler track");
+        let bus_id = app.group_tracks_recorded(vec![0, 1])
+            .expect("tracks should group");
+        let group_id = app.groups[0].id;
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id)
+            .expect("group backing bus");
+        app.add_builtin_bus_effect_sync(bus_idx, "OTT")
+            .expect("group bus should accept an effect");
+        let effect_id = app.device_registry.bus_audio_effect(bus_id, 0);
+
+        app.delete_group_recorded(group_id)
+            .expect("group deletion should record");
+        assert!(app.groups.is_empty());
+        assert!(app.buses.iter().all(|bus| bus.id != bus_id));
+
+        let undo = crate::tui::edit::undo(&mut app);
+        assert!(
+            matches!(undo, crate::tui::history::HistoryReplay::Applied(_)),
+            "group delete undo failed: {undo:?}",
+        );
+        let restored_idx = app.buses.iter().position(|bus| bus.id == bus_id)
+            .expect("undo should restore the same bus id");
+        assert_eq!(app.groups[0].id, group_id);
+        assert_eq!(app.groups[0].members, vec![0, 1]);
+        assert_eq!(app.buses[restored_idx].effect_descriptors[0].name, "OTT");
+        assert_eq!(app.device_registry.bus_audio_effect(bus_id, 0), effect_id);
+        for track in 0..2 {
+            assert_eq!(
+                app.state.with_scene_track_pattern(0, track, |pattern| {
+                    pattern.track_params.output.clone()
+                }),
+                Some(crate::sequencer::TrackOutput::Bus(bus_id)),
+            );
+        }
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(app.groups.is_empty());
+        assert!(app.buses.iter().all(|bus| bus.id != bus_id));
+        graph.process_block();
+    }
+
+    #[test]
     fn recorded_bus_effect_chain_restores_stable_identity_and_scene_values() {
         let graph = TestLiveGraph::new("bus-fx-history-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);

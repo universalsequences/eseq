@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Slice 6, plus Slice 7A track creation and deletion.
+Implemented through Slice 7C for the current authoring command surface.
 
 - Slice 0 provides stable track identity, bounded linear history, barriers,
   revision tracking, and global undo/redo shortcuts.
@@ -43,13 +43,26 @@ Implemented through Slice 6, plus Slice 7A track creation and deletion.
   reordering through the shared `FxChainHost`/`MonoPair` path. Per-pattern
   values and rack macro tables are restored transactionally, including mappings
   dropped by deletion.
-- Slice 7A currently covers track creation from explicit add actions and all
+- Slice 7A covers track creation from explicit add actions and all
   sample/instrument/Sound drop zones, plus deletion and reinsertion at the
   original dense position. Replay retains the `TrackId`, Track Pattern pool,
   scene cells and routing references, sidechains, groups, track-scoped macro
   mappings, instruments/racks, audio and MIDI FX, and runtime graph bindings.
-  Duplicate/reorder commands and standalone persisted color/collapse/rack-bank
-  edits remain for the rest of Slice 7A.
+  Persisted track collapse and rack-slot deletion are undoable through stable
+  track/rack identities; the latter restores slot FX and rack macro state as
+  one container transaction. Track/rack duplicate and reorder operations are
+  not currently exposed as authoring commands; future implementations must use
+  these structural transaction boundaries rather than mutate topology directly.
+- Slice 7B snapshots the coherent scene/Track Pattern repository around scene
+  create/delete/rename/reorder, Track Pattern fork/clone/delete, scene-cell
+  assign/clear, and propagation. Undo/redo restores the original stable
+  `PatternId` values, current scene, overrides, scene routing metadata, and bus
+  pattern repository.
+- Slice 7C covers stable-id bus add/delete/rename/reorder APIs and the active
+  group create/dissolve/membership paths. A topology entry retains bus effect
+  resources and identities, group members by `TrackId`, every scene's bus
+  patterns, and all stored track send/output references. Global replay also
+  republishes mixer/group UI state after structural restoration.
 - Project schema version 4 serializes authoritative stable instance records for
   track audio effects, MIDI effects, bus effects, rack slots, and rack-slot
   effects. Dense pattern slots remain value snapshots and are rebound to those

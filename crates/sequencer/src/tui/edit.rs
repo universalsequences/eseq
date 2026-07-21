@@ -12,9 +12,10 @@ use super::command::{history_policy, sanitize_pasted_step_snapshot, AppCommand};
 use super::history::{
     step_snapshot_bit_exact_eq, ActiveGesture, ApplyMode, BusEffectChainPatch,
     BusEffectChainState, BusEffectValuesPatch, BusMixerPatch, BusMixerSnapshot,
+    BusGroupStructurePatch, BusGroupStructureState, BusStructureState,
     DeviceId, DeviceValueSnapshot, DeviceValuesPatch, EditPatch, EffectChainPatch,
     EffectChainState, EffectInstanceState, EffectPatternSlots, GestureId, HistoryMove,
-    HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, MidiFxChainPatch,
+    GroupStructureState, HistoryPolicy, HistoryReplay, InstrumentBindingPatch, MergeKey, MidiFxChainPatch,
     MidiFxChainState, MidiFxInstanceState, PatternGeometryPatch,
     RackContainerSlotState, RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
     RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
@@ -1518,6 +1519,347 @@ impl App {
         self.restore_bus_pattern_snapshot(&bus_snapshot);
         self.push_all_restored_defaults();
         Ok(())
+    }
+
+    fn capture_bus_group_structure_state(&mut self) -> Result<BusGroupStructureState, String> {
+        self.save_current_bus_pattern();
+        if !self.state.save_current_pattern_snapshot(
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        ) {
+            return Err("Could not snapshot track routing before editing bus topology".to_string());
+        }
+        let mut buses = Vec::with_capacity(self.buses.len());
+        for bus_idx in 0..self.buses.len() {
+            let bus = &self.buses[bus_idx];
+            let (id, name, volume, mute, solo, gate_sequence) = (
+                bus.id,
+                bus.name.clone(),
+                bus.volume,
+                bus.mute,
+                bus.solo,
+                bus.gate_sequence.clone(),
+            );
+            let effects = self.capture_bus_effect_chain_state(bus_idx, None)?;
+            buses.push(BusStructureState {
+                id,
+                name,
+                volume,
+                mute,
+                solo,
+                gate_sequence,
+                effects,
+            });
+        }
+        let groups = self.groups.iter().map(|group| {
+            let members = group.members.iter().map(|track| {
+                self.track_registry.id_at(*track)
+                    .ok_or_else(|| format!("Track group {} has an invalid member", group.id))
+            }).collect::<Result<Vec<_>, String>>()?;
+            Ok(GroupStructureState {
+                id: group.id,
+                name: group.name.clone(),
+                color: group.color,
+                collapsed: group.collapsed,
+                members,
+                bus_id: BusId(group.bus_id),
+            })
+        }).collect::<Result<Vec<_>, String>>()?;
+        Ok(BusGroupStructureState {
+            buses,
+            groups,
+            scenes: self.state.capture_project_scenes(),
+        })
+    }
+
+    fn restore_bus_group_structure_state(
+        &mut self,
+        target: &BusGroupStructureState,
+    ) -> Result<(), String> {
+        let mut ids = std::collections::HashSet::new();
+        if target.buses.iter().any(|bus| !ids.insert(bus.id)) {
+            return Err("Bus history contains duplicate stable bus ids".to_string());
+        }
+        if !ids.contains(&BusId::MIX) {
+            return Err("Bus history is missing the main mix bus".to_string());
+        }
+        if target.groups.iter().any(|group| !ids.contains(&group.bus_id)) {
+            return Err("Bus history contains an invalid group reference".to_string());
+        }
+        let groups = target.groups.iter().map(|group| {
+            let members = group.members.iter().map(|track| {
+                self.track_registry.index_of(*track)
+                    .ok_or_else(|| format!("Track {:?} no longer exists", track))
+            }).collect::<Result<Vec<_>, String>>()?;
+            Ok(crate::project::ProjectTrackGroup {
+                id: group.id,
+                name: group.name.clone(),
+                color: group.color,
+                collapsed: group.collapsed,
+                members,
+                bus_id: group.bus_id.0,
+            })
+        }).collect::<Result<Vec<_>, String>>()?;
+
+        let obsolete = self.buses.iter()
+            .map(|bus| bus.id)
+            .filter(|id| *id != BusId::MIX && !ids.contains(id))
+            .collect::<Vec<_>>();
+        for id in obsolete {
+            if !self.delete_bus_channel(id) {
+                return Err(format!("Could not remove bus {:?} during history replay", id));
+            }
+        }
+        for bus in &target.buses {
+            if !self.buses.iter().any(|current| current.id == bus.id) {
+                self.add_bus_channel_with_id(bus.id, &bus.name)?;
+            }
+        }
+        for (target_index, target_bus) in target.buses.iter().enumerate() {
+            let current_index = self.buses.iter().position(|bus| bus.id == target_bus.id)
+                .ok_or_else(|| format!("Bus {:?} disappeared during history replay", target_bus.id))?;
+            if current_index != target_index {
+                let bus = self.buses.remove(current_index);
+                self.buses.insert(target_index, bus);
+            }
+        }
+        for (bus_idx, target_bus) in target.buses.iter().enumerate() {
+            let current_effects = self.capture_bus_effect_chain_state(bus_idx, None)?;
+            if !current_effects.instances.is_empty() || !target_bus.effects.instances.is_empty() {
+                self.restore_bus_effect_chain_state(bus_idx, &current_effects, &target_bus.effects)?;
+            }
+            let bus = &mut self.buses[bus_idx];
+            bus.name.clone_from(&target_bus.name);
+            bus.volume = target_bus.volume;
+            bus.mute = target_bus.mute;
+            bus.solo = target_bus.solo;
+            bus.gate_sequence.clone_from(&target_bus.gate_sequence);
+        }
+        self.groups = groups;
+        self.restore_scene_structure_state(&target.scenes)?;
+        for track in 0..self.tracks.len() {
+            let mut graph = self.graph_controller();
+            graph.apply_track_output_routing(track);
+            graph.apply_track_bus_sends(track);
+        }
+        self.publish_bus_gate_runtime();
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    pub fn apply_recorded_bus_group_structure_mutation<T>(
+        &mut self,
+        label: &'static str,
+        mutate: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
+        finish_active_gesture(self);
+        let before = self.capture_bus_group_structure_state()?;
+        let result = match mutate(self) {
+            Ok(result) => result,
+            Err(error) => {
+                return match self.restore_bus_group_structure_state(&before) {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(format!(
+                        "Bus/group edit failed ({error}); restoring its before-state also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let after = match self.capture_bus_group_structure_state() {
+            Ok(after) => after,
+            Err(capture_error) => {
+                return match self.restore_bus_group_structure_state(&before) {
+                    Ok(()) => Err(format!(
+                        "Bus/group edit was rolled back because its after-state could not be captured: {capture_error}"
+                    )),
+                    Err(rollback_error) => Err(format!(
+                        "Bus/group after-state capture failed ({capture_error}); rollback also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let patch = BusGroupStructurePatch { before, after };
+        let retained_bytes = patch.retained_bytes();
+        self.history.commit(label, None, EditPatch::BusGroupStructure(patch), retained_bytes);
+        Ok(result)
+    }
+
+    pub fn add_bus_recorded(&mut self, name: String) -> Result<BusId, String> {
+        self.apply_recorded_bus_group_structure_mutation("Add bus", |app| {
+            Ok(app.add_bus_channel(name))
+        })
+    }
+
+    pub fn delete_bus_recorded(&mut self, id: BusId) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Delete bus", |app| {
+            app.delete_bus_channel(id)
+                .then_some(())
+                .ok_or_else(|| format!("Bus {:?} cannot be deleted", id))
+        })
+    }
+
+    pub fn rename_bus_recorded(&mut self, id: BusId, name: String) -> Result<(), String> {
+        let name = name.trim().to_string();
+        self.apply_recorded_bus_group_structure_mutation("Rename bus", |app| {
+            if name.is_empty() {
+                return Err("Bus name cannot be empty".to_string());
+            }
+            let bus = app.buses.iter_mut().find(|bus| bus.id == id)
+                .ok_or_else(|| format!("Bus {:?} does not exist", id))?;
+            if bus.name == name {
+                return Err("Bus name is unchanged".to_string());
+            }
+            bus.name.clone_from(&name);
+            Ok(())
+        })
+    }
+
+    pub fn reorder_bus_recorded(&mut self, source: usize, target: usize) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Reorder bus", |app| {
+            if source >= app.buses.len() || target >= app.buses.len() {
+                return Err("Bus index is out of range".to_string());
+            }
+            if app.buses[source].id == BusId::MIX || app.buses[target].id == BusId::MIX {
+                return Err("The main mix bus has a fixed position".to_string());
+            }
+            if source == target {
+                return Err("Bus order is unchanged".to_string());
+            }
+            let bus = app.buses.remove(source);
+            app.buses.insert(target, bus);
+            Ok(())
+        })
+    }
+
+    pub fn group_tracks_recorded(&mut self, mut members: Vec<usize>) -> Result<BusId, String> {
+        members.sort_unstable();
+        members.dedup();
+        self.apply_recorded_bus_group_structure_mutation("Group tracks", |app| {
+            if members.len() < 2
+                || members.iter().any(|track| *track >= app.tracks.len())
+                || members.iter().any(|track| app.groups.iter().any(|group| group.members.contains(track)))
+            {
+                return Err("At least two ungrouped tracks are required".to_string());
+            }
+            let group_index = app.groups.len() + 1;
+            let bus = app.add_bus_channel(format!("Group {group_index}"));
+            for track in &members {
+                app.set_track_output_all_scenes_unrecorded(*track, crate::sequencer::TrackOutput::Bus(bus));
+            }
+            let color = app.track_colors.get(members[0])
+                .map(|color| [color.r, color.g, color.b])
+                .unwrap_or([0.5, 0.5, 0.5]);
+            let group_id = app.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+            app.groups.push(crate::project::ProjectTrackGroup {
+                id: group_id,
+                name: format!("Group {group_index}"),
+                color,
+                collapsed: false,
+                members,
+                bus_id: bus.0,
+            });
+            Ok(bus)
+        })
+    }
+
+    pub fn move_track_to_group_recorded(
+        &mut self,
+        track: usize,
+        target_group: usize,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Move track to group", |app| {
+            if track >= app.tracks.len() {
+                return Err("Track is out of range".to_string());
+            }
+            let (target_id, target_bus) = app.groups.get(target_group)
+                .map(|group| (group.id, BusId(group.bus_id)))
+                .ok_or_else(|| "Group is out of range".to_string())?;
+            if app.groups[target_group].members.contains(&track) {
+                return Err("Track is already in this group".to_string());
+            }
+            let source_id = app.groups.iter()
+                .find(|group| group.id != target_id && group.members.contains(&track))
+                .map(|group| group.id);
+            app.set_track_output_all_scenes_unrecorded(
+                track,
+                crate::sequencer::TrackOutput::Bus(target_bus),
+            );
+            app.groups[target_group].members.push(track);
+            app.groups[target_group].members.sort_unstable();
+            app.groups[target_group].members.dedup();
+            if let Some(source_id) = source_id {
+                let source = app.groups.iter().position(|group| group.id == source_id)
+                    .expect("source group was resolved above");
+                app.groups[source].members.retain(|member| *member != track);
+                if app.groups[source].members.len() < 2 {
+                    let bus = BusId(app.groups[source].bus_id);
+                    if !app.delete_bus_channel(bus) {
+                        return Err("Could not dissolve the source group bus".to_string());
+                    }
+                    app.groups.remove(source);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn remove_track_from_group_recorded(&mut self, track: usize) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Remove track from group", |app| {
+            let group = app.groups.iter().position(|group| group.members.contains(&track))
+                .ok_or_else(|| "Track is not grouped".to_string())?;
+            app.set_track_output_all_scenes_unrecorded(track, crate::sequencer::TrackOutput::Mix);
+            app.groups[group].members.retain(|member| *member != track);
+            if app.groups[group].members.len() < 2 {
+                let bus = BusId(app.groups[group].bus_id);
+                if !app.delete_bus_channel(bus) {
+                    return Err("Could not dissolve the group bus".to_string());
+                }
+                app.groups.remove(group);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn delete_group_recorded(&mut self, group_id: u64) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Delete track group", |app| {
+            let group = app.groups.iter().position(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            let members = app.groups[group].members.clone();
+            for track in members {
+                app.set_track_output_all_scenes_unrecorded(
+                    track,
+                    crate::sequencer::TrackOutput::Mix,
+                );
+            }
+            let bus = BusId(app.groups[group].bus_id);
+            if !app.delete_bus_channel(bus) {
+                return Err("Could not delete the track group's backing bus".to_string());
+            }
+            app.groups.remove(group);
+            Ok(())
+        })
+    }
+
+    pub fn rename_group_recorded(&mut self, group_id: u64, name: String) -> Result<(), String> {
+        let name = name.trim().to_string();
+        self.apply_recorded_bus_group_structure_mutation("Rename track group", |app| {
+            if name.is_empty() {
+                return Err("Track group name cannot be empty".to_string());
+            }
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            if group.name == name {
+                return Err("Track group name is unchanged".to_string());
+            }
+            group.name.clone_from(&name);
+            if let Some(bus) = app.buses.iter_mut().find(|bus| bus.id.0 == group.bus_id) {
+                bus.name.clone_from(&name);
+            }
+            Ok(())
+        })
     }
 
     fn restore_track_instrument_state(
@@ -6019,6 +6361,19 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_scene_structure_state(target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::BusGroupStructure(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "bus/group-structure replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_bus_group_structure_state(target)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
@@ -6045,6 +6400,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneStructure(_) => true,
+        EditPatch::BusGroupStructure(_) => true,
         EditPatch::EffectChain(_) => true,
         EditPatch::BusEffectChain(_) => true,
         EditPatch::BusEffectValues(_) => true,
@@ -6114,7 +6470,12 @@ pub fn redo(app: &mut App) -> HistoryReplay<EditError> {
 }
 
 fn structural_track_patch(patch: &EditPatch) -> bool {
-    matches!(patch, EditPatch::TrackCreation(_) | EditPatch::TrackDeletion(_))
+    matches!(
+        patch,
+        EditPatch::TrackCreation(_)
+            | EditPatch::TrackDeletion(_)
+            | EditPatch::BusGroupStructure(_)
+    )
 }
 
 fn wait_for_track_topology_boundary(app: &mut App) -> Result<Option<u64>, EditError> {
@@ -6178,6 +6539,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::BusGroupStructure(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::EffectChain(_) => {
