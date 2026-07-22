@@ -1007,9 +1007,9 @@ impl App {
             .master_volume
             .store(1.0_f32.to_bits(), Ordering::Relaxed);
         self.push_master_volume();
-        self.set_reverb_param(0, 0.2);
-        self.set_reverb_param(1, 0.8);
-        self.set_reverb_param(2, 0.3);
+        self.set_reverb_param_unrecorded(0, 0.2);
+        self.set_reverb_param_unrecorded(1, 0.8);
+        self.set_reverb_param_unrecorded(2, 0.3);
 
         self.current_project_name = None;
         self.editor.scratch_buffer.clear();
@@ -3046,9 +3046,9 @@ impl App {
                 graph.apply_track_bus_sends(track_idx);
             }
         }
-        self.set_reverb_param(0, reverb.size);
-        self.set_reverb_param(1, reverb.brightness);
-        self.set_reverb_param(2, reverb.replace);
+        self.set_reverb_param_unrecorded(0, reverb.size);
+        self.set_reverb_param_unrecorded(1, reverb.brightness);
+        self.set_reverb_param_unrecorded(2, reverb.replace);
         let mut macro_engine = crate::macro_engine::MacroEngine::default();
         let mut restored_values = Vec::with_capacity(macros.len());
         for project_macro in macros {
@@ -3720,6 +3720,65 @@ fn apply_instrument_preset_to_container_slot(
         if row.iter().any(Option::is_some) {
             slot.key_locks.insert(note, row);
         }
+    }
+}
+
+/// Canonical persisted project state used by undo/redo tests.
+///
+/// Serialization deliberately excludes runtime graph identities. The project
+/// name, active scene/track, and scratch editor are normalized because they
+/// are session or text-editor state rather than sequencer authoring state.
+#[cfg(test)]
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct AuthoringStateSnapshot(Vec<u8>);
+
+#[cfg(test)]
+impl std::fmt::Debug for AuthoringStateSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthoringStateSnapshot")
+            .field("serialized_bytes", &self.0.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl AuthoringStateSnapshot {
+    pub(super) fn first_difference(&self, other: &Self) -> Option<(usize, String, String)> {
+        let index = self
+            .0
+            .iter()
+            .zip(&other.0)
+            .position(|(left, right)| left != right)
+            .or_else(|| {
+                (self.0.len() != other.0.len()).then_some(self.0.len().min(other.0.len()))
+            })?;
+        let start = index.saturating_sub(48);
+        let left_end = (index + 48).min(self.0.len());
+        let right_end = (index + 48).min(other.0.len());
+        Some((
+            index,
+            String::from_utf8_lossy(&self.0[start..left_end]).into_owned(),
+            String::from_utf8_lossy(&other.0[start..right_end]).into_owned(),
+        ))
+    }
+}
+
+#[cfg(test)]
+impl App {
+    pub(super) fn capture_authoring_state_snapshot(
+        &mut self,
+    ) -> Result<AuthoringStateSnapshot, String> {
+        let mut project = self.capture_project("__authoring_state_snapshot__")?;
+        project.name.clear();
+        project.current_pattern = 0;
+        project.current_track = None;
+        project.scratch.buffer.clear();
+        project.scratch.cursor_row = 0;
+        project.scratch.cursor_col = 0;
+        serde_json::to_vec(&project)
+            .map(AuthoringStateSnapshot)
+            .map_err(|error| format!("could not serialize authoring-state snapshot: {error}"))
     }
 }
 

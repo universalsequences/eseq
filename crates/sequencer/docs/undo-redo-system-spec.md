@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Slice 7C for the current authoring command surface.
+Implemented through Slice 8 for the current authoring command surface.
 
 - Slice 0 provides stable track identity, bounded linear history, barriers,
   revision tracking, and global undo/redo shortcuts.
@@ -84,6 +84,16 @@ Implemented through Slice 7C for the current authoring command surface.
   transactional if a stable target disappears. Neural edits and generated
   command batches retain the accepted snapshots rather than regeneration
   seeds. Arming and other performance-only controls remain outside history.
+- Slice 8 completes the mutation audit and release gate. The test-only
+  `AuthoringStateSnapshot` compares the authoritative serialized project state
+  while normalizing runtime and editor-only identity. Deterministic mixed
+  history stress, retained-resource eviction, failure rollback, graph resource,
+  save-at-revision, gesture-allocation, and text-versus-sequencer routing tests
+  form the hardening suite. The audit found and fixed the remaining global
+  reverb bypass; all three persisted reverb parameters now use coalesced
+  history, while project initialization/load remains explicitly unrecorded.
+  The complete classification is recorded in
+  `docs/undo-redo-mutation-audit.md`.
 
 Related: `docs/racks-spec.md` (Amendment A: `FxChainHost`, rack-slot chains,
 rack macro banks), `docs/MACRO_MAPPING_SPEC.md`, `docs/instrument-swap-spec.md`.

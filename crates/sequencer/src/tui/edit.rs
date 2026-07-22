@@ -3592,6 +3592,15 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
                     .to_vec(),
             ),
         ),
+        AppCommand::SetReverbParam { param_idx, .. } => {
+            let value = match param_idx {
+                0 => app.ui.reverb_size,
+                1 => app.ui.reverb_brightness,
+                2 => app.ui.reverb_replace,
+                _ => return Err(EditError::UnsupportedCommand),
+            };
+            Ok(BarrierWitness::Bytes(value.to_bits().to_le_bytes().to_vec()))
+        }
         AppCommand::SetBpm { .. } => Ok(BarrierWitness::Bytes(
             app.state
                 .transport
@@ -5054,6 +5063,9 @@ fn capture_transport_authoring(app: &App) -> TransportAuthoringSnapshot {
     TransportAuthoringSnapshot {
         bpm: app.state.transport.bpm.load(Ordering::Relaxed),
         master_volume_bits: app.state.transport.master_volume.load(Ordering::Relaxed),
+        reverb_size_bits: app.ui.reverb_size.to_bits(),
+        reverb_brightness_bits: app.ui.reverb_brightness.to_bits(),
+        reverb_replace_bits: app.ui.reverb_replace.to_bits(),
     }
 }
 
@@ -5451,6 +5463,7 @@ fn apply_recorded_transport_command(
     }
     let label = match cmd {
         AppCommand::SetBpm { .. } => "Set BPM",
+        AppCommand::SetReverbParam { .. } => "Set reverb parameter",
         _ => "Set master volume",
     };
     let patch = TransportParamsPatch { before: entry_before, after };
@@ -5787,6 +5800,7 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
                 cmd,
                 AppCommand::SetMasterVolume { .. }
                     | AppCommand::AdjustMasterVolume { .. }
+                    | AppCommand::SetReverbParam { .. }
                     | AppCommand::SetBpm { .. }
             ) =>
         {
@@ -5841,6 +5855,7 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
                 cmd,
                 AppCommand::SetMasterVolume { .. }
                     | AppCommand::AdjustMasterVolume { .. }
+                    | AppCommand::SetReverbParam { .. }
                     | AppCommand::SetBpm { .. }
             ) =>
         {
@@ -6299,6 +6314,15 @@ fn replay_transport_params_patch(
         .store(target.master_volume_bits, Ordering::Relaxed);
     if before.master_volume_bits != target.master_volume_bits {
         app.push_master_volume();
+    }
+    if before.reverb_size_bits != target.reverb_size_bits {
+        app.set_reverb_param_unrecorded(0, f32::from_bits(target.reverb_size_bits));
+    }
+    if before.reverb_brightness_bits != target.reverb_brightness_bits {
+        app.set_reverb_param_unrecorded(1, f32::from_bits(target.reverb_brightness_bits));
+    }
+    if before.reverb_replace_bits != target.reverb_replace_bits {
+        app.set_reverb_param_unrecorded(2, f32::from_bits(target.reverb_replace_bits));
     }
     let publish_scheduler = before.bpm != target.bpm;
     if publish_scheduler {
@@ -6863,6 +6887,7 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -6873,6 +6898,26 @@ mod tests {
         SwingResolution, Timebase,
     };
     use crate::tui::AudioBuses;
+
+    struct TestLiveGraph(LiveGraphPtr);
+
+    impl TestLiveGraph {
+        fn new(label: &str) -> Self {
+            crate::audiograph::initialize_engine_for_test(64, 44_100);
+            let label = CString::new(label).unwrap();
+            let ptr = unsafe {
+                crate::audiograph::create_live_graph(32, 64, label.as_ptr(), 2)
+            };
+            assert!(!ptr.is_null());
+            Self(LiveGraphPtr(ptr))
+        }
+    }
+
+    impl Drop for TestLiveGraph {
+        fn drop(&mut self) {
+            unsafe { crate::audiograph::destroy_live_graph(self.0.0) };
+        }
+    }
 
     fn test_app(state: SequencerState) -> App {
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
@@ -6895,6 +6940,26 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app
+    }
+
+    fn configure_test_sampler_project(app: &mut App, sample_path: &str) {
+        app.tracks[0].clear();
+        let sample_path = std::path::PathBuf::from(sample_path);
+        app.sampler_paths = vec![Some(sample_path.clone())];
+        app.register_loaded_sample_path("", -1, sample_path);
+        app.graph.track_buffer_ids = vec![-1];
+        app.graph.track_sample_rates = vec![44_100];
+        app.graph.track_instrument_types = vec![InstrumentType::Sampler];
+        app.graph.track_instrument_run_modes = vec![
+            crate::sequencer::CustomInstrumentRunMode::Instrument,
+        ];
+        app.graph.track_engine_ids = vec![None];
+        app.graph.effect_descriptors = vec![
+            crate::effects::EffectDescriptor::default_full_chain(),
+        ];
+        app.graph.instrument_descriptors = vec![
+            crate::effects::EffectDescriptor::builtin_sampler(),
+        ];
     }
 
     fn assert_command_round_trip(app: &mut App, cmd: AppCommand, steps: &[usize]) {
@@ -8553,11 +8618,13 @@ mod tests {
     }
 
     #[test]
-    fn transport_params_round_trip_bpm_and_master_volume() {
+    fn transport_and_reverb_params_round_trip_bit_exactly() {
+        let graph = TestLiveGraph::new("transport-reverb-history-test");
         let mut app = test_app(SequencerState::new(
             1,
             vec![default_empty_effect_chain()],
         ));
+        app.graph.lg = graph.0;
         let before = capture_transport_authoring(&app);
         let scheduler_version = app.state.scheduler_snapshot_version();
         try_apply_command(&mut app, AppCommand::SetBpm { bpm: 173 }).unwrap();
@@ -8571,8 +8638,19 @@ mod tests {
         .unwrap();
         assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version + 1);
         finish_active_gesture(&mut app);
+        try_apply_command(
+            &mut app,
+            AppCommand::SetReverbParam {
+                param_idx: 1,
+                value: 0.375,
+            },
+        )
+        .unwrap();
+        finish_active_gesture(&mut app);
         let after = capture_transport_authoring(&app);
 
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version + 1);
         assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
         assert_eq!(app.state.scheduler_snapshot_version(), scheduler_version + 1);
         assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
@@ -8580,7 +8658,231 @@ mod tests {
         assert_eq!(capture_transport_authoring(&app), before);
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         assert_eq!(capture_transport_authoring(&app), after);
+    }
+
+    #[test]
+    fn authoring_state_oracle_proves_mixed_command_round_trips() {
+        let graph = TestLiveGraph::new("authoring-state-oracle-test");
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        app.graph.lg = graph.0;
+        configure_test_sampler_project(&mut app, "/tmp/undo-authoring-oracle.wav");
+        let before = app.capture_authoring_state_snapshot().unwrap();
+
+        try_apply_command(&mut app, AppCommand::ToggleStep { track: 0, step: 3 }).unwrap();
+        try_apply_command(
+            &mut app,
+            AppCommand::SetTrackPan { track: 0, value: -0.625 },
+        )
+        .unwrap();
+        finish_active_gesture(&mut app);
+        try_apply_command(&mut app, AppCommand::SetBpm { bpm: 147 }).unwrap();
+        finish_active_gesture(&mut app);
+        try_apply_command(
+            &mut app,
+            AppCommand::SetReverbParam {
+                param_idx: 2,
+                value: 0.75,
+            },
+        )
+        .unwrap();
+        finish_active_gesture(&mut app);
+        let after = app.capture_authoring_state_snapshot().unwrap();
+        assert_ne!(after, before);
+
+        let entries = app.history.undo_len();
+        for _ in 0..entries {
+            assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        }
+        assert_eq!(app.capture_authoring_state_snapshot().unwrap(), before);
+        for _ in 0..entries {
+            assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        }
+        assert_eq!(app.capture_authoring_state_snapshot().unwrap(), after);
+    }
+
+    #[test]
+    fn scalar_and_multi_step_history_patches_are_target_scoped() {
+        let mut app = test_app(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        app.tracks.push("Track 2".to_string());
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        for step in [2, 7, 11] {
+            app.state.pattern.patterns[0].set_step_active(step, true);
+        }
+        try_apply_command(
+            &mut app,
+            AppCommand::ClearSteps {
+                track: 0,
+                steps: vec![2, 7, 11],
+            },
+        ).unwrap();
+        let EditPatch::StepCells(step_patch) = app.history.next_undo_patch().unwrap() else {
+            panic!("multi-step edit must retain a cell patch, not a project snapshot");
+        };
+        assert_eq!(step_patch.cells.len(), 3);
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetTrackAttack {
+                track: 1,
+                ms: 23.5,
+            },
+        ).unwrap();
+        finish_active_gesture(&mut app);
+        let EditPatch::TrackParams(track_patch) = app.history.next_undo_patch().unwrap() else {
+            panic!("scalar edit must retain one stable track patch");
+        };
+        assert_eq!(track_patch.target.track, app.track_registry.id_at(1).unwrap());
+    }
+
+    #[test]
+    fn deterministic_mixed_history_stress_round_trips_with_scene_switches_and_no_ops() {
+        const SEED: u64 = 0x5eed_8bad_f00d_cafe;
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(
+                    1,
+                    &[crate::effects::EffectDescriptor::default_full_chain()],
+                ),
+                PatternSnapshot::new_default(
+                    1,
+                    &[crate::effects::EffectDescriptor::default_full_chain()],
+                ),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        let graph = TestLiveGraph::new("deterministic-history-stress-test");
+        let mut app = test_app(state);
+        app.graph.lg = graph.0;
+        configure_test_sampler_project(&mut app, "/tmp/undo-history-stress.wav");
+        app.state.launch_scene(
+            1,
+            1,
+            &[-1],
+            &[44_100],
+            &[String::new()],
+            &[InstrumentType::Sampler],
+        ).unwrap();
+        let _ = app.capture_authoring_state_snapshot().unwrap();
+        app.state.launch_scene(
+            0,
+            1,
+            &[-1],
+            &[44_100],
+            &[String::new()],
+            &[InstrumentType::Sampler],
+        ).unwrap();
+        let initial = app.capture_authoring_state_snapshot().unwrap();
+        let mut rng = SEED;
+        let mut operations = Vec::new();
+        for index in 0..96 {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let choice = (rng >> 32) % 7;
+            let description = match choice {
+                0 => {
+                    let step = (rng as usize) % 16;
+                    try_apply_command(&mut app, AppCommand::ToggleStep { track: 0, step })
+                        .unwrap();
+                    format!("toggle-step {step}")
+                }
+                1 => {
+                    let value = ((rng >> 16) as u16) as f32 / u16::MAX as f32 * 2.0 - 1.0;
+                    try_apply_command(&mut app, AppCommand::SetTrackPan { track: 0, value })
+                        .unwrap();
+                    finish_active_gesture(&mut app);
+                    format!("set-pan {:08x}", value.to_bits())
+                }
+                2 => {
+                    let bpm = 40 + (rng % 220) as u32;
+                    try_apply_command(&mut app, AppCommand::SetBpm { bpm }).unwrap();
+                    finish_active_gesture(&mut app);
+                    format!("set-bpm {bpm}")
+                }
+                3 => {
+                    let result = undo(&mut app);
+                    format!("undo {result:?}")
+                }
+                4 => {
+                    let result = redo(&mut app);
+                    format!("redo {result:?}")
+                }
+                5 => {
+                    let scene = index % 2;
+                    app.state.launch_scene(
+                        scene,
+                        1,
+                        &[-1],
+                        &[44_100],
+                        &[String::new()],
+                        &[InstrumentType::Sampler],
+                    ).unwrap();
+                    format!("launch-scene {scene}")
+                }
+                _ => {
+                    let current = f32::from_bits(
+                        app.state.pattern.track_params[0].pan.load(Ordering::Relaxed),
+                    );
+                    let outcome = try_apply_command(
+                        &mut app,
+                        AppCommand::SetTrackPan { track: 0, value: current },
+                    ).unwrap();
+                    finish_active_gesture(&mut app);
+                    format!("no-op {outcome:?}")
+                }
+            };
+            operations.push(format!("{index}: {description}"));
+        }
+        finish_active_gesture(&mut app);
+        let final_scene = app.state.current_scene_index();
+        let final_state = app.capture_authoring_state_snapshot().unwrap();
+        let applied_entry_count = app.history.undo_len();
+        for _ in 0..applied_entry_count {
+            assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        }
+        app.state.launch_scene(
+            0,
+            1,
+            &[-1],
+            &[44_100],
+            &[String::new()],
+            &[InstrumentType::Sampler],
+        ).unwrap();
+        let restored_initial = app.capture_authoring_state_snapshot().unwrap();
+        assert_eq!(
+            restored_initial,
+            initial,
+            "seed={SEED:#x} difference={:?}\n{}",
+            restored_initial.first_difference(&initial),
+            operations.join("\n"),
+        );
+        for _ in 0..applied_entry_count {
+            assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        }
+        app.state.launch_scene(
+            final_scene,
+            1,
+            &[-1],
+            &[44_100],
+            &[String::new()],
+            &[InstrumentType::Sampler],
+        ).unwrap();
+        let restored_final = app.capture_authoring_state_snapshot().unwrap();
+        assert_eq!(
+            restored_final,
+            final_state,
+            "seed={SEED:#x} difference={:?}\n{}",
+            restored_final.first_difference(&final_state),
+            operations.join("\n"),
+        );
     }
 
     #[test]
@@ -8892,6 +9194,37 @@ mod tests {
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         assert!(app.state.pattern.patterns[0].is_active(1));
         assert!(app.state.pattern.patterns[0].is_active(6));
+    }
+
+    #[test]
+    fn failed_compound_replay_restores_applied_children_and_preserves_history() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let checkpoint = app.history.undo_len();
+        assert!(matches!(
+            try_apply_command(&mut app, AppCommand::ToggleStep { track: 0, step: 4 }),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert!(matches!(
+            try_apply_command(&mut app, AppCommand::SetBpm { bpm: 177 }),
+            Ok(EditOutcome::Applied(_))
+        ));
+        finish_active_gesture(&mut app);
+        squash_history_since(&mut app, checkpoint, "Step and tempo")
+            .expect("two edits should become one compound entry");
+        let after = capture_transport_authoring(&app);
+        let revision = app.history.current_revision();
+
+        let track = app.track_registry.id_at(0).expect("stable track target");
+        assert_eq!(app.track_registry.remove(track), Some(0));
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Failed(_)));
+        assert!(app.state.pattern.patterns[0].is_active(4));
+        assert_eq!(capture_transport_authoring(&app), after);
+        assert_eq!((app.history.undo_len(), app.history.redo_len()), (1, 0));
+        assert_eq!(app.history.current_revision(), revision);
     }
 
     #[test]

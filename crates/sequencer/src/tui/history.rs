@@ -643,6 +643,9 @@ impl TrackParamsPatch {
 pub struct TransportAuthoringSnapshot {
     pub bpm: u32,
     pub master_volume_bits: u32,
+    pub reverb_size_bits: u32,
+    pub reverb_brightness_bits: u32,
+    pub reverb_replace_bits: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -1312,6 +1315,8 @@ fn registry_heap_bytes(registry: &PlockVariantRegistry) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     fn manager(max_entries: usize, max_bytes: usize) -> UndoManager<i32> {
@@ -1354,6 +1359,29 @@ mod tests {
         assert_eq!(history.undo_len(), 1);
         assert_eq!(history.retained_bytes(), 80);
         assert!(history.newest_entry_exceeds_byte_budget());
+    }
+
+    #[test]
+    fn budget_eviction_releases_only_evicted_structural_resources() {
+        let first = Arc::new("compiled-first");
+        let second = Arc::new("compiled-second");
+        let third = Arc::new("compiled-third");
+        let mut history = UndoManager::new(HistoryBudget {
+            max_entries: 2,
+            max_bytes: 1024,
+        });
+        history.commit("first", None, Arc::clone(&first), 16);
+        history.commit("second", None, Arc::clone(&second), 16);
+        history.commit("third", None, Arc::clone(&third), 16);
+
+        assert_eq!(Arc::strong_count(&first), 1, "the evicted resource must be released");
+        assert_eq!(Arc::strong_count(&second), 2);
+        assert_eq!(Arc::strong_count(&third), 2);
+        assert!(matches!(history.undo(|_| Ok::<_, ()>(())), HistoryReplay::Applied(_)));
+        assert_eq!(Arc::strong_count(&third), 2, "redo must retain the structural resource");
+        history.reset();
+        assert_eq!(Arc::strong_count(&second), 1);
+        assert_eq!(Arc::strong_count(&third), 1);
     }
 
     #[test]

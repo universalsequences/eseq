@@ -593,6 +593,16 @@ impl App {
     }
 
     pub(super) fn set_reverb_param(&mut self, cursor: usize, value: f32) {
+        apply_command(
+            self,
+            AppCommand::SetReverbParam {
+                param_idx: cursor,
+                value,
+            },
+        );
+    }
+
+    pub(super) fn set_reverb_param_unrecorded(&mut self, cursor: usize, value: f32) {
         let clamped = value.clamp(0.0, 1.0);
         let param_idx = match cursor {
             0 => {

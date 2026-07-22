@@ -519,6 +519,11 @@ pub enum AppCommand {
     AdjustMasterVolume {
         delta: f32,
     },
+    /// Set one persisted global reverb parameter; also pushes to the live graph.
+    SetReverbParam {
+        param_idx: usize,
+        value: f32,
+    },
 
     SetTrackTimebase {
         track: usize,
@@ -1196,6 +1201,9 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         AppCommand::SetMasterVolume { .. } | AppCommand::AdjustMasterVolume { .. } => {
             HistoryPolicy::Coalesce(super::history::MergeKey::new("transport:master-volume"))
         }
+        AppCommand::SetReverbParam { param_idx, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("global:reverb:{param_idx}")),
+        ),
         AppCommand::SetBpm { .. } => {
             HistoryPolicy::Coalesce(super::history::MergeKey::new("transport:bpm"))
         }
@@ -2691,6 +2699,7 @@ pub(crate) fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
             | AppCommand::ToggleBusSolo { .. }
             | AppCommand::SetMasterVolume { .. }
             | AppCommand::AdjustMasterVolume { .. }
+            | AppCommand::SetReverbParam { .. }
             | AppCommand::MacroCreate { .. }
             | AppCommand::MacroEnsure { .. }
             | AppCommand::MacroDelete { .. }
@@ -3029,6 +3038,10 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
                 Ordering::Relaxed,
             );
             app.push_master_volume();
+        }
+
+        AppCommand::SetReverbParam { param_idx, value } => {
+            app.set_reverb_param_unrecorded(param_idx, value);
         }
 
         AppCommand::SetTrackTimebase { track, timebase } => {
