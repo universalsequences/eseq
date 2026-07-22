@@ -5460,7 +5460,18 @@ fn fire_resolved(
             ),
         }
     };
+    let scheduled_source = scheduled_sampler_params.is_some();
     let sampler_params = scheduled_sampler_params.unwrap_or_else(fallback_sampler_params);
+    if crate::sampler::srange_debug_enabled() {
+        eprintln!(
+            "[srange] trigger dispatch track={} step={} source={} start={} end={}",
+            track_idx,
+            step,
+            if scheduled_source { "scheduled" } else { "fallback" },
+            sampler_params.start_point,
+            sampler_params.end_point,
+        );
+    }
     let attack_ms = sampler_params.attack_ms;
     let release_ms = sampler_params.release_ms;
     let attack_samples = attack_ms * data.sample_rate as f32 / 1000.0;

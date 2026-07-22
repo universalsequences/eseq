@@ -4593,6 +4593,11 @@ impl SequencerState {
         self.pattern.scenes.lock().unwrap().clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_scenes_mut<R>(&self, f: impl FnOnce(&mut ProjectScenes) -> R) -> R {
+        f(&mut self.pattern.scenes.lock().unwrap())
+    }
+
     pub(crate) fn restore_project_scenes(
         &self,
         target: &ProjectScenes,
@@ -10099,7 +10104,22 @@ impl SequencerState {
             .and_then(|pool| pool.get_mut(pattern_id))
             .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
         let mut stored_slot = data.instrument_slot.clone();
-        stored_slot.apply_authoring_values(&values.slot)?;
+        if let Err(error) = stored_slot.apply_authoring_values(&values.slot) {
+            if !is_effective {
+                return Err(error);
+            }
+            // The pool copy can predate the current instrument descriptor
+            // (older saved project, e.g. the sampler grew params). The values
+            // being applied were captured from the live slot, so reseed the
+            // stored layout from it instead of failing the edit forever.
+            let slot = self
+                .pattern
+                .instrument_slots
+                .get(track)
+                .ok_or_else(|| "live instrument target no longer exists".to_string())?;
+            stored_slot = EffectSlotSnapshot::capture(slot);
+            stored_slot.apply_authoring_values(&values.slot)?;
+        }
         let live_slot = if is_effective {
             let slot = self
                 .pattern

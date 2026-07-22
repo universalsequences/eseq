@@ -3358,6 +3358,11 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
                 .and_then(|descriptor| descriptor.params.get(param_idx))
                 .map(|param| param.clamp(value))
                 .unwrap_or(value);
+            if crate::sampler::srange_debug_enabled() && (param_idx == 2 || param_idx == 3) {
+                eprintln!(
+                    "[srange] SetInstrumentParam track={track} param={param_idx} value={value}"
+                );
+            }
             let slot = &app.state.pattern.instrument_slots[track];
             slot.defaults.set(param_idx, value);
             app.send_effective_instrument_param(track, param_idx);

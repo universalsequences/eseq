@@ -1001,6 +1001,18 @@ impl App {
                 11 => (crate::sampler::PARAM_WARP_SAMPLE_BPM, value),
                 _ => (idx, value),
             };
+            if crate::sampler::srange_debug_enabled() && (param_idx == 2 || param_idx == 3) {
+                eprintln!(
+                    "[srange] live push track={} param={} value={} voice_lids={}",
+                    track,
+                    param_idx,
+                    fvalue,
+                    self.graph
+                        .track_voice_lids
+                        .get(track)
+                        .map_or(0, |lids| lids.len()),
+                );
+            }
             let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
             let resolved_idx = if is_mod_param {
                 idx - crate::voice_modulator::MOD_PARAM_BASE as u64
@@ -1448,6 +1460,16 @@ impl App {
                 11 => (crate::sampler::PARAM_WARP_SAMPLE_BPM, value),
                 _ => (idx, value),
             };
+            if crate::sampler::srange_debug_enabled() && (param_idx == 2 || param_idx == 3) {
+                eprintln!(
+                    "[srange] rack live push track={} slot={} param={} value={} sampler_ids={}",
+                    track,
+                    slot_idx,
+                    param_idx,
+                    fvalue,
+                    nodes.sampler_ids.len(),
+                );
+            }
             let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
             let resolved_idx = if is_mod_param {
                 idx - crate::voice_modulator::MOD_PARAM_BASE as u64

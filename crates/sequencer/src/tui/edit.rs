@@ -5132,10 +5132,11 @@ fn rollback_device_value_edit(
     error: EditError,
 ) -> EditError {
     let rollback = restore_device_value_snapshot(app, target, before)
-        .and_then(|_| push_live_device_values(app, target, Some(before)))
-        .map(|_| {
-            app.state.publish_scheduler_snapshot();
-        });
+        .and_then(|_| push_live_device_values(app, target, Some(before)));
+    // Publish even when the rollback itself failed: the commands already
+    // mutated live state, and skipping the publish leaves the scheduler
+    // playing stale values until the next unrelated publish.
+    app.state.publish_scheduler_snapshot();
     match rollback {
         Ok(()) => error,
         Err(rollback_error) => EditError::ReplayFailed(format!(
@@ -7735,6 +7736,53 @@ mod tests {
     }
 
     #[test]
+    fn scene_cell_assignment_keeps_restored_pattern_sample_identity() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut first = PatternSnapshot::new_default(1, &[]);
+        first.sample_ids[0] = (7, "sample-one".to_string(), 44_100);
+        let mut second = PatternSnapshot::new_default(1, &[]);
+        second.sample_ids[0] = (9, "sample-two".to_string(), 48_000);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let shared = state.scene_track_pattern_id(1, 0).unwrap();
+
+        let mut app = test_app(state);
+        configure_test_sampler_project(&mut app, "/tmp/sample-one.wav");
+        app.graph.track_buffer_ids = vec![7];
+        app.tracks[0] = "sample-one".to_string();
+
+        // Mirrors the "set-scene-cell" handler: the live sample arrays must be
+        // updated inside the mutation, before the wrapper re-snapshots live
+        // state into the newly effective pattern.
+        app.apply_recorded_scene_structure_mutation("Assign scene cell", |app| {
+            if !app.state.set_scene_cell(
+                0,
+                0,
+                shared,
+                1,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            ) {
+                return Err("set_scene_cell failed".to_string());
+            }
+            let sample_ids = app.state.effective_pattern_sample_ids(1);
+            app.graph_controller().apply_sample_ids(&sample_ids);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            app.state.effective_pattern_sample_ids(1)[0],
+            (9, "sample-two".to_string(), 48_000),
+            "assigning a pattern into the current scene must not clobber its sample"
+        );
+        assert_eq!(app.graph.track_buffer_ids[0], 9);
+        assert_eq!(app.tracks[0], "sample-two");
+    }
+
+    #[test]
     fn recorded_track_collapse_round_trips_by_stable_track_identity() {
         let mut app = test_app(SequencerState::new(
             1,
@@ -8155,6 +8203,115 @@ mod tests {
             .capture_pattern_instrument_device_values(0, pattern)
             .unwrap()
             .bit_exact_eq(&before));
+    }
+
+    #[test]
+    fn sampler_range_drag_reaches_scheduler_snapshot() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor];
+        app.state.publish_scheduler_snapshot();
+
+        for (start, end) in [(0.1, 0.9), (0.2, 0.8), (0.25, 0.75)] {
+            let outcome = apply_coalesced_device_value_batch(
+                &mut app,
+                &[
+                    AppCommand::SetInstrumentParam {
+                        track: 0,
+                        param_idx: 2,
+                        value: start,
+                    },
+                    AppCommand::SetInstrumentParam {
+                        track: 0,
+                        param_idx: 3,
+                        value: end,
+                    },
+                ],
+                "sampler-range",
+                "Set sampler range",
+            );
+            assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        }
+        finish_active_gesture(&mut app);
+        let snapshot = app.state.latest_scheduler_snapshot();
+        let slot = &snapshot.tracks[0].instrument_slot;
+        assert_eq!(slot.defaults.get(2).copied(), Some(0.25));
+        assert_eq!(slot.defaults.get(3).copied(), Some(0.75));
+    }
+
+    #[test]
+    fn sampler_range_edit_survives_stale_pattern_pool_descriptor() {
+        // Older saved projects can hold a pool copy of the instrument slot
+        // whose param layout predates the current descriptor (the sampler
+        // grew params). Device-value edits used to fail with "device scalar
+        // descriptor changed while replaying history" and skip the scheduler
+        // publish, leaving audio on stale start/end until transport restart.
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+
+        // Simulate the old-project pool copy: fewer params than the live slot.
+        app.state.with_scenes_mut(|scenes| {
+            let data = scenes.track_pools[0].get_mut(pattern).unwrap();
+            let stale_params = (data.instrument_slot.num_params as usize).saturating_sub(3);
+            data.instrument_slot.num_params = stale_params as u32;
+            data.instrument_slot.defaults.truncate(stale_params);
+        });
+        app.state.publish_scheduler_snapshot();
+
+        let outcome = apply_coalesced_device_value_batch(
+            &mut app,
+            &[
+                AppCommand::SetInstrumentParam {
+                    track: 0,
+                    param_idx: 2,
+                    value: 0.25,
+                },
+                AppCommand::SetInstrumentParam {
+                    track: 0,
+                    param_idx: 3,
+                    value: 0.75,
+                },
+            ],
+            "sampler-range",
+            "Set sampler range",
+        );
+        assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        finish_active_gesture(&mut app);
+
+        let snapshot = app.state.latest_scheduler_snapshot();
+        let slot = &snapshot.tracks[0].instrument_slot;
+        assert_eq!(slot.defaults.get(2).copied(), Some(0.25));
+        assert_eq!(slot.defaults.get(3).copied(), Some(0.75));
+
+        // The pool copy must be healed to the live layout.
+        let live_num_params = app.state.pattern.instrument_slots[0]
+            .num_params
+            .load(Ordering::Relaxed);
+        app.state.with_scenes_mut(|scenes| {
+            let data = scenes.track_pools[0].get(pattern).unwrap();
+            assert_eq!(data.instrument_slot.num_params, live_num_params);
+            assert_eq!(data.instrument_slot.defaults.get(2).copied(), Some(0.25));
+        });
     }
 
     #[test]

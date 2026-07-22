@@ -19063,17 +19063,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let num_tracks = app.tracks.len();
                         let deleted = app.apply_recorded_scene_structure_mutation(
                             "Delete track pattern",
-                            |app| app.state.delete_track_pattern(
-                                track,
-                                PatternId(pattern_id),
-                                num_tracks,
-                                &app.graph.track_buffer_ids,
-                                &app.graph.track_sample_rates,
-                                &app.tracks,
-                                &app.graph.track_instrument_types,
-                            ).then_some(()).ok_or_else(|| format!(
-                                "Could not delete track {} pattern {}", track + 1, pattern_id
-                            )),
+                            |app| {
+                                if !app.state.delete_track_pattern(
+                                    track,
+                                    PatternId(pattern_id),
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                ) {
+                                    return Err(format!(
+                                        "Could not delete track {} pattern {}",
+                                        track + 1,
+                                        pattern_id
+                                    ));
+                                }
+                                // The live sample arrays must match the restored
+                                // replacement pattern before the wrapper
+                                // re-snapshots live state into it, or the old
+                                // sample clobbers the pattern's sample_id.
+                                let sample_ids =
+                                    app.state.effective_pattern_sample_ids(num_tracks);
+                                app.graph_controller().apply_sample_ids(&sample_ids);
+                                Ok(())
+                            },
                         );
                         if deleted.is_err() {
                             editor.handle_host_event(HostEvent::Status(format!(
@@ -19083,8 +19097,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let sample_ids = app.state.effective_pattern_sample_ids(num_tracks);
-                        app.graph_controller().apply_sample_ids(&sample_ids);
                         if let Err(error) = app
                             .graph_controller()
                             .sync_track_instrument_run_modes_from_live_state()
@@ -19135,18 +19147,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let num_tracks = app.tracks.len();
                         let shared = app.apply_recorded_scene_structure_mutation(
                             "Assign scene cell",
-                            |app| app.state.set_scene_cell(
-                                scene,
-                                track,
-                                PatternId(pattern_id),
-                                num_tracks,
-                                &app.graph.track_buffer_ids,
-                                &app.graph.track_sample_rates,
-                                &app.tracks,
-                                &app.graph.track_instrument_types,
-                            ).then_some(()).ok_or_else(|| format!(
-                                "Could not assign scene {} track {}", scene + 1, track + 1
-                            )),
+                            |app| {
+                                if !app.state.set_scene_cell(
+                                    scene,
+                                    track,
+                                    PatternId(pattern_id),
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                ) {
+                                    return Err(format!(
+                                        "Could not assign scene {} track {}",
+                                        scene + 1,
+                                        track + 1
+                                    ));
+                                }
+                                // The live sample arrays must match the restored
+                                // pattern before the wrapper re-snapshots live
+                                // state into it, or the old sample clobbers the
+                                // pattern's sample_id.
+                                let sample_ids =
+                                    app.state.effective_pattern_sample_ids(num_tracks);
+                                app.graph_controller().apply_sample_ids(&sample_ids);
+                                Ok(())
+                            },
                         );
                         if shared.is_err() {
                             editor.handle_host_event(HostEvent::Status(format!(
@@ -19157,8 +19183,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let sample_ids = app.state.effective_pattern_sample_ids(num_tracks);
-                        app.graph_controller().apply_sample_ids(&sample_ids);
                         if let Err(error) = app
                             .graph_controller()
                             .sync_track_instrument_run_modes_from_live_state()
