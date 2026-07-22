@@ -1424,7 +1424,7 @@ fn apply_step_param_history_host_command(
 fn apply_move_step_history_host_command(
     app: &mut tui::App,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, usize, Vec<usize>, isize, bool), String> {
+) -> Result<(tui::edit::EditOutcome, usize, Vec<usize>, Vec<usize>, isize, bool), String> {
     let Value::Map(map) = payload else {
         return Err("step move payload was invalid".to_string());
     };
@@ -1455,12 +1455,26 @@ fn apply_move_step_history_host_command(
     {
         return Err("step move range was invalid".to_string());
     }
-    let mut affected = steps.clone();
-    affected.extend(steps.iter().map(|step| (*step as isize + delta) as usize));
     let sources = steps
         .iter()
         .map(|step| (*step, app.state.capture_step_snapshot(track, *step)))
         .collect::<Vec<_>>();
+    let mut affected = Vec::new();
+    for (step, snapshot) in &sources {
+        let duration_cells = if snapshot.active {
+            snapshot.params[StepParam::Duration as usize]
+                .max(1.0)
+                .ceil() as usize
+        } else {
+            1
+        };
+        let destination = (*step as isize + delta) as usize;
+        for base in [*step, destination] {
+            affected.extend(base..base.saturating_add(duration_cells).min(num_steps));
+        }
+    }
+    affected.sort_unstable();
+    affected.dedup();
     let outcome = tui::edit::apply_recorded_step_mutation(
         app,
         track,
@@ -1481,7 +1495,7 @@ fn apply_move_step_history_host_command(
         },
     )
     .map_err(|error| format!("could not move steps: {error:?}"))?;
-    Ok((outcome, track, steps, delta, move_selection))
+    Ok((outcome, track, steps, affected, delta, move_selection))
 }
 
 fn apply_slice2_history_host_command(
@@ -1645,6 +1659,34 @@ fn apply_slice3_history_host_command(
     tui::try_apply_command(app, command)
         .map(|outcome| (outcome, track))
         .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
+}
+
+/// Mixer-strip ops stay on the targeted per-track invalidation (Mute/Solo
+/// already fan the effective-mute/color fields out to every track);
+/// everything else falls back to the full whole-track + ui-epoch resync.
+fn slice3_track_mixer_invalidation(payload: &Value) -> Option<TrackMixerInvalidation> {
+    let Value::Map(map) = payload else {
+        return None;
+    };
+    match map_string(map, "op")?.as_str() {
+        "volume" => Some(TrackMixerInvalidation::Volume),
+        "pan" => Some(TrackMixerInvalidation::Pan),
+        "toggle-mute" => Some(TrackMixerInvalidation::Mute),
+        "toggle-solo" => Some(TrackMixerInvalidation::Solo),
+        _ => None,
+    }
+}
+
+/// Bus-fader drags likewise skip the ui-epoch resync; discrete bus ops
+/// (mute/solo toggles) keep it.
+fn bus_mixer_targeted_invalidation(payload: &Value) -> Option<BusMixerInvalidation> {
+    let Value::Map(map) = payload else {
+        return None;
+    };
+    match map_string(map, "op")?.as_str() {
+        "volume" => Some(BusMixerInvalidation::Volume),
+        _ => None,
+    }
 }
 
 fn apply_bus_mixer_history_host_command(
@@ -2788,7 +2830,29 @@ fn sync_single_step_structural_bindings(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
 ) -> bool {
-    if track >= app.tracks.len() || step >= MAX_STEPS {
+    sync_step_batch_structural_bindings(
+        rt,
+        state,
+        app,
+        track,
+        &[step],
+        current_track_idx,
+        selected_steps,
+        expanded_step_projection,
+    )
+}
+
+fn sync_step_batch_structural_bindings(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+    track: usize,
+    steps: &[usize],
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+) -> bool {
+    if track >= app.tracks.len() || steps.is_empty() {
         return false;
     }
     // Direct per-step writes bypass the per-track lane digest used by
@@ -2798,88 +2862,82 @@ fn sync_single_step_structural_bindings(
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
-    let visible = step < num_steps;
     let selected = selected_steps.lock().unwrap();
     let mut dirty = false;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            &track_step_active_field(track, step),
-            Value::Bool(visible && state.pattern.patterns[track].is_active(step)),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            &track_step_duration_field(track, step),
-            Value::Bool(visible && track_step_duration_covered(state, track, step)),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            &track_step_plocked_field(track, step),
-            Value::Bool(
-                visible && track_step_has_plock(state, track, &app.graph.effect_descriptors, step),
-            ),
-        )
-        .effects_dirty;
-    let step_plock_kinds = build_step_plock_kinds(state, track);
-    let step_variant_r = build_step_variant_color_channel(state, track, 0);
-    let step_variant_g = build_step_variant_color_channel(state, track, 1);
-    let step_variant_b = build_step_variant_color_channel(state, track, 2);
-    dirty |= rt
-        .set_reactive_list_index(
-            "SEQ",
-            "track-step-plock-kinds",
-            track,
-            step_plock_kinds.clone(),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive_list_index("SEQ", "track-step-variant-r", track, step_variant_r.clone())
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive_list_index("SEQ", "track-step-variant-g", track, step_variant_g.clone())
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive_list_index("SEQ", "track-step-variant-b", track, step_variant_b.clone())
-        .effects_dirty;
-    if track == current_track_idx {
+    let render_values = plock_variant_step_render_values(state, track);
+    for &step in steps {
+        if step >= MAX_STEPS {
+            continue;
+        }
+        let visible = step < num_steps;
         dirty |= rt
-            .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds)
+            .set_reactive(
+                "SEQ",
+                &track_step_active_field(track, step),
+                Value::Bool(visible && state.pattern.patterns[track].is_active(step)),
+            )
             .effects_dirty;
         dirty |= rt
-            .set_reactive("SEQ", "step-variant-r", step_variant_r)
+            .set_reactive(
+                "SEQ",
+                &track_step_duration_field(track, step),
+                Value::Bool(visible && track_step_duration_covered(state, track, step)),
+            )
             .effects_dirty;
         dirty |= rt
-            .set_reactive("SEQ", "step-variant-g", step_variant_g)
+            .set_reactive(
+                "SEQ",
+                &track_step_plocked_field(track, step),
+                Value::Bool(
+                    visible
+                        && track_step_has_plock(
+                            state,
+                            track,
+                            &app.graph.effect_descriptors,
+                            step,
+                        ),
+                ),
+            )
             .effects_dirty;
         dirty |= rt
-            .set_reactive("SEQ", "step-variant-b", step_variant_b)
+            .set_reactive(
+                "SEQ",
+                &track_step_selected_field(track, step),
+                Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
+            )
             .effects_dirty;
-    }
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            &track_step_selected_field(track, step),
-            Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
-        )
-        .effects_dirty;
-    dirty |= sync_drum_lane_step_binding_fields(rt, state, app, track, Some(step));
-    for viewport in expanded_step_projection.viewports_for_track(track) {
-        if let Some(slot) = visible_slot_for_step(viewport, step) {
-            dirty |= sync_expanded_step_slot(
-                rt,
-                state,
-                app,
-                &selected,
-                current_track_idx,
-                viewport,
-                slot,
-            );
+        let render = render_values[step];
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_plock_kind_field(track, step),
+                Value::Number(render.kind as f64),
+            )
+            .effects_dirty;
+        for (channel, value) in ['r', 'g', 'b'].into_iter().zip(render.color) {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_step_variant_color_field(track, step, channel),
+                    Value::Number(value as f64),
+                )
+                .effects_dirty;
+        }
+        for viewport in expanded_step_projection.viewports_for_track(track) {
+            if let Some(slot) = visible_slot_for_step(viewport, step) {
+                dirty |= sync_expanded_step_slot(
+                    rt,
+                    state,
+                    app,
+                    &selected,
+                    current_track_idx,
+                    viewport,
+                    slot,
+                );
+            }
         }
     }
+    dirty |= sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, steps);
     dirty
 }
 
@@ -2942,13 +3000,31 @@ fn sync_step_selection_bindings(
     current_track_idx: usize,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     changed_steps: &[usize],
+    sync_legacy_list: bool,
 ) -> bool {
     let _ = rt.set_reactive("SEQ", &track_step_binding_rev_field(track), Value::Nil);
     let selected = selected_steps.lock().unwrap();
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
-    let mut dirty = false;
+    let title = if selected.is_empty() {
+        let cursor = match rt.global_value("SEQ_CURSOR") {
+            Some(Value::Map(fields)) => fields
+                .get("step")
+                .and_then(|value| match &*value.borrow() {
+                    Value::Number(step) => Some(*step as usize),
+                    _ => None,
+                })
+                .unwrap_or(0),
+            _ => 0,
+        };
+        format!("step {}", cursor + 1)
+    } else {
+        format!("{} steps", selected.len())
+    };
+    let mut dirty = rt
+        .set_reactive("SEQ", "step-selection-title", Value::String(title))
+        .effects_dirty;
     for &step in changed_steps {
         if step >= MAX_STEPS {
             continue;
@@ -2961,9 +3037,11 @@ fn sync_step_selection_bindings(
                 Value::Bool(is_selected),
             )
             .effects_dirty;
-        dirty |= rt
-            .set_reactive_list_index("SEQ", "selected-steps", step, Value::Bool(is_selected))
-            .effects_dirty;
+        if sync_legacy_list {
+            dirty |= rt
+                .set_reactive_list_index("SEQ", "selected-steps", step, Value::Bool(is_selected))
+                .effects_dirty;
+        }
     }
     if let Some(app) = app {
         for viewport in expanded_step_projection.viewports_for_track(track) {
@@ -3033,6 +3111,19 @@ fn sync_track_plocks_for_neural_selection(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
 ) -> bool {
+    if selection.is_empty()
+        && selected_plock_step(selected_steps).is_some_and(|step| {
+            !track_step_has_plock(state, track, &app.graph.effect_descriptors, step)
+        })
+    {
+        let mut dirty = rt
+            .set_reactive("SEQ", "track-plocks", Value::List(Vec::new()))
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "track-plock-variants", Value::List(Vec::new()))
+            .effects_dirty;
+        return dirty;
+    }
     let mut dirty = rt
         .set_reactive(
             "SEQ",
@@ -3537,9 +3628,10 @@ fn apply_ui_invalidations(
         mixer_visible,
     } = ctx;
 
-    let mut needs_reactive_cycle = true;
+    let mut needs_reactive_cycle = false;
     let mut bus_state_pulled = false;
     let active_track_count = state.active_track_count().min(app.tracks.len());
+    let legacy_step_grid_visible = editor_has_visible_buffer(editor, "*metal*");
     let rt = editor.runtime_mut();
 
     for invalidation in invalidations {
@@ -3552,6 +3644,7 @@ fn apply_ui_invalidations(
             | UiInvalidation::Pattern(PatternInvalidation::TrackLength { track })
             | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { track })
             | UiInvalidation::Step { track, .. }
+            | UiInvalidation::StepBatch { track, .. }
             | UiInvalidation::StepSelection { track, .. }
             | UiInvalidation::ExpandedStepViewport { track, .. }
             | UiInvalidation::TrackMixer { track, .. }
@@ -3701,6 +3794,18 @@ fn apply_ui_invalidations(
                     );
                 }
             },
+            UiInvalidation::StepBatch { track, steps } => {
+                needs_reactive_cycle |= sync_step_batch_structural_bindings(
+                    rt,
+                    state,
+                    app,
+                    track,
+                    &steps,
+                    current_track_idx,
+                    selected_steps,
+                    expanded_step_projection,
+                );
+            }
             UiInvalidation::StepSelection {
                 track,
                 changed_steps,
@@ -3714,10 +3819,25 @@ fn apply_ui_invalidations(
                     current_track_idx,
                     expanded_step_projection,
                     &changed_steps,
+                    legacy_step_grid_visible,
                 );
                 if track == current_track_idx {
                     if fx_visible {
-                        let _ = sync_track_plocks_for_neural_selection(
+                        let next_display = displayed_plock_step(
+                            state,
+                            track,
+                            selected_plock_step(selected_steps),
+                        );
+                        let previous_display = match rt.global_value("SEQ") {
+                            Some(Value::Map(fields)) => fields
+                                .get("fx-step-display-step")
+                                .and_then(|value| match &*value.borrow() {
+                                    Value::Number(step) if *step >= 0.0 => Some(*step as usize),
+                                    _ => None,
+                                }),
+                            _ => None,
+                        };
+                        needs_reactive_cycle |= sync_track_plocks_for_neural_selection(
                             rt,
                             app,
                             state,
@@ -3725,12 +3845,43 @@ fn apply_ui_invalidations(
                             selected_steps,
                             selected_neural_neurons,
                         );
-                        needs_reactive_cycle = true;
+                        let display_values_can_differ = !selected_neural_neurons.is_empty()
+                            || previous_display.is_some_and(|step| {
+                                track_step_has_plock(
+                                    state,
+                                    track,
+                                    &app.graph.effect_descriptors,
+                                    step,
+                                )
+                            })
+                            || next_display.is_some_and(|step| {
+                                track_step_has_plock(
+                                    state,
+                                    track,
+                                    &app.graph.effect_descriptors,
+                                    step,
+                                )
+                            });
+                        if display_values_can_differ {
+                            needs_reactive_cycle |= sync_track_selection_param_binding_fields(
+                                rt,
+                                state,
+                                track,
+                                selected_steps,
+                            );
+                            needs_reactive_cycle |=
+                                sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
+                        }
+                        needs_reactive_cycle |= rt
+                            .set_reactive(
+                                "SEQ",
+                                "fx-step-display-step",
+                                next_display
+                                    .map(|step| Value::Number(step as f64))
+                                    .unwrap_or(Value::Number(-1.0)),
+                            )
+                            .effects_dirty;
                     }
-                    needs_reactive_cycle |=
-                        sync_track_selection_param_binding_fields(rt, state, track, selected_steps);
-                    needs_reactive_cycle |=
-                        sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
                 }
             }
             UiInvalidation::ExpandedStepViewport { track: _, track_id } => {
@@ -5034,7 +5185,8 @@ mod tests {
         apply_piano_roll_gesture_update,
         apply_piano_roll_history_host_command,
         apply_selected_steps_delete, apply_slice3_history_host_command,
-        apply_toggle_step_host_command,
+        apply_toggle_step_host_command, bus_mixer_targeted_invalidation,
+        slice3_track_mixer_invalidation, BusMixerInvalidation, TrackMixerInvalidation,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
         key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
@@ -5092,6 +5244,41 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn slice3_mixer_drag_ops_route_to_targeted_track_mixer_invalidation() {
+        let volume = history_value_map([("op", Value::Keyword("volume".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&volume),
+            Some(TrackMixerInvalidation::Volume)
+        );
+        let pan = history_value_map([("op", Value::Keyword("pan".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&pan),
+            Some(TrackMixerInvalidation::Pan)
+        );
+        let mute_op = history_value_map([("op", Value::Keyword("toggle-mute".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&mute_op),
+            Some(TrackMixerInvalidation::Mute)
+        );
+        let solo_op = history_value_map([("op", Value::Keyword("toggle-solo".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&solo_op),
+            Some(TrackMixerInvalidation::Solo)
+        );
+        // Non-mixer ops keep the whole-track + ui-epoch resync path.
+        let attack = history_value_map([("op", Value::Keyword("attack".to_string()))]);
+        assert_eq!(slice3_track_mixer_invalidation(&attack), None);
+        assert_eq!(slice3_track_mixer_invalidation(&Value::Nil), None);
+
+        assert_eq!(
+            bus_mixer_targeted_invalidation(&volume),
+            Some(BusMixerInvalidation::Volume)
+        );
+        let mute = history_value_map([("op", Value::Keyword("toggle-mute".to_string()))]);
+        assert_eq!(bus_mixer_targeted_invalidation(&mute), None);
     }
 
     #[test]
@@ -5802,6 +5989,7 @@ mod tests {
             0,
             &expanded_step_projection,
             &(0..sequencer::sequencer::MAX_STEPS).collect::<Vec<_>>(),
+            true,
         );
 
         assert_eq!(
@@ -5827,6 +6015,7 @@ mod tests {
             0,
             &expanded_step_projection,
             &[3],
+            true,
         );
         assert_eq!(
             runtime
@@ -6777,11 +6966,24 @@ mod tests {
             .expect("project 92 rack macro drag probe should pass");
     }
 
+    #[test]
+    #[ignore = "release-mode perf probe: exercises sequencer Cmd+A and real step pointer gestures through host mutation, targeted invalidation, tiled-frame, and retained-render paths"]
+    fn project_92_step_interactions_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-step-interactions-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::StepInteractions))
+            .expect("spawn project 92 step interaction probe")
+            .join()
+            .expect("project 92 step interaction probe should pass");
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Project92UiProbe {
         SceneSwitch,
         EscapeDeselect,
         RackMacroDrag,
+        StepInteractions,
     }
 
     fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
@@ -7034,6 +7236,460 @@ mod tests {
         refresh_visible_track_topology_layouts(&mut editor);
         editor.update_tile_rects(180, 70);
         let _ = editor.drain_host_commands();
+
+        if probe == Project92UiProbe::StepInteractions {
+            const TRACK: usize = 0;
+            const STEP_COUNT: usize = 64;
+            const SELECTED_MOVE_STEPS: usize = 16;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+
+            let sequencer_buffer_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer should exist")
+                .id;
+            editor.set_active_buffer(sequencer_buffer_id);
+            state.pattern.track_params[TRACK].set_num_steps(STEP_COUNT);
+            for step in 0..STEP_COUNT {
+                state.pattern.patterns[TRACK].set_step_active(step, step < 24);
+            }
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                TRACK,
+                &selected_steps,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(180, 70);
+
+            let initial_frame =
+                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+            let initial_seq_frame = initial_frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("visible initial sequencer frame");
+            let initial_layout = initial_seq_frame
+                .frame
+                .widget_layout
+                .as_ref()
+                .expect("initial sequencer layout");
+            let viewport = eseqlisp::widget_render::WidgetViewport {
+                cell_w: 8.0,
+                cell_h: 16.0,
+                vp_w: 1440.0,
+                vp_h: 1120.0,
+                time_seconds: 0.0,
+                focused_widget_id: initial_seq_frame.frame.focused_widget_id,
+                focused_branch: true,
+                overlay_viewport_bottom: 70.0,
+                scroll_top: initial_seq_frame.frame.widget_scroll_top
+                    + initial_seq_frame.frame.text_scroll_top as f32,
+                scroll_left: initial_seq_frame.frame.widget_layout_scroll_left,
+                inherited_hover: false,
+            };
+            let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                initial_layout,
+                viewport,
+                viewport.scroll_top,
+                70,
+            );
+            let retained_run_indices =
+                eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+            let step_clipboard = Arc::new(Mutex::new(None));
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            let step_center = |editor: &mut Editor, step: usize| {
+                let layout = editor.widget_layout().expect("sequencer layout");
+                let cell = find_layout_node_by_stable_key(
+                    &layout,
+                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                )
+                .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
+                (
+                    cell.rect.col + cell.rect.width * 0.5,
+                    cell.rect.row + cell.rect.height * 0.5,
+                    layout.rect.width.ceil().max(1.0) as u16,
+                    layout.rect.height.ceil().max(1.0) as u16,
+                )
+            };
+
+            let apply_pending_step_commands = |editor: &mut Editor, app: &mut tui::App| {
+                for command in editor.drain_host_commands() {
+                    let HostCommand::Custom { name, payload } = command else {
+                        continue;
+                    };
+                    match name.as_str() {
+                        "toggle-step" => {
+                            let (outcome, track, step) =
+                                apply_toggle_step_host_command(app, &payload)
+                                    .expect("apply benchmark step toggle");
+                            assert!(matches!(outcome, tui::edit::EditOutcome::Applied(_)));
+                            selected_steps.lock().unwrap().clear();
+                            ui_invalidations.push(UiInvalidation::StepBatch {
+                                track,
+                                steps: vec![step],
+                            });
+                        }
+                        "move-step-history" => {
+                            let (outcome, track, steps, affected_steps, delta, move_selection) =
+                                apply_move_step_history_host_command(app, &payload)
+                                    .expect("apply benchmark step move");
+                            assert!(matches!(outcome, tui::edit::EditOutcome::Applied(_)));
+                            let moved_steps = steps
+                                .iter()
+                                .map(|step| (*step as isize + delta) as usize)
+                                .collect::<Vec<_>>();
+                            let mut changed_selection = Vec::new();
+                            if move_selection {
+                                let mut selected = selected_steps.lock().unwrap();
+                                let previous = selected.clone();
+                                selected.clear();
+                                selected.extend(moved_steps.iter().copied());
+                                changed_selection = previous
+                                    .symmetric_difference(&selected)
+                                    .copied()
+                                    .collect();
+                                changed_selection.sort_unstable();
+                            }
+                            ui_invalidations.push(UiInvalidation::StepBatch {
+                                track,
+                                steps: affected_steps,
+                            });
+                            if move_selection {
+                                ui_invalidations.push(UiInvalidation::StepSelection {
+                                    track,
+                                    changed_steps: changed_selection,
+                                });
+                            }
+                        }
+                        other => panic!("unexpected benchmark host command {other}"),
+                    }
+                }
+            };
+
+            let neural = selected_neural_neurons.lock().unwrap().clone();
+            let mut finish_visible_update = |editor: &mut Editor, app: &mut tui::App| {
+                let started = Instant::now();
+                let invalidations = ui_invalidations.drain();
+                if !invalidations.is_empty() {
+                    apply_ui_invalidations(
+                        invalidations,
+                        UiInvalidationApplyCtx {
+                            app,
+                            editor,
+                            state: &state,
+                            track_collapsed: &track_collapsed,
+                            bus_state: &bus_state,
+                            current_track_idx: TRACK,
+                            selected_steps: &selected_steps,
+                            selected_neural_neurons: &neural,
+                            piano_roll_selection: &piano_roll_selection,
+                            accumulator_names: &accumulator_names,
+                            cached_track_peak_levels: &cached_track_peak_levels,
+                            cached_bus_peak_levels: &cached_bus_peak_levels,
+                            record_armed: &record_armed,
+                            active_delete_target: &active_delete_target,
+                            active_delete_target_version: &active_delete_target_version,
+                            expanded_step_projection: &expanded_step_projection,
+                            fx_visible,
+                            sequencer_visible: true,
+                            mixer_visible,
+                        },
+                    );
+                }
+                let invalidations_done = Instant::now();
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let reactive_done = Instant::now();
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(editor, 180, 70);
+                let seq_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("visible sequencer frame after benchmark action");
+                let layout = seq_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("sequencer layout after benchmark action");
+                let frame_done = Instant::now();
+                let (_, stats) =
+                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        layout,
+                        viewport,
+                        viewport.scroll_top,
+                        70,
+                        &mut retained_runs,
+                        &retained_run_indices,
+                        &seq_frame.frame.dirty_widget_ids,
+                    );
+                assert_eq!(stats.missing_previous_runs, 0);
+                assert_eq!(stats.invalid_previous_runs, 0);
+                let retained_done = Instant::now();
+                (
+                    duration_ms(invalidations_done - started),
+                    duration_ms(reactive_done - invalidations_done),
+                    duration_ms(frame_done - reactive_done),
+                    duration_ms(retained_done - frame_done),
+                )
+            };
+
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            let mut select_one_samples = Vec::with_capacity(SAMPLES);
+            let mut select_all_samples = Vec::with_capacity(SAMPLES);
+            let mut move_samples = Vec::with_capacity(SAMPLES);
+            let mut toggle_drag_samples = Vec::with_capacity(SAMPLES);
+            let mut select_one_dispatch = Vec::with_capacity(SAMPLES);
+            let mut select_all_dispatch = Vec::with_capacity(SAMPLES);
+            let mut move_dispatch = Vec::with_capacity(SAMPLES);
+            let mut toggle_drag_dispatch = Vec::with_capacity(SAMPLES);
+            let mut move_invalidation = Vec::with_capacity(SAMPLES);
+            let mut move_reactive = Vec::with_capacity(SAMPLES);
+            let mut move_frame = Vec::with_capacity(SAMPLES);
+            let mut move_retained = Vec::with_capacity(SAMPLES);
+
+            for iteration in 0..(WARMUPS + SAMPLES) {
+                selected_steps.lock().unwrap().clear();
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                let (col, row, width, height) = step_center(&mut editor, 8);
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: col.floor() as u16,
+                        row: row.floor() as u16,
+                        modifiers: KeyModifiers::SHIFT,
+                    },
+                    0,
+                    0,
+                    width,
+                    height,
+                    col,
+                    row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(*selected_steps.lock().unwrap(), HashSet::from([8]));
+                if iteration >= WARMUPS {
+                    select_one_samples.push(duration_ms(started.elapsed()));
+                    select_one_dispatch.push(duration_ms(dispatch_done - started));
+                }
+
+                selected_steps.lock().unwrap().clear();
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                let started = Instant::now();
+                assert!(handle_metal_command_shortcut_with_ui_epoch(
+                    &mut editor,
+                    &crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char('a'),
+                        KeyModifiers::SUPER,
+                    ),
+                    &state,
+                    &current_track,
+                    &selected_steps,
+                    &step_clipboard,
+                    &ui_epoch,
+                ));
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(selected_steps.lock().unwrap().len(), STEP_COUNT);
+                if iteration >= WARMUPS {
+                    select_all_samples.push(duration_ms(started.elapsed()));
+                    select_all_dispatch.push(duration_ms(dispatch_done - started));
+                }
+
+                for step in 0..STEP_COUNT {
+                    state.pattern.patterns[TRACK].set_step_active(
+                        step,
+                        step >= 8 && step < 8 + SELECTED_MOVE_STEPS,
+                    );
+                }
+                {
+                    let mut selected = selected_steps.lock().unwrap();
+                    selected.clear();
+                    selected.extend(8..8 + SELECTED_MOVE_STEPS);
+                }
+                ui_invalidations.push(UiInvalidation::Pattern(
+                    PatternInvalidation::WholeTrack { track: TRACK },
+                ));
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(
+                    editor.runtime_mut().eval_str("(step-selected? 8)").unwrap(),
+                    Some(Value::Bool(true)),
+                    "move fixture must expose step 8 as selected to the gesture Lisp",
+                );
+                assert_eq!(
+                    editor
+                        .runtime_mut()
+                        .eval_str("(seq-track-step-active? 0 8)")
+                        .unwrap(),
+                    Some(Value::Bool(true)),
+                    "move fixture must expose step 8 as active to the gesture Lisp",
+                );
+                assert_eq!(
+                    editor.runtime_mut().eval_str("SEQ.current-track").unwrap(),
+                    Some(Value::Number(0.0)),
+                    "move fixture must target the visible current track",
+                );
+                let (_, _, width, height) = step_center(&mut editor, 8);
+                let (target_col, target_row, _, _) = step_center(&mut editor, 9);
+                // Arm the exact production pointer-down handler with an
+                // explicit left-edge local coordinate. The timed operation is
+                // the subsequent real mouse drag tick; pointer-down is a
+                // precondition and is intentionally outside the sample.
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-down 0 8 (dict :sx -1))")
+                    .expect("arm selected-step move gesture");
+                assert_eq!(
+                    editor.runtime_mut().eval_str("step-move-last").unwrap(),
+                    Some(Value::Number(8.0)),
+                    "pointer down on the selected active step must arm move dragging",
+                );
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        target_col.floor() as u16,
+                        target_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    target_col,
+                    target_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                let move_visible_phases = finish_visible_update(&mut editor, &mut app);
+                assert_eq!(
+                    *selected_steps.lock().unwrap(),
+                    (9..9 + SELECTED_MOVE_STEPS).collect::<HashSet<_>>()
+                );
+                if iteration >= WARMUPS {
+                    move_samples.push(duration_ms(started.elapsed()));
+                    move_dispatch.push(duration_ms(dispatch_done - started));
+                    move_invalidation.push(move_visible_phases.0);
+                    move_reactive.push(move_visible_phases.1);
+                    move_frame.push(move_visible_phases.2);
+                    move_retained.push(move_visible_phases.3);
+                }
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-up 0 9 (dict :sx -1))")
+                    .expect("finish benchmark selected-step drag");
+
+                selected_steps.lock().unwrap().clear();
+                state.pattern.patterns[TRACK].set_step_active(32, false);
+                state.pattern.patterns[TRACK].set_step_active(33, false);
+                ui_invalidations.push(UiInvalidation::Pattern(
+                    PatternInvalidation::WholeTrack { track: TRACK },
+                ));
+                finish_visible_update(&mut editor, &mut app);
+                let (start_col, start_row, width, height) = step_center(&mut editor, 32);
+                let (target_col, target_row, _, _) = step_center(&mut editor, 33);
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        start_col.floor() as u16,
+                        start_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    start_col,
+                    start_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                finish_visible_update(&mut editor, &mut app);
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        target_col.floor() as u16,
+                        target_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    target_col,
+                    target_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert!(state.pattern.patterns[TRACK].is_active(33));
+                if iteration >= WARMUPS {
+                    toggle_drag_samples.push(duration_ms(started.elapsed()));
+                    toggle_drag_dispatch.push(duration_ms(dispatch_done - started));
+                }
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-up 0 33 (dict :sx -1))")
+                    .expect("finish benchmark toggle drag");
+            }
+
+            // Medians recorded by this same release-mode, end-to-end probe on
+            // project 92 before the targeted invalidation work.
+            for (name, reference_ms, samples, dispatch) in [
+                ("select-one", 8.251, &mut select_one_samples, &mut select_one_dispatch),
+                ("cmd-a", 7.773, &mut select_all_samples, &mut select_all_dispatch),
+                ("move-16", 106.412, &mut move_samples, &mut move_dispatch),
+                ("toggle-drag", 21.020, &mut toggle_drag_samples, &mut toggle_drag_dispatch),
+            ] {
+                let median = percentile(samples, 0.50);
+                let dispatch_median = percentile(dispatch, 0.50);
+                eprintln!(
+                    "[project-92-step-{name}] tracks={} steps={} samples={} median_ms={:.3} p95_ms={:.3} speedup={:.1}x dispatch_host_ms={:.3} visible_update_ms={:.3}",
+                    app.tracks.len(),
+                    STEP_COUNT,
+                    SAMPLES,
+                    median,
+                    percentile(samples, 0.95),
+                    reference_ms / median,
+                    dispatch_median,
+                    median - dispatch_median,
+                );
+                assert!(
+                    median <= reference_ms / 10.0,
+                    "{name} median {median:.3} ms did not reach 10x versus the {reference_ms:.3} ms baseline",
+                );
+            }
+            eprintln!(
+                "[project-92-step-move-16-visible-phases] invalidation_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                percentile(&mut move_invalidation, 0.50),
+                percentile(&mut move_reactive, 0.50),
+                percentile(&mut move_frame, 0.50),
+                percentile(&mut move_retained, 0.50),
+            );
+            return;
+        }
 
         if probe == Project92UiProbe::RackMacroDrag {
             const TRACK: usize = 0;
@@ -9616,24 +10272,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "move-step-history" => {
                         match apply_move_step_history_host_command(&mut app, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(result), track, steps, delta, move_selection)) => {
+                            Ok((tui::edit::EditOutcome::Applied(result), track, steps, affected_steps, delta, move_selection)) => {
+                                let moved_steps = steps
+                                    .iter()
+                                    .map(|step| (*step as isize + delta) as usize)
+                                    .collect::<Vec<_>>();
+                                let mut changed_selection = Vec::new();
                                 if move_selection {
                                     let mut selected = selected_steps.lock().unwrap();
+                                    let previous = selected.clone();
                                     selected.clear();
-                                    selected.extend(
-                                        steps.iter().map(|step| (*step as isize + delta) as usize),
-                                    );
+                                    selected.extend(moved_steps.iter().copied());
+                                    changed_selection = previous
+                                        .symmetric_difference(&selected)
+                                        .copied()
+                                        .collect();
+                                    changed_selection.sort_unstable();
                                 }
                                 *auto_follow_override_until.lock().unwrap() =
                                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                                ui_invalidations.push(UiInvalidation::Pattern(
-                                    PatternInvalidation::WholeTrack { track },
-                                ));
-                                ui_invalidations.push(UiInvalidation::StepSelection {
+                                ui_invalidations.push(UiInvalidation::StepBatch {
                                     track,
-                                    changed_steps: Vec::new(),
+                                    steps: affected_steps,
                                 });
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                if move_selection {
+                                    ui_invalidations.push(UiInvalidation::StepSelection {
+                                        track,
+                                        changed_steps: changed_selection,
+                                    });
+                                }
                                 editor.show_transient_message(result.label);
                             }
                             Ok((tui::edit::EditOutcome::NoOp, ..)) => {}
@@ -9670,12 +10337,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok((tui::edit::EditOutcome::Applied(result), track)) => {
                                 *auto_follow_override_until.lock().unwrap() =
                                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                                if let Some(track) = track {
-                                    ui_invalidations.push(UiInvalidation::Pattern(
-                                        PatternInvalidation::WholeTrack { track },
-                                    ));
+                                match (track, slice3_track_mixer_invalidation(&payload)) {
+                                    (Some(track), Some(change)) => {
+                                        ui_invalidations
+                                            .push(UiInvalidation::TrackMixer { track, change });
+                                    }
+                                    (track, None) => {
+                                        if let Some(track) = track {
+                                            ui_invalidations.push(UiInvalidation::Pattern(
+                                                PatternInvalidation::WholeTrack { track },
+                                            ));
+                                        }
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    (None, Some(_)) => {
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 editor.show_transient_message(result.label);
                             }
                             Ok((tui::edit::EditOutcome::NoOp, _)) => {}
@@ -9691,11 +10369,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match apply_bus_mixer_history_host_command(&mut app, &payload) {
                             Ok((tui::edit::EditOutcome::Applied(result), bus)) => {
                                 *bus_state.lock().unwrap() = app.buses.clone();
-                                ui_invalidations.push(UiInvalidation::BusMixer {
-                                    bus,
-                                    change: BusMixerInvalidation::Volume,
-                                });
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                match bus_mixer_targeted_invalidation(&payload) {
+                                    Some(change) => {
+                                        ui_invalidations
+                                            .push(UiInvalidation::BusMixer { bus, change });
+                                    }
+                                    None => {
+                                        ui_invalidations.push(UiInvalidation::BusMixer {
+                                            bus,
+                                            change: BusMixerInvalidation::Volume,
+                                        });
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
                                 editor.show_transient_message(result.label);
                             }
                             Ok((tui::edit::EditOutcome::NoOp, _)) => {}
@@ -9718,18 +10404,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 drop(selection);
                                 *auto_follow_override_until.lock().unwrap() =
                                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                                for change in [
-                                    StepInvalidation::Active,
-                                    StepInvalidation::Payload,
-                                    StepInvalidation::PlockPresence,
-                                ] {
-                                    ui_invalidations.push(UiInvalidation::Step {
-                                        track,
-                                        step,
-                                        change,
-                                    });
-                                }
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                // The targeted Step invalidations were the
+                                // complete pre-undo UI path for toggles; no
+                                // ui_epoch bump so fast toggle-drags skip the
+                                // full resync per step.
+                                ui_invalidations.push(UiInvalidation::StepBatch {
+                                    track,
+                                    steps: vec![step],
+                                });
                             }
                             Ok(_) => {}
                             Err(error) => editor.handle_host_event(HostEvent::Error(error)),

@@ -272,6 +272,18 @@ pub(crate) fn track_step_plocked_field(track: usize, step: usize) -> String {
     format!("seq-track-step-plocked-{track}-{step}")
 }
 
+pub(crate) fn track_step_plock_kind_field(track: usize, step: usize) -> String {
+    format!("seq-track-step-plock-kind-{track}-{step}")
+}
+
+pub(crate) fn track_step_variant_color_field(
+    track: usize,
+    step: usize,
+    channel: char,
+) -> String {
+    format!("seq-track-step-variant-{channel}-{track}-{step}")
+}
+
 pub(crate) fn track_step_selected_field(track: usize, step: usize) -> String {
     format!("seq-track-step-selected-{track}-{step}")
 }
@@ -1962,6 +1974,7 @@ fn sync_all_track_step_binding_fields_inner(
         let mut duration_mask = [0u64; WORDS];
         let mut plocked_mask = [0u64; WORDS];
         let mut selected_mask = [0u64; WORDS];
+        let render_values = plock_variant_step_render_values(state, track);
         let mut max_reach = f64::NEG_INFINITY;
         for step in 0..MAX_STEPS {
             let word = step / 64;
@@ -2001,6 +2014,13 @@ fn sync_all_track_step_binding_fields_inner(
             for word in mask.iter() {
                 use std::fmt::Write as _;
                 let _ = write!(rev, "{word:016x}");
+            }
+        }
+        for render in &render_values {
+            use std::fmt::Write as _;
+            let _ = write!(rev, "{:02x}", render.kind);
+            for channel in render.color {
+                let _ = write!(rev, "{:08x}", channel.to_bits());
             }
         }
         let rev_changed = rt
@@ -2059,6 +2079,20 @@ fn sync_all_track_step_binding_fields_inner(
             if let Some(profile) = profile.as_deref_mut() {
                 profile.selected_elapsed += started.expect("profile timer").elapsed();
                 profile.selected_sets.note(result);
+            }
+
+            let render = render_values[step];
+            let _ = rt.set_reactive(
+                "SEQ",
+                &track_step_plock_kind_field(track, step),
+                Value::Number(render.kind as f64),
+            );
+            for (channel, value) in ['r', 'g', 'b'].into_iter().zip(render.color) {
+                let _ = rt.set_reactive(
+                    "SEQ",
+                    &track_step_variant_color_field(track, step, channel),
+                    Value::Number(value as f64),
+                );
             }
 
             // Expanded-step param controls use the seqv-slot-param-* projection fields.
@@ -5204,6 +5238,16 @@ pub(crate) fn sync_track_topology_state(
         "record-armed",
         build_record_armed_value(&record_armed.lock().unwrap()),
     );
+    let selected_step_count = selected_steps.lock().unwrap().len();
+    rt.set_reactive(
+        "SEQ",
+        "step-selection-title",
+        Value::String(if selected_step_count == 0 {
+            "step 1".to_string()
+        } else {
+            format!("{selected_step_count} steps")
+        }),
+    );
 
     if app.tracks.is_empty() {
         sync_playhead_fields(rt, 0, 1);
@@ -5289,6 +5333,13 @@ pub(crate) fn sync_track_topology_state(
         "SEQ",
         "instrument-panel",
         build_instrument_panel_value(app, current_track_idx, selected_steps),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "fx-step-display-step",
+        displayed_plock_step(state, current_track_idx, selected_plock_step(selected_steps))
+            .map(|step| Value::Number(step as f64))
+            .unwrap_or(Value::Number(-1.0)),
     );
     sync_fx_param_binding_fields(rt, app, state, current_track_idx, selected_steps);
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
@@ -8734,6 +8785,10 @@ pub(crate) fn sync_drum_lane_step_binding_fields(
     if track >= app.tracks.len() {
         return false;
     }
+    let sounds = drum_rack_sound_options(app, track);
+    if sounds.is_empty() {
+        return false;
+    }
     let mut registered_fields = match rt.global_value("SEQ") {
         Some(Value::Map(fields)) => fields.keys().cloned().collect::<HashSet<_>>(),
         _ => HashSet::new(),
@@ -8742,7 +8797,7 @@ pub(crate) fn sync_drum_lane_step_binding_fields(
         step..step.saturating_add(1).min(MAX_STEPS)
     });
     let mut dirty = false;
-    for sound in drum_rack_sound_options(app, track) {
+    for sound in sounds {
         for step in steps.clone() {
             let selected_field = drum_lane_step_selected_field(track, sound.pad_note, step);
             if registered_fields.insert(selected_field.clone()) {
@@ -8755,6 +8810,57 @@ pub(crate) fn sync_drum_lane_step_binding_fields(
                 .set_reactive(
                     "SEQ",
                     &duration_field,
+                    Value::Bool(drum_lane_step_duration_covered(
+                        state,
+                        track,
+                        sound.pad_note,
+                        step,
+                    )),
+                )
+                .effects_dirty;
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &drum_lane_step_active_field(track, sound.pad_note, step),
+                    Value::Bool(drum_lane_step_active(state, track, sound.pad_note, step)),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
+}
+
+pub(crate) fn sync_drum_lane_step_binding_fields_for_steps(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+    track: usize,
+    steps: &[usize],
+) -> bool {
+    if track >= app.tracks.len() || steps.is_empty() {
+        return false;
+    }
+    let sounds = drum_rack_sound_options(app, track);
+    if sounds.is_empty() {
+        return false;
+    }
+    let mut registered_fields = match rt.global_value("SEQ") {
+        Some(Value::Map(fields)) => fields.keys().cloned().collect::<HashSet<_>>(),
+        _ => HashSet::new(),
+    };
+    let mut dirty = false;
+    for sound in sounds {
+        for &step in steps.iter().filter(|step| **step < MAX_STEPS) {
+            let selected_field = drum_lane_step_selected_field(track, sound.pad_note, step);
+            if registered_fields.insert(selected_field.clone()) {
+                dirty |= rt
+                    .set_reactive("SEQ", &selected_field, Value::Bool(false))
+                    .effects_dirty;
+            }
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &drum_lane_step_duration_field(track, sound.pad_note, step),
                     Value::Bool(drum_lane_step_duration_covered(
                         state,
                         track,
@@ -12297,12 +12403,12 @@ pub(crate) fn build_step_has_plocks_from_mask(mask: &[u64; MAX_STEPS / 64]) -> V
 }
 
 #[derive(Clone, Copy, Debug)]
-struct PlockVariantStepRender {
-    kind: u8,
-    color: [f32; 3],
+pub(crate) struct PlockVariantStepRender {
+    pub(crate) kind: u8,
+    pub(crate) color: [f32; 3],
 }
 
-fn plock_variant_step_render_values(
+pub(crate) fn plock_variant_step_render_values(
     state: &Arc<SequencerState>,
     track: usize,
 ) -> Vec<PlockVariantStepRender> {
@@ -13154,6 +13260,30 @@ mod tests {
     }
 
     #[test]
+    fn tick_widget_accepts_reactive_selected_binding() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("selected", Value::Bool(false))], true);
+
+        let value = runtime
+            .eval_str(
+                r#"
+                  (load "ui/materials.lisp")
+                  (tick :active 1 :plocked 0 :selected (bind "APP" "selected"))
+                "#,
+            )
+            .expect("load materials and construct tick")
+            .expect("tick should return a widget");
+
+        let Value::Map(map) = value else {
+            panic!("tick should return a widget map, got {value:?}");
+        };
+        assert!(matches!(
+            map.get("selected").map(|value| value.borrow().clone()),
+            Some(Value::ReactiveRef { .. })
+        ));
+    }
+
+    #[test]
     fn metal_seq_core_lisp_files_parse() {
         for path in [
             "ui/themes/mac-osx-dark.lisp",
@@ -13293,7 +13423,7 @@ mod tests {
     fn load_keyboard_step_selection_source(runtime: &mut Runtime) {
         let src = std::fs::read_to_string("ui/main.lisp").expect("read ui/main.lisp");
         let start = src
-            .find("(defstate step-key-select-anchor")
+            .find("(def step-key-select-anchor")
             .expect("keyboard step selection source should define anchor");
         let end = src
             .find("(def cursor-toggle")
@@ -13340,6 +13470,30 @@ mod tests {
                     .unwrap()
                     .iter()
                     .any(|selected| *selected),
+            ))
+        });
+
+        let selected_for_lookup = selected.clone();
+        runtime.register_native("seq-step-selected?", move |args, _ctx| {
+            let Some(Value::Number(step)) = args.first() else {
+                return Err("seq-step-selected?: expected step".into());
+            };
+            Ok(Value::Bool(
+                selected_for_lookup.lock().unwrap()[*step as usize],
+            ))
+        });
+
+        let selected_for_indexes = selected.clone();
+        runtime.register_native("seq-selected-step-indexes-native", move |_args, _ctx| {
+            Ok(Value::List(
+                selected_for_indexes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, selected)| **selected)
+                    .map(|(step, _)| Rc::new(RefCell::new(Value::Number(step as f64))))
+                    .collect(),
             ))
         });
 
@@ -13432,10 +13586,12 @@ mod tests {
         let clock = Arc::new(Mutex::new(0.0f64));
         let mut runtime = Runtime::new();
         runtime
-            .eval_str("(defstate cursor-step 0)")
-            .expect("define cursor step");
+            .eval_str(
+                "(do (def cursor-step 0) (def set-cursor-step-value (step) (set! cursor-step step)))",
+            )
+            .expect("define cursor step helpers");
         runtime
-            .eval_str("(defstate step-key-select-anchor nil)")
+            .eval_str("(def step-key-select-anchor nil)")
             .expect("define keyboard anchor");
         runtime
             .eval_str(&format!(
@@ -13477,8 +13633,10 @@ mod tests {
         let toggles = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::new();
         runtime
-            .eval_str("(defstate cursor-step 0)")
-            .expect("define cursor step");
+            .eval_str(
+                "(do (def cursor-step 0) (def set-cursor-step-value (step) (set! cursor-step step)))",
+            )
+            .expect("define cursor step helpers");
         runtime
             .eval_str(
                 "(def SEQ (dict :current-track 1 :selected-steps '(false false false false)))",

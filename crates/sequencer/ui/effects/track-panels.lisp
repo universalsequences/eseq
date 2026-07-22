@@ -286,15 +286,6 @@
                  "No locks")
           :font-size 9 :color :dim :bg :transparent)))))
 
-(def fx-step-selected-count ()
-  (len (filter (lambda (selected) selected) SEQ.selected-steps)))
-
-(def fx-step-selection-title ()
-  (let ((count (fx-step-selected-count)))
-    (if (> count 0)
-      (str count " steps")
-      (str "step " (+ (current-step) 1)))))
-
 (def fx-step-param-value (mode)
   (let ((values (seqv-current-param-values mode))
         (step (current-step)))
@@ -384,7 +375,7 @@
         (h-stack :gap 0.45 :align :start
           (fx-step-track-badge)
           ;(label "step" :font-size 10 :color :white :bg :transparent)
-          (label (fx-step-selection-title) :font-size 8 :color :dim :bg :transparent))
+          (label (bind-seq "step-selection-title") :font-size 8 :color :dim :bg :transparent))
         (h-stack :gap 0.55 :align :center
           (if (seqv-track-drum-rack? SEQ.current-track)
             (fx-step-sound-picker)

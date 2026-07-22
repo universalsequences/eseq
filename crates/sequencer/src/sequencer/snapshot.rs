@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::graph::ProjectGraphOverrides;
@@ -35,6 +36,35 @@ pub struct SequencerStepSnapshot {
     pub swing_resolution_override: Option<SwingResolution>,
 }
 
+impl SequencerStepSnapshot {
+    pub(super) fn capture(state: &SequencerState, track: usize, step: usize) -> Self {
+        let mut params = [0.0f32; NUM_PARAMS];
+        for param in StepParam::ALL {
+            params[param.index()] = state.pattern.step_data[track].get(step, param);
+        }
+        let chord_count = state.pattern.chord_data[track].count(step);
+        let mut chord = Vec::with_capacity(chord_count);
+        let mut chord_durations = Vec::with_capacity(chord_count);
+        let mut chord_delays = Vec::with_capacity(chord_count);
+        for note_idx in 0..chord_count {
+            chord.push(state.pattern.chord_data[track].get(step, note_idx));
+            chord_durations.push(state.pattern.chord_data[track].get_duration(step, note_idx));
+            chord_delays.push(state.pattern.chord_data[track].get_delay(step, note_idx));
+        }
+        Self {
+            active: state.pattern.patterns[track].is_active(step),
+            neural_reset: state.pattern.neural_reset_patterns[track].is_active(step),
+            params,
+            chord,
+            chord_durations,
+            chord_delays,
+            timebase_override: state.pattern.timebase_plocks[track].get(step),
+            swing_override: state.pattern.swing_plocks[track].get(step),
+            swing_resolution_override: state.pattern.swing_resolution_plocks[track].get(step),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SequencerTrackSnapshot {
     pub params: TrackParamsSnapshot,
@@ -56,7 +86,7 @@ pub struct SequencerTrackSnapshot {
 #[derive(Clone, Debug)]
 pub struct SequencerSnapshot {
     pub transport: SequencerTransportSnapshot,
-    pub tracks: Vec<SequencerTrackSnapshot>,
+    pub tracks: Vec<Arc<SequencerTrackSnapshot>>,
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
@@ -106,135 +136,20 @@ impl SequencerSnapshot {
             state.scratch_runtime_descriptors();
 
         for track_idx in 0..num_tracks {
-            let tp = &state.pattern.track_params[track_idx];
-            let params = TrackParamsSnapshot {
-                gate: tp.is_gate_on(),
-                attack_ms: tp.get_attack_ms(),
-                release_ms: tp.get_release_ms(),
-                swing: tp.get_swing(),
-                swing_resolution: tp.get_swing_resolution(),
-                num_steps: tp.get_num_steps(),
-                volume: tp.get_volume(),
-                pan: tp.get_pan(),
-                mute: tp.is_muted(),
-                solo: tp.is_solo(),
-                send: tp.get_send(),
-                output: tp.output(),
-                sends: tp.sends(),
-                polyphonic: tp.is_polyphonic(),
-                max_polyphony: tp.get_max_polyphony(),
-                timebase: tp.get_timebase(),
-                accumulator_idx: tp.get_accumulator_idx(),
-                script_accumulator_name: tp.script_accumulator_name(),
-                midi_fx_chain: tp.midi_fx_chain(),
-                midi_fx_position: tp.get_midi_fx_position(),
-                accum_limit: tp.get_accum_limit(),
-                accum_mode: tp.get_accum_mode(),
-                fts_scale: tp.get_fts_scale(),
-                mute_group: tp.get_mute_group(),
-                global_transpose: tp.uses_global_transpose(),
-            };
-            let instrument_type = InstrumentType::from_runtime_flag(
-                state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
-            );
-            let instrument_base_note_offset = f32::from_bits(
-                state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
-            );
-            let instrument_run_mode = CustomInstrumentRunMode::from_runtime_flag(
-                state.runtime.instrument_run_mode_flags[track_idx].load(Ordering::Relaxed),
-            );
-            let engine_id = match state.runtime.track_engine_ids[track_idx].load(Ordering::Relaxed)
-            {
-                u32::MAX => None,
-                id => Some(id as usize),
-            };
-            let effect_slots: Vec<EffectSlotSnapshot> = state.pattern.effect_chains[track_idx]
-                .iter()
-                .map(EffectSlotSnapshot::capture)
-                .collect();
-            let effect_descriptors = effect_descriptors_by_track
-                .get(track_idx)
-                .cloned()
-                .unwrap_or_else(EffectDescriptor::default_full_chain);
-            let midi_fx_slots = state.pattern.midi_fx_slots[track_idx]
-                .iter()
-                .map(EffectSlotSnapshot::capture)
-                .collect();
-            let instrument_descriptor = instrument_descriptors
-                .get(track_idx)
-                .cloned()
-                .unwrap_or_else(EffectDescriptor::builtin_sampler);
-            let instrument_slot =
-                EffectSlotSnapshot::capture(&state.pattern.instrument_slots[track_idx]);
-
-            let mut steps = Vec::with_capacity(MAX_STEPS);
-            for step_idx in 0..MAX_STEPS {
-                let mut step_params = [0.0f32; NUM_PARAMS];
-                for param in StepParam::ALL {
-                    step_params[param.index()] =
-                        state.pattern.step_data[track_idx].get(step_idx, param);
-                }
-
-                let chord_count = state.pattern.chord_data[track_idx].count(step_idx);
-                let mut chord = Vec::with_capacity(chord_count);
-                let mut chord_durations = Vec::with_capacity(chord_count);
-                let mut chord_delays = Vec::with_capacity(chord_count);
-                for note_idx in 0..chord_count {
-                    chord.push(state.pattern.chord_data[track_idx].get(step_idx, note_idx));
-                    chord_durations
-                        .push(state.pattern.chord_data[track_idx].get_duration(step_idx, note_idx));
-                    chord_delays
-                        .push(state.pattern.chord_data[track_idx].get_delay(step_idx, note_idx));
-                }
-
-                steps.push(SequencerStepSnapshot {
-                    active: state.pattern.patterns[track_idx].is_active(step_idx),
-                    neural_reset: state.pattern.neural_reset_patterns[track_idx]
-                        .is_active(step_idx),
-                    params: step_params,
-                    chord,
-                    chord_durations,
-                    chord_delays,
-                    timebase_override: state.pattern.timebase_plocks[track_idx].get(step_idx),
-                    swing_override: state.pattern.swing_plocks[track_idx].get(step_idx),
-                    swing_resolution_override: state.pattern.swing_resolution_plocks[track_idx]
-                        .get(step_idx),
-                });
-            }
-
-            let process_chain = compose_track_process_chain(
+            tracks.push(capture_live_track(
+                state,
+                track_idx,
                 &project_process_chain,
+                live_rack_tracks.get(track_idx).cloned().unwrap_or(None),
                 live_process_chains.get(track_idx),
-                &instrument_descriptor,
-                &instrument_slot,
-                &effect_descriptors,
-                &effect_slots,
                 live_project_lane_overrides.get(track_idx),
-            );
-            let mut rack_track = live_rack_tracks.get(track_idx).cloned().unwrap_or(None);
-            state.sync_rack_macro_runtime_track(track_idx, rack_track.as_ref());
-            if let Some(rack) = rack_track.as_mut() {
-                rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track_idx);
-            }
-            tracks.push(SequencerTrackSnapshot {
-                params,
-                scene_silenced: state.is_scene_silenced(track_idx),
-                instrument_type,
-                instrument_run_mode,
-                instrument_base_note_offset,
-                engine_id,
-                rack_track,
-                process_chain,
-                effect_descriptors,
-                effect_slots,
-                midi_fx_slots,
-                instrument_descriptor,
-                instrument_slot,
-                steps,
-            });
+                effect_descriptors_by_track.get(track_idx).cloned(),
+                instrument_descriptors.get(track_idx).cloned(),
+            ));
         }
 
         apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
+        let tracks = tracks.into_iter().map(Arc::new).collect();
         let (mod_connections, neural_networks, graph_overrides) = state.current_scene_metadata();
 
         Self {
@@ -245,6 +160,37 @@ impl SequencerSnapshot {
             graph_overrides,
             process_trace: state.process_trace_enabled(),
         }
+    }
+
+    /// Capture one complete live track for copy-on-write scheduler publication.
+    /// This includes device p-lock storage and process/rack state, not only the
+    /// edited step payloads.
+    pub(super) fn capture_live_track(
+        state: &SequencerState,
+        track: usize,
+    ) -> Option<SequencerTrackSnapshot> {
+        if track >= state.active_track_count() {
+            return None;
+        }
+        let project_process_chain = state.project_process_chain();
+        let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
+        let live_process_chains = state.pattern.process_chains.lock().unwrap();
+        let live_project_lane_overrides =
+            state.pattern.project_process_lane_overrides.lock().unwrap();
+        let (effect_descriptors_by_track, instrument_descriptors) =
+            state.scratch_runtime_descriptors();
+        let mut snapshot = capture_live_track(
+            state,
+            track,
+            &project_process_chain,
+            live_rack_tracks.get(track).cloned().unwrap_or(None),
+            live_process_chains.get(track),
+            live_project_lane_overrides.get(track),
+            effect_descriptors_by_track.get(track).cloned(),
+            instrument_descriptors.get(track).cloned(),
+        );
+        apply_track_macro_overrides(track, &mut snapshot, &state.live_macro_overrides());
+        Some(snapshot)
     }
 
     pub fn capture_from_track_pattern_data(
@@ -296,6 +242,7 @@ impl SequencerSnapshot {
         }
 
         apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
+        let tracks = tracks.into_iter().map(Arc::new).collect();
 
         Self {
             transport,
@@ -308,6 +255,104 @@ impl SequencerSnapshot {
     }
 }
 
+fn capture_live_track(
+    state: &SequencerState,
+    track: usize,
+    project_process_chain: &crate::process::TrackProcessChain,
+    mut rack_track: Option<RackTrackSnapshot>,
+    live_process_chain: Option<&crate::process::TrackProcessChain>,
+    live_project_lane_overrides: Option<&crate::process::ProjectLaneOverrides>,
+    effect_descriptors: Option<Vec<EffectDescriptor>>,
+    instrument_descriptor: Option<EffectDescriptor>,
+) -> SequencerTrackSnapshot {
+    let tp = &state.pattern.track_params[track];
+    let params = TrackParamsSnapshot {
+        gate: tp.is_gate_on(),
+        attack_ms: tp.get_attack_ms(),
+        release_ms: tp.get_release_ms(),
+        swing: tp.get_swing(),
+        swing_resolution: tp.get_swing_resolution(),
+        num_steps: tp.get_num_steps(),
+        volume: tp.get_volume(),
+        pan: tp.get_pan(),
+        mute: tp.is_muted(),
+        solo: tp.is_solo(),
+        send: tp.get_send(),
+        output: tp.output(),
+        sends: tp.sends(),
+        polyphonic: tp.is_polyphonic(),
+        max_polyphony: tp.get_max_polyphony(),
+        timebase: tp.get_timebase(),
+        accumulator_idx: tp.get_accumulator_idx(),
+        script_accumulator_name: tp.script_accumulator_name(),
+        midi_fx_chain: tp.midi_fx_chain(),
+        midi_fx_position: tp.get_midi_fx_position(),
+        accum_limit: tp.get_accum_limit(),
+        accum_mode: tp.get_accum_mode(),
+        fts_scale: tp.get_fts_scale(),
+        mute_group: tp.get_mute_group(),
+        global_transpose: tp.uses_global_transpose(),
+    };
+    let instrument_type = InstrumentType::from_runtime_flag(
+        state.runtime.instrument_type_flags[track].load(Ordering::Relaxed),
+    );
+    let instrument_base_note_offset = f32::from_bits(
+        state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+    );
+    let instrument_run_mode = CustomInstrumentRunMode::from_runtime_flag(
+        state.runtime.instrument_run_mode_flags[track].load(Ordering::Relaxed),
+    );
+    let engine_id = match state.runtime.track_engine_ids[track].load(Ordering::Relaxed) {
+        u32::MAX => None,
+        id => Some(id as usize),
+    };
+    let effect_slots = state.pattern.effect_chains[track]
+        .iter()
+        .map(EffectSlotSnapshot::capture)
+        .collect::<Vec<_>>();
+    let effect_descriptors =
+        effect_descriptors.unwrap_or_else(EffectDescriptor::default_full_chain);
+    let midi_fx_slots = state.pattern.midi_fx_slots[track]
+        .iter()
+        .map(EffectSlotSnapshot::capture)
+        .collect();
+    let instrument_descriptor =
+        instrument_descriptor.unwrap_or_else(EffectDescriptor::builtin_sampler);
+    let instrument_slot = EffectSlotSnapshot::capture(&state.pattern.instrument_slots[track]);
+    let steps = (0..MAX_STEPS)
+        .map(|step| SequencerStepSnapshot::capture(state, track, step))
+        .collect();
+    let process_chain = compose_track_process_chain(
+        project_process_chain,
+        live_process_chain,
+        &instrument_descriptor,
+        &instrument_slot,
+        &effect_descriptors,
+        &effect_slots,
+        live_project_lane_overrides,
+    );
+    state.sync_rack_macro_runtime_track(track, rack_track.as_ref());
+    if let Some(rack) = rack_track.as_mut() {
+        rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track);
+    }
+    SequencerTrackSnapshot {
+        params,
+        scene_silenced: state.is_scene_silenced(track),
+        instrument_type,
+        instrument_run_mode,
+        instrument_base_note_offset,
+        engine_id,
+        rack_track,
+        process_chain,
+        effect_descriptors,
+        effect_slots,
+        midi_fx_slots,
+        instrument_descriptor,
+        instrument_slot,
+        steps,
+    }
+}
+
 /// Folds the live macro layer into snapshot-local defaults. This keeps the
 /// scheduler's existing precedence model intact: an explicit p-lock still
 /// replaces the effective default, while process `Add` writes build on it.
@@ -316,26 +361,34 @@ fn apply_macro_overrides(
     overrides: &HashMap<MacroParamKey, f32>,
 ) {
     for (track_idx, track) in tracks.iter_mut().enumerate() {
-        if let Some(rack) = track.rack_track.as_mut() {
-            for rack_macro in &mut rack.macros {
-                if let Some(value) = overrides.get(&MacroParamKey::for_rack_macro(
-                    track_idx,
-                    rack_macro.id.index() as u8,
-                )) {
-                    rack_macro.value = value.clamp(0.0, 1.0);
-                }
+        apply_track_macro_overrides(track_idx, track, overrides);
+    }
+}
+
+fn apply_track_macro_overrides(
+    track_idx: usize,
+    track: &mut SequencerTrackSnapshot,
+    overrides: &HashMap<MacroParamKey, f32>,
+) {
+    if let Some(rack) = track.rack_track.as_mut() {
+        for rack_macro in &mut rack.macros {
+            if let Some(value) = overrides.get(&MacroParamKey::for_rack_macro(
+                track_idx,
+                rack_macro.id.index() as u8,
+            )) {
+                rack_macro.value = value.clamp(0.0, 1.0);
             }
         }
-        apply_slot_macro_overrides(
-            &mut track.instrument_slot,
-            overrides,
-            |param_idx, param_id| MacroParamKey::for_instrument(track_idx, param_idx, param_id),
-        );
-        for (slot_idx, slot) in track.effect_slots.iter_mut().enumerate() {
-            apply_slot_macro_overrides(slot, overrides, |param_idx, param_id| {
-                MacroParamKey::for_effect(track_idx, slot_idx, param_idx, param_id)
-            });
-        }
+    }
+    apply_slot_macro_overrides(
+        &mut track.instrument_slot,
+        overrides,
+        |param_idx, param_id| MacroParamKey::for_instrument(track_idx, param_idx, param_id),
+    );
+    for (slot_idx, slot) in track.effect_slots.iter_mut().enumerate() {
+        apply_slot_macro_overrides(slot, overrides, |param_idx, param_id| {
+            MacroParamKey::for_effect(track_idx, slot_idx, param_idx, param_id)
+        });
     }
 }
 

@@ -809,7 +809,8 @@ The following should build on the same rows rather than replacing them:
   layer: render `song-rows` through the lane projection, draw the playhead
   from `song-position-beats`, and translate drag/split/delete/paint gestures
   into the existing primitive commands. It should require no new persistence,
-  no new mutation paths, and no scheduler changes.
+  no new mutation paths, and no scheduler changes. See
+  `docs/arrangement-timeline-ui-spec.md` for the widget/layout design.
 - **Seeking and starting playback from an arbitrary row or beat.** Already
   plumbed as `start_song_playback(_, start_beat)` (10.1); exposing it is a
   transport/UI change only.

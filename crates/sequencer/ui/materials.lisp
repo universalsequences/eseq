@@ -146,6 +146,7 @@
 (defwidget tick
   :width 1.5 :height 1.5
   :state (active plocked selected)
+  :bindable (active plocked selected)
   :shader
   (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
     (sdf/translate 0 sel-y

@@ -19,6 +19,12 @@ pub(crate) enum UiInvalidation {
         step: usize,
         change: StepInvalidation,
     },
+    /// Structural state for several cells changed in one mutation. Applying
+    /// this as a batch shares selection locks and derived plock/color lanes.
+    StepBatch {
+        track: usize,
+        steps: Vec<usize>,
+    },
     StepSelection {
         track: usize,
         /// Step indexes whose membership in the selection changed.

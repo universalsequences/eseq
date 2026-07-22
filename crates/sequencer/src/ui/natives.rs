@@ -831,10 +831,10 @@ pub(crate) fn init_runtime(
     app: &tui::App,
     state: Arc<SequencerState>,
     track_names: &[String],
-    _track_pan_ids: Arc<Mutex<Vec<i32>>>,
+    track_pan_ids: Arc<Mutex<Vec<i32>>>,
     track_collapsed: Arc<Mutex<Vec<bool>>>,
     buses: Arc<Mutex<Vec<tui::BusChannelState>>>,
-    _bus_node_ids: Arc<Mutex<Vec<tui::BusNodeIds>>>,
+    bus_node_ids: Arc<Mutex<Vec<tui::BusNodeIds>>>,
     current_track: Arc<AtomicUsize>,
     selected_tracks: Arc<Mutex<HashSet<usize>>>,
     track_groups: Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,
@@ -2700,6 +2700,7 @@ pub(crate) fn init_runtime(
 
     // seq-set-track-volume — (seq-set-track-volume track-idx volume)
     let st = state.clone();
+    let pan_ids = track_pan_ids.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-volume", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(vol))) = (args.first(), args.get(1))
@@ -2720,11 +2721,28 @@ pub(crate) fn init_runtime(
             track,
             change: TrackMixerInvalidation::Volume,
         });
+        // Push the panner gain straight to the audio graph so a fader drag is
+        // heard immediately; the enqueued history command re-pushes the same
+        // value when it lands, and remains the sole writer of sequencer state.
+        let pan_ids_lock = pan_ids.lock().unwrap();
+        if let Some(&pan_id) = pan_ids_lock.get(track) {
+            unsafe {
+                sequencer::audiograph::params_push_wrapper(
+                    lg_raw,
+                    sequencer::audiograph::ParamMsg {
+                        idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                        logical_id: pan_id as u64,
+                        fvalue: sequencer::mixer_volume::fader_to_gain(vol),
+                    },
+                );
+            }
+        }
         Ok(Value::Number(vol as f64))
     });
 
     // seq-set-track-pan — (seq-set-track-pan track-idx pan)
     let st = state.clone();
+    let pan_ids = track_pan_ids.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-pan", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(pan))) = (args.first(), args.get(1))
@@ -2745,6 +2763,20 @@ pub(crate) fn init_runtime(
             track,
             change: TrackMixerInvalidation::Pan,
         });
+        // Same zero-latency push as the volume fader (see above).
+        let pan_ids_lock = pan_ids.lock().unwrap();
+        if let Some(&pan_id) = pan_ids_lock.get(track) {
+            unsafe {
+                sequencer::audiograph::params_push_wrapper(
+                    lg_raw,
+                    sequencer::audiograph::ParamMsg {
+                        idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_PAN,
+                        logical_id: pan_id as u64,
+                        fvalue: pan,
+                    },
+                );
+            }
+        }
         Ok(Value::Number(pan as f64))
     });
 
@@ -2832,6 +2864,7 @@ pub(crate) fn init_runtime(
     });
 
     let bus_state = buses.clone();
+    let bus_nodes = bus_node_ids.clone();
     runtime.register_native("seq-set-bus-volume", move |args, ctx| {
         let (Some(Value::Number(bus_idx)), Some(Value::Number(vol))) = (args.first(), args.get(1))
         else {
@@ -2852,6 +2885,20 @@ pub(crate) fn init_runtime(
             bus_id,
             Some(vol as f64),
         ));
+        // Zero-latency gain push, mirroring seq-set-track-volume: the history
+        // command stays the sole writer of bus state and re-pushes this value.
+        if let Some(nodes) = bus_nodes.lock().unwrap().get(bus_idx).cloned() {
+            unsafe {
+                sequencer::audiograph::params_push_wrapper(
+                    lg_raw,
+                    sequencer::audiograph::ParamMsg {
+                        idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: sequencer::mixer_volume::fader_to_gain(vol),
+                    },
+                );
+            }
+        }
         Ok(Value::Number(vol as f64))
     });
 
@@ -3570,6 +3617,31 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(
             !sel.lock().unwrap().is_empty() || !drum_sel.lock().unwrap().is_empty(),
         ))
+    });
+
+    let sel = selected_steps.clone();
+    runtime.register_native("seq-step-selected?", move |args, _ctx| {
+        let Some(Value::Number(step)) = args.first() else {
+            return Err("seq-step-selected?: expected step number".into());
+        };
+        Ok(Value::Bool(sel.lock().unwrap().contains(&(*step as usize))))
+    });
+
+    let sel = selected_steps.clone();
+    runtime.register_native("seq-selected-step-indexes-native", move |_args, _ctx| {
+        let mut steps = sel.lock().unwrap().iter().copied().collect::<Vec<_>>();
+        steps.sort_unstable();
+        Ok(Value::List(
+            steps
+                .into_iter()
+                .map(|step| Rc::new(RefCell::new(Value::Number(step as f64))))
+                .collect(),
+        ))
+    });
+
+    let sel = selected_steps.clone();
+    runtime.register_native("seq-selected-step-count-native", move |_args, _ctx| {
+        Ok(Value::Number(sel.lock().unwrap().len() as f64))
     });
 
     // seq-select-all-steps — select every step in the current track pattern

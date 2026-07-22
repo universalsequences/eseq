@@ -26,7 +26,16 @@
 
 ;; Step cursor helpers are used by the FX step buffer root, so define them
 ;; before loading render roots.
-(defstate cursor-step 0)
+(def cursor-step 0)
+(reactive-set "SEQ_CURSOR" "step" 0)
+
+(def set-cursor-step-value (step)
+  (do
+    (set! cursor-step step)
+    (reactive-set "SEQ_CURSOR" "step" step)
+    (if (= (seq-selected-step-count-native) 0)
+      (reactive-set "SEQ" "step-selection-title" (str "step " (+ step 1)))
+      nil)))
 
 (def cursor-num-steps ()
   (if (seq-has-selected-bus?)
@@ -34,7 +43,7 @@
     SEQ.tp-num-steps))
 
 (def current-step ()
-  (mod cursor-step (max 1 (cursor-num-steps))))
+  (mod (reactive-get "SEQ_CURSOR" "step") (max 1 (cursor-num-steps))))
 
 (def page-count ()
   (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
@@ -877,7 +886,7 @@
             0
             (+ (current-step) 1)))))))
 
-(defstate step-key-select-anchor nil)
+(def step-key-select-anchor nil)
 
 (def cursor-select-step-range (start end)
   (if (seq-has-selected-bus?)
@@ -930,19 +939,19 @@
 
 (def set-track-cursor-step (step)
   (do
-    (set! cursor-step step)
+    (set-cursor-step-value step)
     (sequencer-cursor-step-changed SEQ.current-track step)))
 
-(defstate step-drag-anchor nil)
-(defstate step-click-pending nil)
-(defstate step-move-last nil)
-(defstate step-toggle-drag-value nil)
-(defstate step-click-was-active nil)
-(defstate step-press-ms nil)
-(defstate step-press-step nil)
-(defstate step-drag-progressed nil)
-(defstate step-hold-select nil)
-(defstate step-cmd-drag-last nil)
+(def step-drag-anchor nil)
+(def step-click-pending nil)
+(def step-move-last nil)
+(def step-toggle-drag-value nil)
+(def step-click-was-active nil)
+(def step-press-ms nil)
+(def step-press-step nil)
+(def step-drag-progressed nil)
+(def step-hold-select nil)
+(def step-cmd-drag-last nil)
 
 ; Finder-style shift extension: anchor at the prior keyboard anchor if any,
 ; else the cursor step when a selection exists, else the clicked step.
@@ -971,7 +980,7 @@
     nil))
 
 (def step-selected? (step)
-  (and (seq-has-selection?) (nth SEQ.selected-steps step)))
+  (seq-step-selected? step))
 
 (def step-select-drag-start (step evt)
   (do
@@ -1267,9 +1276,7 @@
       (seq-set-step-param step param value))))
 
 (def seq-selected-step-indexes ()
-  (filter
-    (lambda (step) (nth SEQ.selected-steps step))
-    (range 0 (len SEQ.selected-steps))))
+  (seq-selected-step-indexes-native))
 
 (def seq-set-process-lane-step-value (track lane step value)
   (seq-set-process-lane-step
@@ -1808,7 +1815,7 @@
 (def bus-goto-page (page)
   (do
     (cool-off-follow)
-    (set! cursor-step (min (* page page-size) (- (max 1 (bus-seq-num-steps)) 1)))))
+    (set-cursor-step-value (min (* page page-size) (- (max 1 (bus-seq-num-steps)) 1)))))
 
 (def bus-set-step-param (step value)
   (host-command "set-bus-step-param"
@@ -1821,13 +1828,13 @@
 (def bus-toggle-step (step)
   (do
     (cool-off-follow)
-    (set! cursor-step step)
+    (set-cursor-step-value step)
     (host-command "toggle-bus-step" (dict :bus selected-bus :step step))))
 
 (def bus-set-step-active (step active)
   (do
     (cool-off-follow)
-    (set! cursor-step step)
+    (set-cursor-step-value step)
     (host-command "set-bus-step-active"
       (dict :bus selected-bus :step step :active active))))
 
@@ -1867,14 +1874,14 @@
     (if (cmd-click? evt)
       (do
         (set! step-key-select-anchor nil)
-        (set! cursor-step step)
+        (set-cursor-step-value step)
         (set! step-drag-anchor nil)
         (set! step-cmd-drag-last step)
         (bus-select-step step))
       (let ((anchor (step-shift-anchor step)))
         (do
           (set! step-key-select-anchor anchor)
-          (set! cursor-step step)
+          (set-cursor-step-value step)
           (set! step-drag-anchor anchor)
           (set! step-cmd-drag-last nil)
           (bus-select-step-range anchor step))))))
@@ -1888,7 +1895,7 @@
         (set! step-move-last nil)
         (set! step-toggle-drag-value nil)
         (cool-off-follow)
-        (set! cursor-step step)
+        (set-cursor-step-value step)
         (if (and (cmd-click? evt) (not step-hold-select))
           (if (= step step-cmd-drag-last)
             nil
@@ -1904,7 +1911,7 @@
           (do
             (set! step-click-pending nil)
             (cool-off-follow)
-            (set! cursor-step step)
+            (set-cursor-step-value step)
             (if (= (bus-step-active? step) step-toggle-drag-value)
               nil
               (bus-set-step-active step step-toggle-drag-value)))
@@ -1917,14 +1924,14 @@
                 (cool-off-follow)
                 (bus-move-step-drag step-move-last step)
                 (set! step-move-last step)
-                (set! cursor-step step)))))))))
+                (set-cursor-step-value step)))))))))
 
 (def bus-step-pointer-down (step evt)
   (if (selection-click? evt)
     (bus-step-select-drag-start step evt)
     (do
       (cool-off-follow)
-      (set! cursor-step step)
+      (set-cursor-step-value step)
       (set! step-drag-anchor nil)
       (set! step-press-ms (now-ms))
       (set! step-press-step step)

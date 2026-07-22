@@ -5890,7 +5890,7 @@ fn replay_step_patch(
         .restore_pattern_step_cells_no_publish(track, patch.target.pattern, &cells, registry)
         .map_err(EditError::ReplayFailed)?;
     if publish_scheduler {
-        app.state.publish_scheduler_snapshot();
+        app.state.publish_scheduler_track(track);
     }
     Ok(MutationEffects { publish_scheduler })
 }

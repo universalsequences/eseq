@@ -28,7 +28,7 @@ use super::data::{
     DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
     MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
-use super::snapshot::SequencerSnapshot;
+use super::snapshot::{SequencerSnapshot, SequencerTransportSnapshot};
 use super::{BusId, TrackOutput};
 
 /// Stable logical identity for a sequencer track.
@@ -6966,6 +6966,33 @@ impl SequencerState {
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         let snapshot = Arc::new(SequencerSnapshot::capture(self));
         self.publish_scheduler_snapshot_arc(snapshot)
+    }
+
+    /// Publish one complete track through a copy-on-write scheduler snapshot.
+    /// Unchanged tracks keep their existing `Arc`, while the edited track is
+    /// recaptured with its step payloads, device p-locks, and process state.
+    pub fn publish_scheduler_track(&self, track: usize) -> Arc<SequencerSnapshot> {
+        let current = self.scheduler_snapshot.lock().unwrap().clone();
+        if track >= self.active_track_count()
+            || track >= current.tracks.len()
+            || current.tracks.len() != self.active_track_count()
+        {
+            return self.publish_scheduler_snapshot();
+        }
+        let mut next = (*current).clone();
+        let Some(next_track) = SequencerSnapshot::capture_live_track(self, track) else {
+            return self.publish_scheduler_snapshot();
+        };
+        next.tracks[track] = Arc::new(next_track);
+        next.transport = SequencerTransportSnapshot {
+            bpm: self.transport.bpm.load(Ordering::Relaxed),
+            playing: self.transport.playing.load(Ordering::Relaxed),
+            current_pattern: self.current_scene_index(),
+            pattern_epoch: self.transport.pattern_epoch.load(Ordering::Relaxed),
+            topology_epoch: self.transport.topology_epoch.load(Ordering::Relaxed),
+            num_tracks: self.active_track_count(),
+        };
+        self.publish_scheduler_snapshot_arc(Arc::new(next))
     }
 
     /// Replaces the command-thread macro layer and immediately publishes a
@@ -16846,6 +16873,34 @@ mod tests {
             snapshot.tracks[0].steps[3].params[StepParam::Transpose.index()],
             9.0
         );
+    }
+
+    #[test]
+    fn publish_scheduler_track_recaptures_complete_track_and_reuses_other_tracks() {
+        let state = SequencerState::new(
+            2,
+            vec![
+                vec![EffectSlotState::new(&EffectDescriptor::builtin_filter(), 1)],
+                default_empty_effect_chain(),
+            ],
+        );
+        state.pattern.effect_chains[0][0]
+            .apply_descriptor(&EffectDescriptor::builtin_filter(), 1);
+        state.pattern.instrument_slots[0]
+            .apply_descriptor(&EffectDescriptor::builtin_delay(), 2);
+        let before = state.latest_scheduler_snapshot();
+
+        state.pattern.patterns[0].set_step_active(3, true);
+        state.pattern.effect_chains[0][0].set_plock(3, 0, 0.75);
+        state.pattern.instrument_slots[0].set_plock(3, 0, 0.25);
+        state.publish_scheduler_track(0);
+
+        let after = state.latest_scheduler_snapshot();
+        assert!(!Arc::ptr_eq(&before.tracks[0], &after.tracks[0]));
+        assert!(Arc::ptr_eq(&before.tracks[1], &after.tracks[1]));
+        assert!(after.tracks[0].steps[3].active);
+        assert_eq!(after.tracks[0].effect_slots[0].plocks[3][0], Some(0.75));
+        assert_eq!(after.tracks[0].instrument_slot.plocks[3][0], Some(0.25));
     }
 
     #[test]

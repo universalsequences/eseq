@@ -1141,20 +1141,12 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                     && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
                 let command = if editor.active_buffer().name == "*sequencer*" {
-                    "(seqv-select-all-current-track-steps)"
+                    "seqv-select-all-current-track-steps"
                 } else {
-                    "(select-all-steps)"
+                    "select-all-steps"
                 };
-                let _ = editor.runtime_mut().eval_str(command);
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "selected-steps",
-                    build_selection_value(selected_steps),
-                );
-                editor.runtime_mut().run_reactive_cycle();
+                let _ = editor.runtime_mut().invoke_global(command, Vec::new());
                 editor.refresh_runtime_side_effects();
-                editor.refresh_visible_layouts_for_buffer_named("*metal*");
-                editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
                 editor.mark_needs_redraw();
                 return true;
             }
@@ -2738,20 +2730,10 @@ mod live_keyboard_tests {
             editor.runtime_mut().eval_str("select-all-count").unwrap(),
             Some(eseqlisp::vm::Value::Number(1.0))
         );
-        let selected_value = editor
-            .runtime_mut()
-            .eval_str("SEQ.selected-steps")
-            .unwrap()
-            .expect("selected steps reactive value");
-        let Value::List(items) = selected_value else {
-            panic!("selected steps should be a list");
-        };
-        assert!(
-            items
-                .iter()
-                .take(16)
-                .all(|item| matches!(*item.borrow(), Value::Bool(true))),
-            "Cmd+A should synchronously publish the selected-step reactive list"
+        assert_eq!(
+            *selected_steps.lock().unwrap(),
+            (0..16).collect::<HashSet<_>>(),
+            "Cmd+A should select every current-track step; the native's UI invalidation owns the reactive projection",
         );
     }
 

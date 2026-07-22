@@ -8427,7 +8427,7 @@ mod tests {
         state.toggle_play();
         state.toggle_step_and_clear_plocks(0, 0);
         let mut snapshot = (*state.latest_scheduler_snapshot()).clone();
-        snapshot.tracks[0].scene_silenced = true;
+        Arc::make_mut(&mut snapshot.tracks[0]).scene_silenced = true;
         let mut clock = SnapshotSequencerClock::new(48_000);
 
         let triggers = clock.process_chunk(12_000, &snapshot, &state);

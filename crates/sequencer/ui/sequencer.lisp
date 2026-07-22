@@ -217,7 +217,7 @@
 (def seqv-cursor-step (track-id)
   (let ((track (seqv-track-index-for-id track-id)))
     (if (>= track 0)
-      (let ((stored-step (get (seqv-editor-state-for track-id) :cursor-step)))
+      (let ((stored-step (reactive-get "SEQV" (str "cursor-step-" track-id))))
         (if (= stored-step nil)
           (seqv-global-cursor-step-for-track track)
           (seqv-project-cursor-step track stored-step)))
@@ -232,14 +232,13 @@
 (def seqv-set-cursor-step (track-id step)
   (let ((track (seqv-track-index-for-id track-id)))
     (if (>= track 0)
-      (let ((projected-step (seqv-project-cursor-step track step)))
+      (let ((previous-step (seqv-cursor-step track-id))
+          (projected-step (seqv-project-cursor-step track step)))
         (do
-          (seqv-upsert-editor-state track-id
-            (merge (seqv-editor-state-for track-id) :cursor-step projected-step))
-          (for-each
-            (lambda (candidate-step)
-              (reactive-set "SEQV" (seqv-cursor-highlight-field track candidate-step) false))
-            (range 0 (seqv-track-num-steps track)))
+          (reactive-set "SEQV" (str "cursor-step-" track-id) projected-step)
+          (if (= previous-step projected-step)
+            nil
+            (reactive-set "SEQV" (seqv-cursor-highlight-field track previous-step) false))
           (reactive-set "SEQV" (seqv-cursor-highlight-field track projected-step) true)
           (if (seqv-track-expanded? track-id)
             (seqv-sync-expanded-step-slots-for track track-id)
@@ -763,9 +762,9 @@
     seqv-expanded-step-playhead-height
     (* 3 seqv-expanded-step-column-gap)))
 
-(defstate seqv-drag-track nil)
-(defstate seqv-duration-drag-source nil)
-(defstate seqv-drum-drag-pad nil)
+(def seqv-drag-track nil)
+(def seqv-duration-drag-source nil)
+(def seqv-drum-drag-pad nil)
 
 (def seqv-duration-edge? (evt)
   (let ((sx (get evt :sx)))
@@ -896,10 +895,10 @@
   (let ((track-r (bind-seq-nth "track-color-r-effective" track))
       (track-g (bind-seq-nth "track-color-g-effective" track))
       (track-b (bind-seq-nth "track-color-b-effective" track))
-      (plock-kind (seqv-track-step-value SEQ.track-step-plock-kinds track step 0))
-      (variant-r (seqv-track-step-value SEQ.track-step-variant-r track step 0))
-      (variant-g (seqv-track-step-value SEQ.track-step-variant-g track step 0))
-      (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0)))
+      (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
+      (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
+      (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
+      (variant-b (bind-seq (str "seq-track-step-variant-b-" track "-" step))))
     (box
       :width 3.05 :height 1.55
       :key (str "seqv-step-cell-" track "-" step)
@@ -941,10 +940,10 @@
   (let ((track-r (bind-seq-nth "track-color-r-effective" track))
       (track-g (bind-seq-nth "track-color-g-effective" track))
       (track-b (bind-seq-nth "track-color-b-effective" track))
-      (plock-kind (seqv-track-step-value SEQ.track-step-plock-kinds track step 0))
-      (variant-r (seqv-track-step-value SEQ.track-step-variant-r track step 0))
-      (variant-g (seqv-track-step-value SEQ.track-step-variant-g track step 0))
-      (variant-b (seqv-track-step-value SEQ.track-step-variant-b track step 0)))
+      (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
+      (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
+      (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
+      (variant-b (bind-seq (str "seq-track-step-variant-b-" track "-" step))))
     (box
       :width 3.05 :height 1.55
       :key (str "seqv-drum-lane-step-" track "-" pad-note "-" step)
