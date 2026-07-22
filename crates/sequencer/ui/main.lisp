@@ -27,15 +27,19 @@
 ;; Step cursor helpers are used by the FX step buffer root, so define them
 ;; before loading render roots.
 (def cursor-step 0)
-(reactive-set "SEQ_CURSOR" "step" 0)
 
 (def set-cursor-step-value (step)
-  (do
-    (set! cursor-step step)
-    (reactive-set "SEQ_CURSOR" "step" step)
-    (if (= (seq-selected-step-count-native) 0)
-      (reactive-set "SEQ" "step-selection-title" (str "step " (+ step 1)))
-      nil)))
+  (let ((parameter-step
+          (if (> (or SEQ.fx-step-selection-count 0) 0)
+            (or SEQ.fx-step-parameter-step step)
+            step)))
+    (do
+      (set! cursor-step step)
+      (reactive-set "SEQ" "fx-step-cursor-number" (+ step 1))
+      (reactive-set "SEQ" "fx-step-parameter-step" parameter-step)
+      (reactive-set "SEQ" "fx-step-value-transpose" (nth SEQ.transposes parameter-step))
+      (reactive-set "SEQ" "fx-step-value-velocity" (nth SEQ.velocities parameter-step))
+      (reactive-set "SEQ" "fx-step-value-duration" (nth SEQ.durations parameter-step)))))
 
 (def cursor-num-steps ()
   (if (seq-has-selected-bus?)
@@ -43,7 +47,7 @@
     SEQ.tp-num-steps))
 
 (def current-step ()
-  (mod (reactive-get "SEQ_CURSOR" "step") (max 1 (cursor-num-steps))))
+  (mod cursor-step (max 1 (cursor-num-steps))))
 
 (def page-count ()
   (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))

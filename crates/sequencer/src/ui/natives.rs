@@ -3639,11 +3639,6 @@ pub(crate) fn init_runtime(
         ))
     });
 
-    let sel = selected_steps.clone();
-    runtime.register_native("seq-selected-step-count-native", move |_args, _ctx| {
-        Ok(Value::Number(sel.lock().unwrap().len() as f64))
-    });
-
     // seq-select-all-steps — select every step in the current track pattern
     let st = state.clone();
     let ct = current_track.clone();

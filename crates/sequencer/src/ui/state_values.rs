@@ -3740,6 +3740,79 @@ pub(crate) fn build_param_list(
     Value::List(items)
 }
 
+pub(crate) fn fx_step_param_value_field(param: StepParam) -> Option<&'static str> {
+    match param {
+        StepParam::Velocity => Some("fx-step-value-velocity"),
+        StepParam::Duration => Some("fx-step-value-duration"),
+        StepParam::Transpose => Some("fx-step-value-transpose"),
+        _ => None,
+    }
+}
+
+pub(crate) fn fx_step_cursor_from_runtime(rt: &Runtime) -> usize {
+    match rt.global_value("cursor-step") {
+        Some(Value::Number(step)) if step >= 0.0 => step as usize,
+        _ => 0,
+    }
+}
+
+/// Refresh the fixed-size step-parameter strip without rerunning its Lisp
+/// effect. Every consumer is a retained numeric binding, so cursor and
+/// selection changes stay on the targeted widget path.
+pub(crate) fn sync_fx_step_cursor_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    cursor_step: usize,
+    selected_step: Option<usize>,
+    selected_count: usize,
+) -> bool {
+    if track >= state.active_track_count() {
+        return false;
+    }
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .max(1)
+        .min(MAX_STEPS);
+    let cursor_step = cursor_step.min(num_steps.saturating_sub(1));
+    let parameter_step = selected_step
+        .unwrap_or(cursor_step)
+        .min(num_steps.saturating_sub(1));
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            "fx-step-cursor-number",
+            Value::Number((cursor_step + 1) as f64),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "fx-step-selection-count",
+            Value::Number(selected_count as f64),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "fx-step-parameter-step",
+            Value::Number(parameter_step as f64),
+        )
+        .effects_dirty;
+    for param in [StepParam::Velocity, StepParam::Duration, StepParam::Transpose] {
+        let field = fx_step_param_value_field(param)
+            .expect("step parameter strip field should exist");
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                field,
+                Value::Number(state.pattern.step_data[track].get(parameter_step, param) as f64),
+            )
+            .effects_dirty;
+    }
+    dirty
+}
+
 pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize) {
     rt.set_reactive(
         "SEQ",
@@ -5238,16 +5311,17 @@ pub(crate) fn sync_track_topology_state(
         "record-armed",
         build_record_armed_value(&record_armed.lock().unwrap()),
     );
-    let selected_step_count = selected_steps.lock().unwrap().len();
+    let (selected_step, selected_step_count) = {
+        let selected = selected_steps.lock().unwrap();
+        (selected.iter().copied().min(), selected.len())
+    };
     rt.set_reactive(
         "SEQ",
-        "step-selection-title",
-        Value::String(if selected_step_count == 0 {
-            "step 1".to_string()
-        } else {
-            format!("{selected_step_count} steps")
-        }),
+        "fx-step-selection-count",
+        Value::Number(selected_step_count as f64),
     );
+    rt.set_reactive("SEQ", "fx-step-cursor-number", Value::Number(1.0));
+    rt.set_reactive("SEQ", "fx-step-parameter-step", Value::Number(0.0));
 
     if app.tracks.is_empty() {
         sync_playhead_fields(rt, 0, 1);
@@ -5298,10 +5372,27 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plocks", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plock-variants", Value::List(vec![]));
+        for param in [StepParam::Velocity, StepParam::Duration, StepParam::Transpose] {
+            rt.set_reactive(
+                "SEQ",
+                fx_step_param_value_field(param)
+                    .expect("step parameter strip field should exist"),
+                Value::Number(0.0),
+            );
+        }
         return;
     }
 
     sync_all_track_sequencer_state(rt, state, app, current_track_idx, selected_steps);
+    let cursor_step = fx_step_cursor_from_runtime(rt);
+    sync_fx_step_cursor_binding_fields(
+        rt,
+        state,
+        current_track_idx,
+        cursor_step,
+        selected_step,
+        selected_step_count,
+    );
 
     sync_playhead_fields(
         rt,
@@ -29008,6 +29099,24 @@ mod tests {
     #[test]
     fn metal_seq_step_panel_lays_out_cursor_parameter_pickers() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        let mut transposes = [0.0; 16];
+        transposes[2] = 7.0;
+        transposes[3] = -5.0;
+        let mut velocities = [0.0; 16];
+        velocities[2] = 0.75;
+        velocities[3] = 0.3;
+        let mut durations = [1.0; 16];
+        durations[2] = 2.5;
+        durations[3] = 0.75;
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "transposes", test_number_list(&transposes));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "velocities", test_number_list(&velocities));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "durations", test_number_list(&durations));
         editor
             .runtime_mut()
             .eval_str("(set-track-cursor-step 2)")
@@ -29035,14 +29144,27 @@ mod tests {
             track_badge.props.contains_key("background-color"),
             "step panel track badge should carry the mixer track color"
         );
-        let cursor_label =
-            find_layout_node_by_text(step_params_panel, "step 3").expect("cursor step label");
+        let cursor_label = find_layout_node_by_stable_key(step_params_panel, "fx-step-cursor-label")
+            .expect("cursor step label");
         assert_finite_nonzero_rect(cursor_label, "cursor step label");
+        assert_eq!(layout_prop_number(cursor_label, "value"), Some(3.0));
+        assert_eq!(cursor_label.props.get("prefix"), Some(&Value::String("step ".to_string())));
+        let selection_count = find_layout_node_by_stable_key(
+            step_params_panel,
+            "fx-step-selection-count-label",
+        )
+        .expect("selected-step count label");
+        assert_finite_nonzero_rect(selection_count, "selected-step count label");
+        assert_eq!(layout_prop_number(selection_count, "value"), Some(0.0));
+        assert_eq!(
+            selection_count.props.get("suffix"),
+            Some(&Value::String(" selected".to_string()))
+        );
 
-        for (key, label, expected_min, expected_max) in [
-            ("fx-step-param-transpose", "transpose picker", -48.0, 48.0),
-            ("fx-step-param-velocity", "velocity picker", 0.0, 1.0),
-            ("fx-step-param-duration", "duration picker", 0.0, 128.0),
+        for (key, label, expected_min, expected_max, expected_value) in [
+            ("fx-step-param-transpose", "transpose picker", -48.0, 48.0, 7.0),
+            ("fx-step-param-velocity", "velocity picker", 0.0, 1.0, 0.75),
+            ("fx-step-param-duration", "duration picker", 0.0, 128.0, 2.5),
         ] {
             let picker =
                 find_layout_node_by_stable_key(step_params_panel, key).unwrap_or_else(|| {
@@ -29060,11 +29182,103 @@ mod tests {
                 "{label} max"
             );
             assert_eq!(
+                layout_prop_number(picker, "value"),
+                Some(expected_value),
+                "{label} should read the cursor's retained scalar binding"
+            );
+            assert_eq!(
                 picker.props.get("text-color"),
                 Some(&Value::Keyword("white".to_string())),
                 "{label} should use neutral off-white text"
             );
         }
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(list cursor-step (cursor-num-steps) (current-step))")
+                .unwrap(),
+            Some(test_number_list(&[2.0, 16.0, 2.0])),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(cursor-right)")
+            .expect("move unselected cursor right");
+        assert_eq!(
+            editor.runtime_mut().eval_str("(current-step)").unwrap(),
+            Some(Value::Number(3.0)),
+        );
+        assert_eq!(layout_prop_number(cursor_label, "value"), Some(4.0));
+        for (key, expected_value) in [
+            ("fx-step-param-transpose", -5.0),
+            ("fx-step-param-velocity", 0.3),
+            ("fx-step-param-duration", 0.75),
+        ] {
+            let picker = find_layout_node_by_stable_key(step_params_panel, key)
+                .unwrap_or_else(|| panic!("{key} after cursor move"));
+            assert_eq!(
+                layout_prop_number(picker, "value"),
+                Some(expected_value),
+                "{key} should follow keyboard cursor movement",
+            );
+        }
+        let edits = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let edits = Arc::clone(&edits);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param", move |args, _ctx| {
+                    let step = match args.first() {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected cursor step, got {other:?}"),
+                    };
+                    let param = match args.get(1) {
+                        Some(Value::Keyword(param)) => param.clone(),
+                        other => panic!("expected step parameter, got {other:?}"),
+                    };
+                    let value = match args.get(2) {
+                        Some(Value::Number(value)) => *value,
+                        other => panic!("expected parameter value, got {other:?}"),
+                    };
+                    edits.lock().unwrap().push(format!("{step}:{param}:{value}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        let velocity_on_change = find_layout_node_by_stable_key(
+            step_params_panel,
+            "fx-step-param-velocity",
+        )
+        .and_then(|picker| picker.props.get("on-change"))
+        .cloned()
+        .expect("velocity picker on-change after cursor move");
+        editor
+            .runtime_mut()
+            .invoke(velocity_on_change, vec![Value::Number(0.55)])
+            .expect("edit velocity at keyboard cursor");
+        assert_eq!(
+            edits.lock().unwrap().as_slice(),
+            ["3:velocity:0.55"],
+            "without a selection, the picker must edit the keyboard cursor step",
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "fx-step-selection-count",
+            Value::Number(9.0),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "fx-step-value-velocity",
+            Value::Number(0.4),
+        );
+        assert_eq!(layout_prop_number(selection_count, "value"), Some(9.0));
+        let velocity = find_layout_node_by_stable_key(step_params_panel, "fx-step-param-velocity")
+            .expect("velocity picker");
+        assert_eq!(
+            layout_prop_number(velocity, "value"),
+            Some(0.4),
+            "retained picker value should update without rebuilding the step panel"
+        );
     }
 
     #[test]
@@ -35890,6 +36104,22 @@ mod tests {
                 .unwrap(),
             Some(Value::Number(4.0)),
             "arrow movement should move the expanded editor cursor for the current track"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-1-3\")")
+                .unwrap(),
+            Some(Value::Bool(false)),
+            "arrow movement should clear the previous cursor highlight",
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-1-4\")")
+                .unwrap(),
+            Some(Value::Bool(true)),
+            "arrow movement should activate the next cursor highlight",
         );
     }
 

@@ -2579,6 +2579,7 @@ fn sync_single_step_param_binding(
     step: usize,
     param: StepParam,
     current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
 ) -> bool {
     let Some((current_field, _, mode)) = step_param_fields(param) else {
@@ -2604,6 +2605,15 @@ fn sync_single_step_param_binding(
         dirty |= rt
             .set_reactive_list_index("SEQ", current_field, step, Value::Number(value as f64))
             .effects_dirty;
+        let parameter_step = selected_plock_step(selected_steps)
+            .unwrap_or_else(|| fx_step_cursor_from_runtime(rt));
+        if parameter_step == step {
+            if let Some(field) = fx_step_param_value_field(param) {
+                dirty |= rt
+                    .set_reactive("SEQ", field, Value::Number(value as f64))
+                    .effects_dirty;
+            }
+        }
     }
     for viewport in expanded_step_projection.viewports_for_track(track) {
         if let Some(slot) = visible_slot_for_step(viewport, step) {
@@ -2938,6 +2948,17 @@ fn sync_step_batch_structural_bindings(
         }
     }
     dirty |= sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, steps);
+    if track == current_track_idx {
+        let cursor_step = fx_step_cursor_from_runtime(rt);
+        dirty |= sync_fx_step_cursor_binding_fields(
+            rt,
+            state,
+            track,
+            cursor_step,
+            selected.iter().copied().min(),
+            selected.len(),
+        );
+    }
     dirty
 }
 
@@ -3007,24 +3028,15 @@ fn sync_step_selection_bindings(
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
-    let title = if selected.is_empty() {
-        let cursor = match rt.global_value("SEQ_CURSOR") {
-            Some(Value::Map(fields)) => fields
-                .get("step")
-                .and_then(|value| match &*value.borrow() {
-                    Value::Number(step) => Some(*step as usize),
-                    _ => None,
-                })
-                .unwrap_or(0),
-            _ => 0,
-        };
-        format!("step {}", cursor + 1)
-    } else {
-        format!("{} steps", selected.len())
-    };
-    let mut dirty = rt
-        .set_reactive("SEQ", "step-selection-title", Value::String(title))
-        .effects_dirty;
+    let cursor_step = fx_step_cursor_from_runtime(rt);
+    let mut dirty = sync_fx_step_cursor_binding_fields(
+        rt,
+        state,
+        track,
+        cursor_step,
+        selected.iter().copied().min(),
+        selected.len(),
+    );
     for &step in changed_steps {
         if step >= MAX_STEPS {
             continue;
@@ -3769,6 +3781,7 @@ fn apply_ui_invalidations(
                         step,
                         param.to_step_param(),
                         current_track_idx,
+                        selected_steps,
                         expanded_step_projection,
                     );
                 }
@@ -5960,6 +5973,30 @@ mod tests {
     fn step_selection_sync_updates_selected_steps_without_deadlocking() {
         let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
         state.pattern.track_params[0].set_num_steps(8);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Velocity, 0.66);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Duration, 2.5);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Transpose, 7.0);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Velocity, 0.72);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Duration, 1.5);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Transpose, -4.0);
         let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
             [2_usize, 3, 4]
                 .into_iter()
@@ -5978,6 +6015,9 @@ mod tests {
             )],
             true,
         );
+        runtime
+            .eval_str("(def cursor-step 3)")
+            .expect("register cursor step");
 
         let expanded_step_projection = std::sync::Arc::new(ExpandedStepProjectionRegistry::new());
         super::sync_step_selection_bindings(
@@ -6004,6 +6044,24 @@ mod tests {
                 .expect("read selected step"),
             Some(Value::Bool(true))
         );
+        for (field, expected) in [
+            ("fx-step-cursor-number", 4.0),
+            ("fx-step-selection-count", 3.0),
+            ("fx-step-value-velocity", 0.72),
+            ("fx-step-value-duration", 1.5),
+            ("fx-step-value-transpose", -4.0),
+        ] {
+            let value = runtime
+                .eval_str(&format!("SEQ.{field}"))
+                .unwrap_or_else(|error| panic!("read {field}: {error:?}"));
+            let Some(Value::Number(value)) = value else {
+                panic!("{field} should be numeric, got {value:?}");
+            };
+            assert!(
+                (value - expected).abs() < 0.0001,
+                "{field} expected {expected}, got {value}"
+            );
+        }
 
         selected_steps.lock().unwrap().remove(&3);
         super::sync_step_selection_bindings(
@@ -6030,6 +6088,54 @@ mod tests {
             Some(Value::Bool(true)),
             "delta sync must preserve selection indexes outside changed_steps"
         );
+    }
+
+    #[test]
+    fn single_step_param_sync_updates_selected_panel_scalar_binding() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
+        state.pattern.track_params[0].set_num_steps(8);
+        state
+            .pattern
+            .step_data[0]
+            .set(4, sequencer::sequencer::StepParam::Velocity, 0.72);
+        let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
+            [4, 5, 6, 7].into_iter().collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![(
+                "velocities",
+                Value::List(
+                    (0..sequencer::sequencer::MAX_STEPS)
+                        .map(|_| std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))))
+                        .collect(),
+                ),
+            )],
+            true,
+        );
+        runtime
+            .eval_str("(def cursor-step 0)")
+            .expect("register cursor step");
+
+        super::sync_single_step_param_binding(
+            &mut runtime,
+            &state,
+            0,
+            4,
+            sequencer::sequencer::StepParam::Velocity,
+            0,
+            &selected_steps,
+            &std::sync::Arc::new(ExpandedStepProjectionRegistry::new()),
+        );
+
+        let value = runtime
+            .eval_str("SEQ.fx-step-value-velocity")
+            .expect("read cursor velocity binding");
+        let Some(Value::Number(value)) = value else {
+            panic!("selected velocity should be numeric, got {value:?}");
+        };
+        assert!((value - 0.72).abs() < 0.0001);
     }
 
     #[test]

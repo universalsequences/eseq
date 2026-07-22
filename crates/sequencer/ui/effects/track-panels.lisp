@@ -323,7 +323,7 @@
     (label (seqv-param-name mode) :font-size 8 :color :dim :bg :transparent)
     (number-picker
       :key (str "fx-step-param-" key)
-      :value (fx-step-param-value mode)
+      :value (bind-seq (str "fx-step-value-" key))
       :min (fx-step-param-min mode)
       :max (fx-step-param-max mode)
       :decimals (seqv-param-decimals mode)
@@ -374,8 +374,16 @@
       :border-color :mixer-strip-border    (v-stack :gap 0.55
         (h-stack :gap 0.45 :align :start
           (fx-step-track-badge)
-          ;(label "step" :font-size 10 :color :white :bg :transparent)
-          (label (bind-seq "step-selection-title") :font-size 8 :color :dim :bg :transparent))
+          (h-stack :key "fx-step-selection-summary" :gap 0.15 :align :center
+            (number-label :key "fx-step-cursor-label"
+              :value (bind-seq "fx-step-cursor-number")
+              :prefix "step " :decimals 0 :width 3.3
+              :font-size 8 :color :dim :bg :transparent)
+            (label "·" :font-size 8 :color :dim :bg :transparent)
+            (number-label :key "fx-step-selection-count-label"
+              :value (bind-seq "fx-step-selection-count")
+              :suffix " selected" :decimals 0 :width 5.0
+              :font-size 8 :color :dim :bg :transparent)))
         (h-stack :gap 0.55 :align :center
           (if (seqv-track-drum-rack? SEQ.current-track)
             (fx-step-sound-picker)
