@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use sequencer::{audiograph, engine, tui};
+use sequencer::{app, audiograph, engine};
 
 const BLOCK_SIZE: usize = 512;
 
