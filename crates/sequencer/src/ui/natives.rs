@@ -177,6 +177,63 @@ fn midi_fx_history_command(op: &str, track: usize, value: Value) -> HostCommand 
     }
 }
 
+fn effect_plock_history_command(
+    track: usize,
+    steps: &[usize],
+    slot_idx: usize,
+    updates: &[(usize, f32)],
+) -> HostCommand {
+    let step_values = steps
+        .iter()
+        .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
+        .collect();
+    let update_values = updates
+        .iter()
+        .map(|(param_idx, value)| {
+            Rc::new(RefCell::new(Value::Map(HashMap::from([
+                (
+                    "param-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(*param_idx as f64))),
+                ),
+                (
+                    "value".to_string(),
+                    Rc::new(RefCell::new(Value::Number(*value as f64))),
+                ),
+            ]))))
+        })
+        .collect();
+    let payload = HashMap::from([
+        (
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(track as f64))),
+        ),
+        (
+            "steps".to_string(),
+            Rc::new(RefCell::new(Value::List(step_values))),
+        ),
+        (
+            "slot-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+        ),
+        (
+            "updates".to_string(),
+            Rc::new(RefCell::new(Value::List(update_values))),
+        ),
+        (
+            "gesture".to_string(),
+            Rc::new(RefCell::new(Value::String("custom-effect-control".to_string()))),
+        ),
+        (
+            "label".to_string(),
+            Rc::new(RefCell::new(Value::String("Set custom effect p-lock".to_string()))),
+        ),
+    ]);
+    HostCommand::Custom {
+        name: "set-effect-plock-batch".to_string(),
+        payload: Value::Map(payload),
+    }
+}
+
 fn value_symbol_name(value: &Value) -> Option<String> {
     match value {
         Value::String(value) | Value::Symbol(value) | Value::Keyword(value) => {
@@ -3878,12 +3935,9 @@ pub(crate) fn init_runtime(
     });
 
     // seq-set-effect-plock — apply p-lock to ALL selected steps
-    let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-effect-plock", move |args, _ctx| {
+    runtime.register_native("seq-set-effect-plock", move |args, ctx| {
         let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
         else {
@@ -3893,38 +3947,24 @@ pub(crate) fn init_runtime(
         let slot_idx = *slot as usize;
         let param_idx = *param as usize;
         let val = *val as f32;
-        let chain = &st.pattern.effect_chains[track];
-        let Some(slot_state) = chain.get(slot_idx) else {
-            return Err(format!("slot {slot_idx} out of range").into());
-        };
-        let steps = sel.lock().unwrap();
-        for &step in steps.iter() {
-            slot_state.set_plock(step, param_idx, val);
-            ui_inv.push(UiInvalidation::Step {
-                track,
-                step,
-                change: StepInvalidation::PlockPresence,
-            });
+        let mut steps = sel.lock().unwrap().iter().copied().collect::<Vec<_>>();
+        steps.sort_unstable();
+        if steps.is_empty() {
+            return Ok(Value::Bool(false));
         }
-        st.publish_scheduler_snapshot();
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_inv.push(UiInvalidation::TrackFx {
+        ctx.enqueue_command(effect_plock_history_command(
             track,
-            change: TrackFxInvalidation::Plock {
-                slot: slot_idx,
-                param: param_idx,
-            },
-        });
+            &steps,
+            slot_idx,
+            &[(param_idx, val)],
+        ));
         Ok(Value::Number(val as f64))
     });
 
     // seq-set-effect-plock-pair — apply two effect p-locks to ALL selected steps
-    let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let auto_follow_override = auto_follow_override_until.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-effect-plock-pair", move |args, _ctx| {
+    runtime.register_native("seq-set-effect-plock-pair", move |args, ctx| {
         let (
             Some(Value::Number(slot)),
             Some(Value::Number(param_a)),
@@ -3945,34 +3985,16 @@ pub(crate) fn init_runtime(
         };
         let track = ct.load(Ordering::Relaxed);
         let slot_idx = *slot as usize;
-        let chain = &st.pattern.effect_chains[track];
-        let Some(slot_state) = chain.get(slot_idx) else {
-            return Err(format!("slot {slot_idx} out of range").into());
-        };
         let updates = [
             (*param_a as usize, *val_a as f32),
             (*param_b as usize, *val_b as f32),
         ];
-        let steps = sel.lock().unwrap();
-        for &step in steps.iter() {
-            for (param_idx, val) in updates {
-                slot_state.set_plock(step, param_idx, val);
-                ui_inv.push(UiInvalidation::TrackFx {
-                    track,
-                    change: TrackFxInvalidation::Plock {
-                        slot: slot_idx,
-                        param: param_idx,
-                    },
-                });
-            }
-            ui_inv.push(UiInvalidation::Step {
-                track,
-                step,
-                change: StepInvalidation::PlockPresence,
-            });
+        let mut steps = sel.lock().unwrap().iter().copied().collect::<Vec<_>>();
+        steps.sort_unstable();
+        if steps.is_empty() {
+            return Ok(Value::Bool(false));
         }
-        st.publish_scheduler_snapshot();
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ctx.enqueue_command(effect_plock_history_command(track, &steps, slot_idx, &updates));
         Ok(Value::Bool(true))
     });
 
@@ -5933,6 +5955,35 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_effect_plock_native_dispatches_frozen_history_target() {
+        let command = effect_plock_history_command(
+            2,
+            &[3, 7],
+            11,
+            &[(4, 0.25), (5, 0.75)],
+        );
+        let HostCommand::Custom { name, payload } = command else {
+            panic!("effect p-lock history must use a custom host command");
+        };
+        assert_eq!(name, "set-effect-plock-batch");
+        let Value::Map(payload) = payload else {
+            panic!("effect p-lock history payload must be a map");
+        };
+        assert_eq!(
+            payload.get("track").map(|value| value.borrow().clone()),
+            Some(Value::Number(2.0)),
+        );
+        assert_eq!(
+            payload.get("slot-idx").map(|value| value.borrow().clone()),
+            Some(Value::Number(11.0)),
+        );
+        let steps = payload.get("steps").unwrap().borrow().clone();
+        assert!(matches!(steps, Value::List(values) if values.len() == 2));
+        let updates = payload.get("updates").unwrap().borrow().clone();
+        assert!(matches!(updates, Value::List(values) if values.len() == 2));
+    }
 
     #[test]
     fn drum_rack_select_all_progresses_from_selected_lane_to_all_lanes() {

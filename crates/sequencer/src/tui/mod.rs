@@ -929,6 +929,10 @@ impl DeviceIdentityRegistry {
         self.next_id
     }
 
+    pub(crate) fn allocate_effect_instance(&mut self) -> crate::sequencer::EffectInstanceId {
+        crate::sequencer::EffectInstanceId(self.allocate())
+    }
+
     pub(crate) fn audio_effect(
         &mut self,
         track: crate::sequencer::TrackId,

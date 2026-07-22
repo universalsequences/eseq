@@ -36,7 +36,7 @@ pub use state::{
     StepCellSnapshot,
     StepSlotPlocks, StepSnapshot, TrackId,
     TrackInstrumentPatternState, TrackInstrumentPatternStateSnapshot, TrackOutputEvent,
-    Scene, TrackPatternCellView, TrackPatternData, TrackPatternId, TrackPatternPool, TrackRegistry, TrackRegistryError,
+    Scene, SceneId, TrackPatternCellView, TrackPatternData, TrackPatternId, TrackPatternPool, TrackRegistry, TrackRegistryError,
     TrackPatternLaneState,
     NeuralInstrumentOverrideState, TrackEffectBindingStateSnapshot,
     RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,

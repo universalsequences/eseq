@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
     BusId, EffectInstanceId, InstrumentDeviceValuesSnapshot, MidiFxInstanceId, PatternId,
-    RackSlotId, RackSlotValuesSnapshot, StepCellSnapshot, StepSlotPlocks, TrackId,
+    RackSlotId, RackSlotValuesSnapshot, SceneId, StepCellSnapshot, StepSlotPlocks, TrackId,
     TrackParamsSnapshot, TrackPatternId,
 };
 use crate::effects::EffectSlotValuesSnapshot;
@@ -33,7 +33,6 @@ pub enum HistoryPolicy {
     Coalesce(MergeKey),
     Ignore,
     Barrier,
-    Reset,
 }
 
 #[derive(Clone, Debug)]
@@ -291,7 +290,7 @@ impl BusEffectChainPatch {
 pub struct BusEffectValuesPatch {
     pub bus: BusId,
     pub instance: EffectInstanceId,
-    pub scene: usize,
+    pub scene: SceneId,
     pub before: EffectSlotValuesSnapshot,
     pub after: EffectSlotValuesSnapshot,
 }
@@ -1189,37 +1188,71 @@ pub fn step_snapshot_bit_exact_eq(
     left: &StepCellSnapshot,
     right: &StepCellSnapshot,
 ) -> bool {
-    left.active == right.active
-        && left.neural_reset == right.neural_reset
-        && bit_exact_f32_slice_eq(&left.params, &right.params)
-        && bit_exact_f32_slice_eq(&left.chord, &right.chord)
-        && bit_exact_f32_slice_eq(&left.chord_durations, &right.chord_durations)
-        && bit_exact_f32_slice_eq(&left.chord_delays, &right.chord_delays)
-        && left.timebase == right.timebase
-        && optional_f32_eq(left.swing, right.swing)
-        && left.swing_resolution == right.swing_resolution
-        && slot_plock_slice_eq(&left.midi_fx_plocks, &right.midi_fx_plocks)
-        && slot_plock_slice_eq(&left.effect_plocks, &right.effect_plocks)
-        && slot_plocks_eq(&left.instrument_plocks, &right.instrument_plocks)
-        && left.rack_macro_plocks.len() == right.rack_macro_plocks.len()
-        && left
-            .rack_macro_plocks
+    let crate::sequencer::StepSnapshot {
+        active: left_active,
+        neural_reset: left_neural_reset,
+        params: left_params,
+        chord: left_chord,
+        chord_durations: left_chord_durations,
+        chord_delays: left_chord_delays,
+        timebase: left_timebase,
+        swing: left_swing,
+        swing_resolution: left_swing_resolution,
+        midi_fx_plocks: left_midi_fx_plocks,
+        effect_plocks: left_effect_plocks,
+        instrument_plocks: left_instrument_plocks,
+        rack_macro_plocks: left_rack_macro_plocks,
+        rack_slot_param_plocks: left_rack_slot_param_plocks,
+        rack_slot_instrument_plocks: left_rack_slot_instrument_plocks,
+        rack_slot_effect_plocks: left_rack_slot_effect_plocks,
+    } = left;
+    let crate::sequencer::StepSnapshot {
+        active: right_active,
+        neural_reset: right_neural_reset,
+        params: right_params,
+        chord: right_chord,
+        chord_durations: right_chord_durations,
+        chord_delays: right_chord_delays,
+        timebase: right_timebase,
+        swing: right_swing,
+        swing_resolution: right_swing_resolution,
+        midi_fx_plocks: right_midi_fx_plocks,
+        effect_plocks: right_effect_plocks,
+        instrument_plocks: right_instrument_plocks,
+        rack_macro_plocks: right_rack_macro_plocks,
+        rack_slot_param_plocks: right_rack_slot_param_plocks,
+        rack_slot_instrument_plocks: right_rack_slot_instrument_plocks,
+        rack_slot_effect_plocks: right_rack_slot_effect_plocks,
+    } = right;
+    left_active == right_active
+        && left_neural_reset == right_neural_reset
+        && bit_exact_f32_slice_eq(left_params, right_params)
+        && bit_exact_f32_slice_eq(left_chord, right_chord)
+        && bit_exact_f32_slice_eq(left_chord_durations, right_chord_durations)
+        && bit_exact_f32_slice_eq(left_chord_delays, right_chord_delays)
+        && left_timebase == right_timebase
+        && optional_f32_eq(*left_swing, *right_swing)
+        && left_swing_resolution == right_swing_resolution
+        && slot_plock_slice_eq(left_midi_fx_plocks, right_midi_fx_plocks)
+        && slot_plock_slice_eq(left_effect_plocks, right_effect_plocks)
+        && slot_plocks_eq(left_instrument_plocks, right_instrument_plocks)
+        && left_rack_macro_plocks.len() == right_rack_macro_plocks.len()
+        && left_rack_macro_plocks
             .iter()
-            .zip(&right.rack_macro_plocks)
+            .zip(right_rack_macro_plocks)
             .all(|(left, right)| optional_f32_eq(*left, *right))
         && slot_plock_slice_eq(
-            &left.rack_slot_param_plocks,
-            &right.rack_slot_param_plocks,
+            left_rack_slot_param_plocks,
+            right_rack_slot_param_plocks,
         )
         && slot_plock_slice_eq(
-            &left.rack_slot_instrument_plocks,
-            &right.rack_slot_instrument_plocks,
+            left_rack_slot_instrument_plocks,
+            right_rack_slot_instrument_plocks,
         )
-        && left.rack_slot_effect_plocks.len() == right.rack_slot_effect_plocks.len()
-        && left
-            .rack_slot_effect_plocks
+        && left_rack_slot_effect_plocks.len() == right_rack_slot_effect_plocks.len()
+        && left_rack_slot_effect_plocks
             .iter()
-            .zip(&right.rack_slot_effect_plocks)
+            .zip(right_rack_slot_effect_plocks)
             .all(|(left, right)| slot_plock_slice_eq(left, right))
 }
 
@@ -1250,38 +1283,48 @@ fn slot_plocks_heap_bytes(plocks: &StepSlotPlocks) -> usize {
 }
 
 fn track_params_heap_bytes(snapshot: &TrackParamsSnapshot) -> usize {
-    snapshot.sends.capacity() * std::mem::size_of::<crate::sequencer::TrackSendSnapshot>()
-        + snapshot
-            .script_accumulator_name
+    let TrackParamsSnapshot {
+        gate: _, attack_ms: _, release_ms: _, swing: _, swing_resolution: _, num_steps: _,
+        volume: _, pan: _, mute: _, solo: _, send: _, output: _, sends, polyphonic: _,
+        max_polyphony: _, timebase: _, accumulator_idx: _, script_accumulator_name,
+        midi_fx_chain, midi_fx_position: _, accum_limit: _, accum_mode: _, fts_scale: _,
+        mute_group: _, global_transpose: _,
+    } = snapshot;
+    sends.capacity() * std::mem::size_of::<crate::sequencer::TrackSendSnapshot>()
+        + script_accumulator_name
             .as_ref()
             .map(String::capacity)
             .unwrap_or(0)
-        + snapshot.midi_fx_chain.capacity() * std::mem::size_of::<String>()
-        + snapshot
-            .midi_fx_chain
+        + midi_fx_chain.capacity() * std::mem::size_of::<String>()
+        + midi_fx_chain
             .iter()
             .map(String::capacity)
             .sum::<usize>()
 }
 
 fn step_snapshot_heap_bytes(snapshot: &StepCellSnapshot) -> usize {
+    let crate::sequencer::StepSnapshot {
+        active: _, neural_reset: _, params: _, chord, chord_durations, chord_delays,
+        timebase: _, swing: _, swing_resolution: _, midi_fx_plocks, effect_plocks,
+        instrument_plocks, rack_macro_plocks, rack_slot_param_plocks,
+        rack_slot_instrument_plocks, rack_slot_effect_plocks,
+    } = snapshot;
     let slot_slice_bytes = |slots: &Vec<StepSlotPlocks>| {
         slots.capacity() * std::mem::size_of::<StepSlotPlocks>()
             + slots.iter().map(slot_plocks_heap_bytes).sum::<usize>()
     };
-    snapshot.chord.capacity() * std::mem::size_of::<f32>()
-        + snapshot.chord_durations.capacity() * std::mem::size_of::<f32>()
-        + snapshot.chord_delays.capacity() * std::mem::size_of::<f32>()
-        + slot_slice_bytes(&snapshot.midi_fx_plocks)
-        + slot_slice_bytes(&snapshot.effect_plocks)
-        + slot_plocks_heap_bytes(&snapshot.instrument_plocks)
-        + snapshot.rack_macro_plocks.capacity() * std::mem::size_of::<Option<f32>>()
-        + slot_slice_bytes(&snapshot.rack_slot_param_plocks)
-        + slot_slice_bytes(&snapshot.rack_slot_instrument_plocks)
-        + snapshot.rack_slot_effect_plocks.capacity()
+    chord.capacity() * std::mem::size_of::<f32>()
+        + chord_durations.capacity() * std::mem::size_of::<f32>()
+        + chord_delays.capacity() * std::mem::size_of::<f32>()
+        + slot_slice_bytes(midi_fx_plocks)
+        + slot_slice_bytes(effect_plocks)
+        + slot_plocks_heap_bytes(instrument_plocks)
+        + rack_macro_plocks.capacity() * std::mem::size_of::<Option<f32>>()
+        + slot_slice_bytes(rack_slot_param_plocks)
+        + slot_slice_bytes(rack_slot_instrument_plocks)
+        + rack_slot_effect_plocks.capacity()
             * std::mem::size_of::<Vec<StepSlotPlocks>>()
-        + snapshot
-            .rack_slot_effect_plocks
+        + rack_slot_effect_plocks
             .iter()
             .map(|slots| slot_slice_bytes(slots))
             .sum::<usize>()

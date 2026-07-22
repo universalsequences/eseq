@@ -4,7 +4,7 @@ use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
     BusId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -60,6 +60,88 @@ pub struct StepGestureTransaction {
     label: &'static str,
     before: BTreeMap<usize, StepCellSnapshot>,
     variant_registry_before: PlockVariantRegistry,
+}
+
+fn adopt_replaced_effect_instance_id(
+    before: &[EffectInstanceState],
+    after: &mut [EffectInstanceState],
+) -> bool {
+    if before.len() != after.len() {
+        return false;
+    }
+    let missing_before = before
+        .iter()
+        .filter(|instance| !after.iter().any(|candidate| candidate.id == instance.id))
+        .map(|instance| instance.id)
+        .collect::<Vec<_>>();
+    let new_after = after
+        .iter()
+        .filter(|instance| !before.iter().any(|candidate| candidate.id == instance.id))
+        .map(|instance| instance.id)
+        .collect::<Vec<_>>();
+    if missing_before.len() != 1 || new_after.len() != 1 {
+        return false;
+    }
+    let Some(instance) = after.iter_mut().find(|instance| instance.id == new_after[0]) else {
+        return false;
+    };
+    instance.id = missing_before[0];
+    true
+}
+
+trait EffectChainHistoryState: Clone {
+    fn instances_mut(&mut self) -> &mut Vec<EffectInstanceState>;
+}
+
+impl EffectChainHistoryState for RackEffectChainState {
+    fn instances_mut(&mut self) -> &mut Vec<EffectInstanceState> {
+        &mut self.instances
+    }
+}
+
+impl EffectChainHistoryState for BusEffectChainState {
+    fn instances_mut(&mut self) -> &mut Vec<EffectInstanceState> {
+        &mut self.instances
+    }
+}
+
+impl EffectChainHistoryState for EffectChainState {
+    fn instances_mut(&mut self) -> &mut Vec<EffectInstanceState> {
+        &mut self.instances
+    }
+}
+
+fn rollback_effect_chain_edit<S: EffectChainHistoryState>(
+    app: &mut App,
+    before: &S,
+    retained_ids_by_node: &HashMap<u32, crate::sequencer::EffectInstanceId>,
+    capture: impl FnOnce(
+        &mut App,
+        Option<&HashMap<u32, crate::sequencer::EffectInstanceId>>,
+    ) -> Result<S, String>,
+    restore: impl FnOnce(&mut App, &S, &S) -> Result<(), String>,
+    context: &str,
+    error: String,
+) -> String {
+    let partial = match capture(app, Some(retained_ids_by_node)) {
+        Ok(partial) => partial,
+        Err(_) => {
+            // Restore only needs the current instance list to reuse loaded
+            // sources. An empty list deliberately forces it to reconstruct
+            // the original chain from the retained before-state; this keeps
+            // rollback available when the failed operation made the normal
+            // after-state capture itself impossible.
+            let mut reconstruct = before.clone();
+            reconstruct.instances_mut().clear();
+            reconstruct
+        }
+    };
+    match restore(app, &partial, before) {
+        Ok(()) => format!("{context} failed ({error}); the original chain was restored"),
+        Err(rollback_error) => format!(
+            "{context} failed ({error}); restoring the original chain also failed ({rollback_error})"
+        ),
+    }
 }
 
 impl App {
@@ -141,8 +223,13 @@ impl App {
         let mut ids = Vec::with_capacity(active_slots.len());
         for slot in &active_slots {
             let node_id = snapshot.effect_slots[*slot].node_id;
-            ids.push(retained_ids_by_node.and_then(|ids| ids.get(&node_id).copied())
-                .unwrap_or_else(|| self.device_registry.rack_audio_effect(rack_slot_id, *slot)));
+            ids.push(match retained_ids_by_node {
+                Some(retained) => retained
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or_else(|| self.device_registry.allocate_effect_instance()),
+                None => self.device_registry.rack_audio_effect(rack_slot_id, *slot),
+            });
         }
         self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
         let locator = Self::rack_slot_fx_locator(track, rack_slot);
@@ -182,37 +269,51 @@ impl App {
         let result = match mutate(self) {
             Ok(result) => result,
             Err(error) => {
-                let rollback = self.capture_rack_effect_chain_state(
-                    track,
-                    rack_slot,
-                    Some(&retained_ids_by_node),
-                ).and_then(|partial| {
-                    self.restore_rack_effect_chain_state(track, rack_slot, &partial, &before)
-                });
-                return match rollback {
-                    Ok(()) => Err(error),
-                    Err(rollback_error) => Err(format!(
-                        "Rack-slot effect edit failed ({error}); restoring the original chain also failed ({rollback_error})"
-                    )),
-                };
+                return Err(rollback_effect_chain_edit(
+                    self,
+                    &before,
+                    &retained_ids_by_node,
+                    |app, retained| app.capture_rack_effect_chain_state(track, rack_slot, retained),
+                    |app, current, target| {
+                        app.restore_rack_effect_chain_state(track, rack_slot, current, target)
+                    },
+                    "Rack-slot effect edit",
+                    error,
+                ));
             }
         };
-        let mut after = self.capture_rack_effect_chain_state(
+        let mut after = match self.capture_rack_effect_chain_state(
             track,
             rack_slot,
             Some(&retained_ids_by_node),
-        )?;
-        if before.instances.len() == after.instances.len() {
-            let before_ids = before.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-            let after_ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-            let missing_before = before_ids.iter().filter(|id| !after_ids.contains(id)).copied().collect::<Vec<_>>();
-            let new_after = after_ids.iter().filter(|id| !before_ids.contains(id)).copied().collect::<Vec<_>>();
-            if missing_before.len() == 1 && new_after.len() == 1 {
-                if let Some(instance) = after.instances.iter_mut().find(|instance| instance.id == new_after[0]) {
-                    instance.id = missing_before[0];
-                }
-                let ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-                self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+        ) {
+            Ok(after) => after,
+            Err(error) => return Err(rollback_effect_chain_edit(
+                self,
+                &before,
+                &retained_ids_by_node,
+                |app, retained| app.capture_rack_effect_chain_state(track, rack_slot, retained),
+                |app, current, target| {
+                    app.restore_rack_effect_chain_state(track, rack_slot, current, target)
+                },
+                "Capturing the rack-slot effect edit",
+                error,
+            )),
+        };
+        if adopt_replaced_effect_instance_id(&before.instances, &mut after.instances) {
+            let ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+            if let Err(error) = self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids) {
+                return Err(rollback_effect_chain_edit(
+                    self,
+                    &before,
+                    &retained_ids_by_node,
+                    |app, retained| app.capture_rack_effect_chain_state(track, rack_slot, retained),
+                    |app, current, target| {
+                        app.restore_rack_effect_chain_state(track, rack_slot, current, target)
+                    },
+                    "Rebinding rack-slot effect history identity",
+                    error,
+                ));
             }
         }
         let unchanged = before.instances.len() == after.instances.len()
@@ -397,11 +498,13 @@ impl App {
         let mut ids = Vec::with_capacity(active_slots.len());
         for slot in &active_slots {
             let node_id = self.buses[bus_idx].effect_slots[*slot].node_id;
-            ids.push(
-                retained_ids_by_node
-                    .and_then(|ids| ids.get(&node_id).copied())
-                    .unwrap_or_else(|| self.device_registry.bus_audio_effect(bus_id, *slot)),
-            );
+            ids.push(match retained_ids_by_node {
+                Some(retained) => retained
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or_else(|| self.device_registry.allocate_effect_instance()),
+                None => self.device_registry.bus_audio_effect(bus_id, *slot),
+            });
         }
         self.device_registry.bind_bus_audio_effect_chain(bus_id, &ids)?;
         let locator = FxChainLocator::Bus(bus_id);
@@ -465,30 +568,44 @@ impl App {
         let result = match mutate(self) {
             Ok(result) => result,
             Err(error) => {
-                let rollback = self.capture_bus_effect_chain_state(
-                    bus_idx,
-                    Some(&retained_ids_by_node),
-                ).and_then(|partial| self.restore_bus_effect_chain_state(bus_idx, &partial, &before));
-                return match rollback {
-                    Ok(()) => Err(error),
-                    Err(rollback_error) => Err(format!(
-                        "Bus effect edit failed ({error}); restoring the original chain also failed ({rollback_error})"
-                    )),
-                };
+                return Err(rollback_effect_chain_edit(
+                    self,
+                    &before,
+                    &retained_ids_by_node,
+                    |app, retained| app.capture_bus_effect_chain_state(bus_idx, retained),
+                    |app, current, target| app.restore_bus_effect_chain_state(bus_idx, current, target),
+                    "Bus effect edit",
+                    error,
+                ));
             }
         };
-        let mut after = self.capture_bus_effect_chain_state(bus_idx, Some(&retained_ids_by_node))?;
-        if before.instances.len() == after.instances.len() {
-            let before_ids = before.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-            let after_ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-            let missing_before = before_ids.iter().filter(|id| !after_ids.contains(id)).copied().collect::<Vec<_>>();
-            let new_after = after_ids.iter().filter(|id| !before_ids.contains(id)).copied().collect::<Vec<_>>();
-            if missing_before.len() == 1 && new_after.len() == 1 {
-                if let Some(instance) = after.instances.iter_mut().find(|instance| instance.id == new_after[0]) {
-                    instance.id = missing_before[0];
-                }
-                let ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-                self.device_registry.bind_bus_audio_effect_chain(bus_id, &ids)?;
+        let mut after = match self.capture_bus_effect_chain_state(
+            bus_idx,
+            Some(&retained_ids_by_node),
+        ) {
+            Ok(after) => after,
+            Err(error) => return Err(rollback_effect_chain_edit(
+                self,
+                &before,
+                &retained_ids_by_node,
+                |app, retained| app.capture_bus_effect_chain_state(bus_idx, retained),
+                |app, current, target| app.restore_bus_effect_chain_state(bus_idx, current, target),
+                "Capturing the bus effect edit",
+                error,
+            )),
+        };
+        if adopt_replaced_effect_instance_id(&before.instances, &mut after.instances) {
+            let ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+            if let Err(error) = self.device_registry.bind_bus_audio_effect_chain(bus_id, &ids) {
+                return Err(rollback_effect_chain_edit(
+                    self,
+                    &before,
+                    &retained_ids_by_node,
+                    |app, retained| app.capture_bus_effect_chain_state(bus_idx, retained),
+                    |app, current, target| app.restore_bus_effect_chain_state(bus_idx, current, target),
+                    "Rebinding bus effect history identity",
+                    error,
+                ));
             }
         }
         let mut old_to_new = vec![None; crate::lisp_host::MAX_CUSTOM_FX];
@@ -498,7 +615,18 @@ impl App {
         }
         self.macro_engine.remap_effect_mappings_for_bus(bus_id, &old_to_new);
         self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
-        after = self.capture_bus_effect_chain_state(bus_idx, None)?;
+        after = match self.capture_bus_effect_chain_state(bus_idx, None) {
+            Ok(after) => after,
+            Err(error) => return Err(rollback_effect_chain_edit(
+                self,
+                &before,
+                &retained_ids_by_node,
+                |app, retained| app.capture_bus_effect_chain_state(bus_idx, retained),
+                |app, current, target| app.restore_bus_effect_chain_state(bus_idx, current, target),
+                "Capturing remapped bus effect history",
+                error,
+            )),
+        };
         let unchanged = before.instances.len() == after.instances.len()
             && before.instances.iter().zip(&after.instances).all(|(left, right)| {
                 left.id == right.id && left.source == right.source
@@ -547,7 +675,8 @@ impl App {
             .map(|bus| bus.id)
             .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
         let instance = self.device_registry.bus_audio_effect(bus_id, slot);
-        let scene = self.state.current_scene_index();
+        let scene = self.state.current_scene_id()
+            .ok_or_else(|| "Current scene has no stable identity".to_string())?;
         self.save_current_bus_pattern();
         let current_before = self.buses.get(bus_idx)
             .and_then(|bus| bus.effect_slots.get(slot))
@@ -556,7 +685,7 @@ impl App {
         let merge_key = MergeKey::new(format!(
             "bus-effect:{}:scene:{}:{}",
             instance.0,
-            scene,
+            scene.0,
             merge_suffix.as_ref(),
         ));
         let entry_before = app_bus_effect_gesture_before(self, &merge_key, bus_id, instance, scene)
@@ -884,9 +1013,13 @@ impl App {
             let node_id = self.state.pattern.effect_chains[track][*slot]
                 .node_id
                 .load(Ordering::Relaxed);
-            let id = retained_ids_by_node
-                .and_then(|ids| ids.get(&node_id).copied())
-                .unwrap_or_else(|| self.device_registry.audio_effect(track_id, *slot));
+            let id = match retained_ids_by_node {
+                Some(retained) => retained
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or_else(|| self.device_registry.allocate_effect_instance()),
+                None => self.device_registry.audio_effect(track_id, *slot),
+            };
             ids.push(id);
         }
         self.device_registry
@@ -980,35 +1113,48 @@ impl App {
         let result = match mutate(self) {
             Ok(result) => result,
             Err(error) => {
-                let rollback = self
-                    .capture_track_effect_chain_state(track, Some(&retained_ids_by_node))
-                    .and_then(|partial| {
-                        self.restore_track_effect_chain_state(track, &partial, &before)
-                    });
-                return match rollback {
-                    Ok(()) => Err(error),
-                    Err(rollback_error) => Err(format!(
-                        "Effect edit failed ({error}); restoring the original chain also failed ({rollback_error})"
-                    )),
-                };
+                return Err(rollback_effect_chain_edit(
+                    self,
+                    &before,
+                    &retained_ids_by_node,
+                    |app, retained| app.capture_track_effect_chain_state(track, retained),
+                    |app, current, target| app.restore_track_effect_chain_state(track, current, target),
+                    "Track effect edit",
+                    error,
+                ));
             }
         };
-        let mut after = self.capture_track_effect_chain_state(track, Some(&retained_ids_by_node))?;
-        if before.instances.len() == after.instances.len() {
-            let before_ids = before.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-            let after_ids = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-            let missing_before = before_ids.iter().filter(|id| !after_ids.contains(id)).copied().collect::<Vec<_>>();
-            let new_after = after_ids.iter().filter(|id| !before_ids.contains(id)).copied().collect::<Vec<_>>();
-            if missing_before.len() == 1 && new_after.len() == 1 {
-                if let Some(instance) = after.instances.iter_mut().find(|instance| instance.id == new_after[0]) {
-                    instance.id = missing_before[0];
-                }
-                let rebound = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
-                self.device_registry.bind_audio_effect_chain(
-                    track_id,
-                    BUILTIN_SLOT_COUNT,
-                    &rebound,
-                )?;
+        let mut after = match self.capture_track_effect_chain_state(
+            track,
+            Some(&retained_ids_by_node),
+        ) {
+            Ok(after) => after,
+            Err(error) => return Err(rollback_effect_chain_edit(
+                self,
+                &before,
+                &retained_ids_by_node,
+                |app, retained| app.capture_track_effect_chain_state(track, retained),
+                |app, current, target| app.restore_track_effect_chain_state(track, current, target),
+                "Capturing the track effect edit",
+                error,
+            )),
+        };
+        if adopt_replaced_effect_instance_id(&before.instances, &mut after.instances) {
+            let rebound = after.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
+            if let Err(error) = self.device_registry.bind_audio_effect_chain(
+                track_id,
+                BUILTIN_SLOT_COUNT,
+                &rebound,
+            ) {
+                return Err(rollback_effect_chain_edit(
+                    self,
+                    &before,
+                    &retained_ids_by_node,
+                    |app, retained| app.capture_track_effect_chain_state(track, retained),
+                    |app, current, target| app.restore_track_effect_chain_state(track, current, target),
+                    "Rebinding track effect history identity",
+                    error,
+                ));
             }
         }
         let chain_len = self.graph.effect_descriptors[track].len();
@@ -1028,12 +1174,22 @@ impl App {
         }
         self.macro_engine
             .remap_effect_mappings_for_track(track, &old_to_new);
-        self.state.remap_track_effect_references(
+        if let Err(error) = self.state.remap_track_effect_references(
             track,
             &old_to_new,
             &drop_neural_slots,
             &self.graph.effect_descriptors[track],
-        )?;
+        ) {
+            return Err(rollback_effect_chain_edit(
+                self,
+                &before,
+                &retained_ids_by_node,
+                |app, retained| app.capture_track_effect_chain_state(track, retained),
+                |app, current, target| app.restore_track_effect_chain_state(track, current, target),
+                "Remapping track effect references",
+                error,
+            ));
+        }
         let state = std::sync::Arc::clone(&self.state);
         let effect_descriptors = &self.graph.effect_descriptors;
         let instrument_descriptors = &self.graph.instrument_descriptors;
@@ -1050,7 +1206,18 @@ impl App {
         });
         self.state
             .publish_macro_overrides(self.macro_engine.override_snapshot());
-        after = self.capture_track_effect_chain_state(track, None)?;
+        after = match self.capture_track_effect_chain_state(track, None) {
+            Ok(after) => after,
+            Err(error) => return Err(rollback_effect_chain_edit(
+                self,
+                &before,
+                &retained_ids_by_node,
+                |app, retained| app.capture_track_effect_chain_state(track, retained),
+                |app, current, target| app.restore_track_effect_chain_state(track, current, target),
+                "Capturing remapped track effect history",
+                error,
+            )),
+        };
         let unchanged = before.instances.len() == after.instances.len()
             && before.instances.iter().zip(&after.instances).all(|(left, right)| {
                 left.id == right.id && left.source == right.source
@@ -3037,19 +3204,46 @@ fn macro_bit_exact_eq(left: &Macro, right: &Macro) -> bool {
 }
 
 fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
+    let TrackParamsSnapshot {
+        gate,
+        attack_ms,
+        release_ms,
+        swing,
+        swing_resolution,
+        num_steps,
+        volume,
+        pan,
+        mute,
+        solo,
+        send,
+        output,
+        sends,
+        polyphonic,
+        max_polyphony,
+        timebase,
+        accumulator_idx,
+        script_accumulator_name,
+        midi_fx_chain,
+        midi_fx_position,
+        accum_limit,
+        accum_mode,
+        fts_scale,
+        mute_group,
+        global_transpose,
+    } = snapshot;
     let mut bytes = WitnessBytes::default();
-    bytes.bool(snapshot.gate);
-    bytes.f32(snapshot.attack_ms);
-    bytes.f32(snapshot.release_ms);
-    bytes.f32(snapshot.swing);
-    bytes.u32(snapshot.swing_resolution as u32);
-    bytes.usize(snapshot.num_steps);
-    bytes.f32(snapshot.volume);
-    bytes.f32(snapshot.pan);
-    bytes.bool(snapshot.mute);
-    bytes.bool(snapshot.solo);
-    bytes.f32(snapshot.send);
-    match snapshot.output {
+    bytes.bool(*gate);
+    bytes.f32(*attack_ms);
+    bytes.f32(*release_ms);
+    bytes.f32(*swing);
+    bytes.u32(*swing_resolution as u32);
+    bytes.usize(*num_steps);
+    bytes.f32(*volume);
+    bytes.f32(*pan);
+    bytes.bool(*mute);
+    bytes.bool(*solo);
+    bytes.f32(*send);
+    match output {
         crate::sequencer::TrackOutput::Mix => bytes.u32(0),
         crate::sequencer::TrackOutput::Bus(id) => {
             bytes.u32(1);
@@ -3057,31 +3251,31 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
         }
         crate::sequencer::TrackOutput::None => bytes.u32(2),
     }
-    bytes.usize(snapshot.sends.len());
-    for send in &snapshot.sends {
+    bytes.usize(sends.len());
+    for send in sends {
         bytes.u64(send.destination.0);
         bytes.f32(send.amount);
     }
-    bytes.bool(snapshot.polyphonic);
-    bytes.usize(snapshot.max_polyphony);
-    bytes.u32(snapshot.timebase as u32);
-    bytes.usize(snapshot.accumulator_idx);
-    bytes.bool(snapshot.script_accumulator_name.is_some());
-    if let Some(name) = &snapshot.script_accumulator_name {
+    bytes.bool(*polyphonic);
+    bytes.usize(*max_polyphony);
+    bytes.u32(*timebase as u32);
+    bytes.usize(*accumulator_idx);
+    bytes.bool(script_accumulator_name.is_some());
+    if let Some(name) = script_accumulator_name {
         bytes.usize(name.len());
         bytes.0.extend_from_slice(name.as_bytes());
     }
-    bytes.usize(snapshot.midi_fx_chain.len());
-    for name in &snapshot.midi_fx_chain {
+    bytes.usize(midi_fx_chain.len());
+    for name in midi_fx_chain {
         bytes.usize(name.len());
         bytes.0.extend_from_slice(name.as_bytes());
     }
-    bytes.u32(snapshot.midi_fx_position as u32);
-    bytes.f32(snapshot.accum_limit);
-    bytes.u32(snapshot.accum_mode);
-    bytes.usize(snapshot.fts_scale);
-    bytes.u32(snapshot.mute_group as u32);
-    bytes.bool(snapshot.global_transpose);
+    bytes.u32(*midi_fx_position as u32);
+    bytes.f32(*accum_limit);
+    bytes.u32(*accum_mode);
+    bytes.usize(*fts_scale);
+    bytes.u32(*mute_group as u32);
+    bytes.bool(*global_transpose);
     bytes.0
 }
 
@@ -3096,19 +3290,34 @@ fn encode_optional_f32_rows(bytes: &mut WitnessBytes, rows: &[Vec<Option<f32>>])
 }
 
 fn encode_effect_slot_values(bytes: &mut WitnessBytes, snapshot: &EffectSlotSnapshot) {
-    bytes.usize(snapshot.num_params as usize);
-    bytes.f32_slice(&snapshot.defaults);
-    encode_optional_f32_rows(bytes, &snapshot.plocks);
-    bytes.usize(snapshot.key_locks.len());
-    for (note, values) in &snapshot.key_locks {
+    let EffectSlotSnapshot {
+        node_id: _,
+        modulator_node_id: _,
+        num_params,
+        defaults,
+        plocks,
+        plock_param_ids: _,
+        key_locks,
+        key_lock_param_ids: _,
+        tensor_params,
+        param_node_indices: _,
+        param_node_spans: _,
+        transport_phase_param_idx: _,
+        ir,
+    } = snapshot;
+    bytes.usize(*num_params as usize);
+    bytes.f32_slice(defaults);
+    encode_optional_f32_rows(bytes, plocks);
+    bytes.usize(key_locks.len());
+    for (note, values) in key_locks {
         bytes.0.push(*note);
         bytes.usize(values.len());
         for value in values {
             bytes.optional_f32(*value);
         }
     }
-    bytes.usize(snapshot.tensor_params.len());
-    for tensor in &snapshot.tensor_params {
+    bytes.usize(tensor_params.len());
+    for tensor in tensor_params {
         bytes.usize(tensor.name.len());
         bytes.0.extend_from_slice(tensor.name.as_bytes());
         bytes.usize(tensor.shape.len());
@@ -3124,6 +3333,11 @@ fn encode_effect_slot_values(bytes: &mut WitnessBytes, snapshot: &EffectSlotSnap
                 bytes.f32_slice(values);
             }
         }
+    }
+    bytes.bool(ir.is_some());
+    if let Some(ir) = ir {
+        bytes.usize(ir.len());
+        bytes.0.extend_from_slice(ir.as_bytes());
     }
 }
 
@@ -3379,6 +3593,13 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
                 return Err(invalid("instrument tensor does not exist"));
             }
         }
+        AppCommand::ClearInstrumentKeyLocksForNote { track, .. }
+        | AppCommand::StampInstrumentKeyLockVariant { track, .. }
+        | AppCommand::ClearInstrumentKeyLockVariantsForNotes { track, .. } => {
+            if app.state.pattern.instrument_slots.get(*track).is_none() {
+                return Err(EditError::TrackOutOfRange { track: *track });
+            }
+        }
         AppCommand::SetRackSlotInstrumentParam {
             track,
             slot_idx,
@@ -3452,7 +3673,87 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
                 return Err(invalid("rack macro does not exist"));
             }
         }
-        _ => {}
+        AppCommand::ToggleStep { .. }
+        | AppCommand::SetStepActive { .. }
+        | AppCommand::SetStepParam { .. }
+        | AppCommand::AdjustStepParam { .. }
+        | AppCommand::ClearStepPayload { .. }
+        | AppCommand::ClearSteps { .. }
+        | AppCommand::RotateSteps { .. }
+        | AppCommand::PasteSteps { .. }
+        | AppCommand::ShiftStepRange { .. }
+        | AppCommand::TogglePianoNote { .. }
+        | AppCommand::DuplicateTrackPattern { .. }
+        | AppCommand::HalveTrackPattern { .. }
+        | AppCommand::SetTimebasePlock { .. }
+        | AppCommand::SetTimebasePlockMulti { .. }
+        | AppCommand::ClearTimebasePlockMulti { .. }
+        | AppCommand::ToggleTrackGate { .. }
+        | AppCommand::ToggleTrackPolyphonic { .. }
+        | AppCommand::ToggleTrackMute { .. }
+        | AppCommand::ToggleTrackSolo { .. }
+        | AppCommand::AdjustTrackMaxPolyphony { .. }
+        | AppCommand::SetTrackMaxPolyphony { .. }
+        | AppCommand::SetTrackAttack { .. }
+        | AppCommand::AdjustTrackAttack { .. }
+        | AppCommand::SetTrackRelease { .. }
+        | AppCommand::AdjustTrackRelease { .. }
+        | AppCommand::SetTrackSwing { .. }
+        | AppCommand::SetTrackSwingPlock { .. }
+        | AppCommand::SetTrackSwingPlockMulti { .. }
+        | AppCommand::ClearTrackSwingPlockMulti { .. }
+        | AppCommand::AdjustTrackSwing { .. }
+        | AppCommand::SetTrackSwingResolution { .. }
+        | AppCommand::SetTrackSwingResolutionPlock { .. }
+        | AppCommand::SetTrackSwingResolutionPlockMulti { .. }
+        | AppCommand::ClearTrackSwingResolutionPlockMulti { .. }
+        | AppCommand::NextTrackSwingResolution { .. }
+        | AppCommand::PrevTrackSwingResolution { .. }
+        | AppCommand::SetTrackNumSteps { .. }
+        | AppCommand::AdjustTrackNumSteps { .. }
+        | AppCommand::SetTrackVolume { .. }
+        | AppCommand::AdjustTrackVolume { .. }
+        | AppCommand::SetTrackPan { .. }
+        | AppCommand::AdjustTrackPan { .. }
+        | AppCommand::SetTrackSend { .. }
+        | AppCommand::AdjustTrackSend { .. }
+        | AppCommand::SetTrackOutput { .. }
+        | AppCommand::SetTrackSends { .. }
+        | AppCommand::SetBusVolume { .. }
+        | AppCommand::ToggleBusMute { .. }
+        | AppCommand::ToggleBusSolo { .. }
+        | AppCommand::SetMasterVolume { .. }
+        | AppCommand::AdjustMasterVolume { .. }
+        | AppCommand::SetReverbParam { .. }
+        | AppCommand::SetTrackTimebase { .. }
+        | AppCommand::NextTrackTimebase { .. }
+        | AppCommand::PrevTrackTimebase { .. }
+        | AppCommand::SetTrackFtsScale { .. }
+        | AppCommand::SetTrackAccumIdx { .. }
+        | AppCommand::SetTrackAccumLimit { .. }
+        | AppCommand::AdjustTrackAccumLimit { .. }
+        | AppCommand::SetTrackAccumMode { .. }
+        | AppCommand::SetTrackMuteGroup { .. }
+        | AppCommand::SetTrackGlobalTranspose { .. }
+        | AppCommand::SetInstrumentBaseNoteOffset { .. }
+        | AppCommand::MacroCreate { .. }
+        | AppCommand::MacroCreateScene { .. }
+        | AppCommand::MacroSceneConfig { .. }
+        | AppCommand::MacroEnsure { .. }
+        | AppCommand::MacroDelete { .. }
+        | AppCommand::MacroRename { .. }
+        | AppCommand::MacroSetValue { .. }
+        | AppCommand::MacroRelease { .. }
+        | AppCommand::ScenePushBegin { .. }
+        | AppCommand::ScenePushSetValue { .. }
+        | AppCommand::ScenePushEnd
+        | AppCommand::MacroMapParam { .. }
+        | AppCommand::MacroSetRange { .. }
+        | AppCommand::MacroSetCurve { .. }
+        | AppCommand::MacroUnmap { .. }
+        | AppCommand::TogglePlay
+        | AppCommand::SetBpm { .. }
+        | AppCommand::AdjustRecordQuantizeThresh { .. } => {}
     }
     Ok(())
 }
@@ -4178,7 +4479,7 @@ fn device_plock_merge_suffix(cmd: &AppCommand) -> Option<String> {
         } => Some(format!("instrument:tensor:{tensor_idx}:cell:{cell_idx}")),
         AppCommand::SetRackSlotParamPlock { slot_idx, param, .. }
         | AppCommand::SetRackSlotParamPlockMulti { slot_idx, param, .. } => {
-            Some(format!("rack:{slot_idx}:strip:{param:?}"))
+            Some(format!("rack:{slot_idx}:strip:{}", param.index()))
         }
         AppCommand::SetRackSlotInstrumentPlock { slot_idx, param_idx, .. }
         | AppCommand::SetRackSlotInstrumentPlockMulti { slot_idx, param_idx, .. } => {
@@ -4227,8 +4528,11 @@ fn apply_coalesced_device_plock_commands(
         track: track_id,
         pattern: pattern_id,
     };
+    let affected_key = affected.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
     let merge_key = MergeKey::new(format!(
-        "device-plock:{target:?}:{merge_suffix}:steps:{affected:?}",
+        "device-plock:{}:{}:{merge_suffix}:steps:{affected_key}",
+        target.track.0,
+        target.pattern.0,
     ));
     if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(&merge_key) {
         finish_active_gesture(app);
@@ -4533,6 +4837,12 @@ fn device_value_label(cmd: &AppCommand) -> &'static str {
 }
 
 fn device_value_merge_suffix(cmd: &AppCommand) -> String {
+    let note_list = |notes: &[u8]| {
+        let mut notes = notes.to_vec();
+        notes.sort_unstable();
+        notes.dedup();
+        notes.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+    };
     match cmd {
         AppCommand::SetEffectParam { param_idx, .. }
         | AppCommand::SetMidiFxParam { param_idx, .. }
@@ -4554,7 +4864,63 @@ fn device_value_merge_suffix(cmd: &AppCommand) -> String {
         | AppCommand::SetMidiFxTensorCell {
             tensor_idx, cell_idx, ..
         } => format!("tensor:{tensor_idx}:cell:{cell_idx}"),
+        AppCommand::SetInstrumentKeyLock { note, param_idx, .. }
+        | AppCommand::ClearInstrumentKeyLock { note, param_idx, .. } => {
+            format!("key-lock:note:{note}:param:{param_idx}")
+        }
+        AppCommand::SetInstrumentKeyLockMulti { notes, param_idx, .. } => {
+            format!("key-lock:notes:{}:param:{param_idx}", note_list(notes))
+        }
+        AppCommand::ClearInstrumentKeyLocksForNote { note, .. } => {
+            format!("key-lock:note:{note}:all")
+        }
+        AppCommand::StampInstrumentKeyLockVariant { notes, key, .. } => {
+            let entries = key.entries.iter().map(|entry| format!(
+                "{}:{}:{}:{}:{}",
+                plock_variant_domain_merge_component(entry.domain),
+                entry.slot,
+                entry.param,
+                entry.cell.map(|cell| cell.to_string()).unwrap_or_default(),
+                entry.value_bits,
+            )).collect::<Vec<_>>().join(";");
+            format!("key-lock:notes:{}:variant:{entries}", note_list(notes))
+        }
+        AppCommand::ClearInstrumentKeyLockVariantsForNotes { notes, .. } => {
+            format!("key-lock:notes:{}:all", note_list(notes))
+        }
         _ => device_value_label(cmd).to_string(),
+    }
+}
+
+fn plock_variant_domain_merge_component(
+    domain: crate::plock_variants::PlockVariantDomain,
+) -> &'static str {
+    use crate::plock_variants::PlockVariantDomain;
+    match domain {
+        PlockVariantDomain::TrackTimebase => "track-timebase",
+        PlockVariantDomain::TrackSwing => "track-swing",
+        PlockVariantDomain::TrackSwingResolution => "track-swing-resolution",
+        PlockVariantDomain::MidiEffect => "midi-effect",
+        PlockVariantDomain::MidiEffectTensor => "midi-effect-tensor",
+        PlockVariantDomain::Instrument => "instrument",
+        PlockVariantDomain::InstrumentTensor => "instrument-tensor",
+        PlockVariantDomain::Effect => "effect",
+        PlockVariantDomain::EffectTensor => "effect-tensor",
+        PlockVariantDomain::RackMacro => "rack-macro",
+        PlockVariantDomain::RackSlotParam => "rack-slot-param",
+        PlockVariantDomain::RackSlotInstrument => "rack-slot-instrument",
+        PlockVariantDomain::RackSlotInstrumentTensor => "rack-slot-instrument-tensor",
+        PlockVariantDomain::InstrumentKeyLock => "instrument-key-lock",
+    }
+}
+
+fn device_id_merge_component(id: DeviceId) -> String {
+    match id {
+        DeviceId::TrackInstrument(id) => format!("instrument:{}", id.0),
+        DeviceId::AudioEffect(id) => format!("audio-effect:{}", id.0),
+        DeviceId::MidiEffect(id) => format!("midi-effect:{}", id.0),
+        DeviceId::RackSlot(id) => format!("rack-slot:{}", id.0),
+        DeviceId::RackInstrument(id) => format!("rack-instrument:{}", id.0),
     }
 }
 
@@ -4660,6 +5026,25 @@ fn device_command_changes_key_locks(cmd: &AppCommand) -> bool {
     )
 }
 
+fn rollback_device_value_edit(
+    app: &mut App,
+    target: ResolvedDeviceTarget,
+    before: &DeviceValueSnapshot,
+    error: EditError,
+) -> EditError {
+    let rollback = restore_device_value_snapshot(app, target, before)
+        .and_then(|_| push_live_device_values(app, target, Some(before)))
+        .map(|_| {
+            app.state.publish_scheduler_snapshot();
+        });
+    match rollback {
+        Ok(()) => error,
+        Err(rollback_error) => EditError::ReplayFailed(format!(
+            "{error:?}; restoring device values also failed: {rollback_error:?}"
+        )),
+    }
+}
+
 fn apply_recorded_device_value_commands(
     app: &mut App,
     commands: &[AppCommand],
@@ -4679,8 +5064,8 @@ fn apply_recorded_device_value_commands(
     let current_before = capture_device_value_snapshot(app, target)?;
     let merge_key = merge_key.map(|_| {
         MergeKey::new(format!(
-            "device:{:?}:pattern:{}:{}",
-            target.id,
+            "device:{}:pattern:{}:{}",
+            device_id_merge_component(target.id),
             target.pattern.0,
             merge_suffix,
         ))
@@ -4710,13 +5095,27 @@ fn apply_recorded_device_value_commands(
         app.state
             .reconcile_key_lock_variant_registry_for_track(target.track);
     }
-    let after = capture_device_value_snapshot(app, target)?;
+    let after = match capture_device_value_snapshot(app, target) {
+        Ok(after) => after,
+        Err(error) => {
+            return Err(rollback_device_value_edit(
+                app,
+                target,
+                &current_before,
+                error,
+            ));
+        }
+    };
     if current_before.bit_exact_eq(&after) {
         return Ok(EditOutcome::NoOp);
     }
     if let Err(error) = restore_device_value_snapshot(app, target, &after) {
-        let _ = restore_device_value_snapshot(app, target, &current_before);
-        return Err(error);
+        return Err(rollback_device_value_edit(
+            app,
+            target,
+            &current_before,
+            error,
+        ));
     }
 
     let patch = DeviceValuesPatch {
@@ -4777,7 +5176,10 @@ pub fn apply_coalesced_device_value_batch(
 ) -> Result<EditOutcome, EditError> {
     for command in commands {
         validate_device_command_target(app, command)?;
-        if !matches!(history_policy(command), HistoryPolicy::Coalesce(_))
+        if !matches!(
+            history_policy(command),
+            HistoryPolicy::Record | HistoryPolicy::Coalesce(_)
+        )
             || device_value_command_track(command).is_none()
         {
             return Err(EditError::UnsupportedCommand);
@@ -5059,6 +5461,119 @@ fn apply_live_track_param_effects(
     scheduler_track_params_changed(before, after) || base_note_before != base_note_after
 }
 
+fn rollback_track_params_edit(
+    app: &mut App,
+    track: usize,
+    pattern: crate::sequencer::PatternId,
+    before: &TrackParamsSnapshot,
+    base_note_before: u32,
+    error: EditError,
+) -> EditError {
+    let current = app.state.capture_pattern_track_params(track, pattern).ok();
+    let current_base = app
+        .state
+        .capture_pattern_instrument_base_note_offset(track, pattern)
+        .ok()
+        .map(f32::to_bits);
+    let rollback = app
+        .state
+        .restore_pattern_track_params_no_publish(track, pattern, before)
+        .and_then(|_| {
+            app.state.restore_pattern_instrument_base_note_offset_no_publish(
+                track,
+                pattern,
+                f32::from_bits(base_note_before),
+            )
+        });
+    if let Err(rollback_error) = rollback {
+        return EditError::ReplayFailed(format!(
+            "{error:?}; restoring track parameters also failed: {rollback_error}"
+        ));
+    }
+    if let (Some(current), Some(current_base)) = (current.as_ref(), current_base) {
+        apply_live_track_param_effects(
+            app,
+            track,
+            current,
+            before,
+            current_base,
+            base_note_before,
+        );
+    } else {
+        app.push_track_volume(track);
+        app.push_track_pan(track);
+        app.push_send_gain(track);
+        app.push_track_mute(track);
+        app.push_track_solo_mutes();
+        app.graph_controller().apply_track_output_routing(track);
+        app.graph_controller().apply_track_bus_sends(track);
+        app.state.request_accumulator_reset(track);
+    }
+    app.state.publish_scheduler_snapshot();
+    error
+}
+
+fn rollback_track_params_batch_edit(
+    app: &mut App,
+    before: &[(usize, TrackPatternId, TrackParamsSnapshot, u32)],
+    error: EditError,
+) -> EditError {
+    let mut rollback_errors = Vec::new();
+    for (track, target, snapshot, base_note) in before {
+        let current = app
+            .state
+            .capture_pattern_track_params(*track, target.pattern)
+            .ok();
+        let current_base = app
+            .state
+            .capture_pattern_instrument_base_note_offset(*track, target.pattern)
+            .ok()
+            .map(f32::to_bits);
+        let rollback = app
+            .state
+            .restore_pattern_track_params_no_publish(*track, target.pattern, snapshot)
+            .and_then(|_| {
+                app.state.restore_pattern_instrument_base_note_offset_no_publish(
+                    *track,
+                    target.pattern,
+                    f32::from_bits(*base_note),
+                )
+            });
+        if let Err(rollback_error) = rollback {
+            rollback_errors.push(format!("track {}: {rollback_error}", track + 1));
+            continue;
+        }
+        if let (Some(current), Some(current_base)) = (current.as_ref(), current_base) {
+            apply_live_track_param_effects(
+                app,
+                *track,
+                current,
+                snapshot,
+                current_base,
+                *base_note,
+            );
+        } else {
+            app.push_track_volume(*track);
+            app.push_track_pan(*track);
+            app.push_send_gain(*track);
+            app.push_track_mute(*track);
+            app.push_track_solo_mutes();
+            app.graph_controller().apply_track_output_routing(*track);
+            app.graph_controller().apply_track_bus_sends(*track);
+            app.state.request_accumulator_reset(*track);
+        }
+    }
+    app.state.publish_scheduler_snapshot();
+    if rollback_errors.is_empty() {
+        error
+    } else {
+        EditError::ReplayFailed(format!(
+            "{error:?}; restoring the track-parameter batch also failed: {}",
+            rollback_errors.join("; ")
+        ))
+    }
+}
+
 fn capture_transport_authoring(app: &App) -> TransportAuthoringSnapshot {
     TransportAuthoringSnapshot {
         bpm: app.state.transport.bpm.load(Ordering::Relaxed),
@@ -5167,7 +5682,7 @@ fn app_bus_effect_gesture_before(
     key: &MergeKey,
     bus: BusId,
     instance: crate::sequencer::EffectInstanceId,
-    scene: usize,
+    scene: crate::sequencer::SceneId,
 ) -> Option<crate::effects::EffectSlotValuesSnapshot> {
     app.history.active_gesture_patch(key).and_then(|patch| match patch {
         EditPatch::BusEffectValues(patch)
@@ -5242,29 +5757,63 @@ fn apply_recorded_track_params_command(
         .unwrap_or_else(|| (current_before.clone(), current_base_before));
 
     super::command::execute_command(app, cmd.clone());
-    let after = app
-        .state
-        .capture_pattern_track_params(track, pattern_id)
-        .map_err(EditError::ReplayFailed)?;
-    let base_after = app
+    let after = match app.state.capture_pattern_track_params(track, pattern_id) {
+        Ok(after) => after,
+        Err(error) => return Err(rollback_track_params_edit(
+            app,
+            track,
+            pattern_id,
+            &current_before,
+            current_base_before,
+            EditError::ReplayFailed(error),
+        )),
+    };
+    let base_after = match app
         .state
         .capture_pattern_instrument_base_note_offset(track, pattern_id)
-        .map_err(EditError::ReplayFailed)?
-        .to_bits();
+    {
+        Ok(base_after) => base_after.to_bits(),
+        Err(error) => return Err(rollback_track_params_edit(
+            app,
+            track,
+            pattern_id,
+            &current_before,
+            current_base_before,
+            EditError::ReplayFailed(error),
+        )),
+    };
     if track_params_bit_exact_eq(&current_before, &after) && current_base_before == base_after {
         return Ok(EditOutcome::NoOp);
     }
 
-    app.state
+    if let Err(error) = app.state
         .restore_pattern_track_params_no_publish(track, pattern_id, &after)
-        .map_err(EditError::ReplayFailed)?;
-    app.state
+    {
+        return Err(rollback_track_params_edit(
+            app,
+            track,
+            pattern_id,
+            &current_before,
+            current_base_before,
+            EditError::ReplayFailed(error),
+        ));
+    }
+    if let Err(error) = app.state
         .restore_pattern_instrument_base_note_offset_no_publish(
             track,
             pattern_id,
             f32::from_bits(base_after),
         )
-        .map_err(EditError::ReplayFailed)?;
+    {
+        return Err(rollback_track_params_edit(
+            app,
+            track,
+            pattern_id,
+            &current_before,
+            current_base_before,
+            EditError::ReplayFailed(error),
+        ));
+    }
     if merge_key.is_none()
         && (scheduler_track_params_changed(&current_before, &after)
             || current_base_before != base_after)
@@ -5351,13 +5900,12 @@ pub fn apply_recorded_track_params_batch(
             "track-parameter batch contains duplicate tracks".to_string(),
         ));
     }
-    let merge_key = MergeKey::new(format!(
-        "track-batch:{label}:{:?}",
-        resolved
-            .iter()
-            .map(|(_, target, _, _)| *target)
-            .collect::<Vec<_>>()
-    ));
+    let targets = resolved
+        .iter()
+        .map(|(_, target, _, _)| format!("{}:{}", target.track.0, target.pattern.0))
+        .collect::<Vec<_>>()
+        .join(",");
+    let merge_key = MergeKey::new(format!("track-batch:{label}:{targets}"));
     if app.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(&merge_key) {
         finish_active_gesture(app);
     }
@@ -5373,30 +5921,62 @@ pub fn apply_recorded_track_params_batch(
         super::command::execute_command(app, command.clone());
     }
 
+    let mut after_states = Vec::with_capacity(resolved.len());
+    for (track, target, _, _) in &resolved {
+        let after = match app
+            .state
+            .capture_pattern_track_params(*track, target.pattern)
+        {
+            Ok(after) => after,
+            Err(error) => return Err(rollback_track_params_batch_edit(
+                app,
+                &resolved,
+                EditError::ReplayFailed(error),
+            )),
+        };
+        let base_after = match app
+            .state
+            .capture_pattern_instrument_base_note_offset(*track, target.pattern)
+        {
+            Ok(base_after) => base_after.to_bits(),
+            Err(error) => return Err(rollback_track_params_batch_edit(
+                app,
+                &resolved,
+                EditError::ReplayFailed(error),
+            )),
+        };
+        after_states.push((after, base_after));
+    }
+
     let mut patches = Vec::with_capacity(resolved.len());
     let mut changed = false;
-    for (track, target, current_before, current_base_before) in resolved {
-        let after = app
-            .state
-            .capture_pattern_track_params(track, target.pattern)
-            .map_err(EditError::ReplayFailed)?;
-        let base_after = app
-            .state
-            .capture_pattern_instrument_base_note_offset(track, target.pattern)
-            .map_err(EditError::ReplayFailed)?
-            .to_bits();
+    for ((track, target, current_before, current_base_before), (after, base_after))
+        in resolved.iter().cloned().zip(after_states)
+    {
         changed |= !track_params_bit_exact_eq(&current_before, &after)
             || current_base_before != base_after;
-        app.state
+        if let Err(error) = app.state
             .restore_pattern_track_params_no_publish(track, target.pattern, &after)
-            .map_err(EditError::ReplayFailed)?;
-        app.state
+        {
+            return Err(rollback_track_params_batch_edit(
+                app,
+                &resolved,
+                EditError::ReplayFailed(error),
+            ));
+        }
+        if let Err(error) = app.state
             .restore_pattern_instrument_base_note_offset_no_publish(
                 track,
                 target.pattern,
                 f32::from_bits(base_after),
             )
-            .map_err(EditError::ReplayFailed)?;
+        {
+            return Err(rollback_track_params_batch_edit(
+                app,
+                &resolved,
+                EditError::ReplayFailed(error),
+            ));
+        }
         let entry_before = original
             .as_ref()
             .and_then(|patches| patches.iter().find(|patch| patch.target == target));
@@ -5862,7 +6442,6 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
             apply_recorded_transport_command(app, &cmd, Some(key))
         }
         HistoryPolicy::Coalesce(_) => Err(EditError::UnsupportedCommand),
-        HistoryPolicy::Reset => Err(EditError::UnsupportedCommand),
     }
 }
 
@@ -5931,10 +6510,25 @@ fn replay_pattern_geometry_patch(
         }
     };
     let step_effects = replay_step_patch(app, &patch.cells, mode)?;
-    let geometry_publish = app
+    let geometry_publish = match app
         .state
         .restore_pattern_num_steps_no_publish(track, patch.target.pattern, num_steps)
-        .map_err(EditError::ReplayFailed)?;
+    {
+        Ok(publish) => publish,
+        Err(error) => {
+            let rollback_mode = match mode {
+                ApplyMode::Undo => ApplyMode::Redo,
+                ApplyMode::Redo => ApplyMode::Undo,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => unreachable!(),
+            };
+            return match replay_step_patch(app, &patch.cells, rollback_mode) {
+                Ok(_) => Err(EditError::ReplayFailed(error)),
+                Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                    "{error}; restoring pattern cells also failed: {rollback_error:?}"
+                ))),
+            };
+        }
+    };
     if geometry_publish && !step_effects.publish_scheduler {
         app.state.publish_scheduler_snapshot();
     }
@@ -5975,13 +6569,30 @@ fn replay_track_params_patch(
         .state
         .restore_pattern_track_params_no_publish(track, patch.target.pattern, snapshot)
         .map_err(EditError::ReplayFailed)?;
-    app.state
+    if let Err(error) = app.state
         .restore_pattern_instrument_base_note_offset_no_publish(
             track,
             patch.target.pattern,
             f32::from_bits(base_note_bits),
         )
-        .map_err(EditError::ReplayFailed)?;
+    {
+        let rollback = app
+            .state
+            .restore_pattern_track_params_no_publish(track, patch.target.pattern, &before)
+            .and_then(|_| {
+                app.state.restore_pattern_instrument_base_note_offset_no_publish(
+                    track,
+                    patch.target.pattern,
+                    f32::from_bits(base_note_before),
+                )
+            });
+        return match rollback {
+            Ok(_) => Err(EditError::ReplayFailed(error)),
+            Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                "{error}; restoring track parameters also failed: {rollback_error}"
+            ))),
+        };
+    }
     let publish_scheduler = is_effective
         && (scheduler_track_params_changed(&before, snapshot)
             || base_note_before != base_note_bits);
@@ -6021,10 +6632,39 @@ fn replay_track_params_batch_patch(
             .capture_pattern_instrument_base_note_offset(track, track_patch.target.pattern)
             .map_err(EditError::ReplayFailed)?;
     }
+    let rollback_mode = match mode {
+        ApplyMode::Undo => ApplyMode::Redo,
+        ApplyMode::Redo => ApplyMode::Undo,
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "track-parameter batch replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
     let mut publish_scheduler = false;
-    for track_patch in &patch.tracks {
-        publish_scheduler |= replay_track_params_patch(app, track_patch, mode, false)?
-            .publish_scheduler;
+    let mut applied = Vec::new();
+    for (index, track_patch) in patch.tracks.iter().enumerate() {
+        match replay_track_params_patch(app, track_patch, mode, false) {
+            Ok(effects) => {
+                publish_scheduler |= effects.publish_scheduler;
+                applied.push(index);
+            }
+            Err(error) => {
+                for applied_index in applied.into_iter().rev() {
+                    if let Err(rollback_error) = replay_track_params_patch(
+                        app,
+                        &patch.tracks[applied_index],
+                        rollback_mode,
+                        false,
+                    ) {
+                        return Err(EditError::ReplayFailed(format!(
+                            "track-parameter batch replay failed ({error:?}); rollback also failed ({rollback_error:?})"
+                        )));
+                    }
+                }
+                return Err(error);
+            }
+        }
     }
     if publish_scheduler && publish {
         app.state.publish_scheduler_snapshot();
@@ -6098,7 +6738,11 @@ fn replay_bus_effect_values_patch(
     }
     let live_all = app.capture_bus_pattern_snapshot();
     let mut repository = app.state.export_bus_pattern_repository(&live_all);
-    let scene = repository.get_mut(patch.scene)
+    let scene_idx = app.state.scene_index(patch.scene)
+        .ok_or_else(|| EditError::ReplayFailed(
+            "bus-effect scene no longer exists".to_string(),
+        ))?;
+    let scene = repository.get_mut(scene_idx)
         .ok_or_else(|| EditError::ReplayFailed(
             "bus-effect scene no longer exists".to_string(),
         ))?;
@@ -6112,7 +6756,7 @@ fn replay_bus_effect_values_patch(
     scene_bus.effect_plocks[slot] = values.plocks.clone();
     app.state.replace_bus_pattern_repository(repository, &live_all);
 
-    if app.state.current_scene_index() == patch.scene {
+    if app.state.current_scene_index() == scene_idx {
         let live_slot = app.buses.get_mut(bus_idx)
             .and_then(|bus| bus.effect_slots.get_mut(slot))
             .ok_or_else(|| EditError::ReplayFailed(
@@ -7363,6 +8007,111 @@ mod tests {
     }
 
     #[test]
+    fn sampler_range_updates_coalesce_into_one_two_parameter_gesture() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap();
+
+        for (start, end) in [(0.01, 0.99), (0.02, 0.98), (0.03, 0.97)] {
+            let outcome = apply_coalesced_device_value_batch(
+                &mut app,
+                &[
+                    AppCommand::SetInstrumentParam {
+                        track: 0,
+                        param_idx: 2,
+                        value: start,
+                    },
+                    AppCommand::SetInstrumentParam {
+                        track: 0,
+                        param_idx: 3,
+                        value: end,
+                    },
+                ],
+                "sampler-range",
+                "Set sampler range",
+            );
+            assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        }
+        assert_eq!(app.history.undo_len(), 0);
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap()
+            .bit_exact_eq(&before));
+    }
+
+    #[test]
+    fn sampler_range_key_lock_updates_coalesce_into_one_gesture() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![descriptor];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+        let before = app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap();
+
+        for (start, end) in [(0.01, 0.99), (0.02, 0.98), (0.03, 0.97)] {
+            let outcome = apply_coalesced_device_value_batch(
+                &mut app,
+                &[
+                    AppCommand::SetInstrumentKeyLockMulti {
+                        track: 0,
+                        notes: vec![60, 64],
+                        param_idx: 2,
+                        value: start,
+                    },
+                    AppCommand::SetInstrumentKeyLockMulti {
+                        track: 0,
+                        notes: vec![60, 64],
+                        param_idx: 3,
+                        value: end,
+                    },
+                ],
+                "sampler-range",
+                "Set sampler range",
+            );
+            assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        }
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(app
+            .state
+            .capture_pattern_instrument_device_values(0, pattern)
+            .unwrap()
+            .bit_exact_eq(&before));
+    }
+
+    #[test]
     fn audio_and_midi_effect_defaults_use_stable_device_history() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let descriptor = crate::effects::EffectDescriptor::builtin_filter();
@@ -7445,6 +8194,59 @@ mod tests {
             .capture_pattern_midi_fx_device_values(0, pattern, 0)
             .unwrap()
             .bit_exact_eq(&midi_after));
+    }
+
+    #[test]
+    fn selected_step_plock_on_custom_effect_slot_undoes_as_one_entry() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let slot_idx = BUILTIN_SLOT_COUNT;
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.effect_chains[0][slot_idx].apply_descriptor(&descriptor, 0);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+        app.graph.effect_descriptors[0][slot_idx] = descriptor;
+        let steps = vec![2, 6];
+        let before = steps
+            .iter()
+            .map(|step| app.state.capture_step_snapshot(0, *step))
+            .collect::<Vec<_>>();
+
+        let outcome = apply_coalesced_device_plock_batch(
+            &mut app,
+            &[AppCommand::SetEffectPlockMulti {
+                track: 0,
+                steps: steps.clone(),
+                slot_idx,
+                param_idx: 2,
+                value: 1_200.0,
+            }],
+            "custom-effect-control",
+            "Set custom effect p-lock",
+        );
+        assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1);
+        for step in &steps {
+            assert_eq!(
+                app.state.pattern.effect_chains[0][slot_idx].plocks.get(*step, 2),
+                Some(1_200.0),
+            );
+        }
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        for (step, expected) in steps.iter().zip(before) {
+            assert!(step_snapshot_bit_exact_eq(
+                &app.state.capture_step_snapshot(0, *step),
+                &expected,
+            ));
+        }
     }
 
     #[test]
@@ -8000,6 +8802,45 @@ mod tests {
         assert!(app.state.capture_pattern_instrument_device_values(0, pattern).unwrap().bit_exact_eq(&before));
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+    }
+
+    #[test]
+    fn key_lock_merge_identity_includes_the_edited_notes() {
+        let first = AppCommand::SetInstrumentKeyLock {
+            track: 0,
+            note: 60,
+            param_idx: 2,
+            value: 0.25,
+        };
+        let second = AppCommand::SetInstrumentKeyLock {
+            track: 0,
+            note: 61,
+            param_idx: 2,
+            value: 0.25,
+        };
+        assert_ne!(
+            device_value_merge_suffix(&first),
+            device_value_merge_suffix(&second),
+            "key-lock edits for different notes must not share a history merge identity"
+        );
+
+        let multi_a = AppCommand::SetInstrumentKeyLockMulti {
+            track: 0,
+            notes: vec![64, 60, 64],
+            param_idx: 2,
+            value: 0.5,
+        };
+        let multi_b = AppCommand::SetInstrumentKeyLockMulti {
+            track: 0,
+            notes: vec![60, 64],
+            param_idx: 2,
+            value: 0.75,
+        };
+        assert_eq!(
+            device_value_merge_suffix(&multi_a),
+            device_value_merge_suffix(&multi_b),
+            "note-set identity should be order-independent and deduplicated"
+        );
     }
 
     #[test]

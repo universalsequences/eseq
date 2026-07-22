@@ -2031,6 +2031,14 @@ impl TrackPatternData {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct PatternId(pub u64);
 
+/// Stable logical identity for a project scene.
+///
+/// Scene indices are presentation order and can change when scenes are
+/// inserted, deleted, or reordered. Long-lived authoring references use this
+/// identity instead.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SceneId(pub u64);
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct TrackPatternId {
     pub track: TrackId,
@@ -2111,6 +2119,7 @@ impl TrackPatternPool {
 
 #[derive(Clone, Debug)]
 pub struct Scene {
+    pub id: SceneId,
     pub name: String,
     pub cells: Vec<Option<PatternId>>,
     pub bus_patterns: Vec<BusPatternSnapshot>,
@@ -2130,6 +2139,7 @@ pub struct ProjectScenes {
     pub scenes: Vec<Scene>,
     pub current_scene: usize,
     pub track_overrides: Vec<Option<PatternId>>,
+    next_scene_id: u64,
 }
 
 impl ProjectScenes {
@@ -2153,6 +2163,7 @@ impl ProjectScenes {
                 }
             }
             scenes.push(Scene {
+                id: SceneId(scene_idx as u64 + 1),
                 name: format!("Scene {}", scene_idx + 1),
                 cells,
                 bus_patterns: Vec::new(),
@@ -2165,6 +2176,7 @@ impl ProjectScenes {
 
         if scenes.is_empty() {
             scenes.push(Scene {
+                id: SceneId(1),
                 name: "Scene 1".to_string(),
                 cells: vec![None; track_count],
                 bus_patterns: Vec::new(),
@@ -2180,11 +2192,23 @@ impl ProjectScenes {
             scenes,
             current_scene: current_scene.min(snapshots.len().saturating_sub(1)),
             track_overrides: vec![None; track_count],
+            next_scene_id: u64::try_from(snapshots.len().max(1))
+                .expect("scene count exceeds stable identity space")
+                .checked_add(1)
+                .expect("scene identity space exhausted"),
         }
     }
 
     pub fn scene_count(&self) -> usize {
         self.scenes.len().max(1)
+    }
+
+    pub fn scene_id(&self, scene_idx: usize) -> Option<SceneId> {
+        self.scenes.get(scene_idx).map(|scene| scene.id)
+    }
+
+    pub fn scene_index(&self, id: SceneId) -> Option<usize> {
+        self.scenes.iter().position(|scene| scene.id == id)
     }
 
     /// Sample ids for a scene without cloning the full track pattern data.
@@ -2640,7 +2664,13 @@ impl ProjectScenes {
                 )
             })
             .unwrap_or_default();
+        let next_id = self.next_scene_id;
+        self.next_scene_id = self
+            .next_scene_id
+            .checked_add(1)
+            .expect("scene identity space exhausted");
         self.scenes.push(Scene {
+            id: SceneId(next_id),
             name: format!("Scene {}", scene_idx + 1),
             cells,
             bus_patterns,
@@ -4447,6 +4477,18 @@ impl SequencerState {
         self.current_pattern_index()
     }
 
+    pub(crate) fn current_scene_id(&self) -> Option<SceneId> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scene_id(self.current_scene_index())
+    }
+
+    pub(crate) fn scene_index(&self, id: SceneId) -> Option<usize> {
+        self.pattern.scenes.lock().unwrap().scene_index(id)
+    }
+
     pub(crate) fn effective_track_pattern_id(&self, track: usize) -> Option<PatternId> {
         self.pattern
             .scenes
@@ -4566,6 +4608,20 @@ impl SequencerState {
         }
         if target.current_scene >= target.scenes.len() {
             return Err("Scene history has an invalid current-scene index".to_string());
+        }
+        let unique_scene_ids = target
+            .scenes
+            .iter()
+            .map(|scene| scene.id)
+            .collect::<HashSet<_>>();
+        if unique_scene_ids.len() != target.scenes.len()
+            || unique_scene_ids.iter().any(|id| id.0 == 0)
+            || target.next_scene_id == 0
+            || unique_scene_ids
+                .iter()
+                .any(|id| id.0 >= target.next_scene_id)
+        {
+            return Err("Scene history contains invalid or duplicate scene identities".to_string());
         }
         let _ = self.quantized_launches.cancel_all();
         *self.pattern.scenes.lock().unwrap() = target.clone();
@@ -15791,6 +15847,10 @@ mod tests {
         let original_scene_ids = (0..3)
             .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
             .collect::<Vec<_>>();
+        let original_stable_scene_ids = {
+            let scenes = state.pattern.scenes.lock().unwrap();
+            scenes.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>()
+        };
         let pool_before = {
             let scenes = state.pattern.scenes.lock().unwrap();
             let mut entries = scenes.track_pools[0]
@@ -15804,6 +15864,18 @@ mod tests {
 
         assert_eq!(state.reorder_scene(0, 2), Some(0));
         assert_eq!(state.current_scene_index(), 0);
+        assert_eq!(
+            state.pattern.scenes.lock().unwrap().scenes
+                .iter()
+                .map(|scene| scene.id)
+                .collect::<Vec<_>>(),
+            vec![
+                original_stable_scene_ids[1],
+                original_stable_scene_ids[2],
+                original_stable_scene_ids[0],
+            ],
+            "stable scene identities must move with scenes rather than stay at an index"
+        );
         assert_eq!(
             (0..3)
                 .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
@@ -15832,6 +15904,13 @@ mod tests {
 
         assert_eq!(state.reorder_scene(2, 0), Some(1));
         assert_eq!(state.current_scene_index(), 1);
+        assert_eq!(
+            state.pattern.scenes.lock().unwrap().scenes
+                .iter()
+                .map(|scene| scene.id)
+                .collect::<Vec<_>>(),
+            original_stable_scene_ids
+        );
         assert_eq!(
             (0..3)
                 .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
@@ -15863,6 +15942,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             ids_before
         );
+    }
+
+    #[test]
+    fn deleted_scene_identity_is_not_reused_by_a_new_scene() {
+        let snapshots = vec![
+            snapshot_with_active_step(1, 0, 3),
+            snapshot_with_active_step(1, 0, 9),
+        ];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        let deleted = scenes.scene_id(1).unwrap();
+        assert_eq!(scenes.delete_scene(1), Some(0));
+        let new_scene = scenes.new_scene();
+        assert_ne!(scenes.scene_id(new_scene), Some(deleted));
     }
 
     #[test]

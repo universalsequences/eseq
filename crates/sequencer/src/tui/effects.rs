@@ -5102,6 +5102,146 @@ mod tests {
     }
 
     #[test]
+    fn recorded_bus_effect_insert_places_new_effect_before_target_without_duplication() {
+        let graph = TestLiveGraph::new("bus-fx-recorded-insert-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("Insert Test");
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+        let filter_slot = app
+            .add_builtin_bus_effect_sync(bus_idx, "Filter")
+            .expect("filter should install first");
+        let ott_slot = app
+            .add_builtin_bus_effect_sync(bus_idx, "OTT")
+            .expect("OTT should install second");
+        let filter_node = app.buses[bus_idx].effect_slots[filter_slot].node_id;
+        let ott_node = app.buses[bus_idx].effect_slots[ott_slot].node_id;
+
+        let inserted = app
+            .apply_recorded_bus_effect_chain_mutation(bus_idx, "Insert bus effect", |app| {
+                app.insert_builtin_bus_effect_before_slot_sync(bus_idx, ott_slot, "Phaser-Flanger")
+            })
+            .expect("recorded insert should succeed");
+
+        assert_eq!(inserted, 1);
+        assert_eq!(app.buses[bus_idx].effect_descriptors[0].name, "Filter");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[1].name, "Phaser-Flanger");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[2].name, "OTT");
+        assert_eq!(app.buses[bus_idx].effect_slots[0].node_id, filter_node);
+        assert_eq!(app.buses[bus_idx].effect_slots[2].node_id, ott_node);
+        assert_eq!(
+            app.buses[bus_idx]
+                .effect_slots
+                .iter()
+                .take(3)
+                .map(|slot| slot.node_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "every effect in the inserted chain must retain a distinct live node",
+        );
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_descriptors[0].name, "Filter");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[1].name, "OTT");
+        assert_eq!(app.buses[bus_idx].effect_slots[0].node_id, filter_node);
+        assert_eq!(app.buses[bus_idx].effect_slots[1].node_id, ott_node);
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_descriptors[0].name, "Filter");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[1].name, "Phaser-Flanger");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[2].name, "OTT");
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_track_effect_insert_places_new_effect_before_target() {
+        let graph = TestLiveGraph::new("track-fx-recorded-insert-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("sampler track should be created");
+        let filter_slot = app
+            .add_builtin_effect_sync(0, "Filter")
+            .expect("filter should install first");
+        let ott_slot = app
+            .add_builtin_effect_sync(0, "OTT")
+            .expect("OTT should install second");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let filter_id = app.device_registry.audio_effect(track_id, filter_slot);
+        let ott_id = app.device_registry.audio_effect(track_id, ott_slot);
+
+        let inserted = app
+            .apply_recorded_track_effect_chain_mutation(0, "Insert audio effect", |app| {
+                app.insert_builtin_effect_before_slot_sync(0, ott_slot, "Phaser-Flanger")
+            })
+            .expect("recorded insert should succeed");
+
+        assert_eq!(inserted, ott_slot);
+        assert_eq!(app.graph.effect_descriptors[0][filter_slot].name, "Filter");
+        assert_eq!(app.graph.effect_descriptors[0][inserted].name, "Phaser-Flanger");
+        assert_eq!(app.graph.effect_descriptors[0][inserted + 1].name, "OTT");
+        assert_eq!(app.device_registry.audio_effect_location(filter_id), Some((track_id, filter_slot)));
+        assert_eq!(app.device_registry.audio_effect_location(ott_id), Some((track_id, inserted + 1)));
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_rack_slot_effect_insert_places_new_effect_before_target() {
+        let graph = TestLiveGraph::new("rack-fx-recorded-insert-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller()
+            .add_sampler_rack_track(&[std::path::Path::new(
+                "assets/ir/lexicon-300-rich-plate.wav",
+            )
+            .to_path_buf()])
+            .expect("sampler rack should be created");
+        let filter_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "Filter")
+            .expect("filter should install first");
+        let ott_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "OTT")
+            .expect("OTT should install second");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let rack_slot_id = app.device_registry.rack_slot(track_id, 0);
+        let filter_id = app.device_registry.rack_audio_effect(rack_slot_id, filter_slot);
+        let ott_id = app.device_registry.rack_audio_effect(rack_slot_id, ott_slot);
+
+        let inserted = app
+            .apply_recorded_rack_effect_chain_mutation(0, 0, "Insert rack-slot effect", |app| {
+                app.insert_builtin_rack_slot_effect_before_slot_sync(
+                    0,
+                    0,
+                    ott_slot,
+                    "Phaser-Flanger",
+                )
+            })
+            .expect("recorded insert should succeed");
+
+        let rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack should remain live");
+        assert_eq!(inserted, ott_slot);
+        assert_eq!(rack.slots[0].effect_descriptors[filter_slot].name, "Filter");
+        assert_eq!(rack.slots[0].effect_descriptors[inserted].name, "Phaser-Flanger");
+        assert_eq!(rack.slots[0].effect_descriptors[inserted + 1].name, "OTT");
+        assert_eq!(
+            app.device_registry.rack_audio_effect_location(filter_id),
+            Some((rack_slot_id, filter_slot)),
+        );
+        assert_eq!(
+            app.device_registry.rack_audio_effect_location(ott_id),
+            Some((rack_slot_id, inserted + 1)),
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn recorded_group_delete_restores_backing_bus_fx_and_all_scene_routing() {
         let graph = TestLiveGraph::new("recorded-group-delete-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
@@ -5228,6 +5368,52 @@ mod tests {
             crate::tui::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), 2_000.0_f32.to_bits());
+        graph.process_block();
+    }
+
+    #[test]
+    fn bus_effect_value_history_follows_stable_scene_identity_after_reorder() {
+        let graph = TestLiveGraph::new("bus-fx-scene-identity-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("Scene Identity Bus");
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+        let slot = app.apply_recorded_bus_effect_chain_mutation(
+            bus_idx,
+            "Add bus effect",
+            |app| app.add_builtin_bus_effect_sync(bus_idx, "Filter"),
+        ).unwrap();
+        let original_scene = app.state.current_scene_id().unwrap();
+        let param = 2;
+        let before = app.buses[bus_idx].effect_slots[slot].defaults[param];
+        app.apply_recorded_bus_effect_value_mutation(
+            bus_idx,
+            slot,
+            "Set bus effect parameter",
+            format!("param:{param}"),
+            |app| app.set_bus_effect_param(bus_idx, slot, param, 4_000.0),
+        ).unwrap();
+        crate::tui::edit::finish_active_gesture(&mut app);
+
+        app.state.clone_pattern(0, &[], &[], &[], &[]);
+        assert_eq!(app.state.reorder_scene(0, 1), Some(0));
+        let original_scene_idx = app.state.scene_index(original_scene).unwrap();
+        assert_eq!(original_scene_idx, 1);
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let live = app.capture_bus_pattern_snapshot();
+        let repository = app.state.export_bus_pattern_repository(&live);
+        let original_bus = repository[original_scene_idx]
+            .iter()
+            .find(|bus| bus.id == bus_id)
+            .unwrap();
+        assert_eq!(
+            original_bus.effect_defaults[slot][param].to_bits(),
+            before.to_bits(),
+            "undo must update the original scene after its dense index changes"
+        );
         graph.process_block();
     }
 

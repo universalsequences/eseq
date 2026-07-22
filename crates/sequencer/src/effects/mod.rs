@@ -7734,39 +7734,63 @@ pub struct EffectSlotValuesSnapshot {
 
 impl EffectSlotValuesSnapshot {
     pub fn bit_exact_eq(&self, other: &Self) -> bool {
-        self.num_params == other.num_params
-            && f32_slice_bits_eq(&self.defaults, &other.defaults)
-            && optional_f32_rows_bits_eq(&self.plocks, &other.plocks)
-            && self.key_locks.len() == other.key_locks.len()
-            && self.key_locks.iter().all(|(note, values)| {
-                other
-                    .key_locks
+        let Self {
+            num_params: left_num_params,
+            defaults: left_defaults,
+            plocks: left_plocks,
+            key_locks: left_key_locks,
+            tensor_params: left_tensor_params,
+            ir: left_ir,
+            prepared_ir: left_prepared_ir,
+        } = self;
+        let Self {
+            num_params: right_num_params,
+            defaults: right_defaults,
+            plocks: right_plocks,
+            key_locks: right_key_locks,
+            tensor_params: right_tensor_params,
+            ir: right_ir,
+            prepared_ir: right_prepared_ir,
+        } = other;
+        left_num_params == right_num_params
+            && f32_slice_bits_eq(left_defaults, right_defaults)
+            && optional_f32_rows_bits_eq(left_plocks, right_plocks)
+            && left_key_locks.len() == right_key_locks.len()
+            && left_key_locks.iter().all(|(note, values)| {
+                right_key_locks
                     .get(note)
                     .is_some_and(|other| optional_f32_slice_bits_eq(values, other))
             })
-            && tensor_snapshots_bits_eq(&self.tensor_params, &other.tensor_params)
-            && self.ir == other.ir
-            && prepared_ir_bits_eq(self.prepared_ir.as_deref(), other.prepared_ir.as_deref())
+            && tensor_snapshots_bits_eq(left_tensor_params, right_tensor_params)
+            && left_ir == right_ir
+            && prepared_ir_bits_eq(left_prepared_ir.as_deref(), right_prepared_ir.as_deref())
     }
 
     pub fn retained_bytes(&self) -> usize {
+        let Self {
+            num_params: _,
+            defaults,
+            plocks,
+            key_locks,
+            tensor_params,
+            ir,
+            prepared_ir: _,
+        } = self;
         std::mem::size_of::<Self>()
-            + self.defaults.capacity() * std::mem::size_of::<f32>()
-            + optional_f32_rows_retained_bytes(&self.plocks)
-            + self
-                .key_locks
+            + defaults.capacity() * std::mem::size_of::<f32>()
+            + optional_f32_rows_retained_bytes(plocks)
+            + key_locks
                 .iter()
                 .map(|(_, values)| {
                     std::mem::size_of::<u8>()
                         + values.capacity() * std::mem::size_of::<Option<f32>>()
                 })
                 .sum::<usize>()
-            + self
-                .tensor_params
+            + tensor_params
                 .iter()
                 .map(tensor_snapshot_retained_bytes)
                 .sum::<usize>()
-            + self.ir.as_ref().map_or(0, String::capacity)
+            + ir.as_ref().map_or(0, String::capacity)
     }
 }
 
@@ -7820,15 +7844,28 @@ fn tensor_snapshots_bits_eq(
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
-            left.name == right.name
-                && left.shape == right.shape
-                && left.cell_offset == right.cell_offset
-                && f32_slice_bits_eq(&left.default, &right.default)
-                && left.plocks.len() == right.plocks.len()
-                && left
-                    .plocks
+            let TensorParamSnapshot {
+                name: left_name,
+                shape: left_shape,
+                cell_offset: left_cell_offset,
+                default: left_default,
+                plocks: left_plocks,
+            } = left;
+            let TensorParamSnapshot {
+                name: right_name,
+                shape: right_shape,
+                cell_offset: right_cell_offset,
+                default: right_default,
+                plocks: right_plocks,
+            } = right;
+            left_name == right_name
+                && left_shape == right_shape
+                && left_cell_offset == right_cell_offset
+                && f32_slice_bits_eq(left_default, right_default)
+                && left_plocks.len() == right_plocks.len()
+                && left_plocks
                     .iter()
-                    .zip(&right.plocks)
+                    .zip(right_plocks)
                     .all(|(left, right)| match (left, right) {
                         (Some(left), Some(right)) => f32_slice_bits_eq(left, right),
                         (None, None) => true,
@@ -7846,13 +7883,19 @@ fn optional_f32_rows_retained_bytes(rows: &[Vec<Option<f32>>]) -> usize {
 }
 
 fn tensor_snapshot_retained_bytes(tensor: &TensorParamSnapshot) -> usize {
+    let TensorParamSnapshot {
+        name,
+        shape,
+        cell_offset: _,
+        default,
+        plocks,
+    } = tensor;
     std::mem::size_of::<TensorParamSnapshot>()
-        + tensor.name.capacity()
-        + tensor.shape.capacity() * std::mem::size_of::<usize>()
-        + tensor.default.capacity() * std::mem::size_of::<f32>()
-        + tensor.plocks.capacity() * std::mem::size_of::<Option<Vec<f32>>>()
-        + tensor
-            .plocks
+        + name.capacity()
+        + shape.capacity() * std::mem::size_of::<usize>()
+        + default.capacity() * std::mem::size_of::<f32>()
+        + plocks.capacity() * std::mem::size_of::<Option<Vec<f32>>>()
+        + plocks
             .iter()
             .flatten()
             .map(|values| values.capacity() * std::mem::size_of::<f32>())

@@ -3499,6 +3499,14 @@ fn sync_instrument_param_batch_display(
             Some(selection),
         );
     }
+    if param_indices.iter().any(|param_idx| *param_idx == 2 || *param_idx == 3) {
+        ui_dirty |= sync_sampler_selection_time_fields(
+            editor.runtime_mut(),
+            app,
+            track,
+            display_step,
+        );
+    }
     flush_reactive_display_edit(editor, ui_dirty);
 }
 
@@ -13595,6 +13603,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-rack-slot-instrument-param-batch"
+                    | "set-rack-slot-instrument-plock-batch" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let updates = map_param_updates(map);
+                            if let (Some(track), Some(slot_idx), Some(updates)) =
+                                (track, slot_idx, updates)
+                            {
+                                let steps = map_usize_list(map, "steps").unwrap_or_else(|| {
+                                    selected_steps
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .copied()
+                                        .collect::<Vec<_>>()
+                                });
+                                let commands = rack_slot_snapshot_for_host(&state, track, slot_idx)
+                                    .and_then(|slot| app.rack_slot_instrument_descriptor(&slot))
+                                    .map(|descriptor| {
+                                        updates.into_iter().filter_map(|(param_idx, user_value)| {
+                                            let param = descriptor.params.get(param_idx)?;
+                                            let value = param.clamp(param.user_input_to_stored(user_value));
+                                            Some(if name == "set-rack-slot-instrument-plock-batch" {
+                                                tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                    track,
+                                                    slot_idx,
+                                                    steps: steps.clone(),
+                                                    param_idx,
+                                                    value,
+                                                }
+                                            } else {
+                                                tui::AppCommand::SetRackSlotInstrumentParam {
+                                                    track,
+                                                    slot_idx,
+                                                    param_idx,
+                                                    value,
+                                                }
+                                            })
+                                        }).collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                let gesture = map_string(map, "gesture")
+                                    .unwrap_or_else(|| "rack-instrument".to_string());
+                                let label = map_string(map, "label")
+                                    .unwrap_or_else(|| "Set rack instrument parameters".to_string());
+                                let result = if name == "set-rack-slot-instrument-plock-batch" {
+                                    tui::edit::apply_coalesced_device_plock_batch(
+                                        &mut app,
+                                        &commands,
+                                        &gesture,
+                                        &label,
+                                    )
+                                } else {
+                                    tui::edit::apply_coalesced_device_value_batch(
+                                        &mut app,
+                                        &commands,
+                                        &gesture,
+                                        &label,
+                                    )
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        rack_control_snapshot_dirty = true;
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Error(
+                                        format!("rack instrument parameter batch failed: {error:?}"),
+                                    )),
+                                }
+                            }
+                        }
+                    }
                     "set-rack-slot-instrument-param" => {
                         if let Value::Map(ref map) = payload {
                             let track = map_usize(map, "track");
@@ -13929,17 +14016,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    "set-instrument-param-batch" | "set-instrument-plock-batch" => {
+                    "set-instrument-param-batch"
+                    | "set-instrument-plock-batch"
+                    | "set-instrument-key-lock-batch" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(updates) = map_param_updates(map) {
-                                let track = current_track.load(Ordering::Relaxed);
+                                let track = map_usize(map, "track")
+                                    .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
                                 let mut commands = Vec::with_capacity(updates.len());
-                                let steps = selected_steps
-                                    .lock()
-                                    .unwrap()
-                                    .iter()
-                                    .copied()
-                                    .collect::<Vec<_>>();
+                                let steps = map_usize_list(map, "steps").unwrap_or_else(|| {
+                                    selected_steps
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .copied()
+                                        .collect::<Vec<_>>()
+                                });
+                                let notes = map_u8_list(map, "notes").unwrap_or_default();
                                 for (param_idx, user_value) in updates {
                                     if let Some(desc) = app
                                         .graph
@@ -13955,6 +14048,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 param_idx,
                                                 value,
                                             }
+                                        } else if name == "set-instrument-key-lock-batch" {
+                                            tui::AppCommand::SetInstrumentKeyLockMulti {
+                                                track,
+                                                notes: notes.clone(),
+                                                param_idx,
+                                                value,
+                                            }
                                         } else {
                                             tui::AppCommand::SetInstrumentParam {
                                                 track,
@@ -13965,18 +14065,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 let result = if name == "set-instrument-plock-batch" {
+                                    let gesture = map_string(map, "gesture")
+                                        .unwrap_or_else(|| "instrument-envelope".to_string());
+                                    let label = map_string(map, "label")
+                                        .unwrap_or_else(|| "Set instrument envelope".to_string());
                                     tui::edit::apply_coalesced_device_plock_batch(
                                         &mut app,
                                         &commands,
-                                        "instrument-envelope",
-                                        "Set instrument envelope",
+                                        &gesture,
+                                        &label,
                                     )
                                 } else {
+                                    let gesture = map_string(map, "gesture")
+                                        .unwrap_or_else(|| "instrument-envelope".to_string());
+                                    let label = map_string(map, "label")
+                                        .unwrap_or_else(|| "Set instrument envelope".to_string());
                                     tui::edit::apply_coalesced_device_value_batch(
                                         &mut app,
                                         &commands,
-                                        "instrument-envelope",
-                                        "Set instrument envelope",
+                                        &gesture,
+                                        &label,
                                     )
                                 };
                                 if result.is_ok() {
@@ -13995,6 +14103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .filter_map(|command| match command {
                                             tui::AppCommand::SetInstrumentParam { param_idx, .. }
                                             | tui::AppCommand::SetInstrumentPlockMulti {
+                                                param_idx, ..
+                                            }
+                                            | tui::AppCommand::SetInstrumentKeyLockMulti {
                                                 param_idx, ..
                                             } => Some(*param_idx),
                                             _ => None,
@@ -14481,13 +14592,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(slot_idx), Some(updates)) =
                                 (slot_idx, map_param_updates(map))
                             {
-                                let track = current_track.load(Ordering::Relaxed);
-                                let steps = selected_steps
-                                    .lock()
-                                    .unwrap()
-                                    .iter()
-                                    .copied()
-                                    .collect::<Vec<_>>();
+                                let track = map_usize(map, "track")
+                                    .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+                                let steps = map_usize_list(map, "steps").unwrap_or_else(|| {
+                                    selected_steps
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .copied()
+                                        .collect::<Vec<_>>()
+                                });
                                 let commands = updates
                                     .into_iter()
                                     .filter_map(|(param_idx, value)| {
@@ -14518,11 +14632,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     })
                                     .collect::<Vec<_>>();
                                 let result = if name == "set-effect-plock-batch" {
+                                    let gesture = map_string(map, "gesture")
+                                        .unwrap_or_else(|| "effect-curve".to_string());
+                                    let label = map_string(map, "label")
+                                        .unwrap_or_else(|| "Set effect curve".to_string());
                                     tui::edit::apply_coalesced_device_plock_batch(
                                         &mut app,
                                         &commands,
-                                        "effect-curve",
-                                        "Set effect curve",
+                                        &gesture,
+                                        &label,
                                     )
                                 } else {
                                     tui::edit::apply_coalesced_device_value_batch(

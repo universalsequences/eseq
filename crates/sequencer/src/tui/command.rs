@@ -1109,11 +1109,13 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         ))),
         AppCommand::SetRackSlotParamPlock { track, slot_idx, step, param, .. } =>
             HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
-                "track:{track}:rack:{slot_idx}:{param:?}:step:{step}"
+                "track:{track}:rack:{slot_idx}:param:{}:step:{step}",
+                param.index(),
             ))),
         AppCommand::SetRackSlotParamPlockMulti { track, slot_idx, param, .. } =>
             HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
-                "track:{track}:rack:{slot_idx}:{param:?}:plock"
+                "track:{track}:rack:{slot_idx}:param:{}:plock",
+                param.index(),
             ))),
         AppCommand::SetRackSlotInstrumentPlock {
             track, slot_idx, step, param_idx, ..
