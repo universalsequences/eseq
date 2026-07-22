@@ -137,9 +137,7 @@
           :border-width (if def-chip 1 0)
           :border-color c)
         (label (instrument-key-lock-chip-label chip)
-          :font-size 8.4 :color (if current :white :dim) :bg :transparent)
-        (label (str (get chip :count))
-          :font-size 8.4 :color (if current :white :dark-gray) :bg :transparent)))))
+          :font-size 8.4 :color (if current :white :dim) :bg :transparent)))))
 
 (def instrument-key-select-note (note)
   (let ((already-selected (instrument-key-note-selected? note))

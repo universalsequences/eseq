@@ -8164,7 +8164,7 @@ pub(crate) fn build_instrument_panel_value(
     );
     def_map.insert(
         "display".to_string(),
-        Rc::new(RefCell::new(Value::String("def".to_string()))),
+        Rc::new(RefCell::new(Value::String("base".to_string()))),
     );
     def_map.insert(
         "count".to_string(),
@@ -12278,6 +12278,10 @@ pub(crate) fn build_track_plock_variants_value_with_preview(
     def_map.insert(
         "label".to_string(),
         Rc::new(RefCell::new(Value::String("def".to_string()))),
+    );
+    def_map.insert(
+        "display".to_string(),
+        Rc::new(RefCell::new(Value::String("base".to_string()))),
     );
     def_map.insert(
         "count".to_string(),

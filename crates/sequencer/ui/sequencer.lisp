@@ -599,14 +599,14 @@
     (sdf/layer
       (sdf/fill
         (sdf/translate 0 0.0
-          (sdf/rounded-rect (* 1.0 width) (* 1.00 height) 0.0))
+          (sdf/rounded-rect (* 1.0 width) (* 1.00 height) 0.1))
         (material
           :lighting (lighting :edge-min -0.3 :edge-max 0.393
             :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
           :color (if (= duration 1)
             (aqua-color
-              (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5)
-              (rgba track-r track-g track-b 1))
+               (mix :white (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5) (if (= selected 1) 0.8 1))
+              (if (= selected 1) :white (rgba track-r track-g track-b 1)))
             (rgba 0 0 0 0))))
       (sdf/fill (sdf/circle (if (= selected 1) 0.76 0.75))
         (material
@@ -639,7 +639,7 @@
               (if (= plock-kind 2) 0.12 0.0)
               0.0)
             :offset (vec2 0 0))))
-      (sdf/fill (sdf/circle (if (= selected 1) 0.5 0.6))
+      (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
         (material
           :lighting (lighting :edge-min -0.25 :edge-max 1.95
             :light (vec3 0.0 -1.0 2.5) :shininess 32.0)

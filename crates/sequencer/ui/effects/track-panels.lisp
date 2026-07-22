@@ -157,9 +157,7 @@
           :border-width (if def-chip 1 0)
           :border-color c)
         (label (fx-plock-chip-label chip)
-          :font-size 8.6 :color (if current :black :dim) :bg :transparent)
-        (label (str (get chip :count))
-          :font-size 8.6 :color (if current :black :dark-gray) :bg :transparent)))))
+          :font-size 8.6 :color (if current :black :dim) :bg :transparent)))))
 
 (def fx-plock-domain-title (domain)
   (if (= domain "inst")
