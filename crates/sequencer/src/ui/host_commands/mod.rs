@@ -1,3 +1,7 @@
+mod dispatch;
+
+pub(crate) use dispatch::dispatch_custom_host_command;
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
